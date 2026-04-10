@@ -258,7 +258,11 @@ def _execute_compatibility_ship(
         record_store=record_store,
         artifact_id=resolved_artifact_id,
     )
-    resolved_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
+    resolved_request = _resolve_artifact_native_execution_request(
+        request=request,
+        artifact_id=resolved_artifact_id,
+        artifact_manifest=artifact_manifest,
+    )
 
     if resolved_request.dry_run:
         click.echo(json.dumps(resolved_request.model_dump(mode="json"), indent=2, sort_keys=True))
@@ -423,6 +427,29 @@ def _read_artifact_manifest_if_present(
         return record_store.read_artifact_manifest(normalized_artifact_id)
     except FileNotFoundError:
         return None
+
+
+def _resolve_artifact_native_execution_request(
+    *,
+    request: CompatibilityShipRequest,
+    artifact_id: str,
+    artifact_manifest: ArtifactIdentityManifest | None,
+) -> CompatibilityShipRequest:
+    branch_sync = request.branch_sync
+    if artifact_manifest is None or branch_sync is None:
+        return request.model_copy(update={"artifact_id": artifact_id})
+    return request.model_copy(
+        update={
+            "artifact_id": artifact_id,
+            "branch_sync": branch_sync.model_copy(
+                update={
+                    "branch_update_required": False,
+                    "skipped_for_artifact_image": True,
+                    "applied": False,
+                }
+            ),
+        }
+    )
 
 
 def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) -> str:

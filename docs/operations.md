@@ -60,6 +60,9 @@ title: Operations
   syncs `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` onto the Dokploy target
   before deploy execution so runtime execution can prefer the immutable image
   instead of relying only on branch-sync state.
+- On that artifact-backed path, compatibility `ship` now bypasses the old
+  branch-sync git push entirely and records that the branch move was skipped
+  because deploy execution used the immutable artifact image instead.
 - When no stored artifact manifest is available, compatibility `ship` clears
   any stale `DOCKER_IMAGE_REFERENCE` override so the target falls back to the
   normal `DOCKER_IMAGE` + `DOCKER_IMAGE_TAG` contract.

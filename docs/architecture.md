@@ -50,6 +50,9 @@ title: Architecture
   references at runtime by syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to
   Dokploy whenever a stored artifact manifest is available, while clearing
   stale overrides when it is not.
+- When that immutable artifact image is available, compatibility `ship` no
+  longer depends on branch-sync to drive deploy execution; the old git-push
+  step is bypassed and recorded as skipped-for-artifact-image instead.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

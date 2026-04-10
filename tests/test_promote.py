@@ -247,6 +247,103 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         self.assertNotIn("DOCKER_IMAGE_REFERENCE", str(captured_update["env_text"]))
         self.assertIn("DOCKER_IMAGE=odoo-ai", str(captured_update["env_text"]))
 
+    def test_ship_artifact_manifest_bypasses_branch_sync_execution(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            artifact_dir = state_dir / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "artifact-sha256-image456.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_id": "artifact-sha256-image456",
+                        "odoo_ai_commit": "abc123",
+                        "enterprise_base_digest": "sha256:enterprise123",
+                        "image": {
+                            "repository": "ghcr.io/cbusillo/odoo-private",
+                            "digest": "sha256:image456",
+                            "tags": ["sha-abc123"],
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            platform_dir = repo_root / "platform"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            (platform_dir / "dokploy.toml").write_text(
+                """
+schema_version = 2
+
+[defaults]
+target_type = "compose"
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+""".strip(),
+                encoding="utf-8",
+            )
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    wait=True,
+                    verify_health=False,
+                    branch_sync={
+                        "source_git_ref": "origin/main",
+                        "source_commit": "abc123",
+                        "target_branch": "opw-prod",
+                        "remote_branch_commit_before": "def456",
+                        "branch_update_required": True,
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            captured_commands: list[list[str]] = []
+
+            with patch(
+                "control_plane.cli._run_command",
+                side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(len(captured_commands), 1)
+            self.assertIn("update", captured_commands[0])
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
+            self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
+            self.assertIn('"skipped_for_artifact_image": true', persisted_payload)
+            self.assertIn('"branch_update_required": false', persisted_payload)
+            self.assertIn('"applied": false', persisted_payload)
+
 
 class PromoteCliTests(unittest.TestCase):
     def test_compatibility_execute_persists_record_and_executes_control_plane_ship(self) -> None:

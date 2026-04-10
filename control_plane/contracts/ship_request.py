@@ -11,6 +11,7 @@ class BranchSyncEvidence(BaseModel):
     target_branch: str
     remote_branch_commit_before: str = ""
     branch_update_required: bool
+    skipped_for_artifact_image: bool = False
     applied: bool = False
 
     @model_validator(mode="after")
@@ -21,6 +22,8 @@ class BranchSyncEvidence(BaseModel):
             raise ValueError("branch sync evidence requires source_commit")
         if not self.target_branch.strip():
             raise ValueError("branch sync evidence requires target_branch")
+        if self.skipped_for_artifact_image and self.applied:
+            raise ValueError("artifact-image-skipped branch sync cannot also be marked applied")
         return self
 
 

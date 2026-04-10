@@ -64,6 +64,9 @@ state/
 - Deploy execution should also drive the Dokploy image selection from stored
   artifact manifests when possible by syncing an exact
   `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` override before the deploy starts.
+- When that exact-image artifact path is used, branch-sync evidence remains in
+  the deployment record but is marked as skipped for artifact-image execution
+  instead of applied.
 - When no stored artifact manifest is available for a direct ship, deploy
   execution should clear any stale `DOCKER_IMAGE_REFERENCE` override so the
   target falls back to the ordinary repo/tag image contract.
