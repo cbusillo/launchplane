@@ -36,9 +36,13 @@ title: Architecture
   the live ship execution boundary.
 - Direct `ship` ownership now also enters through this repo, and Dokploy
   target resolution, credentials, and trigger/wait execution now run here.
-- Phase 5 now leaves only the Odoo-specific post-deploy update as a remaining
-  cross-repo runtime step, and that step goes through the canonical
-  `odoo-ai platform update` path rather than a hidden compatibility worker.
+- Phase 5 closes with a single explicit cross-repo runtime seam: the
+  Odoo-specific post-deploy update. That step remains in `odoo-ai` on purpose
+  and runs through the canonical `odoo-ai platform update` path rather than a
+  hidden compatibility worker.
+- Deployment records now persist post-deploy update evidence as well, so the
+  remaining seam is visible in control-plane state instead of being implicit in
+  process output.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

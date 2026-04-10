@@ -40,8 +40,13 @@ title: Operations
   deployment so the control plane owns the exact runtime target identity used
   for the deploy.
 - Compatibility `ship` now also owns Dokploy credential loading and Dokploy
-  trigger/wait execution directly. The Odoo-specific post-deploy update now
-  runs through the canonical `odoo-ai platform update` path when it applies.
+  trigger/wait execution directly.
+- The Odoo-specific post-deploy update remains the one explicit cross-repo
+  runtime seam. When it applies, control-plane ship runs it through the
+  canonical `odoo-ai platform update` path.
+- Deployment records now persist post-deploy update evidence so operator state
+  shows whether that remaining Odoo-owned step was skipped, pending, passed, or
+  failed.
 - Control-plane-owned Dokploy credentials now come from the control-plane
   repo's untracked `.env` by default, or explicit process env overrides,
   instead of piggybacking on `odoo-ai`'s `.env`.

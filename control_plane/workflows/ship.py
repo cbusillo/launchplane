@@ -4,6 +4,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import DelegatedExecutor
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, HealthcheckEvidence
+from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.ship_request import CompatibilityShipRequest
 
 
@@ -46,6 +47,38 @@ def _resolve_destination_health(
     )
 
 
+def _resolve_post_deploy_update(
+    request: CompatibilityShipRequest,
+    *,
+    deployment_status: str,
+) -> PostDeployUpdateEvidence:
+    if not request.wait or request.target_type != "compose":
+        return PostDeployUpdateEvidence()
+    if deployment_status == "pending":
+        return PostDeployUpdateEvidence(
+            attempted=True,
+            status="pending",
+            detail=(
+                "Odoo-specific post-deploy update is pending through the canonical "
+                "odoo-ai platform update workflow."
+            ),
+        )
+    if deployment_status == "pass":
+        return PostDeployUpdateEvidence(
+            attempted=True,
+            status="pass",
+            detail=(
+                "Odoo-specific post-deploy update completed through the canonical "
+                "odoo-ai platform update workflow."
+            ),
+        )
+    return PostDeployUpdateEvidence(
+        attempted=False,
+        status="skipped",
+        detail="Odoo-specific post-deploy update did not run because deploy execution did not complete successfully.",
+    )
+
+
 def build_compatibility_deployment_record(
     *,
     request: CompatibilityShipRequest,
@@ -56,6 +89,8 @@ def build_compatibility_deployment_record(
     finished_at: str,
     resolved_target: ResolvedTargetEvidence | None = None,
     delegated_executor: DelegatedExecutor = "control-plane.dokploy",
+    post_deploy_update: PostDeployUpdateEvidence | None = None,
+    destination_health: HealthcheckEvidence | None = None,
 ) -> DeploymentRecord:
     artifact_identity = None
     if request.artifact_id.strip():
@@ -82,7 +117,12 @@ def build_compatibility_deployment_record(
             started_at=started_at,
             finished_at=finished_at,
         ),
-        destination_health=_resolve_destination_health(
+        post_deploy_update=post_deploy_update or _resolve_post_deploy_update(
+            request,
+            deployment_status=deployment_status,
+        ),
+        destination_health=destination_health
+        or _resolve_destination_health(
             request.destination_health,
             wait=request.wait,
             deployment_status=deployment_status,

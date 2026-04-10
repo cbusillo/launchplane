@@ -6,6 +6,7 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
     HealthcheckEvidence,
+    PostDeployUpdateEvidence,
 )
 from control_plane.contracts.ship_request import BranchSyncEvidence
 
@@ -46,6 +47,7 @@ class DeploymentRecord(BaseModel):
     branch_sync: BranchSyncEvidence | None = None
     resolved_target: ResolvedTargetEvidence | None = None
     deploy: DeploymentEvidence
+    post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 
     @model_validator(mode="after")

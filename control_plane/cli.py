@@ -12,7 +12,7 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, PromotionRecord
+from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, HealthcheckEvidence, PostDeployUpdateEvidence, PromotionRecord
 from control_plane.contracts.ship_request import CompatibilityShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.promote import (
@@ -191,6 +191,10 @@ def _run_post_deploy_update_via_odoo_ai(
     _run_command(command)
 
 
+def _skipped_destination_health(request: CompatibilityShipRequest, *, detail_status: str = "skipped") -> HealthcheckEvidence:
+    return request.destination_health.model_copy(update={"verified": False, "status": detail_status})
+
+
 def _export_ship_request_via_odoo_ai(
     *,
     odoo_ai_root: Path,
@@ -287,23 +291,6 @@ def _execute_compatibility_ship(
             resolved_target=resolved_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
         )
-        if delegated_request.wait and resolved_target.target_type == "compose":
-            _run_post_deploy_update_via_odoo_ai(
-                odoo_ai_root=odoo_ai_root,
-                env_file=env_file,
-                request=delegated_request,
-            )
-        _verify_ship_healthchecks(request=delegated_request)
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-        )
     except (subprocess.CalledProcessError, click.ClickException):
         final_record = build_compatibility_deployment_record(
             request=delegated_request,
@@ -314,6 +301,76 @@ def _execute_compatibility_ship(
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
             delegated_executor="control-plane.dokploy",
+        )
+        record_store.write_deployment_record(final_record)
+        raise
+
+    try:
+        if delegated_request.wait and resolved_target.target_type == "compose":
+            _run_post_deploy_update_via_odoo_ai(
+                odoo_ai_root=odoo_ai_root,
+                env_file=env_file,
+                request=delegated_request,
+            )
+    except (subprocess.CalledProcessError, click.ClickException):
+        final_record = build_compatibility_deployment_record(
+            request=delegated_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            delegated_executor="control-plane.dokploy",
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                detail=(
+                    "Odoo-specific post-deploy update failed through the canonical "
+                    "odoo-ai platform update workflow."
+                ),
+            ),
+            destination_health=_skipped_destination_health(delegated_request),
+        )
+        record_store.write_deployment_record(final_record)
+        raise
+
+    post_deploy_update_evidence = PostDeployUpdateEvidence()
+    if delegated_request.wait and resolved_target.target_type == "compose":
+        post_deploy_update_evidence = PostDeployUpdateEvidence(
+            attempted=True,
+            status="pass",
+            detail=(
+                "Odoo-specific post-deploy update completed through the canonical "
+                "odoo-ai platform update workflow."
+            ),
+        )
+
+    try:
+        _verify_ship_healthchecks(request=delegated_request)
+        final_record = build_compatibility_deployment_record(
+            request=delegated_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            delegated_executor="control-plane.dokploy",
+            post_deploy_update=post_deploy_update_evidence,
+        )
+    except (subprocess.CalledProcessError, click.ClickException):
+        final_record = build_compatibility_deployment_record(
+            request=delegated_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            delegated_executor="control-plane.dokploy",
+            post_deploy_update=post_deploy_update_evidence,
+            destination_health=_skipped_destination_health(delegated_request, detail_status="fail"),
         )
         record_store.write_deployment_record(final_record)
         raise

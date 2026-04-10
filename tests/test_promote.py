@@ -107,8 +107,40 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertIsInstance(record, DeploymentRecord)
         self.assertEqual(record.artifact_identity.artifact_id, "artifact-sha256-image456")
         self.assertEqual(record.deploy.status, "pending")
+        self.assertEqual(record.post_deploy_update.status, "skipped")
         self.assertEqual(record.destination_health.status, "pending")
         self.assertFalse(record.destination_health.verified)
+
+    def test_build_compatibility_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(self) -> None:
+        request = CompatibilityShipRequest(
+            context="opw",
+            instance="prod",
+            source_git_ref="abc123",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            wait=True,
+            verify_health=True,
+            destination_health={
+                "verified": False,
+                "urls": ["https://prod.example.com/web/health"],
+                "timeout_seconds": 45,
+                "status": "pending",
+            },
+        )
+
+        record = build_compatibility_deployment_record(
+            request=request,
+            record_id="deployment-compose-pass",
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at="2026-04-10T18:22:31Z",
+            finished_at="2026-04-10T18:24:00Z",
+        )
+
+        self.assertTrue(record.post_deploy_update.attempted)
+        self.assertEqual(record.post_deploy_update.status, "pass")
+        self.assertIn("canonical odoo-ai platform update workflow", record.post_deploy_update.detail)
 
     def test_build_compatibility_deployment_record_carries_branch_sync_evidence(self) -> None:
         request = CompatibilityShipRequest(
@@ -553,6 +585,10 @@ target_id = "compose-123"
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "fail"', persisted_payload)
+            self.assertIn('"post_deploy_update": {', persisted_payload)
+            self.assertIn('"attempted": true', persisted_payload)
+            self.assertIn('"status": "fail"', persisted_payload)
+            self.assertIn('canonical odoo-ai platform update workflow', persisted_payload)
 
     def test_ship_compatibility_execute_persists_failed_deployment_record(self) -> None:
         runner = CliRunner()

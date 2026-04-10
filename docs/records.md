@@ -45,8 +45,7 @@ state/
 
 - One file per direct ship attempt owned by `odoo-control-plane`.
 - Record the requested source git ref, target, deploy status, recorded
-  executor,
-  and destination health evidence.
+  executor, post-deploy update evidence, and destination health evidence.
 - Persist branch-sync intent there as well so the control plane owns the
   requested git branch movement even while transitional runtime steps still
   performs the actual push.
@@ -62,6 +61,9 @@ state/
 - The recorded executor now reflects control-plane-owned Dokploy execution,
   while the Odoo-specific post-deploy update step is orchestrated separately
   through the canonical `odoo-ai platform update` path.
+- Deployment records should make that remaining seam explicit by recording
+  whether the Odoo-specific post-deploy update was skipped, pending, passed, or
+  failed.
 
 ## Inventory
 

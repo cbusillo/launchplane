@@ -87,6 +87,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     started_at="2026-04-10T18:22:31Z",
                     finished_at="2026-04-10T18:24:00Z",
                 ),
+                post_deploy_update={
+                    "attempted": True,
+                    "status": "pass",
+                    "detail": "Odoo-specific post-deploy update completed through the canonical odoo-ai platform update workflow.",
+                },
                 destination_health={
                     "verified": True,
                     "urls": ["https://prod.example.com/web/health"],
@@ -100,6 +105,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertTrue(written_path.exists())
             self.assertEqual(loaded_record.record_id, record.record_id)
             self.assertEqual(loaded_record.deploy.deployment_id, "delegated-odoo-ai-ship")
+            self.assertEqual(loaded_record.post_deploy_update.status, "pass")
             self.assertEqual(loaded_record.destination_health.status, "pass")
             self.assertEqual(loaded_record.branch_sync.target_branch, "prod")
             self.assertEqual(loaded_record.resolved_target.target_id, "compose-123")
