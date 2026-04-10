@@ -91,3 +91,35 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             persisted_manifest = state_dir / "artifacts" / "artifact-sha256-image456.json"
             self.assertTrue(persisted_manifest.exists())
+
+    def test_find_artifact_manifests_by_commit_returns_matches(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_artifact_manifest(
+                ArtifactIdentityManifest(
+                    artifact_id="artifact-sha256-image456",
+                    odoo_ai_commit="abc123",
+                    enterprise_base_digest="sha256:enterprise123",
+                    image=ArtifactImageReference(
+                        repository="ghcr.io/cbusillo/odoo-private",
+                        digest="sha256:image456",
+                    ),
+                )
+            )
+            store.write_artifact_manifest(
+                ArtifactIdentityManifest(
+                    artifact_id="artifact-sha256-image789",
+                    odoo_ai_commit="def456",
+                    enterprise_base_digest="sha256:enterprise123",
+                    image=ArtifactImageReference(
+                        repository="ghcr.io/cbusillo/odoo-private",
+                        digest="sha256:image789",
+                    ),
+                )
+            )
+
+            matching_manifests = store.find_artifact_manifests_by_commit("abc123")
+
+            self.assertEqual(len(matching_manifests), 1)
+            self.assertEqual(matching_manifests[0].artifact_id, "artifact-sha256-image456")

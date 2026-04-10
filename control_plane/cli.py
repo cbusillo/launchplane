@@ -30,6 +30,18 @@ def _run_command(command: list[str]) -> None:
     subprocess.run(command, check=True, env=command_env)
 
 
+def _resolve_artifact_id_for_request(
+    *,
+    record_store: FilesystemRecordStore,
+    requested_artifact_id: str,
+    source_git_ref: str,
+) -> str:
+    matching_manifests = record_store.find_artifact_manifests_by_commit(source_git_ref)
+    if len(matching_manifests) == 1:
+        return matching_manifests[0].artifact_id
+    return requested_artifact_id
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -143,16 +155,23 @@ def promote_compatibility_execute(
     env_file: Path | None,
 ) -> None:
     request = CompatibilityPromotionRequest.model_validate(_load_json_file(input_file))
-    record_id = generate_promotion_record_id(
-        context_name=request.context,
-        from_instance_name=request.from_instance,
-        to_instance_name=request.to_instance,
+    record_store = _store(state_dir)
+    resolved_artifact_id = _resolve_artifact_id_for_request(
+        record_store=record_store,
+        requested_artifact_id=request.artifact_id,
+        source_git_ref=request.source_git_ref,
     )
-    if request.dry_run:
+    resolved_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
+    record_id = generate_promotion_record_id(
+        context_name=resolved_request.context,
+        from_instance_name=resolved_request.from_instance,
+        to_instance_name=resolved_request.to_instance,
+    )
+    if resolved_request.dry_run:
         click.echo(
             json.dumps(
                 build_compatibility_promotion_record(
-                    request=request,
+                    request=resolved_request,
                     record_id=record_id,
                     deployment_id="",
                     deployment_status="pending",
@@ -164,12 +183,11 @@ def promote_compatibility_execute(
         return
 
     pending_record = build_compatibility_promotion_record(
-        request=request,
+        request=resolved_request,
         record_id=record_id,
         deployment_id="",
         deployment_status="pending",
     )
-    record_store = _store(state_dir)
     record_path = record_store.write_promotion_record(pending_record)
 
     ship_command = [
@@ -180,43 +198,43 @@ def promote_compatibility_execute(
         "platform",
         "ship",
         "--context",
-        request.context,
+        resolved_request.context,
         "--instance",
-        request.to_instance,
+        resolved_request.to_instance,
         "--source-ref",
-        request.source_git_ref,
+        resolved_request.source_git_ref,
         "--skip-gate",
     ]
     if env_file is not None:
         ship_command.extend(["--env-file", str(env_file)])
-    if request.wait:
+    if resolved_request.wait:
         ship_command.append("--wait")
     else:
         ship_command.append("--no-wait")
-    if request.timeout_seconds is not None:
-        ship_command.extend(["--timeout", str(request.timeout_seconds)])
-    if request.verify_health:
+    if resolved_request.timeout_seconds is not None:
+        ship_command.extend(["--timeout", str(resolved_request.timeout_seconds)])
+    if resolved_request.verify_health:
         ship_command.append("--verify-health")
     else:
         ship_command.append("--no-verify-health")
-    if request.health_timeout_seconds is not None:
-        ship_command.extend(["--health-timeout", str(request.health_timeout_seconds)])
-    if request.no_cache:
+    if resolved_request.health_timeout_seconds is not None:
+        ship_command.extend(["--health-timeout", str(resolved_request.health_timeout_seconds)])
+    if resolved_request.no_cache:
         ship_command.append("--no-cache")
-    if request.allow_dirty:
+    if resolved_request.allow_dirty:
         ship_command.append("--allow-dirty")
 
     try:
         _run_command(ship_command)
         final_record = build_compatibility_promotion_record(
-            request=request,
+            request=resolved_request,
             record_id=record_id,
             deployment_id="delegated-odoo-ai-ship",
             deployment_status="pass",
         )
     except subprocess.CalledProcessError:
         final_record = build_compatibility_promotion_record(
-            request=request,
+            request=resolved_request,
             record_id=record_id,
             deployment_id="delegated-odoo-ai-ship",
             deployment_status="fail",

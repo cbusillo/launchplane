@@ -1,3 +1,4 @@
+import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -135,6 +136,62 @@ class PromoteCliTests(unittest.TestCase):
             persisted_payload = promotion_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"artifact_id": "compatibility-opw-abc123"', persisted_payload)
+
+    def test_compatibility_execute_prefers_stored_artifact_manifest_for_commit(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            artifact_dir = state_dir / "artifacts"
+            artifact_dir.mkdir(parents=True, exist_ok=True)
+            (artifact_dir / "artifact-sha256-image456.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_id": "artifact-sha256-image456",
+                        "odoo_ai_commit": "abc123",
+                        "enterprise_base_digest": "sha256:enterprise123",
+                        "image": {
+                            "repository": "ghcr.io/cbusillo/odoo-private",
+                            "digest": "sha256:image456",
+                            "tags": ["sha-abc123"],
+                        },
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            input_file = repo_root / "promotion-request.json"
+            input_file.write_text(
+                CompatibilityPromotionRequest(
+                    artifact_id="compatibility-opw-abc123",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    dry_run=True,
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "promote",
+                    "compatibility-execute",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                    "--odoo-ai-root",
+                    str(repo_root),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
 
     def test_ship_compatibility_plan_validates_request(self) -> None:
         runner = CliRunner()

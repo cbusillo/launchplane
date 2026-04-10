@@ -36,6 +36,8 @@ state/
   destination health.
 - Transitional records may use compatibility artifact identifiers when a full
   immutable artifact pipeline has not been wired into the handoff yet.
+- When a single stored artifact manifest already matches the promoted commit,
+  prefer that real artifact id over the synthetic compatibility id.
 
 ## Inventory
 
