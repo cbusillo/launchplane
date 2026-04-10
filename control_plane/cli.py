@@ -13,7 +13,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, HealthcheckEvidence, PostDeployUpdateEvidence, PromotionRecord
-from control_plane.contracts.ship_request import CompatibilityShipRequest
+from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
@@ -22,7 +22,7 @@ from control_plane.workflows.promote import (
     generate_promotion_record_id,
 )
 from control_plane.workflows.ship import (
-    build_compatibility_deployment_record,
+    build_deployment_record,
     generate_deployment_record_id,
     utc_now_timestamp,
 )
@@ -51,23 +51,6 @@ def _run_command_capture(command: list[str], *, cwd: Path | None = None) -> str:
     return result.stdout
 
 
-def _apply_branch_sync(*, odoo_ai_root: Path, request: CompatibilityShipRequest) -> CompatibilityShipRequest:
-    branch_sync = request.branch_sync
-    if branch_sync is None or not branch_sync.branch_update_required or branch_sync.applied:
-        return request
-
-    _run_command(
-        [
-            "git",
-            "push",
-            "origin",
-            f"+{branch_sync.source_commit}:refs/heads/{branch_sync.target_branch}",
-        ],
-        cwd=odoo_ai_root,
-    )
-    return request.model_copy(update={"branch_sync": branch_sync.model_copy(update={"applied": True})})
-
-
 def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_error: str = ""
@@ -86,7 +69,7 @@ def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
     raise click.ClickException(f"Healthcheck failed for {url}: {last_error or 'timeout'}")
 
 
-def _verify_ship_healthchecks(*, request: CompatibilityShipRequest) -> None:
+def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
     if not request.wait or not request.verify_health:
         return
     if not request.destination_health.urls:
@@ -103,7 +86,7 @@ def _verify_ship_healthchecks(*, request: CompatibilityShipRequest) -> None:
 def _resolve_dokploy_target(
     *,
     odoo_ai_root: Path,
-    request: CompatibilityShipRequest,
+    request: ShipRequest,
 ) -> tuple[ResolvedTargetEvidence, int]:
     source_of_truth = control_plane_dokploy.load_dokploy_source_of_truth(odoo_ai_root / "platform" / "dokploy.toml")
     target_definition = control_plane_dokploy.find_dokploy_target_definition(
@@ -115,7 +98,7 @@ def _resolve_dokploy_target(
         raise click.ClickException(f"No Dokploy target definition found for {request.context}/{request.instance}.")
     if target_definition.target_type != request.target_type:
         raise click.ClickException(
-            "Compatibility ship request target_type does not match platform/dokploy.toml. "
+            "Ship request target_type does not match platform/dokploy.toml. "
             f"Request={request.target_type} configured={target_definition.target_type}."
         )
     if not target_definition.target_id.strip():
@@ -138,7 +121,7 @@ def _execute_dokploy_deploy(
     *,
     odoo_ai_root: Path,
     env_file: Path | None,
-    request: CompatibilityShipRequest,
+    request: ShipRequest,
     resolved_target: ResolvedTargetEvidence,
     deploy_timeout_seconds: int,
 ) -> None:
@@ -175,7 +158,7 @@ def _run_post_deploy_update_via_odoo_ai(
     *,
     odoo_ai_root: Path,
     env_file: Path | None,
-    request: CompatibilityShipRequest,
+    request: ShipRequest,
 ) -> None:
     command = [
         "uv",
@@ -194,7 +177,7 @@ def _run_post_deploy_update_via_odoo_ai(
     _run_command(command)
 
 
-def _skipped_destination_health(request: CompatibilityShipRequest, *, detail_status: str = "skipped") -> HealthcheckEvidence:
+def _skipped_destination_health(request: ShipRequest, *, detail_status: str = "skipped") -> HealthcheckEvidence:
     return request.destination_health.model_copy(update={"verified": False, "status": detail_status})
 
 
@@ -203,7 +186,7 @@ def _export_ship_request_via_odoo_ai(
     odoo_ai_root: Path,
     env_file: Path | None,
     request: CompatibilityPromotionRequest,
-) -> CompatibilityShipRequest:
+) -> ShipRequest:
     command = [
         "uv",
         "run",
@@ -215,6 +198,8 @@ def _export_ship_request_via_odoo_ai(
         request.context,
         "--instance",
         request.to_instance,
+        "--artifact-id",
+        request.artifact_id,
         "--source-ref",
         request.source_git_ref,
     ]
@@ -237,24 +222,23 @@ def _export_ship_request_via_odoo_ai(
     if request.allow_dirty:
         command.append("--allow-dirty")
     payload = json.loads(_run_command_capture(command, cwd=odoo_ai_root))
-    ship_request = CompatibilityShipRequest.model_validate(payload)
-    return ship_request.model_copy(update={"artifact_id": request.artifact_id})
+    return ShipRequest.model_validate(payload)
 
 
-def _execute_compatibility_ship(
+def _execute_ship(
     *,
     state_dir: Path,
     odoo_ai_root: Path,
     env_file: Path | None,
-    request: CompatibilityShipRequest,
-) -> tuple[Path | None, DeploymentRecord | CompatibilityShipRequest]:
+    request: ShipRequest,
+) -> tuple[Path | None, DeploymentRecord | ShipRequest]:
     record_store = _store(state_dir)
     resolved_artifact_id = _resolve_artifact_id_for_request(
         record_store=record_store,
         requested_artifact_id=request.artifact_id,
         source_git_ref=request.source_git_ref,
     )
-    artifact_manifest = _read_artifact_manifest_if_present(
+    artifact_manifest = _read_artifact_manifest(
         record_store=record_store,
         artifact_id=resolved_artifact_id,
     )
@@ -273,7 +257,7 @@ def _execute_compatibility_ship(
         instance_name=resolved_request.instance,
     )
     started_at = utc_now_timestamp()
-    pending_record = build_compatibility_deployment_record(
+    pending_record = build_deployment_record(
         request=resolved_request,
         record_id=record_id,
         deployment_id="control-plane-dokploy",
@@ -284,13 +268,12 @@ def _execute_compatibility_ship(
     record_path = record_store.write_deployment_record(pending_record)
 
     try:
-        delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=resolved_request)
         resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
             odoo_ai_root=odoo_ai_root,
-            request=delegated_request,
+            request=resolved_request,
         )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_compatibility_deployment_record(
+        final_record = build_deployment_record(
             request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",
@@ -309,13 +292,13 @@ def _execute_compatibility_ship(
         _execute_dokploy_deploy(
             odoo_ai_root=odoo_ai_root,
             env_file=env_file,
-            request=delegated_request,
+            request=resolved_request,
             resolved_target=resolved_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
         )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
+        final_record = build_deployment_record(
+            request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",
             deployment_status="fail",
@@ -328,15 +311,15 @@ def _execute_compatibility_ship(
         raise
 
     try:
-        if delegated_request.wait and resolved_target.target_type == "compose":
+        if resolved_request.wait and resolved_target.target_type == "compose":
             _run_post_deploy_update_via_odoo_ai(
                 odoo_ai_root=odoo_ai_root,
                 env_file=env_file,
-                request=delegated_request,
+                request=resolved_request,
             )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
+        final_record = build_deployment_record(
+            request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",
             deployment_status="pass",
@@ -352,13 +335,13 @@ def _execute_compatibility_ship(
                     "odoo-ai platform update workflow."
                 ),
             ),
-            destination_health=_skipped_destination_health(delegated_request),
+            destination_health=_skipped_destination_health(resolved_request),
         )
         record_store.write_deployment_record(final_record)
         raise
 
     post_deploy_update_evidence = PostDeployUpdateEvidence()
-    if delegated_request.wait and resolved_target.target_type == "compose":
+    if resolved_request.wait and resolved_target.target_type == "compose":
         post_deploy_update_evidence = PostDeployUpdateEvidence(
             attempted=True,
             status="pass",
@@ -369,9 +352,9 @@ def _execute_compatibility_ship(
         )
 
     try:
-        _verify_ship_healthchecks(request=delegated_request)
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
+        _verify_ship_healthchecks(request=resolved_request)
+        final_record = build_deployment_record(
+            request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",
             deployment_status="pass",
@@ -382,8 +365,8 @@ def _execute_compatibility_ship(
             post_deploy_update=post_deploy_update_evidence,
         )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
+        final_record = build_deployment_record(
+            request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",
             deployment_status="pass",
@@ -392,7 +375,7 @@ def _execute_compatibility_ship(
             resolved_target=resolved_target,
             delegated_executor="control-plane.dokploy",
             post_deploy_update=post_deploy_update_evidence,
-            destination_health=_skipped_destination_health(delegated_request, detail_status="fail"),
+            destination_health=_skipped_destination_health(resolved_request, detail_status="fail"),
         )
         record_store.write_deployment_record(final_record)
         raise
@@ -410,46 +393,48 @@ def _resolve_artifact_id_for_request(
     source_git_ref: str,
 ) -> str:
     matching_manifests = record_store.find_artifact_manifests_by_commit(source_git_ref)
+    normalized_artifact_id = requested_artifact_id.strip()
     if len(matching_manifests) == 1:
-        return matching_manifests[0].artifact_id
-    return requested_artifact_id
+        matched_artifact_id = matching_manifests[0].artifact_id
+        if not normalized_artifact_id or normalized_artifact_id.startswith("compatibility-"):
+            return matched_artifact_id
+        return normalized_artifact_id
+    if normalized_artifact_id:
+        return normalized_artifact_id
+    if len(matching_manifests) > 1:
+        raise click.ClickException(
+            "Ship requires an explicit artifact_id when multiple stored artifact manifests match "
+            f"source_git_ref={source_git_ref}."
+        )
+    raise click.ClickException(
+        "Ship requires an explicit artifact_id or a unique stored artifact manifest for "
+        f"source_git_ref={source_git_ref}."
+    )
 
 
-def _read_artifact_manifest_if_present(
+def _read_artifact_manifest(
     *,
     record_store: FilesystemRecordStore,
     artifact_id: str,
-) -> ArtifactIdentityManifest | None:
-    normalized_artifact_id = artifact_id.strip()
-    if not normalized_artifact_id:
-        return None
+) -> ArtifactIdentityManifest:
     try:
-        return record_store.read_artifact_manifest(normalized_artifact_id)
+        return record_store.read_artifact_manifest(artifact_id)
     except FileNotFoundError:
-        return None
+        raise click.ClickException(f"Ship requires stored artifact manifest '{artifact_id}'.") from None
 
 
 def _resolve_artifact_native_execution_request(
     *,
-    request: CompatibilityShipRequest,
+    request: ShipRequest,
     artifact_id: str,
-    artifact_manifest: ArtifactIdentityManifest | None,
-) -> CompatibilityShipRequest:
-    branch_sync = request.branch_sync
-    if artifact_manifest is None or branch_sync is None:
-        return request.model_copy(update={"artifact_id": artifact_id})
-    return request.model_copy(
-        update={
-            "artifact_id": artifact_id,
-            "branch_sync": branch_sync.model_copy(
-                update={
-                    "branch_update_required": False,
-                    "skipped_for_artifact_image": True,
-                    "applied": False,
-                }
-            ),
-        }
-    )
+    artifact_manifest: ArtifactIdentityManifest,
+) -> ShipRequest:
+    if artifact_manifest.artifact_id != artifact_id:
+        raise click.ClickException(
+            "Artifact manifest id mismatch during ship execution: "
+            f"request={artifact_id} manifest={artifact_manifest.artifact_id}."
+        )
+    return request.model_copy(update={"artifact_id": artifact_id})
 
 
 def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) -> str:
@@ -631,12 +616,12 @@ def promote_record(
     click.echo(record_path)
 
 
-@promote.command("compatibility-execute")
+@promote.command("execute")
 @click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
-def promote_compatibility_execute(
+def promote_execute(
     state_dir: Path,
     input_file: Path,
     odoo_ai_root: Path,
@@ -684,14 +669,14 @@ def promote_compatibility_execute(
             env_file=env_file,
             request=resolved_request,
         )
-        _record_path, deployment_record = _execute_compatibility_ship(
+        _record_path, deployment_record = _execute_ship(
             state_dir=state_dir,
             odoo_ai_root=odoo_ai_root,
             env_file=env_file,
             request=ship_request,
         )
         if not isinstance(deployment_record, DeploymentRecord):
-            raise click.ClickException("Compatibility ship execution returned an unexpected dry-run payload during promotion.")
+            raise click.ClickException("Ship execution returned an unexpected dry-run payload during promotion.")
         final_record = build_compatibility_promotion_record(
             request=resolved_request,
             record_id=record_id,
@@ -724,26 +709,26 @@ def ship() -> None:
     """Ship workflow commands."""
 
 
-@ship.command("compatibility-plan")
+@ship.command("plan")
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def ship_compatibility_plan(input_file: Path) -> None:
-    request = CompatibilityShipRequest.model_validate(_load_json_file(input_file))
+def ship_plan(input_file: Path) -> None:
+    request = ShipRequest.model_validate(_load_json_file(input_file))
     click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
-@ship.command("compatibility-execute")
+@ship.command("execute")
 @click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
-def ship_compatibility_execute(
+def ship_execute(
     state_dir: Path,
     input_file: Path,
     odoo_ai_root: Path,
     env_file: Path | None,
 ) -> None:
-    request = CompatibilityShipRequest.model_validate(_load_json_file(input_file))
-    record_path, _record = _execute_compatibility_ship(
+    request = ShipRequest.model_validate(_load_json_file(input_file))
+    record_path, _record = _execute_ship(
         state_dir=state_dir,
         odoo_ai_root=odoo_ai_root,
         env_file=env_file,

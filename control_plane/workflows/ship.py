@@ -5,7 +5,7 @@ from control_plane.contracts.deployment_record import DelegatedExecutor
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, HealthcheckEvidence
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
-from control_plane.contracts.ship_request import CompatibilityShipRequest
+from control_plane.contracts.ship_request import ShipRequest
 
 
 def generate_deployment_record_id(*, context_name: str, instance_name: str) -> str:
@@ -48,7 +48,7 @@ def _resolve_destination_health(
 
 
 def _resolve_post_deploy_update(
-    request: CompatibilityShipRequest,
+    request: ShipRequest,
     *,
     deployment_status: str,
 ) -> PostDeployUpdateEvidence:
@@ -79,9 +79,9 @@ def _resolve_post_deploy_update(
     )
 
 
-def build_compatibility_deployment_record(
+def build_deployment_record(
     *,
-    request: CompatibilityShipRequest,
+    request: ShipRequest,
     record_id: str,
     deployment_id: str,
     deployment_status: str,
@@ -106,7 +106,6 @@ def build_compatibility_deployment_record(
         verify_destination_health=request.verify_health,
         no_cache=request.no_cache,
         delegated_executor=delegated_executor,
-        branch_sync=request.branch_sync,
         resolved_target=resolved_target,
         deploy=DeploymentEvidence(
             target_name=request.target_name,

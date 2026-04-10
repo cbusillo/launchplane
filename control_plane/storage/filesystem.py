@@ -19,7 +19,10 @@ class FilesystemRecordStore:
     def _write_model(self, record_type: str, record_id: str, model: BaseModel) -> Path:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
-        record_path.write_text(json.dumps(model.model_dump(mode="json"), indent=2, sort_keys=True), encoding="utf-8")
+        record_path.write_text(
+            json.dumps(model.model_dump(mode="json", exclude_none=True), indent=2, sort_keys=True),
+            encoding="utf-8",
+        )
         return record_path
 
     def _read_model(self, model_type: type[BaseModel], record_type: str, record_id: str) -> BaseModel:

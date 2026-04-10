@@ -12,10 +12,36 @@ from control_plane.cli import _resolve_dokploy_target, _sync_artifact_image_refe
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest
-from control_plane.contracts.ship_request import CompatibilityShipRequest
-from control_plane.workflows.ship import build_compatibility_deployment_record
+from control_plane.contracts.ship_request import ShipRequest
+from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.promote import build_promotion_record
 from control_plane.workflows.promote import build_compatibility_promotion_record
+
+
+def _write_artifact_manifest(
+    state_dir: Path,
+    *,
+    artifact_id: str = "artifact-sha256-image456",
+    source_commit: str = "abc123",
+) -> None:
+    artifact_dir = state_dir / "artifacts"
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    (artifact_dir / f"{artifact_id}.json").write_text(
+        json.dumps(
+            {
+                "artifact_id": artifact_id,
+                "odoo_ai_commit": source_commit,
+                "enterprise_base_digest": "sha256:enterprise123",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-private",
+                    "digest": "sha256:image456",
+                    "tags": [f"sha-{source_commit}"],
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
 
 
 class PromoteWorkflowTests(unittest.TestCase):
@@ -77,8 +103,8 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertTrue(record.post_deploy_update.attempted)
         self.assertEqual(record.post_deploy_update.status, "pass")
 
-    def test_build_compatibility_deployment_record_marks_pending_health_for_async_ship(self) -> None:
-        request = CompatibilityShipRequest(
+    def test_build_deployment_record_marks_pending_health_for_async_ship(self) -> None:
+        request = ShipRequest(
             context="opw",
             instance="prod",
             source_git_ref="abc123",
@@ -96,7 +122,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             },
         )
 
-        record = build_compatibility_deployment_record(
+        record = build_deployment_record(
             request=request,
             record_id="deployment-1",
             deployment_id="delegated-ship",
@@ -112,11 +138,12 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.destination_health.status, "pending")
         self.assertFalse(record.destination_health.verified)
 
-    def test_build_compatibility_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(self) -> None:
-        request = CompatibilityShipRequest(
+    def test_build_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(self) -> None:
+        request = ShipRequest(
             context="opw",
             instance="prod",
             source_git_ref="abc123",
+            artifact_id="artifact-sha256-image456",
             target_name="opw-prod",
             target_type="compose",
             deploy_mode="dokploy-compose-api",
@@ -130,7 +157,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             },
         )
 
-        record = build_compatibility_deployment_record(
+        record = build_deployment_record(
             request=request,
             record_id="deployment-compose-pass",
             deployment_id="control-plane-dokploy",
@@ -142,42 +169,6 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertTrue(record.post_deploy_update.attempted)
         self.assertEqual(record.post_deploy_update.status, "pass")
         self.assertIn("canonical odoo-ai platform update workflow", record.post_deploy_update.detail)
-
-    def test_build_compatibility_deployment_record_carries_branch_sync_evidence(self) -> None:
-        request = CompatibilityShipRequest(
-            context="opw",
-            instance="prod",
-            source_git_ref="origin/opw-prod",
-            target_name="opw-prod",
-            target_type="compose",
-            deploy_mode="dokploy-compose-api",
-            branch_sync={
-                "source_git_ref": "origin/opw-prod",
-                "source_commit": "abc123",
-                "target_branch": "prod",
-                "remote_branch_commit_before": "def456",
-                "branch_update_required": True,
-            },
-        )
-
-        record = build_compatibility_deployment_record(
-            request=request,
-            record_id="deployment-branch-sync",
-            deployment_id="delegated-ship",
-            deployment_status="pending",
-            started_at="2026-04-10T18:22:31Z",
-            finished_at="",
-            resolved_target={
-                "target_type": "compose",
-                "target_id": "compose-123",
-                "target_name": "opw-prod",
-            },
-        )
-
-        self.assertEqual(record.branch_sync.source_commit, "abc123")
-        self.assertEqual(record.branch_sync.target_branch, "prod")
-        self.assertTrue(record.branch_sync.branch_update_required)
-        self.assertEqual(record.resolved_target.target_id, "compose-123")
 
 
 class ArtifactImageOverrideTests(unittest.TestCase):
@@ -247,7 +238,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         self.assertNotIn("DOCKER_IMAGE_REFERENCE", str(captured_update["env_text"]))
         self.assertIn("DOCKER_IMAGE=odoo-ai", str(captured_update["env_text"]))
 
-    def test_ship_artifact_manifest_bypasses_branch_sync_execution(self) -> None:
+    def test_ship_artifact_manifest_executes_without_git_push(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -288,7 +279,8 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -297,13 +289,6 @@ target_id = "compose-123"
                     deploy_mode="dokploy-compose-api",
                     wait=True,
                     verify_health=False,
-                    branch_sync={
-                        "source_git_ref": "origin/main",
-                        "source_commit": "abc123",
-                        "target_branch": "opw-prod",
-                        "remote_branch_commit_before": "def456",
-                        "branch_update_required": True,
-                    },
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
@@ -323,7 +308,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -340,9 +325,7 @@ target_id = "compose-123"
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
-            self.assertIn('"skipped_for_artifact_image": true', persisted_payload)
-            self.assertIn('"branch_update_required": false', persisted_payload)
-            self.assertIn('"applied": false', persisted_payload)
+            self.assertNotIn('"branch_sync"', persisted_payload)
 
 
 class PromoteCliTests(unittest.TestCase):
@@ -383,14 +366,14 @@ class PromoteCliTests(unittest.TestCase):
             )
             with patch(
                 "control_plane.cli._export_ship_request_via_odoo_ai",
-                return_value=CompatibilityShipRequest(
+                return_value=ShipRequest(
+                    artifact_id="compatibility-opw-abc123",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    artifact_id="compatibility-opw-abc123",
                     wait=True,
                     verify_health=True,
                     destination_health={
@@ -401,7 +384,7 @@ class PromoteCliTests(unittest.TestCase):
                     },
                 ),
             ), patch(
-                "control_plane.cli._execute_compatibility_ship",
+                "control_plane.cli._execute_ship",
                 return_value=(
                     state_dir / "deployments" / "deployment-1.json",
                     DeploymentRecord(
@@ -427,7 +410,7 @@ class PromoteCliTests(unittest.TestCase):
                     main,
                     [
                         "promote",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -551,7 +534,7 @@ class PromoteCliTests(unittest.TestCase):
                 main,
                 [
                     "promote",
-                    "compatibility-execute",
+                    "execute",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -569,16 +552,17 @@ class PromoteCliTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    artifact_id="artifact-sha256-image456",
                     wait=True,
                     verify_health=True,
                     destination_health={
@@ -614,7 +598,7 @@ class PromoteCliTests(unittest.TestCase):
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -670,7 +654,7 @@ class PromoteCliTests(unittest.TestCase):
 
             with patch(
                 "control_plane.cli._export_ship_request_via_odoo_ai",
-                return_value=CompatibilityShipRequest(
+                return_value=ShipRequest(
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -688,7 +672,7 @@ class PromoteCliTests(unittest.TestCase):
                     },
                 ),
             ), patch(
-                "control_plane.cli._execute_compatibility_ship",
+                "control_plane.cli._execute_ship",
                 return_value=(
                     state_dir / "deployments" / "deployment-1.json",
                     DeploymentRecord(
@@ -725,7 +709,7 @@ class PromoteCliTests(unittest.TestCase):
                     main,
                     [
                         "promote",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -749,7 +733,8 @@ class PromoteCliTests(unittest.TestCase):
             repo_root = Path(temporary_directory_name)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -770,7 +755,7 @@ class PromoteCliTests(unittest.TestCase):
                 main,
                 [
                     "ship",
-                    "compatibility-plan",
+                    "plan",
                     "--input-file",
                     str(input_file),
                 ],
@@ -804,7 +789,8 @@ class PromoteCliTests(unittest.TestCase):
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -820,7 +806,7 @@ class PromoteCliTests(unittest.TestCase):
                 main,
                 [
                     "ship",
-                    "compatibility-execute",
+                    "execute",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -833,11 +819,12 @@ class PromoteCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
 
-    def test_ship_compatibility_execute_runs_dokploy_in_control_plane(self) -> None:
+    def test_ship_execute_runs_dokploy_in_control_plane(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             platform_dir = repo_root / "platform"
             platform_dir.mkdir(parents=True, exist_ok=True)
             (platform_dir / "dokploy.toml").write_text(
@@ -856,7 +843,8 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -865,15 +853,7 @@ target_id = "compose-123"
                     deploy_mode="dokploy-compose-api",
                     wait=True,
                     verify_health=False,
-                    branch_sync={
-                        "source_git_ref": "origin/opw-prod",
-                        "source_commit": "abc123",
-                        "target_branch": "prod",
-                            "remote_branch_commit_before": "def456",
-                            "branch_update_required": True,
-                            "applied": False,
-                        },
-                    ).model_dump_json(indent=2),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             captured_commands: list[list[str]] = []
@@ -892,7 +872,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -903,18 +883,16 @@ target_id = "compose-123"
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual(len(captured_commands), 2)
-            self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
-            self.assertIn("update", captured_commands[1])
+            self.assertEqual(len(captured_commands), 1)
+            self.assertIn("update", captured_commands[0])
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"delegated_executor": "control-plane.dokploy"', persisted_payload)
             self.assertIn('"deployment_id": "control-plane-dokploy"', persisted_payload)
-            self.assertIn('"source_commit": "abc123"', persisted_payload)
-            self.assertIn('"applied": true', persisted_payload)
             self.assertIn('"target_id": "compose-123"', persisted_payload)
+            self.assertNotIn('"branch_sync"', persisted_payload)
 
     def test_ship_compatibility_execute_resolves_artifact_from_stored_manifest(self) -> None:
         runner = CliRunner()
@@ -957,7 +935,8 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -986,7 +965,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -1012,6 +991,7 @@ target_id = "compose-123"
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             platform_dir = repo_root / "platform"
             platform_dir.mkdir(parents=True, exist_ok=True)
             (platform_dir / "dokploy.toml").write_text(
@@ -1030,7 +1010,8 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -1068,7 +1049,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -1088,9 +1069,11 @@ target_id = "compose-123"
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -1132,7 +1115,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -1157,9 +1140,11 @@ target_id = "compose-123"
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -1195,7 +1180,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -1212,69 +1197,53 @@ target_id = "compose-123"
             self.assertIn('"status": "fail"', persisted_payload)
             self.assertIn('"finished_at": "', persisted_payload)
 
-    def test_ship_compatibility_execute_fails_closed_when_branch_sync_apply_fails(self) -> None:
+    def test_ship_execute_fails_closed_when_artifact_manifest_is_missing(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-missing",
                     context="opw",
                     instance="prod",
                     source_git_ref="origin/opw-prod",
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    branch_sync={
-                        "source_git_ref": "origin/opw-prod",
-                        "source_commit": "abc123",
-                        "target_branch": "prod",
-                        "remote_branch_commit_before": "def456",
-                        "branch_update_required": True,
-                    },
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
-            captured_commands: list[list[str]] = []
-
-            def capture_and_fail(command: list[str], cwd: Path | None = None) -> None:
-                captured_commands.append(command)
-                if command[:3] == ["git", "push", "origin"]:
-                    raise subprocess.CalledProcessError(1, command)
-
-            with patch("control_plane.cli._run_command", side_effect=capture_and_fail):
-                result = runner.invoke(
-                    main,
-                    [
-                        "ship",
-                        "compatibility-execute",
-                        "--state-dir",
-                        str(state_dir),
-                        "--input-file",
-                        str(input_file),
-                        "--odoo-ai-root",
-                        str(repo_root),
-                    ],
-                )
+            result = runner.invoke(
+                main,
+                [
+                    "ship",
+                    "execute",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                    "--odoo-ai-root",
+                    str(repo_root),
+                ],
+            )
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertEqual(len(captured_commands), 1)
-            self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
+            self.assertIn("stored artifact manifest", result.output)
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
-            self.assertEqual(len(deployment_files), 1)
-            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
-            self.assertIn('"status": "fail"', persisted_payload)
-            self.assertIn('"applied": false', persisted_payload)
+            self.assertEqual(len(deployment_files), 0)
 
     def test_ship_compatibility_execute_fails_closed_when_target_resolution_fails(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                CompatibilityShipRequest(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -1293,7 +1262,7 @@ target_id = "compose-123"
                     main,
                     [
                         "ship",
-                        "compatibility-execute",
+                        "execute",
                         "--state-dir",
                         str(state_dir),
                         "--input-file",
@@ -1333,7 +1302,8 @@ target_id = "compose-123"
 
             resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
                 odoo_ai_root=repo_root,
-                request=CompatibilityShipRequest(
+                request=ShipRequest(
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
