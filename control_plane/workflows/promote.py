@@ -3,10 +3,10 @@ from datetime import UTC, datetime
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
-    CompatibilityPromotionRequest,
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
+    PromotionRequest,
     PromotionRecord,
 )
 
@@ -98,9 +98,9 @@ def _resolve_destination_health(
     )
 
 
-def build_compatibility_promotion_record(
+def build_executed_promotion_record(
     *,
-    request: CompatibilityPromotionRequest,
+    request: PromotionRequest,
     record_id: str,
     deployment_id: str,
     deployment_status: str,

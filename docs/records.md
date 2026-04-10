@@ -36,10 +36,10 @@ state/
 - One file per promotion attempt.
 - Record source, destination, artifact id, gate evidence, deploy evidence, and
   destination health.
-- Transitional records may use compatibility artifact identifiers when a full
-  immutable artifact pipeline has not been wired into the handoff yet.
+- Promote inputs should reference the immutable artifact id directly.
 - When a single stored artifact manifest already matches the promoted commit,
-  prefer that real artifact id over the synthetic compatibility id.
+  the control plane may normalize older request payloads onto that stored real
+  artifact id before persisting the promotion record.
 
 ## Deployment Record
 
@@ -59,8 +59,8 @@ state/
 - Deploy execution should also drive the Dokploy image selection from stored
   artifact manifests when possible by syncing an exact
   `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` override before the deploy starts.
-- Native ship requests should not persist branch-sync evidence because branch
-  movement is no longer part of artifact-backed execution.
+- Native ship/deploy records should not persist branch-sync evidence because
+  branch movement is no longer part of artifact-backed execution.
 - When no stored artifact manifest is available for a direct ship, deploy
   execution should fail closed instead of falling back to the ordinary repo/tag
   image contract.

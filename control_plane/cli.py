@@ -12,12 +12,12 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, HealthcheckEvidence, PostDeployUpdateEvidence, PromotionRecord
+from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence, PromotionRecord, PromotionRequest
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
-    build_compatibility_promotion_record,
+    build_executed_promotion_record,
     build_promotion_record,
     generate_promotion_record_id,
 )
@@ -185,7 +185,7 @@ def _export_ship_request_via_odoo_ai(
     *,
     odoo_ai_root: Path,
     env_file: Path | None,
-    request: CompatibilityPromotionRequest,
+    request: PromotionRequest,
 ) -> ShipRequest:
     command = [
         "uv",
@@ -627,7 +627,7 @@ def promote_execute(
     odoo_ai_root: Path,
     env_file: Path | None,
 ) -> None:
-    request = CompatibilityPromotionRequest.model_validate(_load_json_file(input_file))
+    request = PromotionRequest.model_validate(_load_json_file(input_file))
     record_store = _store(state_dir)
     resolved_artifact_id = _resolve_artifact_id_for_request(
         record_store=record_store,
@@ -643,7 +643,7 @@ def promote_execute(
     if resolved_request.dry_run:
         click.echo(
             json.dumps(
-                build_compatibility_promotion_record(
+                build_executed_promotion_record(
                     request=resolved_request,
                     record_id=record_id,
                     deployment_id="",
@@ -655,7 +655,7 @@ def promote_execute(
         )
         return
 
-    pending_record = build_compatibility_promotion_record(
+    pending_record = build_executed_promotion_record(
         request=resolved_request,
         record_id=record_id,
         deployment_id="",
@@ -677,14 +677,14 @@ def promote_execute(
         )
         if not isinstance(deployment_record, DeploymentRecord):
             raise click.ClickException("Ship execution returned an unexpected dry-run payload during promotion.")
-        final_record = build_compatibility_promotion_record(
+        final_record = build_executed_promotion_record(
             request=resolved_request,
             record_id=record_id,
             deployment_id=deployment_record.deploy.deployment_id,
             deployment_status=deployment_record.deploy.status,
         )
     except (subprocess.CalledProcessError, click.ClickException, json.JSONDecodeError):
-        final_record = build_compatibility_promotion_record(
+        final_record = build_executed_promotion_record(
             request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",

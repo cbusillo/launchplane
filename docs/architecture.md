@@ -26,14 +26,14 @@ title: Architecture
 - addon code
 - local developer workflows
 - Odoo-specific validation
-- thin compatibility wrappers during migration
+- the remaining explicit handoff seams
 
 ## Transition Direction
 
 - The first live workflow owned here is `promote`.
-- During the current compatibility slice, `promote` uses `odoo-ai` only for
-  read-only ship-request export while this repo owns the promotion record and
-  the live ship execution boundary.
+- `promote` now accepts the native artifact-backed promotion contract and uses
+  `odoo-ai` only for read-only ship-request export while this repo owns the
+  promotion record and the live ship execution boundary.
 - Direct `ship` ownership now also enters through this repo, and Dokploy
   target resolution, credentials, and trigger/wait execution now run here.
 - Phase 5 closes with a single explicit cross-repo runtime seam: the
@@ -54,9 +54,9 @@ title: Architecture
 - When the control plane cannot resolve a stored artifact manifest for ship
   execution, it now fails closed instead of falling back to branch-sync or
   repo/tag image selection.
-- Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
+- The remaining `odoo-ai` handoff seams must fail closed when this repo cannot
   accept control.
-- Compatibility wrappers are transitional and should be removed after parity.
+- Any temporary wrapper logic should stay explicit and removable.
 
 ## Runtime Shape
 

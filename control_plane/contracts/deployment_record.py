@@ -8,7 +8,6 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
 )
-from control_plane.contracts.ship_request import BranchSyncEvidence
 
 DelegatedExecutor = Literal[
     "control-plane.dokploy",
@@ -44,7 +43,6 @@ class DeploymentRecord(BaseModel):
     verify_destination_health: bool = True
     no_cache: bool = False
     delegated_executor: DelegatedExecutor = "control-plane.dokploy"
-    branch_sync: BranchSyncEvidence | None = None
     resolved_target: ResolvedTargetEvidence | None = None
     deploy: DeploymentEvidence
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)

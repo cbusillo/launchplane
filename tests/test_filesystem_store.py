@@ -67,13 +67,6 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 context="opw",
                 instance="prod",
                 source_git_ref="abc123",
-                branch_sync={
-                    "source_git_ref": "origin/opw-prod",
-                    "source_commit": "abc123",
-                    "target_branch": "prod",
-                    "remote_branch_commit_before": "def456",
-                    "branch_update_required": True,
-                },
                 resolved_target={
                     "target_type": "compose",
                     "target_id": "compose-123",
@@ -108,7 +101,6 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_record.deploy.deployment_id, "delegated-odoo-ai-ship")
             self.assertEqual(loaded_record.post_deploy_update.status, "pass")
             self.assertEqual(loaded_record.destination_health.status, "pass")
-            self.assertEqual(loaded_record.branch_sync.target_branch, "prod")
             self.assertEqual(loaded_record.resolved_target.target_id, "compose-123")
 
     def test_artifacts_ingest_odoo_ai_writes_manifest(self) -> None:

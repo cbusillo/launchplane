@@ -7,7 +7,7 @@ and environment operations.
 
 - Own artifact and promotion records outside `odoo-ai`.
 - Become the long-term home for promotion and deploy orchestration.
-- Keep `odoo-ai` focused on code, local DX, and thin compatibility wrappers.
+- Keep `odoo-ai` focused on code, local DX, and the remaining explicit handoff seams.
 
 ## Bootstrap Scope
 

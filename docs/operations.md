@@ -23,9 +23,9 @@ title: Operations
 - Operator-local state belongs under `state/` or another explicit state
   directory outside git.
 - Promotion execution history should remain append-only.
-- The first live promote path now uses `odoo-ai` only for read-only ship
-  request export and then executes ship directly from the control-plane-owned
-  path.
+- Promote now uses the native artifact-backed promotion request, then uses
+  `odoo-ai` only for read-only ship-request export before executing ship from
+  the control-plane-owned path.
 - Direct `ship` now enters here first as an artifact-backed workflow, not a
   branch-sync fallback.
 - Artifact manifests handed off from `odoo-ai` should be persisted here before

@@ -91,7 +91,7 @@ class PromotionRecord(BaseModel):
         return self
 
 
-class CompatibilityPromotionRequest(BaseModel):
+class PromotionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
@@ -115,7 +115,17 @@ class CompatibilityPromotionRequest(BaseModel):
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 
     @model_validator(mode="after")
-    def _validate_instances(self) -> "CompatibilityPromotionRequest":
+    def _validate_request(self) -> "PromotionRequest":
+        if not self.artifact_id.strip():
+            raise ValueError("promotion request requires artifact_id")
+        if not self.source_git_ref.strip():
+            raise ValueError("promotion request requires source_git_ref")
+        if not self.context.strip():
+            raise ValueError("promotion request requires context")
+        if not self.target_name.strip():
+            raise ValueError("promotion request requires target_name")
+        if not self.deploy_mode.strip():
+            raise ValueError("promotion request requires deploy_mode")
         if self.from_instance == self.to_instance:
             raise ValueError("promotion source and destination instances must differ")
         return self

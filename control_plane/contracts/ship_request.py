@@ -3,30 +3,6 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 
 
-class BranchSyncEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    source_git_ref: str
-    source_commit: str
-    target_branch: str
-    remote_branch_commit_before: str = ""
-    branch_update_required: bool
-    skipped_for_artifact_image: bool = False
-    applied: bool = False
-
-    @model_validator(mode="after")
-    def _validate_branch_sync(self) -> "BranchSyncEvidence":
-        if not self.source_git_ref.strip():
-            raise ValueError("branch sync evidence requires source_git_ref")
-        if not self.source_commit.strip():
-            raise ValueError("branch sync evidence requires source_commit")
-        if not self.target_branch.strip():
-            raise ValueError("branch sync evidence requires target_branch")
-        if self.skipped_for_artifact_image and self.applied:
-            raise ValueError("artifact-image-skipped branch sync cannot also be marked applied")
-        return self
-
-
 class ShipRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

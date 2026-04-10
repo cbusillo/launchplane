@@ -11,11 +11,11 @@ from click.testing import CliRunner
 from control_plane.cli import _resolve_dokploy_target, _sync_artifact_image_reference_for_target, main
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import CompatibilityPromotionRequest
+from control_plane.contracts.promotion_record import PromotionRequest
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.promote import build_promotion_record
-from control_plane.workflows.promote import build_compatibility_promotion_record
+from control_plane.workflows.promote import build_executed_promotion_record
 
 
 def _write_artifact_manifest(
@@ -63,9 +63,9 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.deploy.target_name, "opw-prod")
         self.assertEqual(record.from_instance, "testing")
 
-    def test_build_compatibility_promotion_record_marks_success_after_waited_ship(self) -> None:
-        request = CompatibilityPromotionRequest(
-            artifact_id="compatibility-opw-abc123",
+    def test_build_executed_promotion_record_marks_success_after_waited_ship(self) -> None:
+        request = PromotionRequest(
+            artifact_id="artifact-sha256-image456",
             source_git_ref="abc123",
             context="opw",
             from_instance="testing",
@@ -90,7 +90,7 @@ class PromoteWorkflowTests(unittest.TestCase):
             backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
         )
 
-        record = build_compatibility_promotion_record(
+        record = build_executed_promotion_record(
             request=request,
             record_id="promotion-1",
             deployment_id="delegated-ship",
@@ -329,15 +329,15 @@ target_id = "compose-123"
 
 
 class PromoteCliTests(unittest.TestCase):
-    def test_compatibility_execute_persists_record_and_executes_control_plane_ship(self) -> None:
+    def test_promote_execute_persists_record_and_executes_control_plane_ship(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                CompatibilityPromotionRequest(
-                    artifact_id="compatibility-opw-abc123",
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
                     source_git_ref="abc123",
                     context="opw",
                     from_instance="testing",
@@ -367,7 +367,7 @@ class PromoteCliTests(unittest.TestCase):
             with patch(
                 "control_plane.cli._export_ship_request_via_odoo_ai",
                 return_value=ShipRequest(
-                    artifact_id="compatibility-opw-abc123",
+                    artifact_id="artifact-sha256-image456",
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -389,7 +389,7 @@ class PromoteCliTests(unittest.TestCase):
                     state_dir / "deployments" / "deployment-1.json",
                     DeploymentRecord(
                         record_id="deployment-1",
-                        artifact_identity={"artifact_id": "compatibility-opw-abc123"},
+                        artifact_identity={"artifact_id": "artifact-sha256-image456"},
                         context="opw",
                         instance="prod",
                         source_git_ref="abc123",
@@ -425,7 +425,7 @@ class PromoteCliTests(unittest.TestCase):
             self.assertEqual(len(promotion_files), 1)
             persisted_payload = promotion_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
-            self.assertIn('"artifact_id": "compatibility-opw-abc123"', persisted_payload)
+            self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
             self.assertIn('"deployment_id": "control-plane-dokploy"', persisted_payload)
 
     def test_inventory_show_reads_current_environment_state(self) -> None:
@@ -491,7 +491,7 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
             self.assertIn('"promoted_from_instance": "testing"', result.output)
 
-    def test_compatibility_execute_prefers_stored_artifact_manifest_for_commit(self) -> None:
+    def test_promote_execute_prefers_explicit_artifact_id(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -516,8 +516,8 @@ class PromoteCliTests(unittest.TestCase):
             )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                CompatibilityPromotionRequest(
-                    artifact_id="compatibility-opw-abc123",
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
                     source_git_ref="abc123",
                     context="opw",
                     from_instance="testing",
@@ -547,7 +547,7 @@ class PromoteCliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
 
-    def test_ship_compatibility_execute_persists_environment_inventory_after_success(self) -> None:
+    def test_ship_execute_persists_environment_inventory_after_success(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -616,15 +616,15 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn('"deployment_record_id": "deployment-', persisted_payload)
             self.assertIn('canonical odoo-ai platform update workflow', persisted_payload)
 
-    def test_promote_compatibility_execute_persists_inventory_with_promotion_linkage(self) -> None:
+    def test_promote_execute_persists_inventory_with_promotion_linkage(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                CompatibilityPromotionRequest(
-                    artifact_id="compatibility-opw-abc123",
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
                     source_git_ref="abc123",
                     context="opw",
                     from_instance="testing",
@@ -727,7 +727,7 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn('"promotion_record_id": "promotion-', persisted_payload)
             self.assertIn('"promoted_from_instance": "testing"', persisted_payload)
 
-    def test_ship_compatibility_plan_validates_request(self) -> None:
+    def test_ship_plan_validates_request(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -764,7 +764,7 @@ class PromoteCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn('"source_git_ref": "abc123"', result.output)
 
-    def test_ship_compatibility_execute_prefers_stored_artifact_manifest_for_commit(self) -> None:
+    def test_ship_execute_prefers_stored_artifact_manifest_for_commit(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -894,7 +894,7 @@ target_id = "compose-123"
             self.assertIn('"target_id": "compose-123"', persisted_payload)
             self.assertNotIn('"branch_sync"', persisted_payload)
 
-    def test_ship_compatibility_execute_resolves_artifact_from_stored_manifest(self) -> None:
+    def test_ship_execute_resolves_artifact_from_stored_manifest(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -986,7 +986,7 @@ target_id = "compose-123"
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
 
-    def test_ship_compatibility_execute_runs_health_verification_from_control_plane(self) -> None:
+    def test_ship_execute_runs_health_verification_from_control_plane(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -1064,7 +1064,7 @@ target_id = "compose-123"
             self.assertIn("update", captured_commands[0])
             self.assertEqual(captured_health_urls, ["https://prod.example.com/web/health"])
 
-    def test_ship_compatibility_execute_marks_record_failed_when_health_verification_fails(self) -> None:
+    def test_ship_execute_marks_record_failed_when_health_verification_fails(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -1135,7 +1135,7 @@ target_id = "compose-123"
             self.assertIn('"status": "fail"', persisted_payload)
             self.assertIn('canonical odoo-ai platform update workflow', persisted_payload)
 
-    def test_ship_compatibility_execute_persists_failed_deployment_record(self) -> None:
+    def test_ship_execute_persists_failed_deployment_record(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -1234,7 +1234,7 @@ target_id = "compose-123"
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 0)
 
-    def test_ship_compatibility_execute_fails_closed_when_target_resolution_fails(self) -> None:
+    def test_ship_execute_fails_closed_when_target_resolution_fails(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
