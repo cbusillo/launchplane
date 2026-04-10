@@ -8,8 +8,8 @@ from unittest.mock import patch
 import click
 from click.testing import CliRunner
 
-from control_plane.cli import main
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.cli import _resolve_dokploy_target, main
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest
 from control_plane.contracts.ship_request import CompatibilityShipRequest
 from control_plane.workflows.ship import build_compatibility_deployment_record
@@ -184,17 +184,9 @@ class PromoteCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             captured_commands: list[list[str]] = []
-            captured_resolve_commands: list[list[str]] = []
-
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
-            ), patch(
-                "control_plane.cli._run_command_capture",
-                side_effect=lambda command, cwd=None: (
-                    captured_resolve_commands.append(command),
-                    json.dumps({"target_type": "compose", "target_id": "compose-123", "target_name": "opw-prod"}),
-                )[1],
             ):
                 result = runner.invoke(
                     main,
@@ -313,11 +305,27 @@ class PromoteCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn('"source_git_ref": "abc123"', result.output)
 
-    def test_ship_compatibility_execute_delegates_internal_worker(self) -> None:
+    def test_ship_compatibility_execute_runs_dokploy_in_control_plane(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            platform_dir = repo_root / "platform"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            (platform_dir / "dokploy.toml").write_text(
+                """
+schema_version = 2
+
+[defaults]
+target_type = "compose"
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+""".strip(),
+                encoding="utf-8",
+            )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
                 CompatibilityShipRequest(
@@ -341,17 +349,13 @@ class PromoteCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             captured_commands: list[list[str]] = []
-            captured_resolve_commands: list[list[str]] = []
 
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
             ), patch(
-                "control_plane.cli._run_command_capture",
-                side_effect=lambda command, cwd=None: (
-                    captured_resolve_commands.append(command),
-                    json.dumps({"target_type": "compose", "target_id": "compose-123", "target_name": "opw-prod"}),
-                )[1],
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
             ):
                 result = runner.invoke(
                     main,
@@ -368,23 +372,15 @@ class PromoteCliTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual(len(captured_resolve_commands), 1)
-            self.assertIn("compatibility-resolve-ship-target", captured_resolve_commands[0])
-            self.assertEqual(len(captured_commands), 3)
+            self.assertEqual(len(captured_commands), 2)
             self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
-            self.assertIn("compatibility-dokploy-worker", captured_commands[1])
-            self.assertIn("--skip-gate", captured_commands[1])
-            self.assertIn("--branch-sync-target-branch", captured_commands[1])
-            self.assertIn("--branch-sync-update-required", captured_commands[1])
-            self.assertIn("--branch-sync-applied", captured_commands[1])
-            self.assertIn("--resolved-target-id", captured_commands[1])
-            self.assertIn("compose-123", captured_commands[1])
-            self.assertIn("compatibility-post-deploy-update", captured_commands[2])
+            self.assertIn("compatibility-post-deploy-update", captured_commands[1])
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
-            self.assertIn('"delegated_executor": "odoo-ai.compatibility-dokploy-worker"', persisted_payload)
+            self.assertIn('"delegated_executor": "control-plane.dokploy"', persisted_payload)
+            self.assertIn('"deployment_id": "control-plane-dokploy"', persisted_payload)
             self.assertIn('"source_commit": "abc123"', persisted_payload)
             self.assertIn('"applied": true', persisted_payload)
             self.assertIn('"target_id": "compose-123"', persisted_payload)
@@ -394,6 +390,22 @@ class PromoteCliTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            platform_dir = repo_root / "platform"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            (platform_dir / "dokploy.toml").write_text(
+                """
+schema_version = 2
+
+[defaults]
+target_type = "compose"
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+""".strip(),
+                encoding="utf-8",
+            )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
                 CompatibilityShipRequest(
@@ -421,8 +433,8 @@ class PromoteCliTests(unittest.TestCase):
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
             ), patch(
-                "control_plane.cli._run_command_capture",
-                return_value=json.dumps({"target_type": "compose", "target_id": "compose-123", "target_name": "opw-prod"}),
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
             ), patch(
                 "control_plane.cli._wait_for_ship_healthcheck",
                 side_effect=lambda url, timeout_seconds: captured_health_urls.append(url),
@@ -442,10 +454,8 @@ class PromoteCliTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual(len(captured_commands), 2)
-            self.assertIn("compatibility-dokploy-worker", captured_commands[0])
-            self.assertIn("--no-verify-health", captured_commands[0])
-            self.assertIn("compatibility-post-deploy-update", captured_commands[1])
+            self.assertEqual(len(captured_commands), 1)
+            self.assertIn("compatibility-post-deploy-update", captured_commands[0])
             self.assertEqual(captured_health_urls, ["https://prod.example.com/web/health"])
 
     def test_ship_compatibility_execute_marks_record_failed_when_health_verification_fails(self) -> None:
@@ -477,6 +487,15 @@ class PromoteCliTests(unittest.TestCase):
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: None,
+            ), patch(
+                "control_plane.cli._resolve_dokploy_target",
+                return_value=(
+                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
+                    600,
+                ),
+            ), patch(
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
             ), patch(
                 "control_plane.cli._wait_for_ship_healthcheck",
                 side_effect=click.ClickException("Healthcheck failed"),
@@ -528,7 +547,13 @@ class PromoteCliTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.cli._run_command",
+                "control_plane.cli._resolve_dokploy_target",
+                return_value=(
+                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
+                    600,
+                ),
+            ), patch(
+                "control_plane.cli._execute_dokploy_deploy",
                 side_effect=subprocess.CalledProcessError(1, ["uv", "run"]),
             ):
                 result = runner.invoke(
@@ -626,7 +651,7 @@ class PromoteCliTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.cli._run_command_capture",
+                "control_plane.cli._resolve_dokploy_target",
                 side_effect=click.ClickException("Target resolution failed"),
             ):
                 result = runner.invoke(
@@ -648,6 +673,44 @@ class PromoteCliTests(unittest.TestCase):
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "fail"', persisted_payload)
+
+    def test_resolve_dokploy_target_reads_target_id_and_timeout_from_source_of_truth(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            platform_dir = repo_root / "platform"
+            platform_dir.mkdir(parents=True, exist_ok=True)
+            (platform_dir / "dokploy.toml").write_text(
+                """
+schema_version = 2
+
+[profiles.opw]
+target_type = "compose"
+deploy_timeout_seconds = 7200
+
+[[targets]]
+profile = "opw"
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
+                odoo_ai_root=repo_root,
+                request=CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                ),
+            )
+
+        self.assertEqual(resolved_target.target_id, "compose-123")
+        self.assertEqual(resolved_target.target_name, "opw-prod")
+        self.assertEqual(deploy_timeout_seconds, 7200)
 
 
 if __name__ == "__main__":

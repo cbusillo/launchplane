@@ -9,7 +9,11 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.ship_request import BranchSyncEvidence
 
-DelegatedExecutor = Literal["odoo-ai.compatibility-dokploy-worker", "odoo-ai.compatibility-ship-worker"]
+DelegatedExecutor = Literal[
+    "control-plane.dokploy",
+    "odoo-ai.compatibility-dokploy-worker",
+    "odoo-ai.compatibility-ship-worker",
+]
 
 
 class ResolvedTargetEvidence(BaseModel):
@@ -40,7 +44,7 @@ class DeploymentRecord(BaseModel):
     wait_for_completion: bool = True
     verify_destination_health: bool = True
     no_cache: bool = False
-    delegated_executor: DelegatedExecutor = "odoo-ai.compatibility-ship-worker"
+    delegated_executor: DelegatedExecutor = "control-plane.dokploy"
     branch_sync: BranchSyncEvidence | None = None
     resolved_target: ResolvedTargetEvidence | None = None
     deploy: DeploymentEvidence

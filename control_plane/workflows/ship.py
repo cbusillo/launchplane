@@ -55,7 +55,7 @@ def build_compatibility_deployment_record(
     started_at: str,
     finished_at: str,
     resolved_target: ResolvedTargetEvidence | None = None,
-    delegated_executor: DelegatedExecutor = "odoo-ai.compatibility-dokploy-worker",
+    delegated_executor: DelegatedExecutor = "control-plane.dokploy",
 ) -> DeploymentRecord:
     artifact_identity = None
     if request.artifact_id.strip():

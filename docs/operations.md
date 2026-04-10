@@ -39,12 +39,11 @@ title: Operations
 - Compatibility `ship` destination health verification now also runs from the
   control-plane-owned boundary after the delegated worker returns.
 - Compatibility `ship` now resolves the concrete Dokploy target before
-  delegation and passes that resolved target into the worker instead of letting
-  the worker choose the target on its own.
-- Compatibility `ship` no longer uses one monolithic delegated worker for the
-  full path. The control plane now calls a thin Dokploy execution worker first
-  and a separate post-deploy update worker only when that Odoo-specific step is
-  actually required.
+  deployment so the control plane owns the exact runtime target identity used
+  for the deploy.
+- Compatibility `ship` now also owns Dokploy credential loading and Dokploy
+  trigger/wait execution directly. Only the Odoo-specific post-deploy update
+  remains delegated back to `odoo-ai` when it applies.
 
 ## Migration Rules
 

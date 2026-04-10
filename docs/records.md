@@ -57,10 +57,10 @@ state/
   verification rather than relying on the delegated worker to make that final
   readiness call.
 - Deployment records now also persist the resolved Dokploy target so the
-  control plane owns the exact runtime target identity used for the delegated
-  deploy.
-- The delegated executor recorded there now reflects the thin Dokploy worker,
-  while the Odoo-specific post-deploy update step is orchestrated separately.
+  control plane owns the exact runtime target identity used for the deploy.
+- The recorded executor now reflects control-plane-owned Dokploy execution,
+  while the Odoo-specific post-deploy update step is orchestrated separately as
+  the only remaining delegated compatibility step.
 
 ## Inventory
 
