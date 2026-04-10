@@ -2,6 +2,9 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from click.testing import CliRunner
+
+from control_plane.cli import main
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactImageReference
 from control_plane.contracts.promotion_record import DeploymentEvidence, PromotionRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -51,3 +54,40 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertTrue(written_path.exists())
             self.assertEqual(loaded_record.record_id, record.record_id)
             self.assertEqual(loaded_record.deploy.target_name, "opw-prod")
+
+    def test_artifacts_ingest_odoo_ai_writes_manifest(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "artifact-manifest.json"
+            input_file.write_text(
+                ArtifactIdentityManifest(
+                    artifact_id="artifact-sha256-image456",
+                    odoo_ai_commit="f45db648",
+                    enterprise_base_digest="sha256:enterprise123",
+                    addon_sources=({"repository": "cbusillo/disable_odoo_online", "ref": "main"},),
+                    image=ArtifactImageReference(
+                        repository="ghcr.io/cbusillo/odoo-private",
+                        digest="sha256:image456",
+                        tags=("sha-f45db648",),
+                    ),
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "artifacts",
+                    "ingest-odoo-ai",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            persisted_manifest = state_dir / "artifacts" / "artifact-sha256-image456.json"
+            self.assertTrue(persisted_manifest.exists())

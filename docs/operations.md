@@ -5,6 +5,7 @@ title: Operations
 ## Bootstrap Commands
 
 - `uv run control-plane artifacts write --input-file <path>`
+- `uv run control-plane artifacts ingest-odoo-ai --input-file <path>`
 - `uv run control-plane artifacts show --artifact-id <artifact-id>`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
@@ -21,6 +22,8 @@ title: Operations
 - The first live promote path may delegate the underlying `platform ship`
   worker back to `odoo-ai`, but that delegation is an internal compatibility
   detail. The promote boundary itself belongs here.
+- Artifact manifests handed off from `odoo-ai` should be persisted here before
+  later workflows depend on them.
 
 ## Migration Rules
 

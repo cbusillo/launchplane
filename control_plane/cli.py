@@ -57,6 +57,15 @@ def artifacts_show(state_dir: Path, artifact_id: str) -> None:
     click.echo(json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
+@artifacts.command("ingest-odoo-ai")
+@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def artifacts_ingest_odoo_ai(state_dir: Path, input_file: Path) -> None:
+    manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
+    record_path = _store(state_dir).write_artifact_manifest(manifest)
+    click.echo(record_path)
+
+
 @main.group()
 def promotions() -> None:
     """Promotion record commands."""

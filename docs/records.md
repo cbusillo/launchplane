@@ -25,6 +25,9 @@ state/
 - One file per immutable artifact identifier.
 - Record the public app commit, private enterprise digest, and final image
   identity.
+- Preserve build-affecting addon, OpenUpgrade, and flag inputs alongside the
+  image identity so the control plane owns the full manifest instead of a thin
+  image pointer.
 
 ## Promotion Record
 
