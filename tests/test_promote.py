@@ -7,6 +7,7 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest
+from control_plane.contracts.ship_request import CompatibilityShipRequest
 from control_plane.workflows.promote import build_promotion_record
 from control_plane.workflows.promote import build_compatibility_promotion_record
 
@@ -134,6 +135,42 @@ class PromoteCliTests(unittest.TestCase):
             persisted_payload = promotion_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"artifact_id": "compatibility-opw-abc123"', persisted_payload)
+
+    def test_ship_compatibility_plan_validates_request(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "ship",
+                    "compatibility-plan",
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn('"source_git_ref": "abc123"', result.output)
 
 
 if __name__ == "__main__":

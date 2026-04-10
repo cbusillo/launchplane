@@ -7,6 +7,7 @@ import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, PromotionRecord
+from control_plane.contracts.ship_request import CompatibilityShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.promote import (
     build_compatibility_promotion_record,
@@ -216,3 +217,15 @@ def promote_compatibility_execute(
 
     record_store.write_promotion_record(final_record)
     click.echo(record_path)
+
+
+@main.group()
+def ship() -> None:
+    """Ship workflow commands."""
+
+
+@ship.command("compatibility-plan")
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def ship_compatibility_plan(input_file: Path) -> None:
+    request = CompatibilityShipRequest.model_validate(_load_json_file(input_file))
+    click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
