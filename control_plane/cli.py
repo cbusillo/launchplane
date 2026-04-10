@@ -246,18 +246,25 @@ def _execute_compatibility_ship(
     env_file: Path | None,
     request: CompatibilityShipRequest,
 ) -> tuple[Path | None, DeploymentRecord | CompatibilityShipRequest]:
-    if request.dry_run:
-        click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
-        return None, request
-
     record_store = _store(state_dir)
+    resolved_artifact_id = _resolve_artifact_id_for_request(
+        record_store=record_store,
+        requested_artifact_id=request.artifact_id,
+        source_git_ref=request.source_git_ref,
+    )
+    resolved_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
+
+    if resolved_request.dry_run:
+        click.echo(json.dumps(resolved_request.model_dump(mode="json"), indent=2, sort_keys=True))
+        return None, resolved_request
+
     record_id = generate_deployment_record_id(
-        context_name=request.context,
-        instance_name=request.instance,
+        context_name=resolved_request.context,
+        instance_name=resolved_request.instance,
     )
     started_at = utc_now_timestamp()
     pending_record = build_compatibility_deployment_record(
-        request=request,
+        request=resolved_request,
         record_id=record_id,
         deployment_id="control-plane-dokploy",
         deployment_status="pending",
@@ -267,14 +274,14 @@ def _execute_compatibility_ship(
     record_path = record_store.write_deployment_record(pending_record)
 
     try:
-        delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=request)
+        delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=resolved_request)
         resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
             odoo_ai_root=odoo_ai_root,
             request=delegated_request,
         )
     except (subprocess.CalledProcessError, click.ClickException):
         final_record = build_compatibility_deployment_record(
-            request=request,
+            request=resolved_request,
             record_id=record_id,
             deployment_id="control-plane-dokploy",
             deployment_status="fail",

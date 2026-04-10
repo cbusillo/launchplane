@@ -52,6 +52,10 @@ title: Operations
 - Successful waited `ship` and `promote` executions now also refresh current
   environment inventory under `state/inventory/`, so the control plane can
   answer what artifact/source ref is currently running for each environment.
+- Direct `ship` now also prefers a stored real artifact id when the requested
+  commit matches exactly one persisted artifact manifest, so current-state and
+  deploy-history records do not fall back to blank artifact identity when the
+  control plane already knows the immutable build output.
 - Control-plane-owned Dokploy credentials now come from the control-plane
   repo's untracked `.env` by default, or explicit process env overrides,
   instead of piggybacking on `odoo-ai`'s `.env`.

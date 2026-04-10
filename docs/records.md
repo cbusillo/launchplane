@@ -64,6 +64,10 @@ state/
 - Deployment records should make that remaining seam explicit by recording
   whether the Odoo-specific post-deploy update was skipped, pending, passed, or
   failed.
+- When a direct `ship` request arrives without an explicit artifact id but the
+  control plane already has exactly one stored artifact manifest for the
+  requested commit, deployment history should prefer that real artifact id over
+  leaving artifact identity blank.
 
 ## Inventory
 
