@@ -121,6 +121,29 @@ def _resolve_dokploy_target_via_odoo_ai(
     return ResolvedTargetEvidence.model_validate(payload)
 
 
+def _run_post_deploy_update_via_odoo_ai(
+    *,
+    odoo_ai_root: Path,
+    env_file: Path | None,
+    request: CompatibilityShipRequest,
+) -> None:
+    command = [
+        "uv",
+        "run",
+        "--project",
+        str(odoo_ai_root),
+        "platform",
+        "compatibility-post-deploy-update",
+        "--context",
+        request.context,
+        "--instance",
+        request.instance,
+    ]
+    if env_file is not None:
+        command.extend(["--env-file", str(env_file)])
+    _run_command(command)
+
+
 def _resolve_artifact_id_for_request(
     *,
     record_store: FilesystemRecordStore,
@@ -365,13 +388,13 @@ def ship_compatibility_execute(
         click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
         return
 
-    ship_command = [
+    dokploy_command = [
         "uv",
         "run",
         "--project",
         str(odoo_ai_root),
         "platform",
-        "compatibility-ship-worker",
+        "compatibility-dokploy-worker",
         "--context",
         request.context,
         "--instance",
@@ -381,20 +404,20 @@ def ship_compatibility_execute(
         "--skip-gate",
     ]
     if env_file is not None:
-        ship_command.extend(["--env-file", str(env_file)])
+        dokploy_command.extend(["--env-file", str(env_file)])
     if request.wait:
-        ship_command.append("--wait")
+        dokploy_command.append("--wait")
     else:
-        ship_command.append("--no-wait")
+        dokploy_command.append("--no-wait")
     if request.timeout_seconds is not None:
-        ship_command.extend(["--timeout", str(request.timeout_seconds)])
-    ship_command.append("--no-verify-health")
+        dokploy_command.extend(["--timeout", str(request.timeout_seconds)])
+    dokploy_command.append("--no-verify-health")
     if request.health_timeout_seconds is not None:
-        ship_command.extend(["--health-timeout", str(request.health_timeout_seconds)])
+        dokploy_command.extend(["--health-timeout", str(request.health_timeout_seconds)])
     if request.no_cache:
-        ship_command.append("--no-cache")
+        dokploy_command.append("--no-cache")
     if request.allow_dirty:
-        ship_command.append("--allow-dirty")
+        dokploy_command.append("--allow-dirty")
     record_store = _store(state_dir)
     record_id = generate_deployment_record_id(
         context_name=request.context,
@@ -431,7 +454,7 @@ def ship_compatibility_execute(
         raise
 
     if delegated_request.branch_sync is not None:
-        ship_command.extend(
+        dokploy_command.extend(
             [
                 "--branch-sync-source-ref",
                 delegated_request.branch_sync.source_git_ref,
@@ -444,14 +467,14 @@ def ship_compatibility_execute(
             ]
         )
         if delegated_request.branch_sync.branch_update_required:
-            ship_command.append("--branch-sync-update-required")
+            dokploy_command.append("--branch-sync-update-required")
         else:
-            ship_command.append("--no-branch-sync-update-required")
+            dokploy_command.append("--no-branch-sync-update-required")
         if delegated_request.branch_sync.applied:
-            ship_command.append("--branch-sync-applied")
+            dokploy_command.append("--branch-sync-applied")
         else:
-            ship_command.append("--no-branch-sync-applied")
-    ship_command.extend(
+            dokploy_command.append("--no-branch-sync-applied")
+    dokploy_command.extend(
         [
             "--resolved-target-type",
             resolved_target.target_type,
@@ -463,7 +486,13 @@ def ship_compatibility_execute(
     )
 
     try:
-        _run_command(ship_command)
+        _run_command(dokploy_command)
+        if delegated_request.wait and resolved_target.target_type == "compose":
+            _run_post_deploy_update_via_odoo_ai(
+                odoo_ai_root=odoo_ai_root,
+                env_file=env_file,
+                request=delegated_request,
+            )
         _verify_ship_healthchecks(request=delegated_request)
         final_record = build_compatibility_deployment_record(
             request=delegated_request,
@@ -473,8 +502,9 @@ def ship_compatibility_execute(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            delegated_executor="odoo-ai.compatibility-dokploy-worker",
         )
-    except subprocess.CalledProcessError:
+    except (subprocess.CalledProcessError, click.ClickException):
         final_record = build_compatibility_deployment_record(
             request=delegated_request,
             record_id=record_id,
@@ -483,6 +513,7 @@ def ship_compatibility_execute(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            delegated_executor="odoo-ai.compatibility-dokploy-worker",
         )
         record_store.write_deployment_record(final_record)
         raise

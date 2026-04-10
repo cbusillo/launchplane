@@ -41,6 +41,10 @@ title: Operations
 - Compatibility `ship` now resolves the concrete Dokploy target before
   delegation and passes that resolved target into the worker instead of letting
   the worker choose the target on its own.
+- Compatibility `ship` no longer uses one monolithic delegated worker for the
+  full path. The control plane now calls a thin Dokploy execution worker first
+  and a separate post-deploy update worker only when that Odoo-specific step is
+  actually required.
 
 ## Migration Rules
 

@@ -9,7 +9,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.ship_request import BranchSyncEvidence
 
-DelegatedExecutor = Literal["odoo-ai.compatibility-ship-worker"]
+DelegatedExecutor = Literal["odoo-ai.compatibility-dokploy-worker", "odoo-ai.compatibility-ship-worker"]
 
 
 class ResolvedTargetEvidence(BaseModel):

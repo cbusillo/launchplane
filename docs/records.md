@@ -59,6 +59,8 @@ state/
 - Deployment records now also persist the resolved Dokploy target so the
   control plane owns the exact runtime target identity used for the delegated
   deploy.
+- The delegated executor recorded there now reflects the thin Dokploy worker,
+  while the Odoo-specific post-deploy update step is orchestrated separately.
 
 ## Inventory
 
