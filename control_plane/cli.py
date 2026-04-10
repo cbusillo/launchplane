@@ -14,6 +14,11 @@ from control_plane.workflows.promote import (
     build_promotion_record,
     generate_promotion_record_id,
 )
+from control_plane.workflows.ship import (
+    build_compatibility_deployment_record,
+    generate_deployment_record_id,
+    utc_now_timestamp,
+)
 
 
 def _store(state_dir: Path) -> FilesystemRecordStore:
@@ -259,10 +264,12 @@ def ship_compatibility_plan(input_file: Path) -> None:
 
 
 @ship.command("compatibility-execute")
+@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def ship_compatibility_execute(
+    state_dir: Path,
     input_file: Path,
     odoo_ai_root: Path,
     env_file: Path | None,
@@ -306,4 +313,43 @@ def ship_compatibility_execute(
     if request.allow_dirty:
         ship_command.append("--allow-dirty")
 
-    _run_command(ship_command)
+    record_store = _store(state_dir)
+    record_id = generate_deployment_record_id(
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    started_at = utc_now_timestamp()
+    pending_record = build_compatibility_deployment_record(
+        request=request,
+        record_id=record_id,
+        deployment_id="delegated-odoo-ai-ship",
+        deployment_status="pending",
+        started_at=started_at,
+        finished_at="",
+    )
+    record_path = record_store.write_deployment_record(pending_record)
+
+    try:
+        _run_command(ship_command)
+        final_record = build_compatibility_deployment_record(
+            request=request,
+            record_id=record_id,
+            deployment_id="delegated-odoo-ai-ship",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+        )
+    except subprocess.CalledProcessError:
+        final_record = build_compatibility_deployment_record(
+            request=request,
+            record_id=record_id,
+            deployment_id="delegated-odoo-ai-ship",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+        )
+        record_store.write_deployment_record(final_record)
+        raise
+
+    record_store.write_deployment_record(final_record)
+    click.echo(record_path)

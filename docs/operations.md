@@ -27,6 +27,9 @@ title: Operations
   delegates to the internal `odoo-ai` worker during transition.
 - Artifact manifests handed off from `odoo-ai` should be persisted here before
   later workflows depend on them.
+- Compatibility `ship` execution should persist a deployment record here before
+  and after delegation so deploy history no longer lives only in `odoo-ai`
+  process output.
 
 ## Migration Rules
 

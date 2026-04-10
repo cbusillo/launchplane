@@ -1,4 +1,5 @@
 import json
+import subprocess
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,8 +8,10 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest
 from control_plane.contracts.ship_request import CompatibilityShipRequest
+from control_plane.workflows.ship import build_compatibility_deployment_record
 from control_plane.workflows.promote import build_promotion_record
 from control_plane.workflows.promote import build_compatibility_promotion_record
 
@@ -71,6 +74,40 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.destination_health.status, "pass")
         self.assertTrue(record.post_deploy_update.attempted)
         self.assertEqual(record.post_deploy_update.status, "pass")
+
+    def test_build_compatibility_deployment_record_marks_pending_health_for_async_ship(self) -> None:
+        request = CompatibilityShipRequest(
+            context="opw",
+            instance="prod",
+            source_git_ref="abc123",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            artifact_id="artifact-sha256-image456",
+            wait=False,
+            verify_health=True,
+            destination_health={
+                "verified": False,
+                "urls": ["https://prod.example.com/web/health"],
+                "timeout_seconds": 45,
+                "status": "pending",
+            },
+        )
+
+        record = build_compatibility_deployment_record(
+            request=request,
+            record_id="deployment-1",
+            deployment_id="delegated-ship",
+            deployment_status="pending",
+            started_at="2026-04-10T18:22:31Z",
+            finished_at="",
+        )
+
+        self.assertIsInstance(record, DeploymentRecord)
+        self.assertEqual(record.artifact_identity.artifact_id, "artifact-sha256-image456")
+        self.assertEqual(record.deploy.status, "pending")
+        self.assertEqual(record.destination_health.status, "pending")
+        self.assertFalse(record.destination_health.verified)
 
 
 class PromoteCliTests(unittest.TestCase):
@@ -233,6 +270,7 @@ class PromoteCliTests(unittest.TestCase):
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
                 CompatibilityShipRequest(
@@ -255,6 +293,8 @@ class PromoteCliTests(unittest.TestCase):
                     [
                         "ship",
                         "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
                         "--input-file",
                         str(input_file),
                         "--odoo-ai-root",
@@ -266,6 +306,62 @@ class PromoteCliTests(unittest.TestCase):
             self.assertEqual(len(captured_commands), 1)
             self.assertIn("compatibility-ship-worker", captured_commands[0])
             self.assertIn("--skip-gate", captured_commands[0])
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
+            self.assertIn('"status": "pass"', persisted_payload)
+            self.assertIn('"delegated_executor": "odoo-ai.compatibility-ship-worker"', persisted_payload)
+
+    def test_ship_compatibility_execute_persists_failed_deployment_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    wait=True,
+                    verify_health=True,
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "control_plane.cli._run_command",
+                side_effect=subprocess.CalledProcessError(1, ["uv", "run"]),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
+            self.assertIn('"status": "fail"', persisted_payload)
+            self.assertIn('"finished_at": "', persisted_payload)
 
 
 if __name__ == "__main__":

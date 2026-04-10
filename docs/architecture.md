@@ -14,6 +14,7 @@ title: Architecture
 
 - artifact manifests
 - promotion records
+- deployment records
 - environment inventory
 - promotion execution
 - deploy orchestration
@@ -35,6 +36,9 @@ title: Architecture
 - Direct `ship` ownership now also enters through this repo, while the
   temporary execution worker still lives in `odoo-ai` as an internal
   compatibility command.
+- Phase 5 starts tightening that boundary by persisting first-class deployment
+  records here even when the underlying deploy still delegates to the
+  transitional internal worker.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

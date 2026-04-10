@@ -14,6 +14,8 @@ title: Records
 state/
   artifacts/
     <artifact-id>.json
+  deployments/
+    <record-id>.json
   promotions/
     <record-id>.json
   inventory/
@@ -38,6 +40,14 @@ state/
   immutable artifact pipeline has not been wired into the handoff yet.
 - When a single stored artifact manifest already matches the promoted commit,
   prefer that real artifact id over the synthetic compatibility id.
+
+## Deployment Record
+
+- One file per direct ship attempt owned by `odoo-control-plane`.
+- Record the requested source git ref, target, deploy status, delegated worker,
+  and destination health evidence.
+- Compatibility ship execution may still delegate the underlying runtime work
+  to `odoo-ai`, but the durable deploy record belongs here.
 
 ## Inventory
 

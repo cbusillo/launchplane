@@ -1,0 +1,83 @@
+from datetime import UTC, datetime
+
+from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, HealthcheckEvidence
+from control_plane.contracts.ship_request import CompatibilityShipRequest
+
+
+def generate_deployment_record_id(*, context_name: str, instance_name: str) -> str:
+    timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
+    return f"deployment-{timestamp}-{context_name}-{instance_name}"
+
+
+def utc_now_timestamp() -> str:
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _resolve_destination_health(
+    destination_health: HealthcheckEvidence,
+    *,
+    wait: bool,
+    deployment_status: str,
+) -> HealthcheckEvidence:
+    if destination_health.status == "skipped":
+        return destination_health
+    if not wait:
+        return HealthcheckEvidence(
+            verified=False,
+            urls=destination_health.urls,
+            timeout_seconds=destination_health.timeout_seconds,
+            status="pending",
+        )
+    if deployment_status == "pass":
+        return HealthcheckEvidence(
+            verified=True,
+            urls=destination_health.urls,
+            timeout_seconds=destination_health.timeout_seconds,
+            status="pass",
+        )
+    return HealthcheckEvidence(
+        verified=False,
+        urls=destination_health.urls,
+        timeout_seconds=destination_health.timeout_seconds,
+        status="fail",
+    )
+
+
+def build_compatibility_deployment_record(
+    *,
+    request: CompatibilityShipRequest,
+    record_id: str,
+    deployment_id: str,
+    deployment_status: str,
+    started_at: str,
+    finished_at: str,
+) -> DeploymentRecord:
+    artifact_identity = None
+    if request.artifact_id.strip():
+        artifact_identity = ArtifactIdentityReference(artifact_id=request.artifact_id)
+
+    return DeploymentRecord(
+        record_id=record_id,
+        artifact_identity=artifact_identity,
+        context=request.context,
+        instance=request.instance,
+        source_git_ref=request.source_git_ref,
+        wait_for_completion=request.wait,
+        verify_destination_health=request.verify_health,
+        no_cache=request.no_cache,
+        deploy=DeploymentEvidence(
+            target_name=request.target_name,
+            target_type=request.target_type,
+            deploy_mode=request.deploy_mode,
+            deployment_id=deployment_id,
+            status=deployment_status,
+            started_at=started_at,
+            finished_at=finished_at,
+        ),
+        destination_health=_resolve_destination_health(
+            request.destination_health,
+            wait=request.wait,
+            deployment_status=deployment_status,
+        ),
+    )

@@ -4,6 +4,7 @@ from pathlib import Path
 from pydantic import BaseModel
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 
 
@@ -55,4 +56,12 @@ class FilesystemRecordStore:
     def read_promotion_record(self, record_id: str) -> PromotionRecord:
         return PromotionRecord.model_validate(
             self._read_model(PromotionRecord, "promotions", record_id).model_dump(mode="json")
+        )
+
+    def write_deployment_record(self, record: DeploymentRecord) -> Path:
+        return self._write_model("deployments", record.record_id, record)
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord:
+        return DeploymentRecord.model_validate(
+            self._read_model(DeploymentRecord, "deployments", record_id).model_dump(mode="json")
         )
