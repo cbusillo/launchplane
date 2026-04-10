@@ -1,0 +1,27 @@
+.DS_Store
+__pycache__/
+*.py[cod]
+.coverage
+.coverage.*
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Local env and secrets
+.env
+.env.*
+!.env.example
+
+# Local state and scratch artifacts
+state/
+tmp/*
+!tmp/README.md
+
+# Tooling internals
+.code/
+.claude/
+.idea/

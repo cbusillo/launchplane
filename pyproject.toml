@@ -1,0 +1,33 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "odoo-control-plane"
+version = "0.1.0"
+description = "Private control-plane contracts and workflows for Odoo artifact promotion"
+requires-python = ">=3.13"
+dependencies = [
+    "click>=8.1",
+    "pydantic>=2.8",
+]
+
+[project.optional-dependencies]
+dev = [
+    "mypy>=1.11",
+    "ruff>=0.12",
+]
+
+[project.scripts]
+control-plane = "control_plane.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["control_plane"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
