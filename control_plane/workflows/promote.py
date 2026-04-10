@@ -57,12 +57,14 @@ def _resolve_post_deploy_update(status_target_type: str, *, wait: bool, deployme
         return PostDeployUpdateEvidence(
             attempted=True,
             status="pending",
-            detail="Delegated odoo-ai ship update workflow is pending.",
+            detail="Post-deploy update workflow is pending.",
         )
     return PostDeployUpdateEvidence(
         attempted=True,
         status="pass" if deployment_status == "pass" else deployment_status,
-        detail="Delegated odoo-ai ship update workflow completed." if deployment_status == "pass" else "Delegated ship workflow did not complete successfully.",
+        detail="Post-deploy update workflow completed."
+        if deployment_status == "pass"
+        else "Ship workflow did not complete successfully.",
     )
 
 

@@ -44,23 +44,24 @@ state/
 ## Deployment Record
 
 - One file per direct ship attempt owned by `odoo-control-plane`.
-- Record the requested source git ref, target, deploy status, delegated worker,
+- Record the requested source git ref, target, deploy status, recorded
+  executor,
   and destination health evidence.
 - Persist branch-sync intent there as well so the control plane owns the
-  requested git branch movement even while the transitional worker still
+  requested git branch movement even while transitional runtime steps still
   performs the actual push.
 - Once the control plane applies that git push itself, persist whether the
-  branch-sync step was already applied before the delegated worker starts.
+  branch-sync step was already applied before deploy execution starts.
 - Compatibility ship execution may still delegate the underlying runtime work
   to `odoo-ai`, but the durable deploy record belongs here.
 - The final deployment status now also reflects control-plane-owned health
-  verification rather than relying on the delegated worker to make that final
+  verification rather than relying on delegated runtime steps to make that final
   readiness call.
 - Deployment records now also persist the resolved Dokploy target so the
   control plane owns the exact runtime target identity used for the deploy.
 - The recorded executor now reflects control-plane-owned Dokploy execution,
-  while the Odoo-specific post-deploy update step is orchestrated separately as
-  the only remaining delegated compatibility step.
+  while the Odoo-specific post-deploy update step is orchestrated separately
+  through the canonical `odoo-ai platform update` path.
 
 ## Inventory
 

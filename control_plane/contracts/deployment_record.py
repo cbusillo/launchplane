@@ -11,8 +11,6 @@ from control_plane.contracts.ship_request import BranchSyncEvidence
 
 DelegatedExecutor = Literal[
     "control-plane.dokploy",
-    "odoo-ai.compatibility-dokploy-worker",
-    "odoo-ai.compatibility-ship-worker",
 ]
 
 

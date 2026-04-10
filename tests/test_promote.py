@@ -148,7 +148,7 @@ class PromoteWorkflowTests(unittest.TestCase):
 
 
 class PromoteCliTests(unittest.TestCase):
-    def test_compatibility_execute_persists_record_and_delegates_ship(self) -> None:
+    def test_compatibility_execute_persists_record_and_executes_control_plane_ship(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -183,10 +183,47 @@ class PromoteCliTests(unittest.TestCase):
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
-            captured_commands: list[list[str]] = []
             with patch(
-                "control_plane.cli._run_command",
-                side_effect=lambda command, cwd=None: captured_commands.append(command),
+                "control_plane.cli._export_ship_request_via_odoo_ai",
+                return_value=CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    artifact_id="compatibility-opw-abc123",
+                    wait=True,
+                    verify_health=True,
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ),
+            ), patch(
+                "control_plane.cli._execute_compatibility_ship",
+                return_value=(
+                    state_dir / "deployments" / "deployment-1.json",
+                    DeploymentRecord(
+                        record_id="deployment-1",
+                        artifact_identity={"artifact_id": "compatibility-opw-abc123"},
+                        context="opw",
+                        instance="prod",
+                        source_git_ref="abc123",
+                        delegated_executor="control-plane.dokploy",
+                        deploy={
+                            "target_name": "opw-prod",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                            "deployment_id": "control-plane-dokploy",
+                            "status": "pass",
+                            "started_at": "2026-04-10T18:22:31Z",
+                            "finished_at": "2026-04-10T18:24:00Z",
+                        },
+                    ),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -203,15 +240,12 @@ class PromoteCliTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual(len(captured_commands), 1)
-            self.assertIn("platform", captured_commands[0])
-            self.assertIn("ship", captured_commands[0])
-            self.assertIn("--skip-gate", captured_commands[0])
             promotion_files = sorted((state_dir / "promotions").glob("*.json"))
             self.assertEqual(len(promotion_files), 1)
             persisted_payload = promotion_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"artifact_id": "compatibility-opw-abc123"', persisted_payload)
+            self.assertIn('"deployment_id": "control-plane-dokploy"', persisted_payload)
 
     def test_compatibility_execute_prefers_stored_artifact_manifest_for_commit(self) -> None:
         runner = CliRunner()
@@ -374,7 +408,7 @@ target_id = "compose-123"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertEqual(len(captured_commands), 2)
             self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
-            self.assertIn("compatibility-post-deploy-update", captured_commands[1])
+            self.assertIn("update", captured_commands[1])
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
@@ -455,7 +489,7 @@ target_id = "compose-123"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertEqual(len(captured_commands), 1)
-            self.assertIn("compatibility-post-deploy-update", captured_commands[0])
+            self.assertIn("update", captured_commands[0])
             self.assertEqual(captured_health_urls, ["https://prod.example.com/web/health"])
 
     def test_ship_compatibility_execute_marks_record_failed_when_health_verification_fails(self) -> None:

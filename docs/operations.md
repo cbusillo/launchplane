@@ -20,11 +20,10 @@ title: Operations
 - Operator-local state belongs under `state/` or another explicit state
   directory outside git.
 - Promotion execution history should remain append-only.
-- The first live promote path may delegate the underlying `platform ship`
-  worker back to `odoo-ai`, but that delegation is an internal compatibility
-  detail. The promote boundary itself belongs here.
-- The direct compatibility `ship` path also enters here first and then
-  delegates to the internal `odoo-ai` worker during transition.
+- The first live promote path now uses `odoo-ai` only for read-only ship
+  request export and then executes ship directly from the control-plane-owned
+  path.
+- The direct compatibility `ship` path also enters here first.
 - Artifact manifests handed off from `odoo-ai` should be persisted here before
   later workflows depend on them.
 - Compatibility `ship` execution should persist a deployment record here before
@@ -34,16 +33,15 @@ title: Operations
   control plane can record the intended branch move even before Dokploy work
   starts.
 - Compatibility `ship` execution now also applies the branch-sync git push from
-  the control-plane-owned boundary before delegating to the transitional
-  worker.
+  the control-plane-owned boundary before deploy execution starts.
 - Compatibility `ship` destination health verification now also runs from the
-  control-plane-owned boundary after the delegated worker returns.
+  control-plane-owned boundary after deploy/update execution returns.
 - Compatibility `ship` now resolves the concrete Dokploy target before
   deployment so the control plane owns the exact runtime target identity used
   for the deploy.
 - Compatibility `ship` now also owns Dokploy credential loading and Dokploy
-  trigger/wait execution directly. Only the Odoo-specific post-deploy update
-  remains delegated back to `odoo-ai` when it applies.
+  trigger/wait execution directly. The Odoo-specific post-deploy update now
+  runs through the canonical `odoo-ai platform update` path when it applies.
 - Control-plane-owned Dokploy credentials now come from the control-plane
   repo's untracked `.env` by default, or explicit process env overrides,
   instead of piggybacking on `odoo-ai`'s `.env`.

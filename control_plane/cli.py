@@ -10,6 +10,7 @@ import click
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, PromotionRecord
 from control_plane.contracts.ship_request import CompatibilityShipRequest
@@ -38,6 +39,13 @@ def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
     command_env = dict(os.environ)
     command_env.pop("VIRTUAL_ENV", None)
     subprocess.run(command, check=True, env=command_env, cwd=cwd)
+
+
+def _run_command_capture(command: list[str], *, cwd: Path | None = None) -> str:
+    command_env = dict(os.environ)
+    command_env.pop("VIRTUAL_ENV", None)
+    result = subprocess.run(command, check=True, env=command_env, cwd=cwd, capture_output=True, text=True)
+    return result.stdout
 
 
 def _apply_branch_sync(*, odoo_ai_root: Path, request: CompatibilityShipRequest) -> CompatibilityShipRequest:
@@ -172,7 +180,7 @@ def _run_post_deploy_update_via_odoo_ai(
         "--project",
         str(odoo_ai_root),
         "platform",
-        "compatibility-post-deploy-update",
+        "update",
         "--context",
         request.context,
         "--instance",
@@ -181,6 +189,137 @@ def _run_post_deploy_update_via_odoo_ai(
     if env_file is not None:
         command.extend(["--env-file", str(env_file)])
     _run_command(command)
+
+
+def _export_ship_request_via_odoo_ai(
+    *,
+    odoo_ai_root: Path,
+    env_file: Path | None,
+    request: CompatibilityPromotionRequest,
+) -> CompatibilityShipRequest:
+    command = [
+        "uv",
+        "run",
+        "--project",
+        str(odoo_ai_root),
+        "platform",
+        "export-ship-request",
+        "--context",
+        request.context,
+        "--instance",
+        request.to_instance,
+        "--source-ref",
+        request.source_git_ref,
+    ]
+    if env_file is not None:
+        command.extend(["--env-file", str(env_file)])
+    if request.wait:
+        command.append("--wait")
+    else:
+        command.append("--no-wait")
+    if request.timeout_seconds is not None:
+        command.extend(["--timeout", str(request.timeout_seconds)])
+    if request.verify_health:
+        command.append("--verify-health")
+    else:
+        command.append("--no-verify-health")
+    if request.health_timeout_seconds is not None:
+        command.extend(["--health-timeout", str(request.health_timeout_seconds)])
+    if request.no_cache:
+        command.append("--no-cache")
+    if request.allow_dirty:
+        command.append("--allow-dirty")
+    payload = json.loads(_run_command_capture(command, cwd=odoo_ai_root))
+    ship_request = CompatibilityShipRequest.model_validate(payload)
+    return ship_request.model_copy(update={"artifact_id": request.artifact_id})
+
+
+def _execute_compatibility_ship(
+    *,
+    state_dir: Path,
+    odoo_ai_root: Path,
+    env_file: Path | None,
+    request: CompatibilityShipRequest,
+) -> tuple[Path | None, DeploymentRecord | CompatibilityShipRequest]:
+    if request.dry_run:
+        click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
+        return None, request
+
+    record_store = _store(state_dir)
+    record_id = generate_deployment_record_id(
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    started_at = utc_now_timestamp()
+    pending_record = build_compatibility_deployment_record(
+        request=request,
+        record_id=record_id,
+        deployment_id="control-plane-dokploy",
+        deployment_status="pending",
+        started_at=started_at,
+        finished_at="",
+    )
+    record_path = record_store.write_deployment_record(pending_record)
+
+    try:
+        delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=request)
+        resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
+            odoo_ai_root=odoo_ai_root,
+            request=delegated_request,
+        )
+    except (subprocess.CalledProcessError, click.ClickException):
+        final_record = build_compatibility_deployment_record(
+            request=request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+        )
+        record_store.write_deployment_record(final_record)
+        raise
+
+    try:
+        _execute_dokploy_deploy(
+            odoo_ai_root=odoo_ai_root,
+            env_file=env_file,
+            request=delegated_request,
+            resolved_target=resolved_target,
+            deploy_timeout_seconds=deploy_timeout_seconds,
+        )
+        if delegated_request.wait and resolved_target.target_type == "compose":
+            _run_post_deploy_update_via_odoo_ai(
+                odoo_ai_root=odoo_ai_root,
+                env_file=env_file,
+                request=delegated_request,
+            )
+        _verify_ship_healthchecks(request=delegated_request)
+        final_record = build_compatibility_deployment_record(
+            request=delegated_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            delegated_executor="control-plane.dokploy",
+        )
+    except (subprocess.CalledProcessError, click.ClickException):
+        final_record = build_compatibility_deployment_record(
+            request=delegated_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            delegated_executor="control-plane.dokploy",
+        )
+        record_store.write_deployment_record(final_record)
+        raise
+
+    record_store.write_deployment_record(final_record)
+    return record_path, final_record
 
 
 def _resolve_artifact_id_for_request(
@@ -343,53 +482,31 @@ def promote_compatibility_execute(
     )
     record_path = record_store.write_promotion_record(pending_record)
 
-    ship_command = [
-        "uv",
-        "run",
-        "--project",
-        str(odoo_ai_root),
-        "platform",
-        "ship",
-        "--context",
-        resolved_request.context,
-        "--instance",
-        resolved_request.to_instance,
-        "--source-ref",
-        resolved_request.source_git_ref,
-        "--skip-gate",
-    ]
-    if env_file is not None:
-        ship_command.extend(["--env-file", str(env_file)])
-    if resolved_request.wait:
-        ship_command.append("--wait")
-    else:
-        ship_command.append("--no-wait")
-    if resolved_request.timeout_seconds is not None:
-        ship_command.extend(["--timeout", str(resolved_request.timeout_seconds)])
-    if resolved_request.verify_health:
-        ship_command.append("--verify-health")
-    else:
-        ship_command.append("--no-verify-health")
-    if resolved_request.health_timeout_seconds is not None:
-        ship_command.extend(["--health-timeout", str(resolved_request.health_timeout_seconds)])
-    if resolved_request.no_cache:
-        ship_command.append("--no-cache")
-    if resolved_request.allow_dirty:
-        ship_command.append("--allow-dirty")
-
     try:
-        _run_command(ship_command)
-        final_record = build_compatibility_promotion_record(
+        ship_request = _export_ship_request_via_odoo_ai(
+            odoo_ai_root=odoo_ai_root,
+            env_file=env_file,
             request=resolved_request,
-            record_id=record_id,
-            deployment_id="delegated-odoo-ai-ship",
-            deployment_status="pass",
         )
-    except subprocess.CalledProcessError:
+        _record_path, deployment_record = _execute_compatibility_ship(
+            state_dir=state_dir,
+            odoo_ai_root=odoo_ai_root,
+            env_file=env_file,
+            request=ship_request,
+        )
+        if not isinstance(deployment_record, DeploymentRecord):
+            raise click.ClickException("Compatibility ship execution returned an unexpected dry-run payload during promotion.")
         final_record = build_compatibility_promotion_record(
             request=resolved_request,
             record_id=record_id,
-            deployment_id="delegated-odoo-ai-ship",
+            deployment_id=deployment_record.deploy.deployment_id,
+            deployment_status=deployment_record.deploy.status,
+        )
+    except (subprocess.CalledProcessError, click.ClickException, json.JSONDecodeError):
+        final_record = build_compatibility_promotion_record(
+            request=resolved_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
             deployment_status="fail",
         )
         record_store.write_promotion_record(final_record)
@@ -423,82 +540,11 @@ def ship_compatibility_execute(
     env_file: Path | None,
 ) -> None:
     request = CompatibilityShipRequest.model_validate(_load_json_file(input_file))
-    if request.dry_run:
-        click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
-        return
-
-    record_store = _store(state_dir)
-    record_id = generate_deployment_record_id(
-        context_name=request.context,
-        instance_name=request.instance,
-    )
-    started_at = utc_now_timestamp()
-    pending_record = build_compatibility_deployment_record(
+    record_path, _record = _execute_compatibility_ship(
+        state_dir=state_dir,
+        odoo_ai_root=odoo_ai_root,
+        env_file=env_file,
         request=request,
-        record_id=record_id,
-        deployment_id="control-plane-dokploy",
-        deployment_status="pending",
-        started_at=started_at,
-        finished_at="",
     )
-    record_path = record_store.write_deployment_record(pending_record)
-
-    try:
-        delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=request)
-        resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
-            odoo_ai_root=odoo_ai_root,
-            request=delegated_request,
-        )
-    except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_compatibility_deployment_record(
-            request=request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-        )
-        record_store.write_deployment_record(final_record)
-        raise
-
-    try:
-        _execute_dokploy_deploy(
-            odoo_ai_root=odoo_ai_root,
-            env_file=env_file,
-            request=delegated_request,
-            resolved_target=resolved_target,
-            deploy_timeout_seconds=deploy_timeout_seconds,
-        )
-        if delegated_request.wait and resolved_target.target_type == "compose":
-            _run_post_deploy_update_via_odoo_ai(
-                odoo_ai_root=odoo_ai_root,
-                env_file=env_file,
-                request=delegated_request,
-            )
-        _verify_ship_healthchecks(request=delegated_request)
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-        )
-    except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_compatibility_deployment_record(
-            request=delegated_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-        )
-        record_store.write_deployment_record(final_record)
-        raise
-
-    record_store.write_deployment_record(final_record)
-    click.echo(record_path)
+    if record_path is not None:
+        click.echo(record_path)
