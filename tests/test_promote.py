@@ -8,7 +8,8 @@ from unittest.mock import patch
 import click
 from click.testing import CliRunner
 
-from control_plane.cli import _resolve_dokploy_target, main
+from control_plane.cli import _resolve_dokploy_target, _sync_artifact_image_reference_for_target, main
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest
 from control_plane.contracts.ship_request import CompatibilityShipRequest
@@ -177,6 +178,74 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.branch_sync.target_branch, "prod")
         self.assertTrue(record.branch_sync.branch_update_required)
         self.assertEqual(record.resolved_target.target_id, "compose-123")
+
+
+class ArtifactImageOverrideTests(unittest.TestCase):
+    def test_sync_artifact_image_reference_sets_exact_image_reference(self) -> None:
+        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod")
+        artifact_manifest = ArtifactIdentityManifest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "odoo_ai_commit": "abc123",
+                "enterprise_base_digest": "sha256:enterprise123",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-private",
+                    "digest": "sha256:image456",
+                    "tags": ["sha-abc123"],
+                },
+            }
+        )
+        captured_update: dict[str, object] = {}
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={"env": "DOCKER_IMAGE=odoo-ai\nDOCKER_IMAGE_TAG=latest"},
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+            side_effect=lambda **kwargs: captured_update.update(kwargs),
+        ):
+            _sync_artifact_image_reference_for_target(
+                artifact_manifest=artifact_manifest,
+                resolved_target=resolved_target,
+            )
+
+        self.assertEqual(captured_update["target_type"], "compose")
+        self.assertEqual(captured_update["target_id"], "compose-123")
+        self.assertIn(
+            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456",
+            str(captured_update["env_text"]),
+        )
+
+    def test_sync_artifact_image_reference_clears_stale_override_without_manifest(self) -> None:
+        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod")
+        captured_update: dict[str, object] = {}
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={
+                "env": (
+                    "DOCKER_IMAGE=odoo-ai\n"
+                    "DOCKER_IMAGE_TAG=latest\n"
+                    "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:stale"
+                )
+            },
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+            side_effect=lambda **kwargs: captured_update.update(kwargs),
+        ):
+            _sync_artifact_image_reference_for_target(
+                artifact_manifest=None,
+                resolved_target=resolved_target,
+            )
+
+        self.assertNotIn("DOCKER_IMAGE_REFERENCE", str(captured_update["env_text"]))
+        self.assertIn("DOCKER_IMAGE=odoo-ai", str(captured_update["env_text"]))
 
 
 class PromoteCliTests(unittest.TestCase):
@@ -431,6 +500,9 @@ class PromoteCliTests(unittest.TestCase):
                     ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
                     600,
                 ),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
             ), patch(
                 "control_plane.cli._execute_dokploy_deploy",
                 side_effect=lambda **_kwargs: None,
@@ -713,6 +785,9 @@ target_id = "compose-123"
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
             ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
                 "control_plane.cli._execute_dokploy_deploy",
                 side_effect=lambda **_kwargs: None,
             ):
@@ -798,7 +873,12 @@ target_id = "compose-123"
                 encoding="utf-8",
             )
 
+            captured_sync_calls: list[dict[str, object]] = []
+
             with patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **kwargs: captured_sync_calls.append(kwargs),
+            ), patch(
                 "control_plane.cli._execute_dokploy_deploy",
                 side_effect=lambda **_kwargs: None,
             ), patch(
@@ -820,6 +900,11 @@ target_id = "compose-123"
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(len(captured_sync_calls), 1)
+            self.assertEqual(
+                captured_sync_calls[0]["artifact_manifest"].artifact_id,
+                "artifact-sha256-image456",
+            )
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
@@ -872,6 +957,9 @@ target_id = "compose-123"
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
             ), patch(
                 "control_plane.cli._execute_dokploy_deploy",
                 side_effect=lambda **_kwargs: None,
@@ -933,6 +1021,9 @@ target_id = "compose-123"
                     ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
                     600,
                 ),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
             ), patch(
                 "control_plane.cli._execute_dokploy_deploy",
                 side_effect=lambda **_kwargs: None,
@@ -996,6 +1087,9 @@ target_id = "compose-123"
                     ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
                     600,
                 ),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
             ), patch(
                 "control_plane.cli._execute_dokploy_deploy",
                 side_effect=subprocess.CalledProcessError(1, ["uv", "run"]),

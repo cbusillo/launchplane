@@ -27,6 +27,8 @@ from control_plane.workflows.ship import (
     utc_now_timestamp,
 )
 
+ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+
 
 def _store(state_dir: Path) -> FilesystemRecordStore:
     return FilesystemRecordStore(state_dir=state_dir)
@@ -252,6 +254,10 @@ def _execute_compatibility_ship(
         requested_artifact_id=request.artifact_id,
         source_git_ref=request.source_git_ref,
     )
+    artifact_manifest = _read_artifact_manifest_if_present(
+        record_store=record_store,
+        artifact_id=resolved_artifact_id,
+    )
     resolved_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
 
     if resolved_request.dry_run:
@@ -292,6 +298,10 @@ def _execute_compatibility_ship(
         raise
 
     try:
+        _sync_artifact_image_reference_for_target(
+            artifact_manifest=artifact_manifest,
+            resolved_target=resolved_target,
+        )
         _execute_dokploy_deploy(
             odoo_ai_root=odoo_ai_root,
             env_file=env_file,
@@ -399,6 +409,61 @@ def _resolve_artifact_id_for_request(
     if len(matching_manifests) == 1:
         return matching_manifests[0].artifact_id
     return requested_artifact_id
+
+
+def _read_artifact_manifest_if_present(
+    *,
+    record_store: FilesystemRecordStore,
+    artifact_id: str,
+) -> ArtifactIdentityManifest | None:
+    normalized_artifact_id = artifact_id.strip()
+    if not normalized_artifact_id:
+        return None
+    try:
+        return record_store.read_artifact_manifest(normalized_artifact_id)
+    except FileNotFoundError:
+        return None
+
+
+def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) -> str:
+    return f"{manifest.image.repository}@{manifest.image.digest}"
+
+
+def _sync_artifact_image_reference_for_target(
+    *,
+    artifact_manifest: ArtifactIdentityManifest | None,
+    resolved_target: ResolvedTargetEvidence,
+) -> None:
+    control_plane_root = Path(__file__).resolve().parent.parent
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=resolved_target.target_type,
+        target_id=resolved_target.target_id,
+    )
+    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    desired_image_reference = ""
+    if artifact_manifest is not None:
+        desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
+
+    current_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
+    if current_image_reference == desired_image_reference:
+        return
+
+    if desired_image_reference:
+        env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
+    else:
+        env_map.pop(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, None)
+
+    control_plane_dokploy.update_dokploy_target_env(
+        host=host,
+        token=token,
+        target_type=resolved_target.target_type,
+        target_id=resolved_target.target_id,
+        target_payload=target_payload,
+        env_text=control_plane_dokploy.serialize_dokploy_env_text(env_map),
+    )
 
 
 def _write_environment_inventory(

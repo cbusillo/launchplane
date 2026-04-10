@@ -61,6 +61,12 @@ state/
 - The recorded executor now reflects control-plane-owned Dokploy execution,
   while the Odoo-specific post-deploy update step is orchestrated separately
   through the canonical `odoo-ai platform update` path.
+- Deploy execution should also drive the Dokploy image selection from stored
+  artifact manifests when possible by syncing an exact
+  `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` override before the deploy starts.
+- When no stored artifact manifest is available for a direct ship, deploy
+  execution should clear any stale `DOCKER_IMAGE_REFERENCE` override so the
+  target falls back to the ordinary repo/tag image contract.
 - Deployment records should make that remaining seam explicit by recording
   whether the Odoo-specific post-deploy update was skipped, pending, passed, or
   failed.

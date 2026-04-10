@@ -46,6 +46,10 @@ title: Architecture
 - Current environment inventory is now also persisted here and refreshed by
   successful waited `ship`/`promote` flows, so this repo owns both append-only
   deploy history and the replace-in-place current-state view.
+- Compatibility `ship` execution now also prefers immutable artifact image
+  references at runtime by syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to
+  Dokploy whenever a stored artifact manifest is available, while clearing
+  stale overrides when it is not.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

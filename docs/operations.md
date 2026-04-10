@@ -56,6 +56,13 @@ title: Operations
   commit matches exactly one persisted artifact manifest, so current-state and
   deploy-history records do not fall back to blank artifact identity when the
   control plane already knows the immutable build output.
+- When a stored artifact manifest is available, compatibility `ship` now also
+  syncs `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` onto the Dokploy target
+  before deploy execution so runtime execution can prefer the immutable image
+  instead of relying only on branch-sync state.
+- When no stored artifact manifest is available, compatibility `ship` clears
+  any stale `DOCKER_IMAGE_REFERENCE` override so the target falls back to the
+  normal `DOCKER_IMAGE` + `DOCKER_IMAGE_TAG` contract.
 - Control-plane-owned Dokploy credentials now come from the control-plane
   repo's untracked `.env` by default, or explicit process env overrides,
   instead of piggybacking on `odoo-ai`'s `.env`.

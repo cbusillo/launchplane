@@ -160,6 +160,102 @@ def latest_deployment_for_target(*, host: str, token: str, target_type: str, tar
     raise click.ClickException(f"Unsupported Dokploy target type: {target_type}")
 
 
+def fetch_dokploy_target_payload(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+) -> JsonObject:
+    if target_type == "compose":
+        payload = dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.one",
+            query={"composeId": target_id},
+        )
+    elif target_type == "application":
+        payload = dokploy_request(
+            host=host,
+            token=token,
+            path="/api/application.one",
+            query={"applicationId": target_id},
+        )
+    else:
+        raise click.ClickException(f"Unsupported target type: {target_type}")
+
+    payload_as_object = as_json_object(payload)
+    if payload_as_object is None:
+        raise click.ClickException(f"Dokploy {target_type}.one returned an invalid response payload.")
+    return payload_as_object
+
+
+def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
+    env_map: dict[str, str] = {}
+    for raw_line in raw_env_text.splitlines():
+        stripped_line = raw_line.strip()
+        if not stripped_line or stripped_line.startswith("#"):
+            continue
+        if stripped_line.startswith("export "):
+            stripped_line = stripped_line[7:].strip()
+        if "=" not in stripped_line:
+            continue
+        key_part, value_part = stripped_line.split("=", 1)
+        env_map[key_part.strip()] = value_part
+    return env_map
+
+
+def serialize_dokploy_env_text(env_map: dict[str, str]) -> str:
+    if not env_map:
+        return ""
+    rendered_lines = [f"{env_key}={env_value}" for env_key, env_value in env_map.items()]
+    return "\n".join(rendered_lines)
+
+
+def update_dokploy_target_env(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    target_payload: JsonObject,
+    env_text: str,
+) -> None:
+    if target_type == "compose":
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/compose.update",
+            method="POST",
+            payload={"composeId": target_id, "env": env_text},
+        )
+        return
+
+    if target_type == "application":
+        build_args = target_payload.get("buildArgs")
+        build_secrets = target_payload.get("buildSecrets")
+        create_env_file = target_payload.get("createEnvFile")
+        payload: JsonObject = {
+            "applicationId": target_id,
+            "env": env_text,
+            "createEnvFile": bool(create_env_file) if isinstance(create_env_file, bool) else True,
+        }
+        if isinstance(build_args, str):
+            payload["buildArgs"] = build_args
+        if isinstance(build_secrets, str):
+            payload["buildSecrets"] = build_secrets
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/application.saveEnvironment",
+            method="POST",
+            payload=payload,
+        )
+        return
+
+    raise click.ClickException(f"Unsupported target type: {target_type}")
+
+
 def wait_for_target_deployment(
     *,
     host: str,
