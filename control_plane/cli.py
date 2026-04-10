@@ -15,6 +15,7 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, HealthcheckEvidence, PostDeployUpdateEvidence, PromotionRecord
 from control_plane.contracts.ship_request import CompatibilityShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
     build_compatibility_promotion_record,
     build_promotion_record,
@@ -376,6 +377,8 @@ def _execute_compatibility_ship(
         raise
 
     record_store.write_deployment_record(final_record)
+    if final_record.wait_for_completion and final_record.deploy.status == "pass":
+        _write_environment_inventory(record_store=record_store, deployment_record=final_record)
     return record_path, final_record
 
 
@@ -389,6 +392,22 @@ def _resolve_artifact_id_for_request(
     if len(matching_manifests) == 1:
         return matching_manifests[0].artifact_id
     return requested_artifact_id
+
+
+def _write_environment_inventory(
+    *,
+    record_store: FilesystemRecordStore,
+    deployment_record: DeploymentRecord,
+    promotion_record_id: str = "",
+    promoted_from_instance: str = "",
+) -> Path:
+    inventory_record = build_environment_inventory(
+        deployment_record=deployment_record,
+        updated_at=utc_now_timestamp(),
+        promotion_record_id=promotion_record_id,
+        promoted_from_instance=promoted_from_instance,
+    )
+    return record_store.write_environment_inventory(inventory_record)
 
 
 @click.group()
@@ -447,6 +466,27 @@ def promotions_write(state_dir: Path, input_file: Path) -> None:
 def promotions_show(state_dir: Path, record_id: str) -> None:
     record = _store(state_dir).read_promotion_record(record_id)
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@main.group()
+def inventory() -> None:
+    """Environment inventory commands."""
+
+
+@inventory.command("show")
+@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+def inventory_show(state_dir: Path, context_name: str, instance_name: str) -> None:
+    record = _store(state_dir).read_environment_inventory(context_name=context_name, instance_name=instance_name)
+    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@inventory.command("list")
+@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+def inventory_list(state_dir: Path) -> None:
+    records = _store(state_dir).list_environment_inventory()
+    click.echo(json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True))
 
 
 @main.group()
@@ -570,6 +610,13 @@ def promote_compatibility_execute(
         raise
 
     record_store.write_promotion_record(final_record)
+    if deployment_record.wait_for_completion and deployment_record.deploy.status == "pass":
+        _write_environment_inventory(
+            record_store=record_store,
+            deployment_record=deployment_record,
+            promotion_record_id=final_record.record_id,
+            promoted_from_instance=final_record.from_instance,
+        )
     click.echo(record_path)
 
 

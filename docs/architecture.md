@@ -43,6 +43,9 @@ title: Architecture
 - Deployment records now persist post-deploy update evidence as well, so the
   remaining seam is visible in control-plane state instead of being implicit in
   process output.
+- Current environment inventory is now also persisted here and refreshed by
+  successful waited `ship`/`promote` flows, so this repo owns both append-only
+  deploy history and the replace-in-place current-state view.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

@@ -5,6 +5,7 @@ from pydantic import BaseModel
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import PromotionRecord
 
 
@@ -65,3 +66,23 @@ class FilesystemRecordStore:
         return DeploymentRecord.model_validate(
             self._read_model(DeploymentRecord, "deployments", record_id).model_dump(mode="json")
         )
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> Path:
+        return self._write_model("inventory", f"{record.context}-{record.instance}", record)
+
+    def read_environment_inventory(self, *, context_name: str, instance_name: str) -> EnvironmentInventory:
+        record_id = f"{context_name}-{instance_name}"
+        return EnvironmentInventory.model_validate(
+            self._read_model(EnvironmentInventory, "inventory", record_id).model_dump(mode="json")
+        )
+
+    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
+        record_dir = self._record_dir("inventory")
+        if not record_dir.exists():
+            return ()
+
+        inventories: list[EnvironmentInventory] = []
+        for inventory_path in sorted(record_dir.glob("*.json")):
+            payload = json.loads(inventory_path.read_text(encoding="utf-8"))
+            inventories.append(EnvironmentInventory.model_validate(payload))
+        return tuple(inventories)

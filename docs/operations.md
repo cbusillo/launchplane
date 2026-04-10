@@ -7,6 +7,8 @@ title: Operations
 - `uv run control-plane artifacts write --input-file <path>`
 - `uv run control-plane artifacts ingest-odoo-ai --input-file <path>`
 - `uv run control-plane artifacts show --artifact-id <artifact-id>`
+- `uv run control-plane inventory show --context <ctx> --instance <instance>`
+- `uv run control-plane inventory list`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
 - `uv run control-plane promote record --artifact-id <artifact-id> --context <ctx> --from-instance testing --to-instance prod`
@@ -47,6 +49,9 @@ title: Operations
 - Deployment records now persist post-deploy update evidence so operator state
   shows whether that remaining Odoo-owned step was skipped, pending, passed, or
   failed.
+- Successful waited `ship` and `promote` executions now also refresh current
+  environment inventory under `state/inventory/`, so the control plane can
+  answer what artifact/source ref is currently running for each environment.
 - Control-plane-owned Dokploy credentials now come from the control-plane
   repo's untracked `.env` by default, or explicit process env overrides,
   instead of piggybacking on `odoo-ai`'s `.env`.

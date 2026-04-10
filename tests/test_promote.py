@@ -279,6 +279,69 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn('"artifact_id": "compatibility-opw-abc123"', persisted_payload)
             self.assertIn('"deployment_id": "control-plane-dokploy"', persisted_payload)
 
+    def test_inventory_show_reads_current_environment_state(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            inventory_dir = state_dir / "inventory"
+            inventory_dir.mkdir(parents=True, exist_ok=True)
+            (inventory_dir / "opw-prod.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "context": "opw",
+                        "instance": "prod",
+                        "artifact_identity": {"artifact_id": "artifact-sha256-image456", "manifest_version": 1},
+                        "source_git_ref": "abc123",
+                        "deploy": {
+                            "target_name": "opw-prod",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                            "deployment_id": "control-plane-dokploy",
+                            "status": "pass",
+                            "started_at": "2026-04-10T18:22:31Z",
+                            "finished_at": "2026-04-10T18:24:00Z",
+                        },
+                        "post_deploy_update": {
+                            "attempted": True,
+                            "status": "pass",
+                            "detail": "Odoo-specific post-deploy update completed through the canonical odoo-ai platform update workflow.",
+                        },
+                        "destination_health": {
+                            "verified": True,
+                            "urls": ["https://prod.example.com/web/health"],
+                            "timeout_seconds": 45,
+                            "status": "pass",
+                        },
+                        "updated_at": "2026-04-10T18:24:01Z",
+                        "deployment_record_id": "deployment-1",
+                        "promotion_record_id": "promotion-1",
+                        "promoted_from_instance": "testing",
+                    },
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "inventory",
+                    "show",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
+            self.assertIn('"promoted_from_instance": "testing"', result.output)
+
     def test_compatibility_execute_prefers_stored_artifact_manifest_for_commit(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -334,6 +397,182 @@ class PromoteCliTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
+
+    def test_ship_compatibility_execute_persists_environment_inventory_after_success(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    artifact_id="artifact-sha256-image456",
+                    wait=True,
+                    verify_health=True,
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "control_plane.cli._resolve_dokploy_target",
+                return_value=(
+                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
+                    600,
+                ),
+            ), patch(
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._run_post_deploy_update_via_odoo_ai",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                side_effect=lambda **_kwargs: None,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            inventory_file = state_dir / "inventory" / "opw-prod.json"
+            self.assertTrue(inventory_file.exists())
+            persisted_payload = inventory_file.read_text(encoding="utf-8")
+            self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
+            self.assertIn('"deployment_record_id": "deployment-', persisted_payload)
+            self.assertIn('canonical odoo-ai platform update workflow', persisted_payload)
+
+    def test_promote_compatibility_execute_persists_inventory_with_promotion_linkage(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "promotion-request.json"
+            input_file.write_text(
+                CompatibilityPromotionRequest(
+                    artifact_id="compatibility-opw-abc123",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    wait=True,
+                    verify_health=True,
+                    health_timeout_seconds=45,
+                    source_health={
+                        "verified": True,
+                        "urls": ["https://testing.example.com/web/health"],
+                        "timeout_seconds": 30,
+                        "status": "pass",
+                    },
+                    backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "control_plane.cli._export_ship_request_via_odoo_ai",
+                return_value=CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    artifact_id="artifact-sha256-image456",
+                    wait=True,
+                    verify_health=True,
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ),
+            ), patch(
+                "control_plane.cli._execute_compatibility_ship",
+                return_value=(
+                    state_dir / "deployments" / "deployment-1.json",
+                    DeploymentRecord(
+                        record_id="deployment-1",
+                        artifact_identity={"artifact_id": "artifact-sha256-image456"},
+                        context="opw",
+                        instance="prod",
+                        source_git_ref="abc123",
+                        delegated_executor="control-plane.dokploy",
+                        deploy={
+                            "target_name": "opw-prod",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                            "deployment_id": "control-plane-dokploy",
+                            "status": "pass",
+                            "started_at": "2026-04-10T18:22:31Z",
+                            "finished_at": "2026-04-10T18:24:00Z",
+                        },
+                        post_deploy_update={
+                            "attempted": True,
+                            "status": "pass",
+                            "detail": "Odoo-specific post-deploy update completed through the canonical odoo-ai platform update workflow.",
+                        },
+                        destination_health={
+                            "verified": True,
+                            "urls": ["https://prod.example.com/web/health"],
+                            "timeout_seconds": 45,
+                            "status": "pass",
+                        },
+                    ),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "promote",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            inventory_file = state_dir / "inventory" / "opw-prod.json"
+            self.assertTrue(inventory_file.exists())
+            persisted_payload = inventory_file.read_text(encoding="utf-8")
+            self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
+            self.assertIn('"promotion_record_id": "promotion-', persisted_payload)
+            self.assertIn('"promoted_from_instance": "testing"', persisted_payload)
 
     def test_ship_compatibility_plan_validates_request(self) -> None:
         runner = CliRunner()

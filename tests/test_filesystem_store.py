@@ -7,6 +7,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactImageReference
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import DeploymentEvidence, PromotionRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 
@@ -178,3 +179,48 @@ class FilesystemRecordStoreTests(unittest.TestCase):
 
             self.assertEqual(len(matching_manifests), 1)
             self.assertEqual(matching_manifests[0].artifact_id, "artifact-sha256-image456")
+
+    def test_write_and_read_environment_inventory(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = EnvironmentInventory(
+                context="opw",
+                instance="prod",
+                artifact_identity={"artifact_id": "artifact-20260410-f45db648"},
+                source_git_ref="abc123",
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    deployment_id="control-plane-dokploy",
+                    status="pass",
+                    started_at="2026-04-10T18:22:31Z",
+                    finished_at="2026-04-10T18:24:00Z",
+                ),
+                post_deploy_update={
+                    "attempted": True,
+                    "status": "pass",
+                    "detail": "Odoo-specific post-deploy update completed through the canonical odoo-ai platform update workflow.",
+                },
+                destination_health={
+                    "verified": True,
+                    "urls": ["https://prod.example.com/web/health"],
+                    "timeout_seconds": 45,
+                    "status": "pass",
+                },
+                updated_at="2026-04-10T18:24:01Z",
+                deployment_record_id="deployment-20260410T182231Z-opw-prod",
+                promotion_record_id="promotion-20260410T182231Z-opw-testing-to-prod",
+                promoted_from_instance="testing",
+            )
+
+            written_path = store.write_environment_inventory(record)
+            loaded_record = store.read_environment_inventory(context_name="opw", instance_name="prod")
+            listed_records = store.list_environment_inventory()
+
+            self.assertTrue(written_path.exists())
+            self.assertEqual(loaded_record.context, "opw")
+            self.assertEqual(loaded_record.instance, "prod")
+            self.assertEqual(loaded_record.promotion_record_id, "promotion-20260410T182231Z-opw-testing-to-prod")
+            self.assertEqual(len(listed_records), 1)

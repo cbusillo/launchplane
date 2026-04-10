@@ -70,3 +70,12 @@ state/
 - Inventory records are keyed by environment.
 - Inventory may be replaced in place because it represents current state rather
   than append-only event history.
+- Inventory records now capture the current deployed source git ref, artifact
+  identity when known, deploy evidence, post-deploy update evidence,
+  destination health, and the deployment/promotion records that established the
+  current state.
+- Successful waited `ship` executions refresh inventory directly from the final
+  deployment record.
+- Successful waited `promote` executions refresh the same inventory record and
+  add promotion linkage so the current state can still be tied back to the
+  controlling promotion record.
