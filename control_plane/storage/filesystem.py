@@ -41,19 +41,6 @@ class FilesystemRecordStore:
             self._read_model(ArtifactIdentityManifest, "artifacts", artifact_id).model_dump(mode="json")
         )
 
-    def find_artifact_manifests_by_commit(self, odoo_ai_commit: str) -> tuple[ArtifactIdentityManifest, ...]:
-        record_dir = self._record_dir("artifacts")
-        if not record_dir.exists():
-            return ()
-
-        matching_manifests: list[ArtifactIdentityManifest] = []
-        for manifest_path in sorted(record_dir.glob("*.json")):
-            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-            manifest = ArtifactIdentityManifest.model_validate(payload)
-            if manifest.odoo_ai_commit == odoo_ai_commit:
-                matching_manifests.append(manifest)
-        return tuple(matching_manifests)
-
     def write_promotion_record(self, record: PromotionRecord) -> Path:
         return self._write_model("promotions", record.record_id, record)
 

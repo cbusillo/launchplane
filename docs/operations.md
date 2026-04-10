@@ -50,9 +50,8 @@ title: Operations
 - Successful waited `ship` and `promote` executions now also refresh current
   environment inventory under `state/inventory/`, so the control plane can
   answer what artifact/source ref is currently running for each environment.
-- Direct `ship` now prefers a stored real artifact id when the requested
-  commit matches exactly one persisted artifact manifest, and otherwise fails
-  closed until the caller provides an explicit artifact id.
+- Direct `ship` now requires an explicit artifact id that already has a stored
+  artifact manifest in control-plane state.
 - When a stored artifact manifest is available, ship now syncs
   `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` onto the Dokploy target before
   deploy execution so runtime execution uses the immutable image directly.

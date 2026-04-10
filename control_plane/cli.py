@@ -233,11 +233,7 @@ def _execute_ship(
     request: ShipRequest,
 ) -> tuple[Path | None, DeploymentRecord | ShipRequest]:
     record_store = _store(state_dir)
-    resolved_artifact_id = _resolve_artifact_id_for_request(
-        record_store=record_store,
-        requested_artifact_id=request.artifact_id,
-        source_git_ref=request.source_git_ref,
-    )
+    resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
     artifact_manifest = _read_artifact_manifest(
         record_store=record_store,
         artifact_id=resolved_artifact_id,
@@ -386,30 +382,11 @@ def _execute_ship(
     return record_path, final_record
 
 
-def _resolve_artifact_id_for_request(
-    *,
-    record_store: FilesystemRecordStore,
-    requested_artifact_id: str,
-    source_git_ref: str,
-) -> str:
-    matching_manifests = record_store.find_artifact_manifests_by_commit(source_git_ref)
+def _require_artifact_id(*, requested_artifact_id: str) -> str:
     normalized_artifact_id = requested_artifact_id.strip()
-    if len(matching_manifests) == 1:
-        matched_artifact_id = matching_manifests[0].artifact_id
-        if not normalized_artifact_id or normalized_artifact_id.startswith("compatibility-"):
-            return matched_artifact_id
-        return normalized_artifact_id
-    if normalized_artifact_id:
-        return normalized_artifact_id
-    if len(matching_manifests) > 1:
-        raise click.ClickException(
-            "Ship requires an explicit artifact_id when multiple stored artifact manifests match "
-            f"source_git_ref={source_git_ref}."
-        )
-    raise click.ClickException(
-        "Ship requires an explicit artifact_id or a unique stored artifact manifest for "
-        f"source_git_ref={source_git_ref}."
-    )
+    if not normalized_artifact_id:
+        raise click.ClickException("Artifact-backed execution requires an explicit artifact_id.")
+    return normalized_artifact_id
 
 
 def _read_artifact_manifest(
@@ -629,10 +606,10 @@ def promote_execute(
 ) -> None:
     request = PromotionRequest.model_validate(_load_json_file(input_file))
     record_store = _store(state_dir)
-    resolved_artifact_id = _resolve_artifact_id_for_request(
+    resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
+    _read_artifact_manifest(
         record_store=record_store,
-        requested_artifact_id=request.artifact_id,
-        source_git_ref=request.source_git_ref,
+        artifact_id=resolved_artifact_id,
     )
     resolved_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
     record_id = generate_promotion_record_id(

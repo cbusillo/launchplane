@@ -334,6 +334,7 @@ class PromoteCliTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
                 PromotionRequest(
@@ -547,6 +548,46 @@ class PromoteCliTests(unittest.TestCase):
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn('"artifact_id": "artifact-sha256-image456"', result.output)
 
+    def test_promote_execute_requires_stored_artifact_manifest(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "promotion-request.json"
+            input_file.write_text(
+                PromotionRequest(
+                    artifact_id="artifact-missing",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    dry_run=True,
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "promote",
+                    "execute",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                    "--odoo-ai-root",
+                    str(repo_root),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("stored artifact manifest", result.output)
+            promotion_files = sorted((state_dir / "promotions").glob("*.json"))
+            self.assertEqual(len(promotion_files), 0)
+
     def test_ship_execute_persists_environment_inventory_after_success(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -621,6 +662,7 @@ class PromoteCliTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
                 PromotionRequest(
