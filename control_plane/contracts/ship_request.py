@@ -11,6 +11,7 @@ class BranchSyncEvidence(BaseModel):
     target_branch: str
     remote_branch_commit_before: str = ""
     branch_update_required: bool
+    applied: bool = False
 
     @model_validator(mode="after")
     def _validate_branch_sync(self) -> "BranchSyncEvidence":

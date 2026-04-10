@@ -178,7 +178,10 @@ class PromoteCliTests(unittest.TestCase):
             )
             captured_commands: list[list[str]] = []
 
-            with patch("control_plane.cli._run_command", side_effect=lambda command: captured_commands.append(command)):
+            with patch(
+                "control_plane.cli._run_command",
+                side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -316,15 +319,19 @@ class PromoteCliTests(unittest.TestCase):
                         "source_git_ref": "origin/opw-prod",
                         "source_commit": "abc123",
                         "target_branch": "prod",
-                        "remote_branch_commit_before": "def456",
-                        "branch_update_required": True,
-                    },
-                ).model_dump_json(indent=2),
+                            "remote_branch_commit_before": "def456",
+                            "branch_update_required": True,
+                            "applied": False,
+                        },
+                    ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             captured_commands: list[list[str]] = []
 
-            with patch("control_plane.cli._run_command", side_effect=lambda command: captured_commands.append(command)):
+            with patch(
+                "control_plane.cli._run_command",
+                side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -340,17 +347,20 @@ class PromoteCliTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            self.assertEqual(len(captured_commands), 1)
-            self.assertIn("compatibility-ship-worker", captured_commands[0])
-            self.assertIn("--skip-gate", captured_commands[0])
-            self.assertIn("--branch-sync-target-branch", captured_commands[0])
-            self.assertIn("--branch-sync-update-required", captured_commands[0])
+            self.assertEqual(len(captured_commands), 2)
+            self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
+            self.assertIn("compatibility-ship-worker", captured_commands[1])
+            self.assertIn("--skip-gate", captured_commands[1])
+            self.assertIn("--branch-sync-target-branch", captured_commands[1])
+            self.assertIn("--branch-sync-update-required", captured_commands[1])
+            self.assertIn("--branch-sync-applied", captured_commands[1])
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"delegated_executor": "odoo-ai.compatibility-ship-worker"', persisted_payload)
             self.assertIn('"source_commit": "abc123"', persisted_payload)
+            self.assertIn('"applied": true', persisted_payload)
 
     def test_ship_compatibility_execute_persists_failed_deployment_record(self) -> None:
         runner = CliRunner()
@@ -402,6 +412,61 @@ class PromoteCliTests(unittest.TestCase):
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "fail"', persisted_payload)
             self.assertIn('"finished_at": "', persisted_payload)
+
+    def test_ship_compatibility_execute_fails_closed_when_branch_sync_apply_fails(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="origin/opw-prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    branch_sync={
+                        "source_git_ref": "origin/opw-prod",
+                        "source_commit": "abc123",
+                        "target_branch": "prod",
+                        "remote_branch_commit_before": "def456",
+                        "branch_update_required": True,
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            captured_commands: list[list[str]] = []
+
+            def capture_and_fail(command: list[str], cwd: Path | None = None) -> None:
+                captured_commands.append(command)
+                if command[:3] == ["git", "push", "origin"]:
+                    raise subprocess.CalledProcessError(1, command)
+
+            with patch("control_plane.cli._run_command", side_effect=capture_and_fail):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertEqual(len(captured_commands), 1)
+            self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
+            self.assertIn('"status": "fail"', persisted_payload)
+            self.assertIn('"applied": false', persisted_payload)
 
 
 if __name__ == "__main__":

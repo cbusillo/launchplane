@@ -33,6 +33,9 @@ title: Operations
 - Public `ship` handoff now includes branch-sync planning metadata so the
   control plane can record the intended branch move even before Dokploy work
   starts.
+- Compatibility `ship` execution now also applies the branch-sync git push from
+  the control-plane-owned boundary before delegating to the transitional
+  worker.
 
 ## Migration Rules
 

@@ -49,6 +49,8 @@ state/
 - Persist branch-sync intent there as well so the control plane owns the
   requested git branch movement even while the transitional worker still
   performs the actual push.
+- Once the control plane applies that git push itself, persist whether the
+  branch-sync step was already applied before the delegated worker starts.
 - Compatibility ship execution may still delegate the underlying runtime work
   to `odoo-ai`, but the durable deploy record belongs here.
 

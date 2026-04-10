@@ -29,10 +29,27 @@ def _load_json_file(input_file: Path) -> dict[str, object]:
     return json.loads(input_file.read_text(encoding="utf-8"))
 
 
-def _run_command(command: list[str]) -> None:
+def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
     command_env = dict(os.environ)
     command_env.pop("VIRTUAL_ENV", None)
-    subprocess.run(command, check=True, env=command_env)
+    subprocess.run(command, check=True, env=command_env, cwd=cwd)
+
+
+def _apply_branch_sync(*, odoo_ai_root: Path, request: CompatibilityShipRequest) -> CompatibilityShipRequest:
+    branch_sync = request.branch_sync
+    if branch_sync is None or not branch_sync.branch_update_required or branch_sync.applied:
+        return request
+
+    _run_command(
+        [
+            "git",
+            "push",
+            "origin",
+            f"+{branch_sync.source_commit}:refs/heads/{branch_sync.target_branch}",
+        ],
+        cwd=odoo_ai_root,
+    )
+    return request.model_copy(update={"branch_sync": branch_sync.model_copy(update={"applied": True})})
 
 
 def _resolve_artifact_id_for_request(
@@ -312,24 +329,6 @@ def ship_compatibility_execute(
         ship_command.append("--no-cache")
     if request.allow_dirty:
         ship_command.append("--allow-dirty")
-    if request.branch_sync is not None:
-        ship_command.extend(
-            [
-                "--branch-sync-source-ref",
-                request.branch_sync.source_git_ref,
-                "--branch-sync-source-commit",
-                request.branch_sync.source_commit,
-                "--branch-sync-target-branch",
-                request.branch_sync.target_branch,
-                "--branch-sync-remote-branch-commit-before",
-                request.branch_sync.remote_branch_commit_before,
-            ]
-        )
-        if request.branch_sync.branch_update_required:
-            ship_command.append("--branch-sync-update-required")
-        else:
-            ship_command.append("--no-branch-sync-update-required")
-
     record_store = _store(state_dir)
     record_id = generate_deployment_record_id(
         context_name=request.context,
@@ -347,9 +346,45 @@ def ship_compatibility_execute(
     record_path = record_store.write_deployment_record(pending_record)
 
     try:
-        _run_command(ship_command)
+        delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=request)
+    except subprocess.CalledProcessError:
         final_record = build_compatibility_deployment_record(
             request=request,
+            record_id=record_id,
+            deployment_id="delegated-odoo-ai-ship",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+        )
+        record_store.write_deployment_record(final_record)
+        raise
+
+    if delegated_request.branch_sync is not None:
+        ship_command.extend(
+            [
+                "--branch-sync-source-ref",
+                delegated_request.branch_sync.source_git_ref,
+                "--branch-sync-source-commit",
+                delegated_request.branch_sync.source_commit,
+                "--branch-sync-target-branch",
+                delegated_request.branch_sync.target_branch,
+                "--branch-sync-remote-branch-commit-before",
+                delegated_request.branch_sync.remote_branch_commit_before,
+            ]
+        )
+        if delegated_request.branch_sync.branch_update_required:
+            ship_command.append("--branch-sync-update-required")
+        else:
+            ship_command.append("--no-branch-sync-update-required")
+        if delegated_request.branch_sync.applied:
+            ship_command.append("--branch-sync-applied")
+        else:
+            ship_command.append("--no-branch-sync-applied")
+
+    try:
+        _run_command(ship_command)
+        final_record = build_compatibility_deployment_record(
+            request=delegated_request,
             record_id=record_id,
             deployment_id="delegated-odoo-ai-ship",
             deployment_status="pass",
@@ -358,7 +393,7 @@ def ship_compatibility_execute(
         )
     except subprocess.CalledProcessError:
         final_record = build_compatibility_deployment_record(
-            request=request,
+            request=delegated_request,
             record_id=record_id,
             deployment_id="delegated-odoo-ai-ship",
             deployment_status="fail",
