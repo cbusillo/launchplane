@@ -38,6 +38,9 @@ title: Operations
   worker.
 - Compatibility `ship` destination health verification now also runs from the
   control-plane-owned boundary after the delegated worker returns.
+- Compatibility `ship` now resolves the concrete Dokploy target before
+  delegation and passes that resolved target into the worker instead of letting
+  the worker choose the target on its own.
 
 ## Migration Rules
 

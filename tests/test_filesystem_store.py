@@ -73,6 +73,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     "remote_branch_commit_before": "def456",
                     "branch_update_required": True,
                 },
+                resolved_target={
+                    "target_type": "compose",
+                    "target_id": "compose-123",
+                    "target_name": "opw-prod",
+                },
                 deploy=DeploymentEvidence(
                     target_name="opw-prod",
                     target_type="compose",
@@ -97,6 +102,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_record.deploy.deployment_id, "delegated-odoo-ai-ship")
             self.assertEqual(loaded_record.destination_health.status, "pass")
             self.assertEqual(loaded_record.branch_sync.target_branch, "prod")
+            self.assertEqual(loaded_record.resolved_target.target_id, "compose-123")
 
     def test_artifacts_ingest_odoo_ai_writes_manifest(self) -> None:
         runner = CliRunner()

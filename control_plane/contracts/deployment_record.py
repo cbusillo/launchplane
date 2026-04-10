@@ -12,6 +12,22 @@ from control_plane.contracts.ship_request import BranchSyncEvidence
 DelegatedExecutor = Literal["odoo-ai.compatibility-ship-worker"]
 
 
+class ResolvedTargetEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_type: Literal["compose", "application"]
+    target_id: str
+    target_name: str
+
+    @model_validator(mode="after")
+    def _validate_target(self) -> "ResolvedTargetEvidence":
+        if not self.target_id.strip():
+            raise ValueError("resolved target evidence requires target_id")
+        if not self.target_name.strip():
+            raise ValueError("resolved target evidence requires target_name")
+        return self
+
+
 class DeploymentRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -26,6 +42,7 @@ class DeploymentRecord(BaseModel):
     no_cache: bool = False
     delegated_executor: DelegatedExecutor = "odoo-ai.compatibility-ship-worker"
     branch_sync: BranchSyncEvidence | None = None
+    resolved_target: ResolvedTargetEvidence | None = None
     deploy: DeploymentEvidence
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 

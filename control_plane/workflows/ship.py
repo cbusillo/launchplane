@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, HealthcheckEvidence
 from control_plane.contracts.ship_request import CompatibilityShipRequest
 
@@ -52,6 +53,7 @@ def build_compatibility_deployment_record(
     deployment_status: str,
     started_at: str,
     finished_at: str,
+    resolved_target: ResolvedTargetEvidence | None = None,
 ) -> DeploymentRecord:
     artifact_identity = None
     if request.artifact_id.strip():
@@ -67,6 +69,7 @@ def build_compatibility_deployment_record(
         verify_destination_health=request.verify_health,
         no_cache=request.no_cache,
         branch_sync=request.branch_sync,
+        resolved_target=resolved_target,
         deploy=DeploymentEvidence(
             target_name=request.target_name,
             target_type=request.target_type,

@@ -9,6 +9,7 @@ from urllib.request import Request, urlopen
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, PromotionRecord
 from control_plane.contracts.ship_request import CompatibilityShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -36,6 +37,13 @@ def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
     command_env = dict(os.environ)
     command_env.pop("VIRTUAL_ENV", None)
     subprocess.run(command, check=True, env=command_env, cwd=cwd)
+
+
+def _run_command_capture(command: list[str], *, cwd: Path | None = None) -> str:
+    command_env = dict(os.environ)
+    command_env.pop("VIRTUAL_ENV", None)
+    result = subprocess.run(command, check=True, env=command_env, cwd=cwd, capture_output=True, text=True)
+    return result.stdout
 
 
 def _apply_branch_sync(*, odoo_ai_root: Path, request: CompatibilityShipRequest) -> CompatibilityShipRequest:
@@ -85,6 +93,32 @@ def _verify_ship_healthchecks(*, request: CompatibilityShipRequest) -> None:
         raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
     for healthcheck_url in request.destination_health.urls:
         _wait_for_ship_healthcheck(url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds)
+
+
+def _resolve_dokploy_target_via_odoo_ai(
+    *,
+    odoo_ai_root: Path,
+    env_file: Path | None,
+    request: CompatibilityShipRequest,
+) -> ResolvedTargetEvidence:
+    command = [
+        "uv",
+        "run",
+        "--project",
+        str(odoo_ai_root),
+        "platform",
+        "compatibility-resolve-ship-target",
+        "--context",
+        request.context,
+        "--instance",
+        request.instance,
+        "--target-type",
+        request.target_type,
+    ]
+    if env_file is not None:
+        command.extend(["--env-file", str(env_file)])
+    payload = json.loads(_run_command_capture(command, cwd=odoo_ai_root))
+    return ResolvedTargetEvidence.model_validate(payload)
 
 
 def _resolve_artifact_id_for_request(
@@ -379,7 +413,12 @@ def ship_compatibility_execute(
 
     try:
         delegated_request = _apply_branch_sync(odoo_ai_root=odoo_ai_root, request=request)
-    except subprocess.CalledProcessError:
+        resolved_target = _resolve_dokploy_target_via_odoo_ai(
+            odoo_ai_root=odoo_ai_root,
+            env_file=env_file,
+            request=delegated_request,
+        )
+    except (subprocess.CalledProcessError, click.ClickException, json.JSONDecodeError):
         final_record = build_compatibility_deployment_record(
             request=request,
             record_id=record_id,
@@ -412,6 +451,16 @@ def ship_compatibility_execute(
             ship_command.append("--branch-sync-applied")
         else:
             ship_command.append("--no-branch-sync-applied")
+    ship_command.extend(
+        [
+            "--resolved-target-type",
+            resolved_target.target_type,
+            "--resolved-target-id",
+            resolved_target.target_id,
+            "--resolved-target-name",
+            resolved_target.target_name,
+        ]
+    )
 
     try:
         _run_command(ship_command)
@@ -423,6 +472,7 @@ def ship_compatibility_execute(
             deployment_status="pass",
             started_at=started_at,
             finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
         )
     except subprocess.CalledProcessError:
         final_record = build_compatibility_deployment_record(
@@ -432,6 +482,7 @@ def ship_compatibility_execute(
             deployment_status="fail",
             started_at=started_at,
             finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
         )
         record_store.write_deployment_record(final_record)
         raise

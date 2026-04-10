@@ -134,11 +134,17 @@ class PromoteWorkflowTests(unittest.TestCase):
             deployment_status="pending",
             started_at="2026-04-10T18:22:31Z",
             finished_at="",
+            resolved_target={
+                "target_type": "compose",
+                "target_id": "compose-123",
+                "target_name": "opw-prod",
+            },
         )
 
         self.assertEqual(record.branch_sync.source_commit, "abc123")
         self.assertEqual(record.branch_sync.target_branch, "prod")
         self.assertTrue(record.branch_sync.branch_update_required)
+        self.assertEqual(record.resolved_target.target_id, "compose-123")
 
 
 class PromoteCliTests(unittest.TestCase):
@@ -178,10 +184,17 @@ class PromoteCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             captured_commands: list[list[str]] = []
+            captured_resolve_commands: list[list[str]] = []
 
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ), patch(
+                "control_plane.cli._run_command_capture",
+                side_effect=lambda command, cwd=None: (
+                    captured_resolve_commands.append(command),
+                    json.dumps({"target_type": "compose", "target_id": "compose-123", "target_name": "opw-prod"}),
+                )[1],
             ):
                 result = runner.invoke(
                     main,
@@ -328,10 +341,17 @@ class PromoteCliTests(unittest.TestCase):
                 encoding="utf-8",
             )
             captured_commands: list[list[str]] = []
+            captured_resolve_commands: list[list[str]] = []
 
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ), patch(
+                "control_plane.cli._run_command_capture",
+                side_effect=lambda command, cwd=None: (
+                    captured_resolve_commands.append(command),
+                    json.dumps({"target_type": "compose", "target_id": "compose-123", "target_name": "opw-prod"}),
+                )[1],
             ):
                 result = runner.invoke(
                     main,
@@ -348,6 +368,8 @@ class PromoteCliTests(unittest.TestCase):
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(len(captured_resolve_commands), 1)
+            self.assertIn("compatibility-resolve-ship-target", captured_resolve_commands[0])
             self.assertEqual(len(captured_commands), 2)
             self.assertEqual(captured_commands[0][:3], ["git", "push", "origin"])
             self.assertIn("compatibility-ship-worker", captured_commands[1])
@@ -355,6 +377,8 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn("--branch-sync-target-branch", captured_commands[1])
             self.assertIn("--branch-sync-update-required", captured_commands[1])
             self.assertIn("--branch-sync-applied", captured_commands[1])
+            self.assertIn("--resolved-target-id", captured_commands[1])
+            self.assertIn("compose-123", captured_commands[1])
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
@@ -362,6 +386,7 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn('"delegated_executor": "odoo-ai.compatibility-ship-worker"', persisted_payload)
             self.assertIn('"source_commit": "abc123"', persisted_payload)
             self.assertIn('"applied": true', persisted_payload)
+            self.assertIn('"target_id": "compose-123"', persisted_payload)
 
     def test_ship_compatibility_execute_runs_health_verification_from_control_plane(self) -> None:
         runner = CliRunner()
@@ -394,6 +419,9 @@ class PromoteCliTests(unittest.TestCase):
             with patch(
                 "control_plane.cli._run_command",
                 side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ), patch(
+                "control_plane.cli._run_command_capture",
+                return_value=json.dumps({"target_type": "compose", "target_id": "compose-123", "target_name": "opw-prod"}),
             ), patch(
                 "control_plane.cli._wait_for_ship_healthcheck",
                 side_effect=lambda url, timeout_seconds: captured_health_urls.append(url),
@@ -575,6 +603,48 @@ class PromoteCliTests(unittest.TestCase):
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "fail"', persisted_payload)
             self.assertIn('"applied": false', persisted_payload)
+
+    def test_ship_compatibility_execute_fails_closed_when_target_resolution_fails(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "control_plane.cli._run_command_capture",
+                side_effect=click.ClickException("Target resolution failed"),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
+            self.assertIn('"status": "fail"', persisted_payload)
 
 
 if __name__ == "__main__":
