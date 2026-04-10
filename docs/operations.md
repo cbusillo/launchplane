@@ -30,6 +30,9 @@ title: Operations
 - Compatibility `ship` execution should persist a deployment record here before
   and after delegation so deploy history no longer lives only in `odoo-ai`
   process output.
+- Public `ship` handoff now includes branch-sync planning metadata so the
+  control plane can record the intended branch move even before Dokploy work
+  starts.
 
 ## Migration Rules
 

@@ -312,6 +312,23 @@ def ship_compatibility_execute(
         ship_command.append("--no-cache")
     if request.allow_dirty:
         ship_command.append("--allow-dirty")
+    if request.branch_sync is not None:
+        ship_command.extend(
+            [
+                "--branch-sync-source-ref",
+                request.branch_sync.source_git_ref,
+                "--branch-sync-source-commit",
+                request.branch_sync.source_commit,
+                "--branch-sync-target-branch",
+                request.branch_sync.target_branch,
+                "--branch-sync-remote-branch-commit-before",
+                request.branch_sync.remote_branch_commit_before,
+            ]
+        )
+        if request.branch_sync.branch_update_required:
+            ship_command.append("--branch-sync-update-required")
+        else:
+            ship_command.append("--no-branch-sync-update-required")
 
     record_store = _store(state_dir)
     record_id = generate_deployment_record_id(

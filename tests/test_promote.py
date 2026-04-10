@@ -109,6 +109,36 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.destination_health.status, "pending")
         self.assertFalse(record.destination_health.verified)
 
+    def test_build_compatibility_deployment_record_carries_branch_sync_evidence(self) -> None:
+        request = CompatibilityShipRequest(
+            context="opw",
+            instance="prod",
+            source_git_ref="origin/opw-prod",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            branch_sync={
+                "source_git_ref": "origin/opw-prod",
+                "source_commit": "abc123",
+                "target_branch": "prod",
+                "remote_branch_commit_before": "def456",
+                "branch_update_required": True,
+            },
+        )
+
+        record = build_compatibility_deployment_record(
+            request=request,
+            record_id="deployment-branch-sync",
+            deployment_id="delegated-ship",
+            deployment_status="pending",
+            started_at="2026-04-10T18:22:31Z",
+            finished_at="",
+        )
+
+        self.assertEqual(record.branch_sync.source_commit, "abc123")
+        self.assertEqual(record.branch_sync.target_branch, "prod")
+        self.assertTrue(record.branch_sync.branch_update_required)
+
 
 class PromoteCliTests(unittest.TestCase):
     def test_compatibility_execute_persists_record_and_delegates_ship(self) -> None:
@@ -282,6 +312,13 @@ class PromoteCliTests(unittest.TestCase):
                     deploy_mode="dokploy-compose-api",
                     wait=True,
                     verify_health=False,
+                    branch_sync={
+                        "source_git_ref": "origin/opw-prod",
+                        "source_commit": "abc123",
+                        "target_branch": "prod",
+                        "remote_branch_commit_before": "def456",
+                        "branch_update_required": True,
+                    },
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
@@ -306,11 +343,14 @@ class PromoteCliTests(unittest.TestCase):
             self.assertEqual(len(captured_commands), 1)
             self.assertIn("compatibility-ship-worker", captured_commands[0])
             self.assertIn("--skip-gate", captured_commands[0])
+            self.assertIn("--branch-sync-target-branch", captured_commands[0])
+            self.assertIn("--branch-sync-update-required", captured_commands[0])
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"delegated_executor": "odoo-ai.compatibility-ship-worker"', persisted_payload)
+            self.assertIn('"source_commit": "abc123"', persisted_payload)
 
     def test_ship_compatibility_execute_persists_failed_deployment_record(self) -> None:
         runner = CliRunner()

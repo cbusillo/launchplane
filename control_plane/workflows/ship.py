@@ -66,6 +66,7 @@ def build_compatibility_deployment_record(
         wait_for_completion=request.wait,
         verify_destination_health=request.verify_health,
         no_cache=request.no_cache,
+        branch_sync=request.branch_sync,
         deploy=DeploymentEvidence(
             target_name=request.target_name,
             target_type=request.target_type,

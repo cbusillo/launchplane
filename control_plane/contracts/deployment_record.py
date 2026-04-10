@@ -7,6 +7,7 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     HealthcheckEvidence,
 )
+from control_plane.contracts.ship_request import BranchSyncEvidence
 
 DelegatedExecutor = Literal["odoo-ai.compatibility-ship-worker"]
 
@@ -24,6 +25,7 @@ class DeploymentRecord(BaseModel):
     verify_destination_health: bool = True
     no_cache: bool = False
     delegated_executor: DelegatedExecutor = "odoo-ai.compatibility-ship-worker"
+    branch_sync: BranchSyncEvidence | None = None
     deploy: DeploymentEvidence
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 

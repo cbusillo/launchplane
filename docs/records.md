@@ -46,6 +46,9 @@ state/
 - One file per direct ship attempt owned by `odoo-control-plane`.
 - Record the requested source git ref, target, deploy status, delegated worker,
   and destination health evidence.
+- Persist branch-sync intent there as well so the control plane owns the
+  requested git branch movement even while the transitional worker still
+  performs the actual push.
 - Compatibility ship execution may still delegate the underlying runtime work
   to `odoo-ai`, but the durable deploy record belongs here.
 
