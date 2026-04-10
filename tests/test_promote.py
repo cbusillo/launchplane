@@ -172,6 +172,44 @@ class PromoteCliTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertIn('"source_git_ref": "abc123"', result.output)
 
+    def test_ship_compatibility_execute_delegates_internal_worker(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    wait=True,
+                    verify_health=False,
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            captured_commands: list[list[str]] = []
+
+            with patch("control_plane.cli._run_command", side_effect=lambda command: captured_commands.append(command)):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(len(captured_commands), 1)
+            self.assertIn("compatibility-ship-worker", captured_commands[0])
+            self.assertIn("--skip-gate", captured_commands[0])
+
 
 if __name__ == "__main__":
     unittest.main()

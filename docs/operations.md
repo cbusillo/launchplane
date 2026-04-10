@@ -11,6 +11,7 @@ title: Operations
 - `uv run control-plane promotions show --record-id <record-id>`
 - `uv run control-plane promote record --artifact-id <artifact-id> --context <ctx> --from-instance testing --to-instance prod`
 - `uv run control-plane promote compatibility-execute --input-file <path> --odoo-ai-root <path>`
+- `uv run control-plane ship compatibility-execute --input-file <path> --odoo-ai-root <path>`
 
 ## Operational Rules
 
@@ -22,6 +23,8 @@ title: Operations
 - The first live promote path may delegate the underlying `platform ship`
   worker back to `odoo-ai`, but that delegation is an internal compatibility
   detail. The promote boundary itself belongs here.
+- The direct compatibility `ship` path also enters here first and then
+  delegates to the internal `odoo-ai` worker during transition.
 - Artifact manifests handed off from `odoo-ai` should be persisted here before
   later workflows depend on them.
 

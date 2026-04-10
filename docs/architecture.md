@@ -32,6 +32,9 @@ title: Architecture
 - During the first compatibility slice, `promote` delegates the underlying
   `ship` worker back to `odoo-ai` while this repo owns the promotion record and
   the orchestration boundary.
+- Direct `ship` ownership now also enters through this repo, while the
+  temporary execution worker still lives in `odoo-ai` as an internal
+  compatibility command.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

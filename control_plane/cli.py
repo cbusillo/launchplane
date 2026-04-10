@@ -238,3 +238,54 @@ def ship() -> None:
 def ship_compatibility_plan(input_file: Path) -> None:
     request = CompatibilityShipRequest.model_validate(_load_json_file(input_file))
     click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@ship.command("compatibility-execute")
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
+def ship_compatibility_execute(
+    input_file: Path,
+    odoo_ai_root: Path,
+    env_file: Path | None,
+) -> None:
+    request = CompatibilityShipRequest.model_validate(_load_json_file(input_file))
+    if request.dry_run:
+        click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
+        return
+
+    ship_command = [
+        "uv",
+        "run",
+        "--project",
+        str(odoo_ai_root),
+        "platform",
+        "compatibility-ship-worker",
+        "--context",
+        request.context,
+        "--instance",
+        request.instance,
+        "--source-ref",
+        request.source_git_ref,
+        "--skip-gate",
+    ]
+    if env_file is not None:
+        ship_command.extend(["--env-file", str(env_file)])
+    if request.wait:
+        ship_command.append("--wait")
+    else:
+        ship_command.append("--no-wait")
+    if request.timeout_seconds is not None:
+        ship_command.extend(["--timeout", str(request.timeout_seconds)])
+    if request.verify_health:
+        ship_command.append("--verify-health")
+    else:
+        ship_command.append("--no-verify-health")
+    if request.health_timeout_seconds is not None:
+        ship_command.extend(["--health-timeout", str(request.health_timeout_seconds)])
+    if request.no_cache:
+        ship_command.append("--no-cache")
+    if request.allow_dirty:
+        ship_command.append("--allow-dirty")
+
+    _run_command(ship_command)
