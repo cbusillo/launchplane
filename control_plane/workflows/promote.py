@@ -53,6 +53,12 @@ def generate_promotion_record_id(*, context_name: str, from_instance_name: str, 
 def _resolve_post_deploy_update(status_target_type: str, *, wait: bool, deployment_status: str) -> PostDeployUpdateEvidence:
     if not wait or status_target_type != "compose":
         return PostDeployUpdateEvidence()
+    if deployment_status == "pending":
+        return PostDeployUpdateEvidence(
+            attempted=True,
+            status="pending",
+            detail="Delegated odoo-ai ship update workflow is pending.",
+        )
     return PostDeployUpdateEvidence(
         attempted=True,
         status="pass" if deployment_status == "pass" else deployment_status,

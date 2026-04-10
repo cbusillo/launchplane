@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -23,7 +24,9 @@ def _load_json_file(input_file: Path) -> dict[str, object]:
 
 
 def _run_command(command: list[str]) -> None:
-    subprocess.run(command, check=True)
+    command_env = dict(os.environ)
+    command_env.pop("VIRTUAL_ENV", None)
+    subprocess.run(command, check=True, env=command_env)
 
 
 @click.group()
