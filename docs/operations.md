@@ -36,6 +36,8 @@ title: Operations
 - Compatibility `ship` execution now also applies the branch-sync git push from
   the control-plane-owned boundary before delegating to the transitional
   worker.
+- Compatibility `ship` destination health verification now also runs from the
+  control-plane-owned boundary after the delegated worker returns.
 
 ## Migration Rules
 

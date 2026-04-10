@@ -5,6 +5,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+import click
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -361,6 +362,113 @@ class PromoteCliTests(unittest.TestCase):
             self.assertIn('"delegated_executor": "odoo-ai.compatibility-ship-worker"', persisted_payload)
             self.assertIn('"source_commit": "abc123"', persisted_payload)
             self.assertIn('"applied": true', persisted_payload)
+
+    def test_ship_compatibility_execute_runs_health_verification_from_control_plane(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    wait=True,
+                    verify_health=True,
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            captured_commands: list[list[str]] = []
+            captured_health_urls: list[str] = []
+
+            with patch(
+                "control_plane.cli._run_command",
+                side_effect=lambda command, cwd=None: captured_commands.append(command),
+            ), patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                side_effect=lambda url, timeout_seconds: captured_health_urls.append(url),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(len(captured_commands), 1)
+            self.assertIn("--no-verify-health", captured_commands[0])
+            self.assertEqual(captured_health_urls, ["https://prod.example.com/web/health"])
+
+    def test_ship_compatibility_execute_marks_record_failed_when_health_verification_fails(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                CompatibilityShipRequest(
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    wait=True,
+                    verify_health=True,
+                    destination_health={
+                        "verified": False,
+                        "urls": ["https://prod.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "control_plane.cli._run_command",
+                side_effect=lambda command, cwd=None: None,
+            ), patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                side_effect=click.ClickException("Healthcheck failed"),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "compatibility-execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--odoo-ai-root",
+                        str(repo_root),
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
+            self.assertIn('"status": "fail"', persisted_payload)
 
     def test_ship_compatibility_execute_persists_failed_deployment_record(self) -> None:
         runner = CliRunner()

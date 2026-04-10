@@ -53,6 +53,9 @@ state/
   branch-sync step was already applied before the delegated worker starts.
 - Compatibility ship execution may still delegate the underlying runtime work
   to `odoo-ai`, but the durable deploy record belongs here.
+- The final deployment status now also reflects control-plane-owned health
+  verification rather than relying on the delegated worker to make that final
+  readiness call.
 
 ## Inventory
 

@@ -1,7 +1,10 @@
 import json
 import os
 import subprocess
+import time
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import click
 
@@ -50,6 +53,38 @@ def _apply_branch_sync(*, odoo_ai_root: Path, request: CompatibilityShipRequest)
         cwd=odoo_ai_root,
     )
     return request.model_copy(update={"branch_sync": branch_sync.model_copy(update={"applied": True})})
+
+
+def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: str = ""
+    while time.monotonic() < deadline:
+        try:
+            request = Request(url, method="GET")
+            with urlopen(request, timeout=min(5, timeout_seconds)) as response:
+                if 200 <= response.status < 300:
+                    return
+                last_error = f"http {response.status}"
+        except HTTPError as error:
+            last_error = f"http {error.code}"
+        except URLError as error:
+            last_error = str(error.reason)
+        time.sleep(1)
+    raise click.ClickException(f"Healthcheck failed for {url}: {last_error or 'timeout'}")
+
+
+def _verify_ship_healthchecks(*, request: CompatibilityShipRequest) -> None:
+    if not request.wait or not request.verify_health:
+        return
+    if not request.destination_health.urls:
+        raise click.ClickException(
+            "Healthcheck verification requested but no target domain/URL was resolved. "
+            "Define domains in platform/dokploy.toml or disable with --no-verify-health."
+        )
+    if request.destination_health.timeout_seconds is None:
+        raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
+    for healthcheck_url in request.destination_health.urls:
+        _wait_for_ship_healthcheck(url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds)
 
 
 def _resolve_artifact_id_for_request(
@@ -319,10 +354,7 @@ def ship_compatibility_execute(
         ship_command.append("--no-wait")
     if request.timeout_seconds is not None:
         ship_command.extend(["--timeout", str(request.timeout_seconds)])
-    if request.verify_health:
-        ship_command.append("--verify-health")
-    else:
-        ship_command.append("--no-verify-health")
+    ship_command.append("--no-verify-health")
     if request.health_timeout_seconds is not None:
         ship_command.extend(["--health-timeout", str(request.health_timeout_seconds)])
     if request.no_cache:
@@ -383,6 +415,7 @@ def ship_compatibility_execute(
 
     try:
         _run_command(ship_command)
+        _verify_ship_healthchecks(request=delegated_request)
         final_record = build_compatibility_deployment_record(
             request=delegated_request,
             record_id=record_id,
