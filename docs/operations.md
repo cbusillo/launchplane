@@ -9,6 +9,7 @@ title: Operations
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
 - `uv run control-plane promote record --artifact-id <artifact-id> --context <ctx> --from-instance testing --to-instance prod`
+- `uv run control-plane promote compatibility-execute --input-file <path> --odoo-ai-root <path>`
 
 ## Operational Rules
 
@@ -17,6 +18,9 @@ title: Operations
 - Operator-local state belongs under `state/` or another explicit state
   directory outside git.
 - Promotion execution history should remain append-only.
+- The first live promote path may delegate the underlying `platform ship`
+  worker back to `odoo-ai`, but that delegation is an internal compatibility
+  detail. The promote boundary itself belongs here.
 
 ## Migration Rules
 

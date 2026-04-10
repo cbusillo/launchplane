@@ -1,12 +1,17 @@
 import json
+import subprocess
 from pathlib import Path
 
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.promotion_record import CompatibilityPromotionRequest, PromotionRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.promote import build_promotion_record
+from control_plane.workflows.promote import (
+    build_compatibility_promotion_record,
+    build_promotion_record,
+    generate_promotion_record_id,
+)
 
 
 def _store(state_dir: Path) -> FilesystemRecordStore:
@@ -15,6 +20,10 @@ def _store(state_dir: Path) -> FilesystemRecordStore:
 
 def _load_json_file(input_file: Path) -> dict[str, object]:
     return json.loads(input_file.read_text(encoding="utf-8"))
+
+
+def _run_command(command: list[str]) -> None:
+    subprocess.run(command, check=True)
 
 
 @click.group()
@@ -106,4 +115,101 @@ def promote_record(
         deployment_id=deployment_id,
     )
     record_path = _store(state_dir).write_promotion_record(record)
+    click.echo(record_path)
+
+
+@promote.command("compatibility-execute")
+@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
+@click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
+def promote_compatibility_execute(
+    state_dir: Path,
+    input_file: Path,
+    odoo_ai_root: Path,
+    env_file: Path | None,
+) -> None:
+    request = CompatibilityPromotionRequest.model_validate(_load_json_file(input_file))
+    record_id = generate_promotion_record_id(
+        context_name=request.context,
+        from_instance_name=request.from_instance,
+        to_instance_name=request.to_instance,
+    )
+    if request.dry_run:
+        click.echo(
+            json.dumps(
+                build_compatibility_promotion_record(
+                    request=request,
+                    record_id=record_id,
+                    deployment_id="",
+                    deployment_status="pending",
+                ).model_dump(mode="json"),
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+
+    pending_record = build_compatibility_promotion_record(
+        request=request,
+        record_id=record_id,
+        deployment_id="",
+        deployment_status="pending",
+    )
+    record_store = _store(state_dir)
+    record_path = record_store.write_promotion_record(pending_record)
+
+    ship_command = [
+        "uv",
+        "run",
+        "--project",
+        str(odoo_ai_root),
+        "platform",
+        "ship",
+        "--context",
+        request.context,
+        "--instance",
+        request.to_instance,
+        "--source-ref",
+        request.source_git_ref,
+        "--skip-gate",
+    ]
+    if env_file is not None:
+        ship_command.extend(["--env-file", str(env_file)])
+    if request.wait:
+        ship_command.append("--wait")
+    else:
+        ship_command.append("--no-wait")
+    if request.timeout_seconds is not None:
+        ship_command.extend(["--timeout", str(request.timeout_seconds)])
+    if request.verify_health:
+        ship_command.append("--verify-health")
+    else:
+        ship_command.append("--no-verify-health")
+    if request.health_timeout_seconds is not None:
+        ship_command.extend(["--health-timeout", str(request.health_timeout_seconds)])
+    if request.no_cache:
+        ship_command.append("--no-cache")
+    if request.allow_dirty:
+        ship_command.append("--allow-dirty")
+
+    try:
+        _run_command(ship_command)
+        final_record = build_compatibility_promotion_record(
+            request=request,
+            record_id=record_id,
+            deployment_id="delegated-odoo-ai-ship",
+            deployment_status="pass",
+        )
+    except subprocess.CalledProcessError:
+        final_record = build_compatibility_promotion_record(
+            request=request,
+            record_id=record_id,
+            deployment_id="delegated-odoo-ai-ship",
+            deployment_status="fail",
+        )
+        record_store.write_promotion_record(final_record)
+        raise
+
+    record_store.write_promotion_record(final_record)
     click.echo(record_path)

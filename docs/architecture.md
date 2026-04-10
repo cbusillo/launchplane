@@ -29,6 +29,9 @@ title: Architecture
 ## Transition Direction
 
 - The first live workflow owned here is `promote`.
+- During the first compatibility slice, `promote` delegates the underlying
+  `ship` worker back to `odoo-ai` while this repo owns the promotion record and
+  the orchestration boundary.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

@@ -31,6 +31,8 @@ state/
 - One file per promotion attempt.
 - Record source, destination, artifact id, gate evidence, deploy evidence, and
   destination health.
+- Transitional records may use compatibility artifact identifiers when a full
+  immutable artifact pipeline has not been wired into the handoff yet.
 
 ## Inventory
 
