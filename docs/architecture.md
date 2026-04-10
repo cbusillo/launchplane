@@ -19,6 +19,7 @@ title: Architecture
 - promotion execution
 - deploy orchestration
 - backup and restore control-plane workflows
+- control-plane-owned operator secrets for deploy/runtime orchestration
 
 `odoo-ai` owns:
 
@@ -33,12 +34,10 @@ title: Architecture
 - During the first compatibility slice, `promote` delegates the underlying
   `ship` worker back to `odoo-ai` while this repo owns the promotion record and
   the orchestration boundary.
-- Direct `ship` ownership now also enters through this repo, while the
-  temporary execution worker still lives in `odoo-ai` as an internal
-  compatibility command.
-- Phase 5 starts tightening that boundary by persisting first-class deployment
-  records here even when the underlying deploy still delegates to the
-  transitional internal worker.
+- Direct `ship` ownership now also enters through this repo, and Dokploy
+  target resolution, credentials, and trigger/wait execution now run here.
+- Phase 5 now leaves only the Odoo-specific post-deploy update as a remaining
+  delegated compatibility step.
 - Compatibility wrappers in `odoo-ai` must fail closed when this repo cannot
   accept control.
 - Compatibility wrappers are transitional and should be removed after parity.

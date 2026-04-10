@@ -131,7 +131,8 @@ def _execute_dokploy_deploy(
     resolved_target: ResolvedTargetEvidence,
     deploy_timeout_seconds: int,
 ) -> None:
-    host, token = control_plane_dokploy.read_dokploy_config(odoo_ai_root=odoo_ai_root, env_file=env_file)
+    control_plane_root = Path(__file__).resolve().parent.parent
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     latest_before = None
     if request.wait:
         latest_before = control_plane_dokploy.latest_deployment_for_target(

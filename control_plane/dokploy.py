@@ -13,6 +13,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS = 600
+CONTROL_PLANE_ENV_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_ENV_FILE"
 
 
 type JsonPrimitive = str | int | float | bool | None
@@ -86,13 +87,11 @@ def resolve_ship_timeout_seconds(
     return DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
 
 
-def read_dokploy_config(*, odoo_ai_root: Path, env_file: Path | None) -> tuple[str, str]:
+def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     environment_values: dict[str, str] = {}
-    default_env_file = odoo_ai_root / ".env"
-    if default_env_file.exists():
-        environment_values.update(_parse_env_file(default_env_file))
-    if env_file is not None:
-        environment_values.update(_parse_env_file(env_file))
+    control_plane_env_file = resolve_control_plane_env_file(control_plane_root)
+    if control_plane_env_file.exists():
+        environment_values.update(_parse_env_file(control_plane_env_file))
     for environment_key in ("DOKPLOY_HOST", "DOKPLOY_TOKEN"):
         environment_value = os.environ.get(environment_key)
         if environment_value is not None:
@@ -103,9 +102,20 @@ def read_dokploy_config(*, odoo_ai_root: Path, env_file: Path | None) -> tuple[s
     if not host or not token:
         raise click.ClickException(
             "Missing DOKPLOY_HOST or DOKPLOY_TOKEN for control-plane Dokploy execution. "
-            "Define them in the selected env file, the odoo-ai root .env, or the current process environment."
+            "Define them in the control-plane .env, the file pointed to by ODOO_CONTROL_PLANE_ENV_FILE, "
+            "or the current process environment."
         )
     return host, token
+
+
+def resolve_control_plane_env_file(control_plane_root: Path) -> Path:
+    configured_env_file = os.environ.get(CONTROL_PLANE_ENV_FILE_ENV_VAR, "").strip()
+    if configured_env_file:
+        candidate_path = Path(configured_env_file)
+        if not candidate_path.is_absolute():
+            candidate_path = control_plane_root / candidate_path
+        return candidate_path
+    return control_plane_root / ".env"
 
 
 def trigger_deployment(*, host: str, token: str, target_type: str, target_id: str, no_cache: bool) -> None:

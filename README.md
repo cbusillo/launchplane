@@ -18,6 +18,7 @@ and environment operations.
 ## Quick Start
 
 ```bash
+cp .env.example .env
 uv run control-plane --help
 uv run python -m unittest
 ```

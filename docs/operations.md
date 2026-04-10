@@ -44,6 +44,9 @@ title: Operations
 - Compatibility `ship` now also owns Dokploy credential loading and Dokploy
   trigger/wait execution directly. Only the Odoo-specific post-deploy update
   remains delegated back to `odoo-ai` when it applies.
+- Control-plane-owned Dokploy credentials now come from the control-plane
+  repo's untracked `.env` by default, or explicit process env overrides,
+  instead of piggybacking on `odoo-ai`'s `.env`.
 
 ## Migration Rules
 
