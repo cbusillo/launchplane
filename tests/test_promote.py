@@ -41,7 +41,7 @@ def _write_artifact_manifest(
         json.dumps(
             {
                 "artifact_id": artifact_id,
-                "odoo_ai_commit": source_commit,
+                "source_commit": source_commit,
                 "enterprise_base_digest": "sha256:enterprise123",
                 "image": {
                     "repository": "ghcr.io/cbusillo/odoo-private",
@@ -205,7 +205,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
-                "odoo_ai_commit": "abc123",
+                "source_commit": "abc123",
                 "enterprise_base_digest": "sha256:enterprise123",
                 "image": {
                     "repository": "ghcr.io/cbusillo/odoo-private",
@@ -221,7 +221,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             return_value=("https://dokploy.example.com", "token-123"),
         ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={"env": "DOCKER_IMAGE=odoo-ai\nDOCKER_IMAGE_TAG=latest"},
+            return_value={"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
         ), patch(
             "control_plane.dokploy.update_dokploy_target_env",
             side_effect=lambda **kwargs: captured_update.update(kwargs),
@@ -249,7 +249,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value={
                 "env": (
-                    "DOCKER_IMAGE=odoo-ai\n"
+                    "DOCKER_IMAGE=odoo-runtime\n"
                     "DOCKER_IMAGE_TAG=latest\n"
                     "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:stale"
                 )
@@ -264,7 +264,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             )
 
         self.assertNotIn("DOCKER_IMAGE_REFERENCE", str(captured_update["env_text"]))
-        self.assertIn("DOCKER_IMAGE=odoo-ai", str(captured_update["env_text"]))
+        self.assertIn("DOCKER_IMAGE=odoo-runtime", str(captured_update["env_text"]))
 
     def test_ship_artifact_manifest_executes_without_git_push(self) -> None:
         runner = CliRunner()
@@ -277,7 +277,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "odoo_ai_commit": "abc123",
+                        "source_commit": "abc123",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -881,7 +881,7 @@ domains = ["https://prod.example.com"]
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "odoo_ai_commit": "abc123",
+                        "source_commit": "abc123",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -1442,7 +1442,7 @@ domains = ["https://prod.example.com"]
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "odoo_ai_commit": "abc123",
+                        "source_commit": "abc123",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -1558,7 +1558,7 @@ target_id = "compose-123"
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "odoo_ai_commit": "abc123",
+                        "source_commit": "abc123",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",

@@ -35,7 +35,7 @@ class ArtifactIdentityManifest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     artifact_id: str
-    odoo_ai_commit: str
+    source_commit: str
     enterprise_base_digest: str
     addon_sources: tuple[ArtifactAddonSource, ...] = ()
     openupgrade_inputs: ArtifactOpenUpgradeInputs = Field(default_factory=ArtifactOpenUpgradeInputs)

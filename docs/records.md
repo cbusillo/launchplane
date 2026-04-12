@@ -63,7 +63,7 @@ state/
 - Record the requested source git ref, target, deploy status, recorded
   executor, post-deploy update evidence, and destination health evidence.
 - Ship execution no longer delegates runtime deploy/update work back to
-  `odoo-ai`; the durable deploy record belongs entirely here.
+  another repo; the durable deploy record belongs entirely here.
 - The final deployment status also reflects control-plane-owned health
   verification rather than relying on delegated runtime steps to make that final
   readiness call.
