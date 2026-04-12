@@ -19,7 +19,9 @@ DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS = 180
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
 CONTROL_PLANE_ENV_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_ENV_FILE"
 CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE"
+CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE"
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
+DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
 DOKPLOY_RUNNING_DEPLOYMENT_STATUSES = {"pending", "queued", "running", "in_progress", "starting"}
@@ -100,14 +102,71 @@ class DokploySourceOfTruth(BaseModel):
         return self
 
 
-def load_dokploy_source_of_truth(source_file_path: Path) -> DokploySourceOfTruth:
+class DokployTargetIdOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: str
+    instance: str
+    target_id: str
+
+    @model_validator(mode="after")
+    def _validate_identity_fields(self) -> "DokployTargetIdOverride":
+        if not self.context.strip():
+            raise ValueError("Dokploy target-id override requires non-empty context")
+        if not self.instance.strip():
+            raise ValueError("Dokploy target-id override requires non-empty instance")
+        if not self.target_id.strip():
+            raise ValueError(
+                f"Dokploy target-id override {self.context}/{self.instance} requires non-empty target_id"
+            )
+        return self
+
+
+class DokployTargetIdCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(ge=1)
+    targets: tuple[DokployTargetIdOverride, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_unique_target_routes(self) -> "DokployTargetIdCatalog":
+        seen_targets: set[tuple[str, str]] = set()
+        for target_definition in self.targets:
+            target_route = (target_definition.context.strip(), target_definition.instance.strip())
+            if target_route in seen_targets:
+                context_name, instance_name = target_route
+                raise ValueError(
+                    f"Duplicate Dokploy target-id override for {context_name}/{instance_name} in target-id catalog"
+                )
+            seen_targets.add(target_route)
+        return self
+
+
+def load_dokploy_source_of_truth(
+    source_file_path: Path,
+    *,
+    target_ids_file_path: Path | None = None,
+) -> DokploySourceOfTruth:
     try:
         payload = tomllib.loads(source_file_path.read_text(encoding="utf-8"))
+        if target_ids_file_path is not None:
+            target_id_catalog = load_dokploy_target_id_catalog(target_ids_file_path)
+            payload = _apply_dokploy_target_id_catalog(payload, target_id_catalog=target_id_catalog)
         return DokploySourceOfTruth.model_validate(payload)
     except FileNotFoundError as error:
         raise click.ClickException(f"Dokploy source-of-truth file not found: {source_file_path}") from error
     except ValueError as error:
         raise click.ClickException(f"Invalid dokploy source-of-truth file {source_file_path}: {error}") from error
+
+
+def load_dokploy_target_id_catalog(target_ids_file_path: Path) -> DokployTargetIdCatalog:
+    try:
+        payload = tomllib.loads(target_ids_file_path.read_text(encoding="utf-8"))
+        return DokployTargetIdCatalog.model_validate(payload)
+    except FileNotFoundError as error:
+        raise click.ClickException(f"Dokploy target-id catalog file not found: {target_ids_file_path}") from error
+    except ValueError as error:
+        raise click.ClickException(f"Invalid Dokploy target-id catalog file {target_ids_file_path}: {error}") from error
 
 
 def find_dokploy_target_definition(
@@ -243,8 +302,81 @@ def resolve_control_plane_dokploy_source_file(control_plane_root: Path) -> Path:
     return control_plane_root / DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
 
 
+def resolve_control_plane_dokploy_target_ids_file(
+    control_plane_root: Path,
+    *,
+    source_file_path: Path | None = None,
+) -> Path:
+    configured_target_ids_file = os.environ.get(CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR, "").strip()
+    if configured_target_ids_file:
+        candidate_path = Path(configured_target_ids_file)
+        if not candidate_path.is_absolute():
+            candidate_path = control_plane_root / candidate_path
+        return candidate_path
+    configured_source_file = os.environ.get(CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR, "").strip()
+    if configured_source_file and source_file_path is not None:
+        return source_file_path.parent / DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE.name
+    return control_plane_root / DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
+
+
 def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> DokploySourceOfTruth:
-    return load_dokploy_source_of_truth(resolve_control_plane_dokploy_source_file(control_plane_root))
+    source_file_path = resolve_control_plane_dokploy_source_file(control_plane_root)
+    target_ids_file_path = resolve_control_plane_dokploy_target_ids_file(
+        control_plane_root,
+        source_file_path=source_file_path,
+    )
+    configured_target_ids_file = os.environ.get(CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR, "").strip()
+    should_load_target_ids = bool(configured_target_ids_file) or target_ids_file_path.exists()
+    return load_dokploy_source_of_truth(
+        source_file_path,
+        target_ids_file_path=target_ids_file_path if should_load_target_ids else None,
+    )
+
+
+def _apply_dokploy_target_id_catalog(
+    payload: dict[str, object],
+    *,
+    target_id_catalog: DokployTargetIdCatalog,
+) -> dict[str, object]:
+    targets_payload = payload.get("targets")
+    if targets_payload is None:
+        targets_list: list[object] = []
+    elif isinstance(targets_payload, list):
+        targets_list = list(targets_payload)
+    else:
+        raise ValueError("Expected dokploy source-of-truth targets to be an array of tables")
+
+    override_map = {
+        (target.context.strip(), target.instance.strip()): target.target_id
+        for target in target_id_catalog.targets
+    }
+    remaining_routes = set(override_map)
+    merged_targets: list[object] = []
+    for raw_target in targets_list:
+        if not isinstance(raw_target, dict):
+            raise ValueError("Expected dokploy source-of-truth targets to be tables")
+        target_payload = dict(raw_target)
+        context_name = str(target_payload.get("context") or "").strip()
+        instance_name = str(target_payload.get("instance") or "").strip()
+        target_route = (context_name, instance_name)
+        override_target_id = override_map.get(target_route)
+        if override_target_id is not None:
+            target_payload["target_id"] = override_target_id
+            remaining_routes.discard(target_route)
+        merged_targets.append(target_payload)
+
+    if remaining_routes:
+        unknown_routes = ", ".join(
+            f"{context_name}/{instance_name}" for context_name, instance_name in sorted(remaining_routes)
+        )
+        raise ValueError(
+            "Dokploy target-id catalog contains route(s) that are not present in the source-of-truth: "
+            f"{unknown_routes}"
+        )
+
+    merged_payload = dict(payload)
+    merged_payload["targets"] = merged_targets
+    return merged_payload
 
 
 def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:

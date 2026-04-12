@@ -10,6 +10,43 @@ from control_plane import dokploy as control_plane_dokploy
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_read_control_plane_dokploy_source_of_truth_merges_operator_local_target_ids(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            source_file = control_plane_root / "config" / "dokploy.toml"
+            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+            target_ids_file.write_text(
+                """
+schema_version = 1
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                    control_plane_root=control_plane_root
+                )
+
+        self.assertEqual(len(source_of_truth.targets), 1)
+        self.assertEqual(source_of_truth.targets[0].target_id, "compose-123")
+
     def test_read_control_plane_dokploy_source_of_truth_prefers_explicit_source_file(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -71,6 +108,36 @@ target_type = "compose"
 
         self.assertIn("requires non-empty target_id", str(raised_error.exception))
 
+    def test_read_control_plane_dokploy_source_of_truth_fails_closed_when_explicit_target_id_catalog_is_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            source_file = control_plane_root / "config" / "dokploy.toml"
+            missing_target_ids_file = control_plane_root / "tmp" / "dokploy-targets.toml"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR: str(missing_target_ids_file),
+                },
+                clear=True,
+            ):
+                with self.assertRaises(click.ClickException) as raised_error:
+                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
+
+        self.assertIn("Dokploy target-id catalog file not found", str(raised_error.exception))
+
     def test_read_control_plane_dokploy_source_of_truth_rejects_duplicate_context_instance_targets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -106,6 +173,41 @@ target_type = "compose"
                     control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
 
         self.assertIn("Duplicate Dokploy target definition for opw/prod", str(raised_error.exception))
+
+    def test_read_control_plane_dokploy_source_of_truth_rejects_unknown_target_id_override_routes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            source_file = control_plane_root / "config" / "dokploy.toml"
+            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+            target_ids_file.write_text(
+                """
+schema_version = 1
+
+[[targets]]
+context = "cm"
+instance = "prod"
+target_id = "compose-456"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaises(click.ClickException) as raised_error:
+                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
+
+        self.assertIn("route(s) that are not present in the source-of-truth: cm/prod", str(raised_error.exception))
 
     def test_read_dokploy_config_prefers_control_plane_env_file(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

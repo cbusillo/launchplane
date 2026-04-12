@@ -23,11 +23,13 @@ and environment operations.
 
 ```bash
 cp .env.example .env
+cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run control-plane --help
 uv run python -m unittest
 ```
 
-The default Dokploy target catalog lives in `config/dokploy.toml`.
+The tracked Dokploy route catalog lives in `config/dokploy.toml`, with
+operator-local target IDs supplied through `config/dokploy-targets.toml`.
 
 ## Docs
 
