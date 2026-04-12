@@ -15,11 +15,13 @@ dist/
 .env
 .env.*
 !.env.example
+config/runtime-environments.toml
 
 # Local state and scratch artifacts
 state/
 tmp/*
 !tmp/README.md
+scratch/
 
 # Tooling internals
 .code/

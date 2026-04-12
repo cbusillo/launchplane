@@ -26,12 +26,8 @@ def _resolve_destination_health(
     if destination_health.status == "skipped":
         return destination_health
     if not wait:
-        return HealthcheckEvidence(
-            verified=False,
-            urls=destination_health.urls,
-            timeout_seconds=destination_health.timeout_seconds,
-            status="pending",
-        )
+        return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
+                                   status="pending")
     if deployment_status == "pass":
         return HealthcheckEvidence(
             verified=True,
@@ -39,12 +35,8 @@ def _resolve_destination_health(
             timeout_seconds=destination_health.timeout_seconds,
             status="pass",
         )
-    return HealthcheckEvidence(
-        verified=False,
-        urls=destination_health.urls,
-        timeout_seconds=destination_health.timeout_seconds,
-        status="fail",
-    )
+    return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
+                               status="fail")
 
 
 def _resolve_post_deploy_update(
@@ -59,8 +51,8 @@ def _resolve_post_deploy_update(
             attempted=True,
             status="pending",
             detail=(
-                "Odoo-specific post-deploy update is pending through the canonical "
-                "odoo-ai platform update workflow."
+                "Odoo-specific post-deploy update is pending through the native "
+                "control-plane Dokploy schedule workflow."
             ),
         )
     if deployment_status == "pass":
@@ -68,15 +60,12 @@ def _resolve_post_deploy_update(
             attempted=True,
             status="pass",
             detail=(
-                "Odoo-specific post-deploy update completed through the canonical "
-                "odoo-ai platform update workflow."
+                "Odoo-specific post-deploy update completed through the native "
+                "control-plane Dokploy schedule workflow."
             ),
         )
     return PostDeployUpdateEvidence(
-        attempted=False,
-        status="skipped",
-        detail="Odoo-specific post-deploy update did not run because deploy execution did not complete successfully.",
-    )
+        detail="Odoo-specific post-deploy update did not run because deploy execution did not complete successfully.")
 
 
 def build_deployment_record(
