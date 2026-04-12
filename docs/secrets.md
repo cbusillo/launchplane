@@ -13,6 +13,8 @@ title: Secrets
 - Keep real values in the control-plane repo's untracked `.env` by default.
 - Local runtime environment truth may live in the control-plane repo's
   untracked `config/runtime-environments.toml`.
+- Live Dokploy `target_id` values belong in the control-plane repo's untracked
+  `config/dokploy-targets.toml`.
 - `DOKPLOY_HOST` and `DOKPLOY_TOKEN` may also be provided through the current
   process environment.
 - Optional ship-mode overrides such as `DOKPLOY_SHIP_MODE` and
@@ -26,6 +28,8 @@ title: Secrets
 - Never commit `.env`, alternate secret files, or rendered env artifacts.
 - Never commit `config/runtime-environments.toml`; keep the real file
   untracked and start from `config/runtime-environments.toml.example`.
+- Never commit `config/dokploy-targets.toml`; keep the real file untracked and
+  start from `config/dokploy-targets.toml.example`.
 - Do not rely on a separate code repo's `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
 
@@ -43,5 +47,6 @@ title: Secrets
 
 ```bash
 cp .env.example .env
+cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 cp config/runtime-environments.toml.example config/runtime-environments.toml
 ```

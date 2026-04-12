@@ -51,12 +51,18 @@ title: Operations
   control-plane env values, so operators do not need any legacy
   request-export step or sibling code-repo path just to plan a control-plane
   workflow.
-- Control-plane-owned Dokploy target definitions live in `config/dokploy.toml`
-  by default. Set `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` when an operator
-  needs an alternate local catalog path.
+- Control-plane-owned Dokploy route definitions live in tracked
+  `config/dokploy.toml` by default.
+- Live Dokploy `target_id` values come from untracked
+  `config/dokploy-targets.toml` by default. Set
+  `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` when an operator needs an
+  alternate local target-id catalog path.
+- Set `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` when an operator needs an
+  alternate local route catalog path.
 - Dokploy source-of-truth loading fails closed if a target entry is
-  missing `target_id` or if multiple entries claim the same
-  `context`/`instance` route.
+  missing `target_id`, if multiple entries claim the same `context`/`instance`
+  route, or if the operator-local target-id catalog contains routes that are
+  not present in the tracked source-of-truth.
 - Artifact manifests handed off from upstream build/export steps should be
   persisted here before later workflows depend on them.
 - Ship execution should persist a deployment record here before execution

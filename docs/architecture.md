@@ -36,9 +36,13 @@ Code and local-DX repos own:
   and the live ship execution boundary.
 - Direct `ship` ownership also enters through this repo, and Dokploy target
   resolution, credentials, and trigger/wait execution run here.
-- The Dokploy target catalog lives in this repo under
+- The tracked Dokploy route catalog lives in this repo under
   `config/dokploy.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
+  paths.
+- Live Dokploy `target_id` values load from operator-local
+  `config/dokploy-targets.toml` by default, with an explicit
+  `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` override for alternate local
   paths.
 - The Odoo-specific compose post-deploy update runs natively here via
   a control-plane-owned Dokploy schedule workflow, so deploy execution no

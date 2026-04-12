@@ -15,6 +15,7 @@ dist/
 .env
 .env.*
 !.env.example
+config/dokploy-targets.toml
 config/runtime-environments.toml
 
 # Local state and scratch artifacts

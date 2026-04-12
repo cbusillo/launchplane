@@ -1,0 +1,31 @@
+schema_version = 1
+
+[[targets]]
+context = "cm"
+instance = "dev"
+target_id = "cm-dev-compose-id"
+
+[[targets]]
+context = "cm"
+instance = "testing"
+target_id = "cm-testing-compose-id"
+
+[[targets]]
+context = "cm"
+instance = "prod"
+target_id = "cm-prod-compose-id"
+
+[[targets]]
+context = "opw"
+instance = "dev"
+target_id = "opw-dev-compose-id"
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "opw-testing-compose-id"
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "opw-prod-compose-id"
