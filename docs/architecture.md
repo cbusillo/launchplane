@@ -4,7 +4,7 @@ title: Architecture
 
 ## Purpose
 
-- Keep long-term release ownership out of `odoo-ai`.
+- Keep long-term release ownership out of code and local-DX repos.
 - Make artifact identity and promotion records first-class control-plane data.
 - Own promotion and deploy orchestration behind explicit contracts.
 
@@ -22,7 +22,7 @@ title: Architecture
 - backup and restore control-plane workflows
 - control-plane-owned operator secrets for deploy/runtime orchestration
 
-`odoo-ai` owns:
+Code and local-DX repos own:
 
 - addon code
 - local developer workflows
@@ -42,7 +42,7 @@ title: Architecture
   paths.
 - The Odoo-specific compose post-deploy update runs natively here via
   a control-plane-owned Dokploy schedule workflow, so deploy execution no
-  longer shells back into `odoo-ai` at runtime.
+  longer shells back into another repo at runtime.
 - Deployment records persist post-deploy update evidence as first-class
   control-plane state instead of hiding that work behind another repo's CLI.
 - Current environment inventory is also persisted here and refreshed by
@@ -56,7 +56,7 @@ title: Architecture
 - When the control plane cannot resolve a stored artifact manifest for ship
   execution, it fails closed instead of falling back to branch-sync or
   repo/tag image selection.
-- Any `odoo-ai` handoff seam must fail closed when this repo cannot accept
+- Any upstream handoff seam must fail closed when this repo cannot accept
   control.
 - Any temporary wrapper logic should stay explicit and removable.
 - Immutable promotion ownership includes validating a stored backup-gate

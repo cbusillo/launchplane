@@ -21,7 +21,8 @@ Treat this file as the launch checklist for every Codex session in
 ## Operating Guardrails
 
 - Prefer fail-closed behavior over silent fallback.
-- Do not reintroduce long-term release ownership back into `odoo-ai`.
+- Do not reintroduce long-term release ownership back into code or local-DX
+  repos.
 - Keep wrapper behavior transitional and document removal criteria.
 - Never commit secrets or operator-local overrides.
 - Update docs in the same change when behavior or ownership changes.
@@ -47,11 +48,11 @@ Treat this file as the launch checklist for every Codex session in
   - environment inventory
   - promotion and deploy orchestration
   - backup and restore control-plane workflows
-- `odoo-ai` owns:
+- Tenant/shared/devkit repos own:
   - addon code
   - local DX
   - Odoo-specific test and validation workflows
-  - thin compatibility wrappers during migration
+  - any remaining migration wrappers that have not been deleted yet
 
 ## Reference Handles
 

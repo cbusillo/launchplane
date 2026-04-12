@@ -20,7 +20,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store = FilesystemRecordStore(state_dir=state_dir)
             manifest = ArtifactIdentityManifest(
                 artifact_id="artifact-20260410-f45db648",
-                odoo_ai_commit="f45db648",
+                source_commit="f45db648",
                 enterprise_base_digest="sha256:enterprise123",
                 image=ArtifactImageReference(
                     repository="ghcr.io/cbusillo/odoo-private",
@@ -227,7 +227,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    deployment_id="delegated-odoo-ai-ship",
+                    deployment_id="delegated-compose-ship",
                     status="pass",
                     started_at="2026-04-10T18:22:31Z",
                     finished_at="2026-04-10T18:24:00Z",
@@ -235,7 +235,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 post_deploy_update={
                     "attempted": True,
                     "status": "pass",
-                    "detail": "Odoo-specific post-deploy update completed through the canonical odoo-ai platform update workflow.",
+                    "detail": "Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
                 },
                 destination_health={
                     "verified": True,
@@ -249,7 +249,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             loaded_record = store.read_deployment_record(record.record_id)
             self.assertTrue(written_path.exists())
             self.assertEqual(loaded_record.record_id, record.record_id)
-            self.assertEqual(loaded_record.deploy.deployment_id, "delegated-odoo-ai-ship")
+            self.assertEqual(loaded_record.deploy.deployment_id, "delegated-compose-ship")
             self.assertEqual(loaded_record.post_deploy_update.status, "pass")
             self.assertEqual(loaded_record.destination_health.status, "pass")
             self.assertEqual(loaded_record.resolved_target.target_id, "compose-123")
@@ -325,7 +325,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 "deployment-20260411T182231Z-opw-prod",
             ])
 
-    def test_artifacts_ingest_odoo_ai_writes_manifest(self) -> None:
+    def test_artifacts_ingest_writes_manifest(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -334,7 +334,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             input_file.write_text(
                 ArtifactIdentityManifest(
                     artifact_id="artifact-sha256-image456",
-                    odoo_ai_commit="f45db648",
+                    source_commit="f45db648",
                     enterprise_base_digest="sha256:enterprise123",
                     addon_sources=({"repository": "cbusillo/disable_odoo_online", "ref": "main"},),
                     image=ArtifactImageReference(
@@ -350,7 +350,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 main,
                 [
                     "artifacts",
-                    "ingest-odoo-ai",
+                    "ingest",
                     "--state-dir",
                     str(state_dir),
                     "--input-file",
@@ -432,7 +432,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 post_deploy_update={
                     "attempted": True,
                     "status": "pass",
-                    "detail": "Odoo-specific post-deploy update completed through the canonical odoo-ai platform update workflow.",
+                    "detail": "Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
                 },
                 destination_health={
                     "verified": True,

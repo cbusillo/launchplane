@@ -26,7 +26,7 @@ title: Secrets
 - Never commit `.env`, alternate secret files, or rendered env artifacts.
 - Never commit `config/runtime-environments.toml`; keep the real file
   untracked and start from `config/runtime-environments.toml.example`.
-- Do not rely on `odoo-ai`'s `.env` for control-plane-owned secrets.
+- Do not rely on a separate code repo's `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
 
 ## Local Runtime Contract

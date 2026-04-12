@@ -5,7 +5,7 @@ title: Operations
 ## Bootstrap Commands
 
 - `uv run control-plane artifacts write --input-file <path>`
-- `uv run control-plane artifacts ingest-odoo-ai --input-file <path>`
+- `uv run control-plane artifacts ingest --input-file <path>`
 - `uv run control-plane artifacts show --artifact-id <artifact-id>`
 - `uv run control-plane backup-gates list --context <ctx> --instance <instance>`
 - `uv run control-plane backup-gates write --input-file <path>`
@@ -43,21 +43,22 @@ title: Operations
   control-plane-owned path.
 - `promote resolve` renders the typed artifact-backed promotion request
   directly from `odoo-control-plane`, so promotion planning does not depend on
-  any `odoo-ai` request-export step.
+  any legacy request-export step from a code repo.
 - Direct `ship` enters here first as an artifact-backed workflow, not a
   branch-sync fallback.
 - `ship resolve` renders the typed artifact-backed ship request directly from
   `odoo-control-plane` by reading this repo's Dokploy source-of-truth and
-  control-plane env values, so operators do not need any `odoo-ai`
-  request-export step or repo path just to plan a control-plane workflow.
+  control-plane env values, so operators do not need any legacy
+  request-export step or sibling code-repo path just to plan a control-plane
+  workflow.
 - Control-plane-owned Dokploy target definitions live in `config/dokploy.toml`
   by default. Set `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` when an operator
   needs an alternate local catalog path.
 - Dokploy source-of-truth loading fails closed if a target entry is
   missing `target_id` or if multiple entries claim the same
   `context`/`instance` route.
-- Artifact manifests handed off from `odoo-ai` should be persisted here before
-  later workflows depend on them.
+- Artifact manifests handed off from upstream build/export steps should be
+  persisted here before later workflows depend on them.
 - Ship execution should persist a deployment record here before execution
   begins and after final status is known so deploy history lives in
   control-plane state instead of transient process output.
@@ -105,13 +106,14 @@ title: Operations
   of falling back to branch sync or repo/tag image selection.
 - Control-plane-owned Dokploy credentials come from the control-plane
   repo's untracked `.env` by default, or explicit process env overrides,
-  instead of piggybacking on `odoo-ai`'s `.env`.
+  instead of piggybacking on a separate code repo's `.env`.
 - Promote fails closed unless a stored backup-gate record explicitly proves
   the destination environment passed the pre-deploy backup gate.
 
 ## Boundary Rules
 
-- Keep wrapper logic in `odoo-ai` thin and disposable.
-- Do not add new long-term remote release ownership back into `odoo-ai`.
+- Keep wrapper logic in code repos thin and disposable.
+- Do not add new long-term remote release ownership back into code or local-DX
+  repos.
 - Any remaining cross-repo handoff must stay explicit, narrow, and fail
   closed.

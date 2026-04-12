@@ -6,11 +6,11 @@ and environment operations.
 ## Purpose
 
 - Own artifact, backup-gate, deployment, promotion, and inventory records
-  outside `odoo-ai`.
+  outside the code and local-DX repos.
 - Own ship and promotion orchestration behind explicit control-plane
   contracts.
-- Keep `odoo-ai` focused on code and local DX, with only explicit artifact and
-  operator handoffs between repos.
+- Keep code and local DX in `odoo-devkit`, tenant repos, and shared-addons,
+  with only explicit artifact and operator handoffs into this repo.
 
 ## Bootstrap Scope
 
