@@ -13,6 +13,7 @@ title: Architecture
 `odoo-control-plane` owns:
 
 - artifact manifests
+- backup-gate records
 - promotion records
 - deployment records
 - environment inventory
@@ -26,37 +27,46 @@ title: Architecture
 - addon code
 - local developer workflows
 - Odoo-specific validation
-- the remaining explicit handoff seams
+- explicit artifact and operator handoff surfaces only
 
-## Transition Direction
+## Current Contract
 
-- The first live workflow owned here is `promote`.
-- `promote` now accepts the native artifact-backed promotion contract and uses
-  `odoo-ai` only for read-only ship-request export while this repo owns the
-  promotion record and the live ship execution boundary.
-- Direct `ship` ownership now also enters through this repo, and Dokploy
-  target resolution, credentials, and trigger/wait execution now run here.
-- Phase 5 closes with a single explicit cross-repo runtime seam: the
-  Odoo-specific post-deploy update. That step remains in `odoo-ai` on purpose
-  and runs through the canonical `odoo-ai platform update` path rather than a
-  hidden compatibility worker.
-- Deployment records now persist post-deploy update evidence as well, so the
-  remaining seam is visible in control-plane state instead of being implicit in
-  process output.
-- Current environment inventory is now also persisted here and refreshed by
+- `promote` accepts the native artifact-backed promotion contract and uses this
+  repo's own ship-request resolution while this repo owns the promotion record
+  and the live ship execution boundary.
+- Direct `ship` ownership also enters through this repo, and Dokploy target
+  resolution, credentials, and trigger/wait execution run here.
+- The Dokploy target catalog lives in this repo under
+  `config/dokploy.toml` by default, with an explicit
+  `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
+  paths.
+- The Odoo-specific compose post-deploy update runs natively here via
+  a control-plane-owned Dokploy schedule workflow, so deploy execution no
+  longer shells back into `odoo-ai` at runtime.
+- Deployment records persist post-deploy update evidence as first-class
+  control-plane state instead of hiding that work behind another repo's CLI.
+- Current environment inventory is also persisted here and refreshed by
   successful waited `ship`/`promote` flows, so this repo owns both append-only
   deploy history and the replace-in-place current-state view.
-- Ship execution now prefers immutable artifact image references at runtime by
+- Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
-- Native ship requests are now artifact-backed from the start and no longer
+- Native ship requests are artifact-backed from the start and no longer
   carry branch-sync metadata through the handoff or execution path.
 - When the control plane cannot resolve a stored artifact manifest for ship
-  execution, it now fails closed instead of falling back to branch-sync or
+  execution, it fails closed instead of falling back to branch-sync or
   repo/tag image selection.
-- The remaining `odoo-ai` handoff seams must fail closed when this repo cannot
-  accept control.
+- Any `odoo-ai` handoff seam must fail closed when this repo cannot accept
+  control.
 - Any temporary wrapper logic should stay explicit and removable.
+- Immutable promotion ownership includes validating a stored backup-gate
+  record for the destination environment before ship execution begins.
+- Operator-facing status/history reads should also terminate here by composing
+  inventory, deployment, promotion, and backup-gate records into a control-
+  plane-owned read model.
+- Planning-time ship request rendering, Dokploy target source-of-truth
+  ownership, promotion-request rendering, deploy execution, and compose
+  post-deploy update all terminate here.
 
 ## Runtime Shape
 

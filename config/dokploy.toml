@@ -1,0 +1,120 @@
+schema_version = 2
+
+[defaults]
+target_type = "compose"
+source_git_ref = "origin/main"
+
+[projects.primary]
+project_name = "odoo-ai"
+
+[profiles.odoo]
+project = "primary"
+healthcheck_enabled = true
+healthcheck_path = "/web/health"
+
+[profiles.odoo.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL_FREEZE = "True"
+ODOO_WEB_COMMAND = "python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+
+[profiles.cm]
+extends = "odoo"
+
+[profiles.opw]
+extends = "odoo"
+deploy_timeout_seconds = 7200
+healthcheck_timeout_seconds = 600
+
+[profiles.opw.env]
+OPENUPGRADE_ENABLED = "True"
+OPENUPGRADE_ADDON_REPOSITORY = "OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
+OPENUPGRADELIB_INSTALL_SPEC = "git+https://github.com/OCA/openupgradelib.git@46d66ff5ed6a99481f84d3c79fc6e50835da7286"
+
+[[targets]]
+profile = "cm"
+context = "cm"
+instance = "dev"
+target_id = "7qlBWu2CYpGMMr5ssaNMa"
+git_branch = "cm-dev"
+require_test_gate = false
+require_prod_gate = false
+domains = ["cm-dev.shinycomputers.com"]
+
+[targets.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://cm-dev.shinycomputers.com"
+ENV_OVERRIDE_AUTHENTIK__BASE_URL = "https://authentik.cellmechanic.com"
+ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "vTpPOs9seII8a0xT5jODra0RQTSBenlj1yDDZXI7"
+ENV_OVERRIDE_AUTHENTIK__DISABLE_PROVIDERS = "Odoo.com"
+ENV_OVERRIDE_AUTHENTIK__GROUP_CLAIM = "groups"
+
+[[targets]]
+profile = "cm"
+context = "cm"
+instance = "testing"
+target_id = "y4uXgXQ6zwjWz8_Na7pfq"
+git_branch = "cm-testing"
+require_test_gate = true
+require_prod_gate = false
+domains = ["cm-testing.shinycomputers.com"]
+
+[targets.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://cm-testing.shinycomputers.com"
+ENV_OVERRIDE_AUTHENTIK__BASE_URL = "https://authentik.cellmechanic.com"
+ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "E2Gxez3L0NMdP2uKNjXtOAXpkXcmG1NG2JRvPhMZ"
+ENV_OVERRIDE_AUTHENTIK__DISABLE_PROVIDERS = "Odoo.com"
+ENV_OVERRIDE_AUTHENTIK__GROUP_CLAIM = "groups"
+
+[[targets]]
+profile = "cm"
+context = "cm"
+instance = "prod"
+target_id = "b1JKIRDxamsU7FpOcGaWV"
+git_branch = "cm-prod"
+require_test_gate = false
+require_prod_gate = true
+domains = ["cm-prod.shinycomputers.com"]
+
+[targets.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://odoo.cellmechanic.com"
+ENV_OVERRIDE_AUTHENTIK__BASE_URL = "https://authentik.cellmechanic.com"
+ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "eFRxxfLhxme4jM3dqaTjNGTsVAqn97lB04zo9Q7x"
+ENV_OVERRIDE_AUTHENTIK__DISABLE_PROVIDERS = "Odoo.com"
+ENV_OVERRIDE_AUTHENTIK__GROUP_CLAIM = "groups"
+
+[[targets]]
+profile = "opw"
+context = "opw"
+instance = "dev"
+target_id = "wYyu60W0ZpcVzhmPGOoit"
+git_branch = "opw-dev"
+require_test_gate = false
+require_prod_gate = false
+domains = ["opw-dev.shinycomputers.com"]
+
+[targets.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-dev.shinycomputers.com"
+
+[[targets]]
+profile = "opw"
+context = "opw"
+instance = "testing"
+target_id = "_z10NI-KN71z53dGuF_45"
+git_branch = "opw-testing"
+require_test_gate = true
+require_prod_gate = false
+domains = ["opw-testing.shinycomputers.com"]
+
+[targets.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-testing.shinycomputers.com"
+
+[[targets]]
+profile = "opw"
+context = "opw"
+instance = "prod"
+target_id = "bvyhVDY4D_N_VULCssLt2"
+git_branch = "opw-prod"
+require_test_gate = false
+require_prod_gate = true
+domains = ["opw-prod.shinycomputers.com"]
+
+[targets.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-prod.shinycomputers.com"

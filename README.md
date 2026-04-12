@@ -5,14 +5,18 @@ and environment operations.
 
 ## Purpose
 
-- Own artifact and promotion records outside `odoo-ai`.
-- Become the long-term home for promotion and deploy orchestration.
-- Keep `odoo-ai` focused on code, local DX, and the remaining explicit handoff seams.
+- Own artifact, backup-gate, deployment, promotion, and inventory records
+  outside `odoo-ai`.
+- Own ship and promotion orchestration behind explicit control-plane
+  contracts.
+- Keep `odoo-ai` focused on code and local DX, with only explicit artifact and
+  operator handoffs between repos.
 
 ## Bootstrap Scope
 
 - File-backed artifact manifests and promotion records.
-- A minimal CLI for record persistence and promotion recording.
+- A CLI for records, inventory, backup gates, and ship/promotion planning and
+  execution.
 - Repo-local docs, policies, CI, and dependency automation.
 
 ## Quick Start
@@ -22,6 +26,8 @@ cp .env.example .env
 uv run control-plane --help
 uv run python -m unittest
 ```
+
+The default Dokploy target catalog lives in `config/dokploy.toml`.
 
 ## Docs
 

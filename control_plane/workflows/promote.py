@@ -15,6 +15,7 @@ def build_promotion_record(
     *,
     record_id: str,
     artifact_id: str,
+    backup_record_id: str = "",
     context_name: str,
     from_instance_name: str,
     to_instance_name: str,
@@ -29,6 +30,7 @@ def build_promotion_record(
     return PromotionRecord(
         record_id=record_id,
         artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+        backup_record_id=backup_record_id,
         context=context_name,
         from_instance=from_instance_name,
         to_instance=to_instance_name,
@@ -77,12 +79,8 @@ def _resolve_destination_health(
     if destination_health.status == "skipped":
         return destination_health
     if not wait:
-        return HealthcheckEvidence(
-            verified=False,
-            urls=destination_health.urls,
-            timeout_seconds=destination_health.timeout_seconds,
-            status="pending",
-        )
+        return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
+                                   status="pending")
     if deployment_status == "pass":
         return HealthcheckEvidence(
             verified=True,
@@ -90,12 +88,8 @@ def _resolve_destination_health(
             timeout_seconds=destination_health.timeout_seconds,
             status="pass",
         )
-    return HealthcheckEvidence(
-        verified=False,
-        urls=destination_health.urls,
-        timeout_seconds=destination_health.timeout_seconds,
-        status="fail",
-    )
+    return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
+                               status="fail")
 
 
 def build_executed_promotion_record(
@@ -108,6 +102,7 @@ def build_executed_promotion_record(
     return PromotionRecord(
         record_id=record_id,
         artifact_identity=ArtifactIdentityReference(artifact_id=request.artifact_id),
+        backup_record_id=request.backup_record_id,
         context=request.context,
         from_instance=request.from_instance,
         to_instance=request.to_instance,

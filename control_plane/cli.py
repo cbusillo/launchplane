@@ -1,5 +1,4 @@
 import json
-import os
 import subprocess
 import time
 from pathlib import Path
@@ -9,12 +8,26 @@ from urllib.request import Request, urlopen
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence, PromotionRecord, PromotionRequest
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.promotion_record import (
+    BackupGateEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+    PromotionRecord,
+    PromotionRequest,
+    ReleaseStatus,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.ui import (
+    render_environment_status_dashboard,
+    render_inventory_overview_dashboard,
+)
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
     build_executed_promotion_record,
@@ -28,27 +41,19 @@ from control_plane.workflows.ship import (
 )
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
 
 
 def _store(state_dir: Path) -> FilesystemRecordStore:
     return FilesystemRecordStore(state_dir=state_dir)
 
 
+def _control_plane_root() -> Path:
+    return Path(__file__).resolve().parent.parent
+
+
 def _load_json_file(input_file: Path) -> dict[str, object]:
     return json.loads(input_file.read_text(encoding="utf-8"))
-
-
-def _run_command(command: list[str], *, cwd: Path | None = None) -> None:
-    command_env = dict(os.environ)
-    command_env.pop("VIRTUAL_ENV", None)
-    subprocess.run(command, check=True, env=command_env, cwd=cwd)
-
-
-def _run_command_capture(command: list[str], *, cwd: Path | None = None) -> str:
-    command_env = dict(os.environ)
-    command_env.pop("VIRTUAL_ENV", None)
-    result = subprocess.run(command, check=True, env=command_env, cwd=cwd, capture_output=True, text=True)
-    return result.stdout
 
 
 def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
@@ -73,37 +78,45 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
     if not request.wait or not request.verify_health:
         return
     if not request.destination_health.urls:
+        source_file = control_plane_dokploy.resolve_control_plane_dokploy_source_file(
+            _control_plane_root()
+        )
         raise click.ClickException(
             "Healthcheck verification requested but no target domain/URL was resolved. "
-            "Define domains in platform/dokploy.toml or disable with --no-verify-health."
+            f"Define domains or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL in {source_file} or disable with --no-verify-health."
         )
     if request.destination_health.timeout_seconds is None:
         raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
     for healthcheck_url in request.destination_health.urls:
-        _wait_for_ship_healthcheck(url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds)
+        _wait_for_ship_healthcheck(
+            url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds
+        )
 
 
 def _resolve_dokploy_target(
     *,
-    odoo_ai_root: Path,
     request: ShipRequest,
 ) -> tuple[ResolvedTargetEvidence, int]:
-    source_of_truth = control_plane_dokploy.load_dokploy_source_of_truth(odoo_ai_root / "platform" / "dokploy.toml")
+    control_plane_root = _control_plane_root()
+    source_file = control_plane_dokploy.resolve_control_plane_dokploy_source_file(
+        control_plane_root
+    )
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
     target_definition = control_plane_dokploy.find_dokploy_target_definition(
         source_of_truth,
         context_name=request.context,
         instance_name=request.instance,
     )
     if target_definition is None:
-        raise click.ClickException(f"No Dokploy target definition found for {request.context}/{request.instance}.")
+        raise click.ClickException(
+            f"No Dokploy target definition found for {request.context}/{request.instance} in {source_file}."
+        )
     if target_definition.target_type != request.target_type:
         raise click.ClickException(
-            "Ship request target_type does not match platform/dokploy.toml. "
+            f"Ship request target_type does not match {source_file}. "
             f"Request={request.target_type} configured={target_definition.target_type}."
-        )
-    if not target_definition.target_id.strip():
-        raise click.ClickException(
-            f"Dokploy target {request.context}/{request.instance} is missing target_id in platform/dokploy.toml."
         )
     resolved_target = ResolvedTargetEvidence(
         target_type=target_definition.target_type,
@@ -117,15 +130,292 @@ def _resolve_dokploy_target(
     return resolved_target, deploy_timeout_seconds
 
 
+def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
+    if configured_ship_mode == "auto":
+        return f"dokploy-{target_type}-api"
+    return f"dokploy-{configured_ship_mode}-api"
+
+
+def _load_control_plane_environment_values() -> dict[str, str]:
+    return control_plane_dokploy.read_control_plane_environment_values(
+        control_plane_root=_control_plane_root(),
+    )
+
+
+def _require_dokploy_target_definition(
+    *,
+    source_file: Path,
+    source_of_truth: control_plane_dokploy.DokploySourceOfTruth,
+    context_name: str,
+    instance_name: str,
+    operation_name: str,
+) -> control_plane_dokploy.DokployTargetDefinition:
+    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if target_definition is None:
+        raise click.ClickException(
+            f"{operation_name} target {context_name}/{instance_name} is missing from {source_file}."
+        )
+    return target_definition
+
+
+def _resolve_native_ship_request(
+    *,
+    context_name: str,
+    instance_name: str,
+    artifact_id: str,
+    source_git_ref: str,
+    wait: bool,
+    timeout_override_seconds: int | None,
+    verify_health: bool,
+    health_timeout_override_seconds: int | None,
+    dry_run: bool,
+    no_cache: bool,
+    allow_dirty: bool,
+) -> ShipRequest:
+    normalized_artifact_id = artifact_id.strip()
+    if not normalized_artifact_id:
+        raise click.ClickException("ship request requires artifact_id")
+
+    control_plane_root = _control_plane_root()
+    source_file = control_plane_dokploy.resolve_control_plane_dokploy_source_file(
+        control_plane_root
+    )
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = _require_dokploy_target_definition(
+        source_file=source_file,
+        source_of_truth=source_of_truth,
+        context_name=context_name,
+        instance_name=instance_name,
+        operation_name="Ship",
+    )
+
+    environment_values = _load_control_plane_environment_values()
+    resolved_source_git_ref = (
+        source_git_ref.strip()
+        or target_definition.source_git_ref.strip()
+        or DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF
+    )
+    destination_health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
+        health_timeout_override_seconds=health_timeout_override_seconds,
+        target_definition=target_definition,
+    )
+    destination_healthcheck_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
+        target_definition=target_definition,
+        environment_values=environment_values,
+    )
+    should_verify_health = verify_health and wait
+    if should_verify_health and not destination_healthcheck_urls:
+        raise click.ClickException(
+            "Healthcheck verification requested but no target domain/URL was resolved. "
+            f"Define domains or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL in {source_file} or disable with --no-verify-health."
+        )
+
+    configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
+        context_name,
+        instance_name,
+        environment_values,
+    )
+    deploy_mode = _resolve_deploy_mode(
+        configured_ship_mode=configured_ship_mode,
+        target_type=target_definition.target_type,
+    )
+
+    try:
+        return ShipRequest(
+            artifact_id=normalized_artifact_id,
+            context=context_name,
+            instance=instance_name,
+            source_git_ref=resolved_source_git_ref,
+            target_name=target_definition.target_name.strip() or f"{context_name}-{instance_name}",
+            target_type=target_definition.target_type,
+            deploy_mode=deploy_mode,
+            wait=wait,
+            timeout_seconds=timeout_override_seconds,
+            verify_health=should_verify_health,
+            health_timeout_seconds=destination_health_timeout_seconds,
+            dry_run=dry_run,
+            no_cache=no_cache,
+            allow_dirty=allow_dirty,
+            destination_health=HealthcheckEvidence(
+                urls=destination_healthcheck_urls,
+                timeout_seconds=destination_health_timeout_seconds,
+                status="pending" if should_verify_health else "skipped",
+            ),
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+
+
+def _resolve_ship_request_for_promotion(
+    *,
+    request: PromotionRequest,
+) -> ShipRequest:
+    ship_request = _resolve_native_ship_request(
+        context_name=request.context,
+        instance_name=request.to_instance,
+        artifact_id=request.artifact_id,
+        source_git_ref=request.source_git_ref,
+        wait=request.wait,
+        timeout_override_seconds=request.timeout_seconds,
+        verify_health=request.verify_health,
+        health_timeout_override_seconds=request.health_timeout_seconds,
+        dry_run=request.dry_run,
+        no_cache=request.no_cache,
+        allow_dirty=request.allow_dirty,
+    )
+    if request.target_type != ship_request.target_type:
+        raise click.ClickException(
+            "Promotion request target_type does not match control-plane Dokploy source-of-truth. "
+            f"Request={request.target_type} configured={ship_request.target_type}."
+        )
+    if request.target_name != ship_request.target_name:
+        raise click.ClickException(
+            "Promotion request target_name does not match control-plane Dokploy source-of-truth. "
+            f"Request={request.target_name} configured={ship_request.target_name}."
+        )
+    if request.deploy_mode != ship_request.deploy_mode:
+        raise click.ClickException(
+            "Promotion request deploy_mode does not match resolved Dokploy ship mode. "
+            f"Request={request.deploy_mode} configured={ship_request.deploy_mode}."
+        )
+    return ship_request
+
+
+def _resolve_native_promotion_request(
+    *,
+    context_name: str,
+    from_instance_name: str,
+    to_instance_name: str,
+    artifact_id: str,
+    backup_record_id: str,
+    source_git_ref: str,
+    wait: bool,
+    timeout_override_seconds: int | None,
+    verify_health: bool,
+    health_timeout_override_seconds: int | None,
+    dry_run: bool,
+    no_cache: bool,
+    allow_dirty: bool,
+) -> PromotionRequest:
+    normalized_artifact_id = artifact_id.strip()
+    if not normalized_artifact_id:
+        raise click.ClickException("promotion request requires artifact_id")
+    normalized_backup_record_id = backup_record_id.strip()
+    if not normalized_backup_record_id:
+        raise click.ClickException("promotion request requires backup_record_id")
+
+    control_plane_root = _control_plane_root()
+    source_file = control_plane_dokploy.resolve_control_plane_dokploy_source_file(
+        control_plane_root
+    )
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    source_target_definition = _require_dokploy_target_definition(
+        source_file=source_file,
+        source_of_truth=source_of_truth,
+        context_name=context_name,
+        instance_name=from_instance_name,
+        operation_name="Promotion source",
+    )
+    destination_target_definition = _require_dokploy_target_definition(
+        source_file=source_file,
+        source_of_truth=source_of_truth,
+        context_name=context_name,
+        instance_name=to_instance_name,
+        operation_name="Promotion destination",
+    )
+
+    environment_values = _load_control_plane_environment_values()
+    resolved_source_git_ref = (
+        source_git_ref.strip()
+        or source_target_definition.source_git_ref.strip()
+        or DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF
+    )
+    source_health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
+        health_timeout_override_seconds=health_timeout_override_seconds,
+        target_definition=source_target_definition,
+    )
+    source_healthcheck_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
+        target_definition=source_target_definition,
+        environment_values=environment_values,
+    )
+    source_health_status: ReleaseStatus = "pending" if source_healthcheck_urls else "skipped"
+    destination_health_timeout_seconds = control_plane_dokploy.resolve_ship_health_timeout_seconds(
+        health_timeout_override_seconds=health_timeout_override_seconds,
+        target_definition=destination_target_definition,
+    )
+    destination_healthcheck_urls = control_plane_dokploy.resolve_ship_healthcheck_urls(
+        target_definition=destination_target_definition,
+        environment_values=environment_values,
+    )
+    should_verify_destination_health = verify_health and wait
+    if should_verify_destination_health and not destination_healthcheck_urls:
+        raise click.ClickException(
+            "Healthcheck verification requested but no target domain/URL was resolved. "
+            f"Define domains or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL in {source_file} or disable with --no-verify-health."
+        )
+    configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
+        context_name,
+        to_instance_name,
+        environment_values,
+    )
+    deploy_mode = _resolve_deploy_mode(
+        configured_ship_mode=configured_ship_mode,
+        target_type=destination_target_definition.target_type,
+    )
+
+    try:
+        return PromotionRequest(
+            artifact_id=normalized_artifact_id,
+            backup_record_id=normalized_backup_record_id,
+            source_git_ref=resolved_source_git_ref,
+            context=context_name,
+            from_instance=from_instance_name,
+            to_instance=to_instance_name,
+            target_name=destination_target_definition.target_name.strip()
+            or f"{context_name}-{to_instance_name}",
+            target_type=destination_target_definition.target_type,
+            deploy_mode=deploy_mode,
+            wait=wait,
+            timeout_seconds=timeout_override_seconds,
+            verify_health=should_verify_destination_health,
+            health_timeout_seconds=destination_health_timeout_seconds,
+            dry_run=dry_run,
+            no_cache=no_cache,
+            allow_dirty=allow_dirty,
+            source_health=HealthcheckEvidence(
+                urls=source_healthcheck_urls,
+                timeout_seconds=source_health_timeout_seconds,
+                status=source_health_status,
+            ),
+            backup_gate=BackupGateEvidence(
+                status="pass",
+                evidence={"backup_record_id": normalized_backup_record_id},
+            ),
+            destination_health=HealthcheckEvidence(
+                urls=destination_healthcheck_urls,
+                timeout_seconds=destination_health_timeout_seconds,
+                status="pending" if should_verify_destination_health else "skipped",
+            ),
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+
+
 def _execute_dokploy_deploy(
     *,
-    odoo_ai_root: Path,
-    env_file: Path | None,
     request: ShipRequest,
     resolved_target: ResolvedTargetEvidence,
     deploy_timeout_seconds: int,
 ) -> None:
-    control_plane_root = Path(__file__).resolve().parent.parent
+    control_plane_root = _control_plane_root()
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     latest_before = None
     if request.wait:
@@ -154,81 +444,49 @@ def _execute_dokploy_deploy(
     )
 
 
-def _run_post_deploy_update_via_odoo_ai(
+def _run_compose_post_deploy_update(
     *,
-    odoo_ai_root: Path,
     env_file: Path | None,
     request: ShipRequest,
 ) -> None:
-    command = [
-        "uv",
-        "run",
-        "--project",
-        str(odoo_ai_root),
-        "platform",
-        "update",
-        "--context",
-        request.context,
-        "--instance",
-        request.instance,
-    ]
-    if env_file is not None:
-        command.extend(["--env-file", str(env_file)])
-    _run_command(command)
+    control_plane_root = _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    if target_definition is None:
+        raise click.ClickException(
+            f"Compose post-deploy update target {request.context}/{request.instance} is missing from the control-plane Dokploy source-of-truth."
+        )
+    if target_definition.target_type != "compose":
+        raise click.ClickException(
+            "Compose post-deploy update requires a compose target in the control-plane Dokploy source-of-truth. "
+            f"Configured={target_definition.target_type}."
+        )
+    control_plane_dokploy.run_compose_post_deploy_update(
+        host=host,
+        token=token,
+        target_definition=target_definition,
+        env_file=env_file,
+    )
 
 
-def _skipped_destination_health(request: ShipRequest, *, detail_status: str = "skipped") -> HealthcheckEvidence:
-    return request.destination_health.model_copy(update={"verified": False, "status": detail_status})
-
-
-def _export_ship_request_via_odoo_ai(
-    *,
-    odoo_ai_root: Path,
-    env_file: Path | None,
-    request: PromotionRequest,
-) -> ShipRequest:
-    command = [
-        "uv",
-        "run",
-        "--project",
-        str(odoo_ai_root),
-        "platform",
-        "export-ship-request",
-        "--context",
-        request.context,
-        "--instance",
-        request.to_instance,
-        "--artifact-id",
-        request.artifact_id,
-        "--source-ref",
-        request.source_git_ref,
-    ]
-    if env_file is not None:
-        command.extend(["--env-file", str(env_file)])
-    if request.wait:
-        command.append("--wait")
-    else:
-        command.append("--no-wait")
-    if request.timeout_seconds is not None:
-        command.extend(["--timeout", str(request.timeout_seconds)])
-    if request.verify_health:
-        command.append("--verify-health")
-    else:
-        command.append("--no-verify-health")
-    if request.health_timeout_seconds is not None:
-        command.extend(["--health-timeout", str(request.health_timeout_seconds)])
-    if request.no_cache:
-        command.append("--no-cache")
-    if request.allow_dirty:
-        command.append("--allow-dirty")
-    payload = json.loads(_run_command_capture(command, cwd=odoo_ai_root))
-    return ShipRequest.model_validate(payload)
+def _skipped_destination_health(
+    request: ShipRequest, *, detail_status: str = "skipped"
+) -> HealthcheckEvidence:
+    return request.destination_health.model_copy(
+        update={"verified": False, "status": detail_status}
+    )
 
 
 def _execute_ship(
     *,
     state_dir: Path,
-    odoo_ai_root: Path,
     env_file: Path | None,
     request: ShipRequest,
 ) -> tuple[Path | None, DeploymentRecord | ShipRequest]:
@@ -265,7 +523,6 @@ def _execute_ship(
 
     try:
         resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
-            odoo_ai_root=odoo_ai_root,
             request=resolved_request,
         )
     except (subprocess.CalledProcessError, click.ClickException):
@@ -286,53 +543,37 @@ def _execute_ship(
             resolved_target=resolved_target,
         )
         _execute_dokploy_deploy(
-            odoo_ai_root=odoo_ai_root,
-            env_file=env_file,
             request=resolved_request,
             resolved_target=resolved_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
         )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="fail",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-        )
+        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
+                                               deployment_id="control-plane-dokploy", deployment_status="fail",
+                                               started_at=started_at, finished_at=utc_now_timestamp(),
+                                               resolved_target=resolved_target)
         record_store.write_deployment_record(final_record)
         raise
 
     try:
         if resolved_request.wait and resolved_target.target_type == "compose":
-            _run_post_deploy_update_via_odoo_ai(
-                odoo_ai_root=odoo_ai_root,
+            _run_compose_post_deploy_update(
                 env_file=env_file,
                 request=resolved_request,
             )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-            post_deploy_update=PostDeployUpdateEvidence(
-                attempted=True,
-                status="fail",
-                detail=(
-                    "Odoo-specific post-deploy update failed through the canonical "
-                    "odoo-ai platform update workflow."
-                ),
-            ),
-            destination_health=_skipped_destination_health(resolved_request),
-        )
+        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
+                                               deployment_id="control-plane-dokploy", deployment_status="pass",
+                                               started_at=started_at, finished_at=utc_now_timestamp(),
+                                               resolved_target=resolved_target,
+                                               post_deploy_update=PostDeployUpdateEvidence(
+                                                   attempted=True,
+                                                   status="fail",
+                                                   detail=(
+                                                       "Odoo-specific post-deploy update failed through the native "
+                                                       "control-plane Dokploy schedule workflow."
+                                                   ),
+                                               ), destination_health=_skipped_destination_health(resolved_request))
         record_store.write_deployment_record(final_record)
         raise
 
@@ -342,37 +583,26 @@ def _execute_ship(
             attempted=True,
             status="pass",
             detail=(
-                "Odoo-specific post-deploy update completed through the canonical "
-                "odoo-ai platform update workflow."
+                "Odoo-specific post-deploy update completed through the native "
+                "control-plane Dokploy schedule workflow."
             ),
         )
 
     try:
         _verify_ship_healthchecks(request=resolved_request)
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-            post_deploy_update=post_deploy_update_evidence,
-        )
+        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
+                                               deployment_id="control-plane-dokploy", deployment_status="pass",
+                                               started_at=started_at, finished_at=utc_now_timestamp(),
+                                               resolved_target=resolved_target,
+                                               post_deploy_update=post_deploy_update_evidence)
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(
-            request=resolved_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=utc_now_timestamp(),
-            resolved_target=resolved_target,
-            delegated_executor="control-plane.dokploy",
-            post_deploy_update=post_deploy_update_evidence,
-            destination_health=_skipped_destination_health(resolved_request, detail_status="fail"),
-        )
+        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
+                                               deployment_id="control-plane-dokploy", deployment_status="pass",
+                                               started_at=started_at, finished_at=utc_now_timestamp(),
+                                               resolved_target=resolved_target,
+                                               post_deploy_update=post_deploy_update_evidence,
+                                               destination_health=_skipped_destination_health(resolved_request,
+                                                                                              detail_status="fail"))
         record_store.write_deployment_record(final_record)
         raise
 
@@ -397,7 +627,77 @@ def _read_artifact_manifest(
     try:
         return record_store.read_artifact_manifest(artifact_id)
     except FileNotFoundError:
-        raise click.ClickException(f"Ship requires stored artifact manifest '{artifact_id}'.") from None
+        raise click.ClickException(
+            f"Ship requires stored artifact manifest '{artifact_id}'."
+        ) from None
+
+
+def _read_backup_gate_record(
+    *,
+    record_store: FilesystemRecordStore,
+    record_id: str,
+) -> BackupGateRecord:
+    try:
+        return record_store.read_backup_gate_record(record_id)
+    except FileNotFoundError:
+        raise click.ClickException(
+            f"Promotion requires stored backup gate record '{record_id}'."
+        ) from None
+
+
+def _resolve_backup_gate_for_promotion(
+    *,
+    request: PromotionRequest,
+    record_store: FilesystemRecordStore,
+) -> tuple[PromotionRequest, BackupGateRecord | None]:
+    if not request.backup_gate.required:
+        resolved_request = request.model_copy(
+            update={
+                "backup_record_id": "",
+                "backup_gate": {"required": False, "status": "skipped", "evidence": {}},
+            }
+        )
+        return resolved_request, None
+
+    normalized_record_id = request.backup_record_id.strip()
+    if not normalized_record_id:
+        raise click.ClickException(
+            "Promotion requires backup_record_id when backup gate is required."
+        )
+
+    backup_gate_record = _read_backup_gate_record(
+        record_store=record_store, record_id=normalized_record_id
+    )
+    if backup_gate_record.context != request.context:
+        raise click.ClickException(
+            "Backup gate record context does not match promotion request. "
+            f"Record={backup_gate_record.context} request={request.context}."
+        )
+    if backup_gate_record.instance != request.to_instance:
+        raise click.ClickException(
+            "Backup gate record instance does not match promotion destination. "
+            f"Record={backup_gate_record.instance} request={request.to_instance}."
+        )
+    if not backup_gate_record.required:
+        raise click.ClickException(
+            f"Backup gate record '{backup_gate_record.record_id}' is marked required=false and cannot satisfy promotion gating."
+        )
+    if backup_gate_record.status != "pass":
+        raise click.ClickException(
+            f"Backup gate record '{backup_gate_record.record_id}' must have status=pass before promotion."
+        )
+
+    resolved_request = request.model_copy(
+        update={
+            "backup_record_id": backup_gate_record.record_id,
+            "backup_gate": {
+                "required": backup_gate_record.required,
+                "status": backup_gate_record.status,
+                "evidence": backup_gate_record.evidence,
+            },
+        }
+    )
+    return resolved_request, backup_gate_record
 
 
 def _resolve_artifact_native_execution_request(
@@ -471,6 +771,170 @@ def _write_environment_inventory(
     return record_store.write_environment_inventory(inventory_record)
 
 
+def _artifact_id_or_empty(artifact_identity: object) -> str:
+    if artifact_identity is None:
+        return ""
+    artifact_id = getattr(artifact_identity, "artifact_id", "")
+    if isinstance(artifact_id, str):
+        return artifact_id
+    return ""
+
+
+def _summarize_backup_gate_record(record: BackupGateRecord) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "context": record.context,
+        "instance": record.instance,
+        "created_at": record.created_at,
+        "source": record.source,
+        "required": record.required,
+        "status": record.status,
+        "evidence": dict(record.evidence),
+    }
+
+
+def _summarize_promotion_record(record: PromotionRecord) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "context": record.context,
+        "from_instance": record.from_instance,
+        "to_instance": record.to_instance,
+        "artifact_id": _artifact_id_or_empty(record.artifact_identity),
+        "backup_record_id": record.backup_record_id,
+        "backup_status": record.backup_gate.status,
+        "deploy_status": record.deploy.status,
+        "deployment_id": record.deploy.deployment_id,
+        "post_deploy_update_status": record.post_deploy_update.status,
+        "destination_health_status": record.destination_health.status,
+    }
+
+
+def _summarize_deployment_record(record: DeploymentRecord) -> dict[str, object]:
+    target_id = ""
+    if record.resolved_target is not None:
+        target_id = record.resolved_target.target_id
+    return {
+        "record_id": record.record_id,
+        "context": record.context,
+        "instance": record.instance,
+        "artifact_id": _artifact_id_or_empty(record.artifact_identity),
+        "source_git_ref": record.source_git_ref,
+        "target_name": record.deploy.target_name,
+        "target_type": record.deploy.target_type,
+        "target_id": target_id,
+        "deploy_status": record.deploy.status,
+        "deployment_id": record.deploy.deployment_id,
+        "post_deploy_update_status": record.post_deploy_update.status,
+        "destination_health_status": record.destination_health.status,
+    }
+
+
+def _summarize_environment_inventory(record: EnvironmentInventory) -> dict[str, object]:
+    return {
+        "context": record.context,
+        "instance": record.instance,
+        "artifact_id": _artifact_id_or_empty(record.artifact_identity),
+        "source_git_ref": record.source_git_ref,
+        "updated_at": record.updated_at,
+        "deployment_record_id": record.deployment_record_id,
+        "promotion_record_id": record.promotion_record_id,
+        "promoted_from_instance": record.promoted_from_instance,
+        "deploy_status": record.deploy.status,
+        "post_deploy_update_status": record.post_deploy_update.status,
+        "destination_health_status": record.destination_health.status,
+    }
+
+
+def _build_environment_status_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, object]:
+    live_inventory = record_store.read_environment_inventory(
+        context_name=context_name, instance_name=instance_name
+    )
+    live_promotion_summary: dict[str, object] | None = None
+    authorized_backup_gate_summary: dict[str, object] | None = None
+
+    if live_inventory.promotion_record_id.strip():
+        try:
+            live_promotion_record = record_store.read_promotion_record(
+                live_inventory.promotion_record_id
+            )
+        except FileNotFoundError:
+            raise click.ClickException(
+                "Environment inventory references missing promotion record "
+                f"'{live_inventory.promotion_record_id}'."
+            ) from None
+        live_promotion_summary = _summarize_promotion_record(live_promotion_record)
+        if live_promotion_record.backup_record_id.strip():
+            try:
+                live_backup_gate_record = record_store.read_backup_gate_record(
+                    live_promotion_record.backup_record_id
+                )
+            except FileNotFoundError:
+                raise click.ClickException(
+                    "Promotion record references missing backup gate record "
+                    f"'{live_promotion_record.backup_record_id}'."
+                ) from None
+            authorized_backup_gate_summary = _summarize_backup_gate_record(live_backup_gate_record)
+
+    latest_promotion = next(
+        iter(
+            record_store.list_promotion_records(
+                context_name=context_name, to_instance_name=instance_name, limit=1
+            )
+        ),
+        None,
+    )
+    latest_deployment = next(
+        iter(
+            record_store.list_deployment_records(
+                context_name=context_name, instance_name=instance_name, limit=1
+            )
+        ),
+        None,
+    )
+
+    return {
+        "context": context_name,
+        "instance": instance_name,
+        "live": _summarize_environment_inventory(live_inventory),
+        "live_promotion": live_promotion_summary,
+        "authorized_backup_gate": authorized_backup_gate_summary,
+        "latest_promotion": _summarize_promotion_record(latest_promotion)
+        if latest_promotion is not None
+        else None,
+        "latest_deployment": _summarize_deployment_record(latest_deployment)
+        if latest_deployment is not None
+        else None,
+    }
+
+
+def _build_environment_overview_payloads(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+) -> list[dict[str, object]]:
+    inventory_records = sorted(
+        (
+            record
+            for record in record_store.list_environment_inventory()
+            if not context_name or record.context == context_name
+        ),
+        key=lambda record: (record.context, record.instance),
+    )
+    return [
+        _build_environment_status_payload(
+            record_store=record_store,
+            context_name=inventory_record.context,
+            instance_name=inventory_record.instance,
+        )
+        for inventory_record in inventory_records
+    ]
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -482,7 +946,9 @@ def artifacts() -> None:
 
 
 @artifacts.command("write")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def artifacts_write(state_dir: Path, input_file: Path) -> None:
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
@@ -491,7 +957,9 @@ def artifacts_write(state_dir: Path, input_file: Path) -> None:
 
 
 @artifacts.command("show")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--artifact-id", required=True)
 def artifacts_show(state_dir: Path, artifact_id: str) -> None:
     manifest = _store(state_dir).read_artifact_manifest(artifact_id)
@@ -499,12 +967,60 @@ def artifacts_show(state_dir: Path, artifact_id: str) -> None:
 
 
 @artifacts.command("ingest-odoo-ai")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def artifacts_ingest_odoo_ai(state_dir: Path, input_file: Path) -> None:
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
     record_path = _store(state_dir).write_artifact_manifest(manifest)
     click.echo(record_path)
+
+
+@main.group("backup-gates")
+def backup_gates() -> None:
+    """Backup gate record commands."""
+
+
+@backup_gates.command("write")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def backup_gates_write(state_dir: Path, input_file: Path) -> None:
+    record = BackupGateRecord.model_validate(_load_json_file(input_file))
+    record_path = _store(state_dir).write_backup_gate_record(record)
+    click.echo(record_path)
+
+
+@backup_gates.command("show")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--record-id", required=True)
+def backup_gates_show(state_dir: Path, record_id: str) -> None:
+    record = _store(state_dir).read_backup_gate_record(record_id)
+    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@backup_gates.command("list")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
+def backup_gates_list(state_dir: Path, context_name: str, instance_name: str, limit: int) -> None:
+    records = _store(state_dir).list_backup_gate_records(
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=limit,
+    )
+    click.echo(
+        json.dumps(
+            [_summarize_backup_gate_record(record) for record in records], indent=2, sort_keys=True
+        )
+    )
 
 
 @main.group()
@@ -513,7 +1029,9 @@ def promotions() -> None:
 
 
 @promotions.command("write")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 def promotions_write(state_dir: Path, input_file: Path) -> None:
     record = PromotionRecord.model_validate(_load_json_file(input_file))
@@ -522,11 +1040,76 @@ def promotions_write(state_dir: Path, input_file: Path) -> None:
 
 
 @promotions.command("show")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--record-id", required=True)
 def promotions_show(state_dir: Path, record_id: str) -> None:
     record = _store(state_dir).read_promotion_record(record_id)
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@promotions.command("list")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--from-instance", "from_instance_name", default="")
+@click.option("--to-instance", "to_instance_name", default="")
+@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
+def promotions_list(
+    state_dir: Path,
+    context_name: str,
+    from_instance_name: str,
+    to_instance_name: str,
+    limit: int,
+) -> None:
+    records = _store(state_dir).list_promotion_records(
+        context_name=context_name,
+        from_instance_name=from_instance_name,
+        to_instance_name=to_instance_name,
+        limit=limit,
+    )
+    click.echo(
+        json.dumps(
+            [_summarize_promotion_record(record) for record in records], indent=2, sort_keys=True
+        )
+    )
+
+
+@main.group()
+def deployments() -> None:
+    """Deployment record commands."""
+
+
+@deployments.command("show")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--record-id", required=True)
+def deployments_show(state_dir: Path, record_id: str) -> None:
+    record = _store(state_dir).read_deployment_record(record_id)
+    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@deployments.command("list")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
+def deployments_list(state_dir: Path, context_name: str, instance_name: str, limit: int) -> None:
+    records = _store(state_dir).list_deployment_records(
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=limit,
+    )
+    click.echo(
+        json.dumps(
+            [_summarize_deployment_record(record) for record in records], indent=2, sort_keys=True
+        )
+    )
 
 
 @main.group()
@@ -535,19 +1118,144 @@ def inventory() -> None:
 
 
 @inventory.command("show")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
 def inventory_show(state_dir: Path, context_name: str, instance_name: str) -> None:
-    record = _store(state_dir).read_environment_inventory(context_name=context_name, instance_name=instance_name)
+    record = _store(state_dir).read_environment_inventory(
+        context_name=context_name, instance_name=instance_name
+    )
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @inventory.command("list")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 def inventory_list(state_dir: Path) -> None:
     records = _store(state_dir).list_environment_inventory()
-    click.echo(json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True))
+    click.echo(
+        json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True)
+    )
+
+
+@inventory.command("overview")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+def inventory_overview(state_dir: Path, context_name: str) -> None:
+    payload = _build_environment_overview_payloads(
+        record_store=_store(state_dir),
+        context_name=context_name,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@main.group()
+def ui() -> None:
+    """Operator UI commands."""
+
+
+@ui.command("inventory-overview")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option(
+    "--output-file",
+    type=click.Path(path_type=Path),
+    default=Path("tmp/inventory-overview.html"),
+    show_default=True,
+)
+def ui_inventory_overview(state_dir: Path, context_name: str, output_file: Path) -> None:
+    payload = _build_environment_overview_payloads(
+        record_store=_store(state_dir),
+        context_name=context_name,
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(
+        render_inventory_overview_dashboard(payload, context_name=context_name),
+        encoding="utf-8",
+    )
+    click.echo(output_file)
+
+
+@ui.command("environment-status")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--output-file",
+    type=click.Path(path_type=Path),
+    default=Path("tmp/environment-status.html"),
+    show_default=True,
+)
+def ui_environment_status(
+    state_dir: Path, context_name: str, instance_name: str, output_file: Path
+) -> None:
+    payload = _build_environment_status_payload(
+        record_store=_store(state_dir),
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(
+        render_environment_status_dashboard(payload),
+        encoding="utf-8",
+    )
+    click.echo(output_file)
+
+
+@inventory.command("status")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+def inventory_status(state_dir: Path, context_name: str, instance_name: str) -> None:
+    payload = _build_environment_status_payload(
+        record_store=_store(state_dir),
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@main.group()
+def environments() -> None:
+    """Runtime environment contract commands."""
+
+
+@environments.command("resolve")
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", default="local", show_default=True)
+@click.option("--json-output", is_flag=True, default=False)
+def environments_resolve(context_name: str, instance_name: str, json_output: bool) -> None:
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=_control_plane_root(),
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if json_output:
+        click.echo(
+            json.dumps(
+                {
+                    "context": context_name,
+                    "instance": instance_name,
+                    "environment": environment_values,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
+        return
+    for environment_key in sorted(environment_values):
+        click.echo(f"{environment_key}={environment_values[environment_key]}")
 
 
 @main.group()
@@ -556,9 +1264,12 @@ def promote() -> None:
 
 
 @promote.command("record")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--record-id", required=True)
 @click.option("--artifact-id", required=True)
+@click.option("--backup-record-id", default="", show_default=False)
 @click.option("--context", "context_name", required=True)
 @click.option("--from-instance", "from_instance_name", required=True)
 @click.option("--to-instance", "to_instance_name", required=True)
@@ -570,6 +1281,7 @@ def promote_record(
     state_dir: Path,
     record_id: str,
     artifact_id: str,
+    backup_record_id: str,
     context_name: str,
     from_instance_name: str,
     to_instance_name: str,
@@ -581,6 +1293,7 @@ def promote_record(
     record = build_promotion_record(
         record_id=record_id,
         artifact_id=artifact_id,
+        backup_record_id=backup_record_id,
         context_name=context_name,
         from_instance_name=from_instance_name,
         to_instance_name=to_instance_name,
@@ -593,15 +1306,62 @@ def promote_record(
     click.echo(record_path)
 
 
+@promote.command("resolve")
+@click.option("--context", "context_name", required=True)
+@click.option("--from-instance", "from_instance_name", required=True)
+@click.option("--to-instance", "to_instance_name", required=True)
+@click.option("--artifact-id", required=True)
+@click.option("--backup-record-id", required=True)
+@click.option("--source-ref", "source_git_ref", default="")
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", "timeout_override_seconds", type=int, default=None)
+@click.option("--verify-health/--no-verify-health", default=True)
+@click.option("--health-timeout", "health_timeout_override_seconds", type=int, default=None)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--no-cache", is_flag=True, default=False)
+@click.option("--allow-dirty", is_flag=True, default=False)
+def promote_resolve(
+    context_name: str,
+    from_instance_name: str,
+    to_instance_name: str,
+    artifact_id: str,
+    backup_record_id: str,
+    source_git_ref: str,
+    wait: bool,
+    timeout_override_seconds: int | None,
+    verify_health: bool,
+    health_timeout_override_seconds: int | None,
+    dry_run: bool,
+    no_cache: bool,
+    allow_dirty: bool,
+) -> None:
+    request = _resolve_native_promotion_request(
+        context_name=context_name,
+        from_instance_name=from_instance_name,
+        to_instance_name=to_instance_name,
+        artifact_id=artifact_id,
+        backup_record_id=backup_record_id,
+        source_git_ref=source_git_ref,
+        wait=wait,
+        timeout_override_seconds=timeout_override_seconds,
+        verify_health=verify_health,
+        health_timeout_override_seconds=health_timeout_override_seconds,
+        dry_run=dry_run,
+        no_cache=no_cache,
+        allow_dirty=allow_dirty,
+    )
+    click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
 @promote.command("execute")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-@click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def promote_execute(
     state_dir: Path,
     input_file: Path,
-    odoo_ai_root: Path,
     env_file: Path | None,
 ) -> None:
     request = PromotionRequest.model_validate(_load_json_file(input_file))
@@ -611,13 +1371,18 @@ def promote_execute(
         record_store=record_store,
         artifact_id=resolved_artifact_id,
     )
-    resolved_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
+    normalized_request = request.model_copy(update={"artifact_id": resolved_artifact_id})
+    resolved_request, _backup_gate_record = _resolve_backup_gate_for_promotion(
+        request=normalized_request,
+        record_store=record_store,
+    )
     record_id = generate_promotion_record_id(
         context_name=resolved_request.context,
         from_instance_name=resolved_request.from_instance,
         to_instance_name=resolved_request.to_instance,
     )
     if resolved_request.dry_run:
+        _resolve_ship_request_for_promotion(request=resolved_request)
         click.echo(
             json.dumps(
                 build_executed_promotion_record(
@@ -641,19 +1406,16 @@ def promote_execute(
     record_path = record_store.write_promotion_record(pending_record)
 
     try:
-        ship_request = _export_ship_request_via_odoo_ai(
-            odoo_ai_root=odoo_ai_root,
-            env_file=env_file,
-            request=resolved_request,
-        )
+        ship_request = _resolve_ship_request_for_promotion(request=resolved_request)
         _record_path, deployment_record = _execute_ship(
             state_dir=state_dir,
-            odoo_ai_root=odoo_ai_root,
             env_file=env_file,
             request=ship_request,
         )
         if not isinstance(deployment_record, DeploymentRecord):
-            raise click.ClickException("Ship execution returned an unexpected dry-run payload during promotion.")
+            raise click.ClickException(
+                "Ship execution returned an unexpected non-record payload during promotion."
+            )
         final_record = build_executed_promotion_record(
             request=resolved_request,
             record_id=record_id,
@@ -693,21 +1455,61 @@ def ship_plan(input_file: Path) -> None:
     click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
+@ship.command("resolve")
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--artifact-id", required=True)
+@click.option("--source-ref", "source_git_ref", default="")
+@click.option("--wait/--no-wait", default=True, show_default=True)
+@click.option("--timeout", "timeout_override_seconds", type=int, default=None)
+@click.option("--verify-health/--no-verify-health", default=True)
+@click.option("--health-timeout", "health_timeout_override_seconds", type=int, default=None)
+@click.option("--dry-run", is_flag=True, default=False)
+@click.option("--no-cache", is_flag=True, default=False)
+@click.option("--allow-dirty", is_flag=True, default=False)
+def ship_resolve(
+    context_name: str,
+    instance_name: str,
+    artifact_id: str,
+    source_git_ref: str,
+    wait: bool,
+    timeout_override_seconds: int | None,
+    verify_health: bool,
+    health_timeout_override_seconds: int | None,
+    dry_run: bool,
+    no_cache: bool,
+    allow_dirty: bool,
+) -> None:
+    request = _resolve_native_ship_request(
+        context_name=context_name,
+        instance_name=instance_name,
+        artifact_id=artifact_id,
+        source_git_ref=source_git_ref,
+        wait=wait,
+        timeout_override_seconds=timeout_override_seconds,
+        verify_health=verify_health,
+        health_timeout_override_seconds=health_timeout_override_seconds,
+        dry_run=dry_run,
+        no_cache=no_cache,
+        allow_dirty=allow_dirty,
+    )
+    click.echo(json.dumps(request.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
 @ship.command("execute")
-@click.option("--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True)
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-@click.option("--odoo-ai-root", type=click.Path(exists=True, file_okay=False, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def ship_execute(
     state_dir: Path,
     input_file: Path,
-    odoo_ai_root: Path,
     env_file: Path | None,
 ) -> None:
     request = ShipRequest.model_validate(_load_json_file(input_file))
     record_path, _record = _execute_ship(
         state_dir=state_dir,
-        odoo_ai_root=odoo_ai_root,
         env_file=env_file,
         request=request,
     )

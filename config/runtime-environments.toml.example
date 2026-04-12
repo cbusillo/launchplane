@@ -1,0 +1,29 @@
+schema_version = 1
+
+[shared_env]
+ODOO_MASTER_PASSWORD = "change_me"
+ODOO_DB_USER = "odoo"
+ODOO_DB_PASSWORD = "change_me"
+GITHUB_TOKEN = ""
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL_FREEZE = true
+ENV_OVERRIDE_SHOPIFY__TEST_STORE = true
+
+[contexts.opw.instances.local.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
+ENV_OVERRIDE_SHOPIFY__SHOP_URL_KEY = "opw-local"
+ENV_OVERRIDE_SHOPIFY__API_TOKEN = ""
+ENV_OVERRIDE_SHOPIFY__WEBHOOK_KEY = ""
+
+[contexts.cm.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL_FREEZE = true
+ENV_OVERRIDE_SHOPIFY__TEST_STORE = true
+
+[contexts.cm.instances.local.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://cm-local.example.com"
+ENV_OVERRIDE_SHOPIFY__SHOP_URL_KEY = "cm-local"
+ENV_OVERRIDE_SHOPIFY__API_TOKEN = ""
+ENV_OVERRIDE_SHOPIFY__WEBHOOK_KEY = ""

@@ -75,6 +75,7 @@ class PromotionRecord(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     record_id: str
     artifact_identity: ArtifactIdentityReference
+    backup_record_id: str = ""
     context: str
     from_instance: str
     to_instance: str
@@ -88,6 +89,8 @@ class PromotionRecord(BaseModel):
     def _validate_promotion_path(self) -> "PromotionRecord":
         if self.from_instance == self.to_instance:
             raise ValueError("promotion source and destination instances must differ")
+        if self.backup_gate.required and self.backup_gate.status == "pass" and not self.backup_record_id.strip():
+            raise ValueError("promotion record with passing backup gate requires backup_record_id")
         return self
 
 
@@ -96,6 +99,7 @@ class PromotionRequest(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     artifact_id: str
+    backup_record_id: str = ""
     source_git_ref: str
     context: str
     from_instance: str
