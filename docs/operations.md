@@ -118,7 +118,8 @@ title: Operations
 
 ## Boundary Rules
 
-- Keep wrapper logic in code repos thin and disposable.
+- Keep code-repo convenience commands thin and explicit, and delete only true
+  compatibility bridges that still exist for migration reasons.
 - Do not add new long-term remote release ownership back into code or local-DX
   repos.
 - Any remaining cross-repo handoff must stay explicit, narrow, and fail
