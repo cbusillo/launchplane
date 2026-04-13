@@ -3,6 +3,9 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 import click
 from pydantic import ValidationError
@@ -37,6 +40,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 RECENT_GENERATION_LIMIT = 3
 HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
 HARBOR_PREVIEW_ENABLE_LABEL = "harbor-preview"
+HARBOR_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
 DEFAULT_HARBOR_BASELINE_CHANNEL = "testing"
 HarborPullRequestAction = str
 HARBOR_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
@@ -47,6 +51,7 @@ HARBOR_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
     rf"```{re.escape(HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     flags=re.IGNORECASE | re.DOTALL,
 )
+GITHUB_PULL_REQUEST_URL_PATTERN = re.compile(r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$")
 
 
 def find_preview_record(
@@ -221,6 +226,7 @@ def build_pull_request_event_mutation_intent(
                 resolved_manifest_fingerprint=resolved_manifest.resolved_manifest_fingerprint,
                 baseline_release_tuple_id=resolved_manifest.baseline_release_tuple_id,
                 source_map=resolved_manifest.source_map,
+                companion_summaries=resolved_manifest.companion_summaries,
             )
             return HarborPullRequestMutationIntent(
                 command="request-generation",
@@ -288,7 +294,7 @@ def resolve_pull_request_event_manifest(
     if not effective_context:
         return None
     metadata = _resolved_preview_request_metadata(request_metadata=request_metadata)
-    if metadata is None or metadata.companions:
+    if metadata is None:
         return None
     try:
         release_tuple = control_plane_release_tuples.resolve_release_tuple(
@@ -298,13 +304,22 @@ def resolve_pull_request_event_manifest(
         )
     except click.ClickException:
         return None
+    companion_sources, companion_summaries = _resolve_companion_sources(
+        control_plane_root=control_plane_root,
+        context_name=effective_context,
+        anchor_pr_url=event.pr_url,
+        metadata=metadata,
+    )
+    if metadata.companions and companion_sources is None:
+        return None
     source_map = tuple(
         [
             PreviewSourceRecord(repo=event.repo, git_sha=event.head_sha, selection="anchor"),
+            *(companion_sources or ()),
             *[
                 PreviewSourceRecord(repo=repo_name, git_sha=git_sha, selection="baseline")
                 for repo_name, git_sha in sorted(release_tuple.repo_shas.items())
-                if repo_name != event.repo
+                if repo_name != event.repo and repo_name not in {item.repo for item in (companion_sources or ())}
             ],
         ]
     )
@@ -318,6 +333,7 @@ def resolve_pull_request_event_manifest(
             source_map=source_map,
         ),
         source_map=source_map,
+        companion_summaries=companion_summaries or (),
     )
 
 
@@ -351,6 +367,108 @@ def _resolved_preview_request_metadata(
     if request_metadata.metadata is not None:
         return request_metadata.metadata
     return HarborPreviewRequestMetadata(baseline_channel=DEFAULT_HARBOR_BASELINE_CHANNEL)
+
+
+def _resolve_companion_sources(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    anchor_pr_url: str,
+    metadata: HarborPreviewRequestMetadata,
+) -> tuple[tuple[PreviewSourceRecord, ...] | None, tuple[PreviewPullRequestSummary, ...] | None]:
+    if not metadata.companions:
+        return (), ()
+    github_owner = github_pr_owner(pr_url=anchor_pr_url)
+    github_token = resolve_harbor_github_token(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+    )
+    if not github_owner or not github_token:
+        return None, None
+    sources: list[PreviewSourceRecord] = []
+    summaries: list[PreviewPullRequestSummary] = []
+    for companion in metadata.companions:
+        try:
+            companion_head_sha, companion_pr_url = fetch_github_pull_request_head(
+                owner=github_owner,
+                repo=companion.repo,
+                pr_number=companion.pr_number,
+                token=github_token,
+            )
+        except click.ClickException:
+            return None, None
+        sources.append(
+            PreviewSourceRecord(
+                repo=companion.repo,
+                git_sha=companion_head_sha,
+                selection="companion",
+            )
+        )
+        summaries.append(
+            PreviewPullRequestSummary(
+                repo=companion.repo,
+                pr_number=companion.pr_number,
+                head_sha=companion_head_sha,
+                pr_url=companion_pr_url,
+            )
+        )
+    return tuple(sources), tuple(summaries)
+
+
+def resolve_harbor_github_token(*, control_plane_root: Path, context_name: str) -> str:
+    try:
+        context_values = control_plane_runtime_environments.resolve_runtime_context_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+        )
+    except click.ClickException:
+        return ""
+    return context_values.get(HARBOR_GITHUB_TOKEN_ENV_KEY, "").strip()
+
+
+def github_pr_owner(*, pr_url: str) -> str:
+    parsed_url = urlparse(pr_url)
+    if parsed_url.netloc.strip().lower() != "github.com":
+        return ""
+    match = GITHUB_PULL_REQUEST_URL_PATTERN.match(parsed_url.path)
+    if match is None:
+        return ""
+    return match.group("owner").strip()
+
+
+def fetch_github_pull_request_head(*, owner: str, repo: str, pr_number: int, token: str) -> tuple[str, str]:
+    request = Request(
+        url=f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
+        headers={
+            "Accept": "application/vnd.github+json",
+            "Authorization": f"Bearer {token}",
+            "X-GitHub-Api-Version": "2022-11-28",
+        },
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+        raise click.ClickException(
+            f"Unable to resolve GitHub pull request {owner}/{repo}#{pr_number}: {exc}"
+        ) from exc
+    head = payload.get("head")
+    if not isinstance(head, dict):
+        raise click.ClickException(
+            f"GitHub pull request {owner}/{repo}#{pr_number} is missing head data."
+        )
+    head_sha = head.get("sha")
+    if not isinstance(head_sha, str) or not head_sha.strip():
+        raise click.ClickException(
+            f"GitHub pull request {owner}/{repo}#{pr_number} is missing head.sha."
+        )
+    html_url = payload.get("html_url")
+    companion_pr_url = (
+        html_url.strip()
+        if isinstance(html_url, str) and html_url.strip()
+        else f"https://github.com/{owner}/{repo}/pull/{pr_number}"
+    )
+    return head_sha.strip(), companion_pr_url
 
 
 def _pull_request_event_timestamp(*, event: GitHubPullRequestEvent) -> str:

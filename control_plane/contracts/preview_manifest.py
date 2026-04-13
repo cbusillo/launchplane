@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.preview_generation_record import PreviewSourceRecord
+from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary, PreviewSourceRecord
 
 
 class HarborResolvedPreviewManifest(BaseModel):
@@ -14,6 +14,7 @@ class HarborResolvedPreviewManifest(BaseModel):
     baseline_release_tuple_id: str
     resolved_manifest_fingerprint: str
     source_map: tuple[PreviewSourceRecord, ...]
+    companion_summaries: tuple[PreviewPullRequestSummary, ...] = ()
 
     @model_validator(mode="after")
     def _validate_manifest(self) -> "HarborResolvedPreviewManifest":
