@@ -28,6 +28,7 @@ from control_plane.ui import (
     render_environment_contract_dashboard,
     render_environment_status_dashboard,
     render_inventory_overview_dashboard,
+    render_operator_site_index,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
@@ -1049,6 +1050,14 @@ def _build_environment_contract_payload(*, context_name: str, instance_name: str
     }
 
 
+def _site_environment_status_file_name(*, context_name: str, instance_name: str) -> str:
+    return f"{context_name}-{instance_name}-status.html"
+
+
+def _site_environment_contract_file_name(*, context_name: str, instance_name: str) -> str:
+    return f"{context_name}-{instance_name}-contract.html"
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -1345,6 +1354,150 @@ def ui_environment_contract(context_name: str, instance_name: str, output_file: 
         encoding="utf-8",
     )
     click.echo(output_file)
+
+
+@ui.command("build-site")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option(
+    "--output-dir",
+    type=click.Path(path_type=Path),
+    default=Path("tmp/operator-ui"),
+    show_default=True,
+)
+def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
+    record_store = _store(state_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    environments_dir = output_dir / "environments"
+    contracts_dir = output_dir / "contracts"
+    environments_dir.mkdir(parents=True, exist_ok=True)
+    contracts_dir.mkdir(parents=True, exist_ok=True)
+
+    overview_payloads = _build_environment_overview_payloads(
+        record_store=record_store,
+        context_name=context_name,
+    )
+    linked_overview_payloads: list[dict[str, object]] = []
+    site_environment_entries_by_key: dict[tuple[str, str], dict[str, object]] = {}
+    for payload in overview_payloads:
+        payload_context = str(payload.get("context", ""))
+        payload_instance = str(payload.get("instance", ""))
+        status_file_name = _site_environment_status_file_name(
+            context_name=payload_context,
+            instance_name=payload_instance,
+        )
+        contract_file_name = _site_environment_contract_file_name(
+            context_name=payload_context,
+            instance_name=payload_instance,
+        )
+        status_page_href = f"environments/{status_file_name}"
+        contract_page_href = f"contracts/{contract_file_name}"
+        overview_payload = {
+            **payload,
+            "status_page_href": status_page_href,
+            "contract_page_href": contract_page_href,
+        }
+        status_payload = {
+            **payload,
+            "home_page_href": "../index.html",
+            "inventory_overview_href": "../inventory-overview.html",
+            "contract_page_href": f"../contracts/{contract_file_name}",
+        }
+        linked_overview_payloads.append(overview_payload)
+        status_output_file = environments_dir / status_file_name
+        status_output_file.write_text(
+            render_environment_status_dashboard(status_payload),
+            encoding="utf-8",
+        )
+        live_payload = payload.get("live")
+        live_summary = live_payload if isinstance(live_payload, dict) else {}
+        site_environment_entries_by_key[(payload_context, payload_instance)] = {
+            "context": payload_context,
+            "instance": payload_instance,
+            "summary": (
+                f"Artifact {live_summary.get('artifact_id', '') or '-'} with "
+                f"deploy status {live_summary.get('deploy_status', '') or 'skipped'}."
+            ),
+            "status_href": status_page_href,
+            "contract_href": contract_page_href,
+        }
+
+    overview_output_file = output_dir / "inventory-overview.html"
+    overview_output_file.write_text(
+        render_inventory_overview_dashboard(
+            linked_overview_payloads,
+            context_name=context_name,
+            home_page_href="index.html",
+        ),
+        encoding="utf-8",
+    )
+
+    definition = control_plane_runtime_environments.load_runtime_environment_definition(
+        control_plane_root=_control_plane_root()
+    )
+    contract_entries: list[dict[str, object]] = []
+    for payload_context, context_definition in sorted(definition.contexts.items()):
+        if context_name and payload_context != context_name:
+            continue
+        for payload_instance in sorted(context_definition.instances):
+            contract_payload = _build_environment_contract_payload(
+                context_name=payload_context,
+                instance_name=payload_instance,
+            )
+            contract_file_name = _site_environment_contract_file_name(
+                context_name=payload_context,
+                instance_name=payload_instance,
+            )
+            contract_output_file = contracts_dir / contract_file_name
+            contract_output_file.write_text(
+                render_environment_contract_dashboard(
+                    {
+                        **contract_payload,
+                        "home_page_href": "../index.html",
+                        "inventory_overview_href": "../inventory-overview.html",
+                        "status_page_href": f"../environments/{_site_environment_status_file_name(context_name=payload_context, instance_name=payload_instance)}",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            contract_entries.append(
+                {
+                    "context": payload_context,
+                    "instance": payload_instance,
+                    "href": f"contracts/{contract_file_name}",
+                }
+            )
+            site_environment_entries_by_key.setdefault(
+                (payload_context, payload_instance),
+                {
+                    "context": payload_context,
+                    "instance": payload_instance,
+                    "summary": "No live inventory record yet. Use the contract page to inspect environment truth first.",
+                    "status_href": "",
+                    "contract_href": f"contracts/{contract_file_name}",
+                },
+            )
+
+    site_environment_entries = [
+        site_environment_entries_by_key[key]
+        for key in sorted(site_environment_entries_by_key)
+    ]
+
+    index_output_file = output_dir / "index.html"
+    index_output_file.write_text(
+        render_operator_site_index(
+            {
+                "context": context_name,
+                "inventory_overview_href": "inventory-overview.html",
+                "environments": site_environment_entries,
+                "contracts": contract_entries,
+            }
+        ),
+        encoding="utf-8",
+    )
+    click.echo(index_output_file)
 
 
 @inventory.command("status")

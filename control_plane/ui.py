@@ -44,6 +44,16 @@ def _render_value(label: str, value: str) -> str:
     )
 
 
+def _render_action_link(label: str, href: str, *, tone: str = "default") -> str:
+    if not href:
+        return ""
+    return (
+        f'<a class="action-link action-link-{escape(tone)}" href="{escape(href)}">'
+        f"{escape(label)}"
+        "</a>"
+    )
+
+
 def _overall_status(live_payload: Mapping[str, object]) -> str:
     for key in ("destination_health_status", "post_deploy_update_status", "deploy_status"):
         status = _string_value(live_payload.get(key))
@@ -63,6 +73,18 @@ def _render_environment_card(payload: Mapping[str, object]) -> str:
     instance_name = _string_value(payload.get("instance"))
     overall_status = _overall_status(live_payload)
     promoted_from_instance = _string_value(live_payload.get("promoted_from_instance"))
+    status_page_href = _string_value(payload.get("status_page_href"))
+    contract_page_href = _string_value(payload.get("contract_page_href"))
+    actions_markup = ""
+    if status_page_href or contract_page_href:
+        actions_markup = "".join(
+            (
+                '<div class="card-actions">',
+                _render_action_link("Open status", status_page_href, tone="primary"),
+                _render_action_link("Open contract", contract_page_href),
+                '</div>',
+            )
+        )
 
     return "".join(
         (
@@ -105,6 +127,7 @@ def _render_environment_card(payload: Mapping[str, object]) -> str:
             _render_value("backup", _string_value(live_promotion_payload.get("backup_record_id"))),
             '</section>',
             '</div>',
+            actions_markup,
             '</article>',
         )
     )
@@ -379,6 +402,9 @@ def render_environment_contract_dashboard(payload: Mapping[str, object]) -> str:
     instance_rows = payload.get("instance_rows", ())
     if not isinstance(instance_rows, Sequence):
         instance_rows = ()
+    home_page_href = _string_value(payload.get("home_page_href"))
+    inventory_overview_href = _string_value(payload.get("inventory_overview_href"))
+    status_page_href = _string_value(payload.get("status_page_href"))
 
     layer_summary_markup = "".join(
         "".join(
@@ -522,6 +548,34 @@ def render_environment_contract_dashboard(payload: Mapping[str, object]) -> str:
       .summary-grid, .panel-grid {{
         display: grid;
         gap: 16px;
+      }}
+
+      .hero-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 20px;
+      }}
+
+      .action-link {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(255, 252, 246, 0.92);
+      }}
+
+      .action-link-primary {{
+        background: var(--accent-soft);
+        border-color: rgba(15, 118, 110, 0.18);
+        color: var(--accent);
       }}
 
       .summary-grid {{
@@ -736,6 +790,11 @@ def render_environment_contract_dashboard(payload: Mapping[str, object]) -> str:
               consume. Sensitive values are redacted here by design; use a trusted terminal command when you truly need
               the raw value.
             </p>
+            <div class="hero-actions">
+              {_render_action_link("Operator site", home_page_href, tone="primary")}
+              {_render_action_link("Inventory overview", inventory_overview_href)}
+              {_render_action_link("Environment status", status_page_href)}
+            </div>
             <div class="hero-meta">
               <span>Generated at {escape(generated_at)}</span>
               <span>Source file: <strong>{escape(source_file)}</strong></span>
@@ -853,10 +912,236 @@ def render_environment_contract_dashboard(payload: Mapping[str, object]) -> str:
 """
 
 
+def render_operator_site_index(payload: Mapping[str, object]) -> str:
+    generated_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+    context_name = _string_value(payload.get("context"))
+    inventory_overview_href = _string_value(payload.get("inventory_overview_href"))
+
+    environments = payload.get("environments", ())
+    if not isinstance(environments, Sequence):
+        environments = ()
+    contracts = payload.get("contracts", ())
+    if not isinstance(contracts, Sequence):
+        contracts = ()
+
+    environment_cards = "".join(
+        "".join(
+            (
+                '<article class="site-card">',
+                f'<p class="eyebrow">{escape(_string_value(item.get("context")))}</p>',
+                f'<h3>{escape(_string_value(item.get("instance")))}</h3>',
+                f'<p class="site-copy">{escape(_string_value(item.get("summary")))}</p>',
+                '<div class="card-actions">',
+                _render_action_link("Status", _string_value(item.get("status_href")), tone="primary"),
+                _render_action_link("Contract", _string_value(item.get("contract_href"))),
+                '</div>',
+                '</article>',
+            )
+        )
+        for item in environments
+        if isinstance(item, Mapping)
+    )
+
+    contract_links = "".join(
+        "".join(
+            (
+                '<li>',
+                _render_action_link(
+                    f"{_string_value(item.get('context'))}/{_string_value(item.get('instance'))}",
+                    _string_value(item.get("href")),
+                ),
+                '</li>',
+            )
+        )
+        for item in contracts
+        if isinstance(item, Mapping)
+    )
+
+    title_suffix = f" for {context_name}" if context_name else ""
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Control Plane Operator Site</title>
+    <style>
+      :root {{
+        --canvas: #efe7d9;
+        --ink: #1a1511;
+        --muted: #5d554c;
+        --line: rgba(26, 21, 17, 0.12);
+        --panel: rgba(255, 251, 245, 0.92);
+        --shadow: 0 20px 48px rgba(26, 21, 17, 0.14);
+        --accent: #0f766e;
+        --accent-soft: rgba(15, 118, 110, 0.14);
+      }}
+
+      * {{ box-sizing: border-box; }}
+
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 28%),
+          radial-gradient(circle at bottom right, rgba(180, 83, 9, 0.12), transparent 24%),
+          linear-gradient(180deg, #eee4d4 0%, var(--canvas) 55%, #e9e0d3 100%);
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+      }}
+
+      main {{
+        width: min(1220px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0 56px;
+      }}
+
+      .hero, .site-card, .panel {{
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }}
+
+      .hero {{
+        padding: 30px;
+        background: linear-gradient(135deg, rgba(255, 251, 245, 0.96), rgba(243, 235, 224, 0.86));
+      }}
+
+      .eyebrow {{
+        margin: 0 0 8px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-size: 0.74rem;
+      }}
+
+      h1, h2, h3 {{
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 700;
+      }}
+
+      h1 {{
+        font-size: clamp(2.3rem, 5vw, 4.4rem);
+        line-height: 0.96;
+        max-width: 12ch;
+      }}
+
+      .hero-copy, .site-copy {{ color: var(--muted); line-height: 1.6; }}
+      .hero-copy {{ max-width: 70ch; margin-top: 16px; }}
+
+      .hero-meta {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+        color: var(--muted);
+      }}
+
+      .action-link {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(255, 252, 246, 0.92);
+      }}
+
+      .action-link-primary {{
+        background: var(--accent-soft);
+        border-color: rgba(15, 118, 110, 0.18);
+        color: var(--accent);
+      }}
+
+      .card-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 16px;
+      }}
+
+      .section-grid {{
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(280px, 0.7fr);
+        gap: 18px;
+        margin-top: 24px;
+      }}
+
+      .cards-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+        gap: 16px;
+      }}
+
+      .site-card, .panel {{ padding: 22px; }}
+
+      .site-copy {{ margin-top: 10px; }}
+
+      .link-list {{
+        display: grid;
+        gap: 10px;
+        list-style: none;
+        padding: 0;
+        margin: 16px 0 0;
+      }}
+
+      @media (max-width: 900px) {{
+        main {{ width: min(100vw - 20px, 1220px); padding: 20px 0 32px; }}
+        .section-grid {{ grid-template-columns: 1fr; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Control Plane Operator Site</p>
+        <h1>Operator cockpit{escape(title_suffix)}</h1>
+        <p class="hero-copy">
+          This generated site bundles the current operator-facing read models into one navigable surface: inventory,
+          environment status, and runtime-environment contract pages. It is still static HTML, but it now behaves like
+          one coherent control-plane cockpit instead of isolated exports.
+        </p>
+        <div class="hero-meta">
+          <span>Generated at {escape(generated_at)}</span>
+          <span>Tracked environments: <strong>{len([item for item in environments if isinstance(item, Mapping)])}</strong></span>
+          <span>Contract pages: <strong>{len([item for item in contracts if isinstance(item, Mapping)])}</strong></span>
+        </div>
+        <div class="card-actions">
+          {_render_action_link("Open inventory overview", inventory_overview_href, tone="primary")}
+        </div>
+      </section>
+
+      <section class="section-grid">
+        <div>
+          <section class="cards-grid">
+            {environment_cards}
+          </section>
+        </div>
+        <aside class="panel">
+          <p class="eyebrow">Contracts</p>
+          <h2>Environment truth pages</h2>
+          <p class="site-copy">Use these pages to inspect the resolved control-plane environment contract for each context and instance.</p>
+          <ul class="link-list">{contract_links}</ul>
+        </aside>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
 def render_inventory_overview_dashboard(
     payloads: Sequence[Mapping[str, object]],
     *,
     context_name: str = "",
+    home_page_href: str = "",
 ) -> str:
     total_count = len(payloads)
     pass_count = 0
@@ -985,6 +1270,12 @@ def render_inventory_overview_dashboard(
         margin-top: 28px;
       }}
 
+      .toolbar-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }}
+
       .search-box {{
         flex: 1 1 280px;
         display: flex;
@@ -1083,6 +1374,34 @@ def render_inventory_overview_dashboard(
         margin-top: 20px;
       }}
 
+      .card-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
+      }}
+
+      .action-link {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(255, 252, 246, 0.92);
+      }}
+
+      .action-link-primary {{
+        background: var(--accent-soft);
+        border-color: rgba(15, 118, 110, 0.18);
+        color: var(--accent);
+      }}
+
       .detail-panel {{
         padding: 16px;
         border-radius: 18px;
@@ -1152,6 +1471,9 @@ def render_inventory_overview_dashboard(
           <span>Visible environments: <strong id="visible-count">{total_count}</strong></span>
         </div>
         <div class="toolbar">
+          <div class="toolbar-actions">
+            {_render_action_link("Operator site", home_page_href, tone="primary")}
+          </div>
           <label class="search-box" for="environment-filter">
             <span>Filter</span>
             <input id="environment-filter" type="search" placeholder="Search context, instance, artifact, or source ref">
@@ -1220,6 +1542,9 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
     instance_name = _string_value(payload.get("instance"))
     overall_status = _overall_status(live_payload)
     generated_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+    home_page_href = _string_value(payload.get("home_page_href"))
+    inventory_overview_href = _string_value(payload.get("inventory_overview_href"))
+    contract_page_href = _string_value(payload.get("contract_page_href"))
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1319,6 +1644,34 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
       .summary-stack {{
         display: grid;
         gap: 12px;
+      }}
+
+      .hero-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 20px;
+      }}
+
+      .action-link {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(255, 252, 246, 0.92);
+      }}
+
+      .action-link-primary {{
+        color: var(--pass);
+        background: rgba(22, 101, 52, 0.12);
+        border-color: rgba(22, 101, 52, 0.18);
       }}
 
       .summary-card {{
@@ -1523,6 +1876,11 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
               This page renders the single-environment control-plane read model: live inventory, latest deployment,
               latest promotion, and the backup record that authorized the current promoted state when one exists.
             </p>
+            <div class="hero-actions">
+              {_render_action_link("Operator site", home_page_href, tone="primary")}
+              {_render_action_link("Inventory overview", inventory_overview_href)}
+              {_render_action_link("Environment contract", contract_page_href)}
+            </div>
             <div class="hero-meta">
               <span>Generated at {escape(generated_at)}</span>
               <span>Artifact: <strong>{escape(_string_value(live_payload.get("artifact_id")) or "-")}</strong></span>

@@ -19,6 +19,7 @@ title: Operations
 - `uv run control-plane ui inventory-overview [--context <ctx>] [--output-file <path>]`
 - `uv run control-plane ui environment-status --context <ctx> --instance <instance> [--output-file <path>]`
 - `uv run control-plane ui environment-contract --context <ctx> --instance <instance> [--output-file <path>]`
+- `uv run control-plane ui build-site [--state-dir <path>] [--context <ctx>] [--output-dir <path>]`
 - `uv run control-plane environments resolve --context <ctx> --instance <instance> [--json-output]`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
@@ -108,6 +109,9 @@ title: Operations
   contract for one context and instance, showing global/context/instance
   layering plus the final resolved environment with sensitive values redacted
   in the HTML output.
+- `ui build-site` generates a linked static operator site with an index page,
+  inventory overview, per-environment status pages, and per-environment
+  environment-contract pages under one output directory.
 - Direct `ship` requires an explicit artifact id that already has a stored
   artifact manifest in control-plane state.
 - When a stored artifact manifest is available, ship syncs

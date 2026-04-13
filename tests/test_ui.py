@@ -482,6 +482,80 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
             self.assertIn("[redacted ending ster]", rendered_html)
             self.assertNotIn("shared-master", rendered_html)
 
+    def test_ui_build_site_generates_linked_pages(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            inventory_dir = state_dir / "inventory"
+            deployment_dir = state_dir / "deployments"
+            inventory_dir.mkdir(parents=True, exist_ok=True)
+            deployment_dir.mkdir(parents=True, exist_ok=True)
+            _write_inventory_record(
+                inventory_dir,
+                context_name="opw",
+                instance_name="testing",
+                artifact_id="artifact-opw",
+                deployment_record_id="deployment-opw",
+            )
+            _write_deployment_record(
+                deployment_dir,
+                context_name="opw",
+                instance_name="testing",
+                artifact_id="artifact-opw",
+                deployment_record_id="deployment-opw",
+            )
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_DB_USER = "odoo"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+
+[contexts.opw.instances.testing.env]
+ODOO_DB_PASSWORD = "testing-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = control_plane_root / "tmp" / "operator-ui"
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ui",
+                        "build-site",
+                        "--state-dir",
+                        str(state_dir),
+                        "--context",
+                        "opw",
+                        "--output-dir",
+                        str(output_dir),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
+            overview_html = (output_dir / "inventory-overview.html").read_text(encoding="utf-8")
+            status_html = (output_dir / "environments" / "opw-testing-status.html").read_text(encoding="utf-8")
+            contract_html = (output_dir / "contracts" / "opw-testing-contract.html").read_text(encoding="utf-8")
+
+            self.assertIn("Operator cockpit for opw", index_html)
+            self.assertIn("inventory-overview.html", index_html)
+            self.assertIn("contracts/opw-testing-contract.html", index_html)
+            self.assertIn("environments/opw-testing-status.html", index_html)
+            self.assertIn("index.html", overview_html)
+            self.assertIn("environments/opw-testing-status.html", overview_html)
+            self.assertIn("../inventory-overview.html", status_html)
+            self.assertIn("../contracts/opw-testing-contract.html", status_html)
+            self.assertIn("../environments/opw-testing-status.html", contract_html)
+
 
 if __name__ == "__main__":
     unittest.main()
