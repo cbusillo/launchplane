@@ -335,6 +335,81 @@ def build_preview_generation_record_from_request(
     )
 
 
+def apply_generation_requested_transition(
+    *,
+    preview: PreviewRecord,
+    generation: PreviewGenerationRecord,
+) -> PreviewRecord:
+    return preview.model_copy(
+        update={
+            "state": "active" if preview.serving_generation_id else "pending",
+            "updated_at": generation.requested_at,
+            "destroyed_at": "",
+            "destroy_reason": "",
+            "active_generation_id": generation.generation_id,
+            "latest_generation_id": generation.generation_id,
+            "latest_manifest_fingerprint": generation.resolved_manifest_fingerprint,
+        }
+    )
+
+
+def apply_generation_ready_transition(
+    *,
+    preview: PreviewRecord,
+    generation: PreviewGenerationRecord,
+) -> PreviewRecord:
+    return preview.model_copy(
+        update={
+            "state": "active",
+            "updated_at": generation.ready_at or generation.finished_at or generation.requested_at,
+            "destroyed_at": "",
+            "destroy_reason": "",
+            "active_generation_id": generation.generation_id,
+            "serving_generation_id": generation.generation_id,
+            "latest_generation_id": generation.generation_id,
+            "latest_manifest_fingerprint": generation.resolved_manifest_fingerprint,
+        }
+    )
+
+
+def apply_generation_failed_transition(
+    *,
+    preview: PreviewRecord,
+    generation: PreviewGenerationRecord,
+) -> PreviewRecord:
+    return preview.model_copy(
+        update={
+            "state": "failed",
+            "updated_at": generation.failed_at or generation.finished_at or generation.requested_at,
+            "active_generation_id": generation.generation_id,
+            "latest_generation_id": generation.generation_id,
+            "latest_manifest_fingerprint": generation.resolved_manifest_fingerprint,
+        }
+    )
+
+
+def apply_preview_destroyed_transition(
+    *,
+    preview: PreviewRecord,
+    destroyed_at: str,
+    destroy_reason: str,
+) -> PreviewRecord:
+    if not destroyed_at.strip():
+        raise ValueError("preview destroyed transition requires destroyed_at")
+    if not destroy_reason.strip():
+        raise ValueError("preview destroyed transition requires destroy_reason")
+    return preview.model_copy(
+        update={
+            "state": "destroyed",
+            "updated_at": destroyed_at,
+            "destroyed_at": destroyed_at,
+            "destroy_reason": destroy_reason,
+            "active_generation_id": "",
+            "serving_generation_id": "",
+        }
+    )
+
+
 def build_preview_status_payload(
     *,
     record_store: FilesystemRecordStore,
