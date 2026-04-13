@@ -161,11 +161,16 @@ title: Operations
   it classifies whether Harbor should enable, refresh, destroy, or ignore a PR
   event under the current label-driven trigger contract and now emits the
   matching Harbor mutation intent. Generation intent remains manifest-resolution
-  dependent until Harbor resolves the exact preview build tuple.
+  dependent only when Harbor cannot yet resolve the exact preview build tuple,
+  such as companion-ref cases that still need external PR-head lookup.
 - Harbor preview-request metadata now starts as one Harbor-owned fenced PR-body
   block using the `harbor-preview` info string with TOML content. Missing blocks
   are treated as absent metadata; malformed or non-allowlisted companion refs
   are reported fail-closed in the ingest payload.
+- For the current no-companion path, Harbor now resolves an exact preview
+  manifest from the anchor PR head SHA plus a control-plane-owned baseline
+  release tuple of exact repo SHAs and emits a full generation mutation request
+  directly from event ingest.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.

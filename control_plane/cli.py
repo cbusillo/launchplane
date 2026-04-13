@@ -1431,6 +1431,7 @@ def harbor_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
 def harbor_previews_ingest_pr_event(state_dir: Path, input_file: Path) -> None:
     event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
     payload = build_pull_request_event_action_payload(
+        control_plane_root=_control_plane_root(),
         record_store=_store(state_dir),
         event=event,
     )
