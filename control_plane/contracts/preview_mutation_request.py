@@ -93,3 +93,26 @@ class PreviewGenerationMutationRequest(BaseModel):
                 "preview generation mutation request requires resolved_manifest_fingerprint"
             )
         return self
+
+
+class PreviewDestroyMutationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    anchor_repo: str
+    anchor_pr_number: int = Field(ge=1)
+    destroyed_at: str
+    destroy_reason: str
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewDestroyMutationRequest":
+        if not self.context.strip():
+            raise ValueError("preview destroy mutation request requires context")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview destroy mutation request requires anchor_repo")
+        if not self.destroyed_at.strip():
+            raise ValueError("preview destroy mutation request requires destroyed_at")
+        if not self.destroy_reason.strip():
+            raise ValueError("preview destroy mutation request requires destroy_reason")
+        return self

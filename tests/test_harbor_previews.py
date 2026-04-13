@@ -835,6 +835,300 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("No Harbor preview found", result.output)
 
+    def test_harbor_previews_request_generation_updates_preview_and_generation_together(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jabc",
+                    state="active",
+                    active_generation_id="hgen_01jabc_1",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    preview_id="hpr_01jabc",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            preview_input_file = control_plane_root / "preview-request.json"
+            preview_input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "updated_at": "2026-04-13T12:20:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            generation_input_file = control_plane_root / "generation-request.json"
+            generation_input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "anchor_head_sha": "aaaa2222",
+                        "state": "building",
+                        "requested_reason": "manifest_changed",
+                        "requested_at": "2026-04-13T12:20:00Z",
+                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "request-generation",
+                        "--state-dir",
+                        str(state_dir),
+                        "--preview-input-file",
+                        str(preview_input_file),
+                        "--generation-input-file",
+                        str(generation_input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            preview = store.read_preview_record("hpr_01jabc")
+            generation = store.read_preview_generation_record("hpr_01jabc-generation-0002")
+            self.assertEqual(preview.active_generation_id, "hpr_01jabc-generation-0002")
+            self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
+            self.assertEqual(preview.serving_generation_id, "hgen_01jabc_1")
+            self.assertEqual(generation.sequence, 2)
+
+    def test_harbor_previews_mark_generation_ready_cuts_over_serving_generation(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jabc",
+                    state="active",
+                    active_generation_id="hpr_01jabc-generation-0002",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hpr_01jabc-generation-0002",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    preview_id="hpr_01jabc",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hpr_01jabc-generation-0002",
+                    preview_id="hpr_01jabc",
+                    sequence=2,
+                    state="deploying",
+                    manifest_fingerprint="harbor-manifest-002",
+                    artifact_id="artifact-opw-124",
+                    ready_at="",
+                )
+            )
+            input_file = control_plane_root / "generation-ready-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "anchor_head_sha": "aaaa2222",
+                        "generation_id": "hpr_01jabc-generation-0002",
+                        "state": "ready",
+                        "requested_reason": "manifest_changed",
+                        "requested_at": "2026-04-13T12:20:00Z",
+                        "ready_at": "2026-04-13T12:25:00Z",
+                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                        "artifact_id": "artifact-opw-124",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "mark-generation-ready",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            preview = store.read_preview_record("hpr_01jabc")
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, "hpr_01jabc-generation-0002")
+            self.assertEqual(preview.active_generation_id, "hpr_01jabc-generation-0002")
+
+    def test_harbor_previews_mark_generation_failed_keeps_existing_serving_generation(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jabc",
+                    state="active",
+                    active_generation_id="hpr_01jabc-generation-0002",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hpr_01jabc-generation-0002",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    preview_id="hpr_01jabc",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hpr_01jabc-generation-0002",
+                    preview_id="hpr_01jabc",
+                    sequence=2,
+                    state="deploying",
+                    manifest_fingerprint="harbor-manifest-002",
+                    artifact_id="artifact-opw-124",
+                    ready_at="",
+                )
+            )
+            input_file = control_plane_root / "generation-failed-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "anchor_head_sha": "aaaa2222",
+                        "generation_id": "hpr_01jabc-generation-0002",
+                        "state": "failed",
+                        "requested_reason": "manifest_changed",
+                        "requested_at": "2026-04-13T12:20:00Z",
+                        "failed_at": "2026-04-13T12:24:00Z",
+                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                        "artifact_id": "artifact-opw-124",
+                        "failure_stage": "deploying",
+                        "failure_summary": "Replacement generation failed during deploy.",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "mark-generation-failed",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            preview = store.read_preview_record("hpr_01jabc")
+            self.assertEqual(preview.state, "failed")
+            self.assertEqual(preview.serving_generation_id, "hgen_01jabc_1")
+            self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
+
+    def test_harbor_previews_destroy_preview_clears_runtime_links(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jabc",
+                    state="teardown_pending",
+                    active_generation_id="hpr_01jabc-generation-0002",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hpr_01jabc-generation-0002",
+                )
+            )
+            input_file = control_plane_root / "destroy-preview-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "destroyed_at": "2026-04-14T12:14:00Z",
+                        "destroy_reason": "merged_after_grace_window",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "destroy-preview",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            preview = store.read_preview_record("hpr_01jabc")
+            self.assertEqual(preview.state, "destroyed")
+            self.assertEqual(preview.active_generation_id, "")
+            self.assertEqual(preview.serving_generation_id, "")
+            self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
+
     def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
