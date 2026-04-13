@@ -62,7 +62,9 @@ Code and local-DX repos own:
   repo/tag image selection.
 - Any upstream handoff seam must fail closed when this repo cannot accept
   control.
-- Any temporary wrapper logic should stay explicit and removable.
+- Any temporary compatibility bridge should stay explicit and removable; native
+  tenant/devkit convenience commands are fine when the ownership boundary stays
+  clear.
 - Immutable promotion ownership includes validating a stored backup-gate
   record for the destination environment before ship execution begins.
 - Operator-facing status/history reads should also terminate here by composing

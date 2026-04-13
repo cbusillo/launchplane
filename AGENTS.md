@@ -23,7 +23,8 @@ Treat this file as the launch checklist for every Codex session in
 - Prefer fail-closed behavior over silent fallback.
 - Do not reintroduce long-term release ownership back into code or local-DX
   repos.
-- Keep wrapper behavior transitional and document removal criteria.
+- Keep any true compatibility bridge explicit and removable; do not treat
+  native tenant/devkit convenience commands as migration-only wrappers.
 - Never commit secrets or operator-local overrides.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
@@ -52,7 +53,8 @@ Treat this file as the launch checklist for every Codex session in
   - addon code
   - local DX
   - Odoo-specific test and validation workflows
-  - any remaining migration wrappers that have not been deleted yet
+  - tenant-root convenience commands and any still-explicit compatibility
+    bridges that have not been deleted yet
 
 ## Reference Handles
 
