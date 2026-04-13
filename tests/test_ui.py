@@ -489,8 +489,12 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
             state_dir = control_plane_root / "state"
             inventory_dir = state_dir / "inventory"
             deployment_dir = state_dir / "deployments"
+            promotion_dir = state_dir / "promotions"
+            backup_gate_dir = state_dir / "backup_gates"
             inventory_dir.mkdir(parents=True, exist_ok=True)
             deployment_dir.mkdir(parents=True, exist_ok=True)
+            promotion_dir.mkdir(parents=True, exist_ok=True)
+            backup_gate_dir.mkdir(parents=True, exist_ok=True)
             _write_inventory_record(
                 inventory_dir,
                 context_name="opw",
@@ -498,11 +502,35 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
                 artifact_id="artifact-opw",
                 deployment_record_id="deployment-opw",
             )
+            inventory_record_path = inventory_dir / "opw-testing.json"
+            inventory_payload = json.loads(inventory_record_path.read_text(encoding="utf-8"))
+            inventory_payload["promotion_record_id"] = "promotion-opw"
+            inventory_payload["promoted_from_instance"] = "local"
+            inventory_record_path.write_text(
+                json.dumps(inventory_payload, indent=2),
+                encoding="utf-8",
+            )
             _write_deployment_record(
                 deployment_dir,
                 context_name="opw",
                 instance_name="testing",
                 artifact_id="artifact-opw",
+                deployment_record_id="deployment-opw",
+            )
+            _write_backup_gate_record(
+                backup_gate_dir,
+                record_id="backup-opw",
+                context_name="opw",
+                instance_name="testing",
+            )
+            _write_promotion_record(
+                promotion_dir,
+                record_id="promotion-opw",
+                artifact_id="artifact-opw",
+                backup_record_id="backup-opw",
+                context_name="opw",
+                from_instance_name="local",
+                to_instance_name="testing",
                 deployment_record_id="deployment-opw",
             )
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
@@ -516,6 +544,9 @@ ODOO_DB_USER = "odoo"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
 
 [contexts.opw.instances.testing.env]
 ODOO_DB_PASSWORD = "testing-secret"
@@ -545,6 +576,15 @@ ODOO_DB_PASSWORD = "testing-secret"
             overview_html = (output_dir / "inventory-overview.html").read_text(encoding="utf-8")
             status_html = (output_dir / "environments" / "opw-testing-status.html").read_text(encoding="utf-8")
             contract_html = (output_dir / "contracts" / "opw-testing-contract.html").read_text(encoding="utf-8")
+            deployment_record_html = (
+                output_dir / "records" / "deployments" / "deployment-opw.html"
+            ).read_text(encoding="utf-8")
+            promotion_record_html = (
+                output_dir / "records" / "promotions" / "promotion-opw.html"
+            ).read_text(encoding="utf-8")
+            backup_gate_record_html = (
+                output_dir / "records" / "backup-gates" / "backup-opw.html"
+            ).read_text(encoding="utf-8")
 
             self.assertIn("Operator cockpit for opw", index_html)
             self.assertIn("inventory-overview.html", index_html)
@@ -554,7 +594,14 @@ ODOO_DB_PASSWORD = "testing-secret"
             self.assertIn("environments/opw-testing-status.html", overview_html)
             self.assertIn("../inventory-overview.html", status_html)
             self.assertIn("../contracts/opw-testing-contract.html", status_html)
+            self.assertIn("../records/deployments/deployment-opw.html", status_html)
+            self.assertIn("../records/promotions/promotion-opw.html", status_html)
+            self.assertIn("../records/backup-gates/backup-opw.html", status_html)
             self.assertIn("../environments/opw-testing-status.html", contract_html)
+            self.assertIn("../../environments/opw-testing-status.html", deployment_record_html)
+            self.assertIn("../../environments/opw-local-status.html", promotion_record_html)
+            self.assertIn("../../records/backup-gates/backup-opw.html", promotion_record_html)
+            self.assertIn("../../environments/opw-testing-status.html", backup_gate_record_html)
 
     def test_ui_build_site_generates_placeholder_status_when_inventory_missing(self) -> None:
         runner = CliRunner()
