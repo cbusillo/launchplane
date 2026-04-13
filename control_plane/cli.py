@@ -14,6 +14,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -37,6 +38,7 @@ from control_plane.workflows.harbor import (
     build_preview_generation_record_from_request,
     build_preview_history_payload,
     build_preview_inventory_payload,
+    build_pull_request_event_action_payload,
     build_preview_record_from_request,
     build_preview_status_payload,
     find_preview_record,
@@ -1419,6 +1421,20 @@ def harbor_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
     )
     preview_path = record_store.write_preview_record(transitioned_preview)
     click.echo(preview_path)
+
+
+@harbor_previews.command("ingest-pr-event")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_ingest_pr_event(state_dir: Path, input_file: Path) -> None:
+    event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
+    payload = build_pull_request_event_action_payload(
+        record_store=_store(state_dir),
+        event=event,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @harbor_previews.command("list")
