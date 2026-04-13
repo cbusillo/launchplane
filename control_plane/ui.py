@@ -314,11 +314,606 @@ def _render_command_list(commands: Sequence[str]) -> str:
     return f'<div class="command-list">{rendered_commands}</div>'
 
 
+def _render_action_group(
+    actions: Sequence[tuple[str, str, str]], *, class_name: str = "action-group"
+) -> str:
+    rendered_actions = "".join(
+        _render_action_link(label, href, tone=tone) for label, href, tone in actions if href
+    )
+    if not rendered_actions:
+        return ""
+    return f'<div class="{escape(class_name)}">{rendered_actions}</div>'
+
+
 def _render_evidence_pairs(evidence: object) -> str:
     if not isinstance(evidence, Mapping) or not evidence:
         return _render_value("evidence", "(none)")
     return "".join(
         _render_value(_string_value(key), _string_value(value)) for key, value in evidence.items()
+    )
+
+
+def _render_value_pairs(fields: Sequence[tuple[str, object]]) -> str:
+    return "".join(_render_value(label, _string_value(value)) for label, value in fields)
+
+
+def _string_sequence(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    return tuple(_string_value(item) for item in value)
+
+
+def _render_record_panel(
+    eyebrow: str,
+    title: str,
+    body_markup: str,
+    *,
+    actions: Sequence[tuple[str, str, str]] = (),
+) -> str:
+    return "".join(
+        (
+            '<article class="panel">',
+            f'<p class="eyebrow">{escape(eyebrow)}</p>',
+            f'<h2>{escape(title)}</h2>',
+            body_markup,
+            _render_action_group(actions, class_name="panel-actions"),
+            '</article>',
+        )
+    )
+
+
+def _render_record_dashboard(
+    *,
+    page_label: str,
+    title: str,
+    summary: str,
+    actions: Sequence[tuple[str, str, str]],
+    summary_tiles: Sequence[tuple[str, str]],
+    badges: Sequence[tuple[str, str]],
+    main_panels: Sequence[str],
+    side_panels: Sequence[str],
+) -> str:
+    generated_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+    summary_tiles_markup = "".join(
+        "".join(
+            (
+                '<article class="summary-card">',
+                f'<span class="eyebrow">{escape(label)}</span>',
+                f'<span class="summary-value">{escape(value or "-")}</span>',
+                '</article>',
+            )
+        )
+        for label, value in summary_tiles
+    )
+    badges_markup = "".join(_render_status_badge(label, status) for label, status in badges if status)
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{escape(page_label)}</title>
+    <style>
+      :root {{
+        --canvas: #f3eee5;
+        --ink: #1d1916;
+        --muted: #5e554d;
+        --line: rgba(29, 25, 22, 0.12);
+        --panel: rgba(255, 251, 246, 0.92);
+        --panel-strong: rgba(252, 248, 242, 0.96);
+        --shadow: 0 18px 40px rgba(29, 25, 22, 0.12);
+        --pass: #166534;
+        --pass-bg: rgba(22, 101, 52, 0.14);
+        --fail: #991b1b;
+        --fail-bg: rgba(153, 27, 27, 0.14);
+        --pending: #9a6700;
+        --pending-bg: rgba(154, 103, 0, 0.15);
+        --skipped: #475569;
+        --skipped-bg: rgba(71, 85, 105, 0.14);
+      }}
+
+      * {{ box-sizing: border-box; }}
+
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(22, 101, 52, 0.08), transparent 24%),
+          radial-gradient(circle at top right, rgba(180, 83, 9, 0.08), transparent 22%),
+          linear-gradient(180deg, #efe7da 0%, var(--canvas) 56%, #ece4d8 100%);
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+      }}
+
+      main {{
+        width: min(1220px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 30px 0 56px;
+      }}
+
+      .hero, .summary-card, .panel {{
+        border: 1px solid var(--line);
+        border-radius: 26px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }}
+
+      .hero {{
+        padding: 28px;
+        background: linear-gradient(135deg, rgba(255, 251, 246, 0.96), rgba(244, 237, 227, 0.86));
+      }}
+
+      .eyebrow {{
+        margin: 0 0 8px;
+        letter-spacing: 0.16em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-size: 0.74rem;
+      }}
+
+      h1, h2 {{
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 700;
+      }}
+
+      h1 {{
+        font-size: clamp(2.2rem, 5vw, 4rem);
+        line-height: 0.98;
+      }}
+
+      h2 {{
+        margin-top: 4px;
+        font-size: 1.6rem;
+      }}
+
+      .hero-copy {{
+        max-width: 70ch;
+        margin: 16px 0 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }}
+
+      .hero-meta {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+        color: var(--muted);
+      }}
+
+      .action-group, .panel-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+      }}
+
+      .action-group {{ margin-top: 20px; }}
+      .panel-actions {{ margin-top: 18px; }}
+
+      .action-link {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 8px 14px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        color: var(--ink);
+        text-decoration: none;
+        font-size: 0.84rem;
+        font-weight: 700;
+        background: rgba(255, 252, 246, 0.92);
+      }}
+
+      .action-link-primary {{
+        color: var(--pass);
+        background: rgba(22, 101, 52, 0.12);
+        border-color: rgba(22, 101, 52, 0.18);
+      }}
+
+      .summary-stack {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        gap: 12px;
+        margin-top: 22px;
+      }}
+
+      .summary-card {{ padding: 18px; }}
+
+      .summary-value {{
+        display: block;
+        margin-top: 8px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 1.6rem;
+      }}
+
+      .status-badge {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 38px;
+        padding: 8px 12px;
+        border-radius: 999px;
+        font-size: 0.82rem;
+        font-weight: 700;
+        letter-spacing: 0.03em;
+      }}
+
+      .status-pass {{ color: var(--pass); background: var(--pass-bg); }}
+      .status-fail {{ color: var(--fail); background: var(--fail-bg); }}
+      .status-pending {{ color: var(--pending); background: var(--pending-bg); }}
+      .status-skipped {{ color: var(--skipped); background: var(--skipped-bg); }}
+
+      .badge-row {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+        gap: 12px;
+        margin-top: 22px;
+      }}
+
+      .layout {{
+        display: grid;
+        grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+        gap: 18px;
+        margin-top: 24px;
+      }}
+
+      .column {{
+        display: grid;
+        gap: 18px;
+      }}
+
+      .panel {{
+        padding: 22px;
+        border-radius: 24px;
+        background: var(--panel-strong);
+      }}
+
+      .panel p + .meta-item,
+      .panel h2 + .meta-item {{ margin-top: 18px; }}
+
+      .meta-item + .meta-item {{ margin-top: 10px; }}
+
+      .meta-label {{
+        display: block;
+        font-size: 0.72rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }}
+
+      .meta-value {{
+        display: block;
+        margin-top: 6px;
+        font-size: 0.98rem;
+        word-break: break-word;
+      }}
+
+      @media (max-width: 900px) {{
+        main {{ width: min(100vw - 20px, 1220px); padding: 20px 0 32px; }}
+        .hero {{ padding: 22px; border-radius: 24px; }}
+        .layout {{ grid-template-columns: 1fr; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">{escape(page_label)}</p>
+        <h1>{escape(title)}</h1>
+        <p class="hero-copy">{escape(summary)}</p>
+        {_render_action_group(actions)}
+        <div class="hero-meta">
+          <span>Generated at {escape(generated_at)}</span>
+        </div>
+        <div class="summary-stack">{summary_tiles_markup}</div>
+        <div class="badge-row">{badges_markup}</div>
+      </section>
+
+      <section class="layout">
+        <div class="column">
+          {''.join(main_panels)}
+        </div>
+
+        <div class="column">
+          {''.join(side_panels)}
+        </div>
+      </section>
+    </main>
+  </body>
+</html>
+"""
+
+
+def render_deployment_record_dashboard(payload: Mapping[str, object]) -> str:
+    record_payload = _mapping_value(payload, "record")
+    resolved_target_payload = _mapping_value(payload, "resolved_target")
+    deploy_payload = _mapping_value(payload, "deploy")
+    post_deploy_update_payload = _mapping_value(payload, "post_deploy_update")
+    destination_health_payload = _mapping_value(payload, "destination_health")
+    return _render_record_dashboard(
+        page_label="Control Plane Deployment Record",
+        title=_string_value(record_payload.get("record_id")) or "Deployment record",
+        summary=(
+            "This page captures one control-plane deployment execution so an operator can inspect the target, "
+            "runtime result, post-deploy update outcome, and destination health evidence without dropping to raw JSON."
+        ),
+        actions=(
+            ("Operator site", _string_value(payload.get("home_page_href")), "primary"),
+            ("Inventory overview", _string_value(payload.get("inventory_overview_href")), "default"),
+            ("Environment status", _string_value(payload.get("status_page_href")), "default"),
+            ("Environment contract", _string_value(payload.get("contract_page_href")), "default"),
+        ),
+        summary_tiles=(
+            ("Deploy status", _string_value(deploy_payload.get("status")) or "-"),
+            (
+                "Environment",
+                (
+                    f"{_string_value(record_payload.get('context'))} / {_string_value(record_payload.get('instance'))}"
+                    if _string_value(record_payload.get("context")) or _string_value(record_payload.get("instance"))
+                    else "-"
+                ),
+            ),
+            ("Artifact", _string_value(record_payload.get("artifact_id")) or "-"),
+        ),
+        badges=(
+            ("deploy", _string_value(deploy_payload.get("status"))),
+            ("update", _string_value(post_deploy_update_payload.get("status"))),
+            ("health", _string_value(destination_health_payload.get("status"))),
+        ),
+        main_panels=(
+            _render_record_panel(
+                "Request",
+                "Deployment inputs",
+                _render_value_pairs(
+                    (
+                        ("artifact", record_payload.get("artifact_id")),
+                        ("source ref", record_payload.get("source_git_ref")),
+                        ("wait for completion", record_payload.get("wait_for_completion")),
+                        ("verify destination health", record_payload.get("verify_destination_health")),
+                        ("no cache", record_payload.get("no_cache")),
+                        ("executor", record_payload.get("delegated_executor")),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Deployment",
+                "Deploy execution",
+                _render_value_pairs(
+                    (
+                        ("target", deploy_payload.get("target_name")),
+                        ("target type", deploy_payload.get("target_type")),
+                        ("deploy mode", deploy_payload.get("deploy_mode")),
+                        ("deployment id", deploy_payload.get("deployment_id")),
+                        ("status", deploy_payload.get("status")),
+                        ("started", deploy_payload.get("started_at")),
+                        ("finished", deploy_payload.get("finished_at")),
+                    )
+                ),
+            ),
+        ),
+        side_panels=(
+            _render_record_panel(
+                "Resolved target",
+                "Target evidence",
+                _render_value_pairs(
+                    (
+                        ("target name", resolved_target_payload.get("target_name")),
+                        ("target type", resolved_target_payload.get("target_type")),
+                        ("target id", resolved_target_payload.get("target_id")),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Post-deploy update",
+                "Application update result",
+                _render_value_pairs(
+                    (
+                        ("attempted", post_deploy_update_payload.get("attempted")),
+                        ("status", post_deploy_update_payload.get("status")),
+                        ("detail", post_deploy_update_payload.get("detail")),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Destination health",
+                "Runtime verification",
+                _render_value_pairs(
+                    (
+                        ("verified", destination_health_payload.get("verified")),
+                        ("status", destination_health_payload.get("status")),
+                        ("timeout", destination_health_payload.get("timeout_seconds")),
+                        ("urls", ", ".join(_string_sequence(destination_health_payload.get("urls")))),
+                    )
+                ),
+            ),
+        ),
+    )
+
+
+def render_promotion_record_dashboard(payload: Mapping[str, object]) -> str:
+    record_payload = _mapping_value(payload, "record")
+    source_health_payload = _mapping_value(payload, "source_health")
+    backup_gate_payload = _mapping_value(payload, "backup_gate")
+    deploy_payload = _mapping_value(payload, "deploy")
+    post_deploy_update_payload = _mapping_value(payload, "post_deploy_update")
+    destination_health_payload = _mapping_value(payload, "destination_health")
+    return _render_record_dashboard(
+        page_label="Control Plane Promotion Record",
+        title=_string_value(record_payload.get("record_id")) or "Promotion record",
+        summary=(
+            "This page captures one promotion execution so an operator can follow artifact movement, backup-gate "
+            "authorization, deploy status, and both source and destination health evidence in one place."
+        ),
+        actions=(
+            ("Operator site", _string_value(payload.get("home_page_href")), "primary"),
+            ("Inventory overview", _string_value(payload.get("inventory_overview_href")), "default"),
+            ("Source status", _string_value(payload.get("source_status_page_href")), "default"),
+            ("Destination status", _string_value(payload.get("destination_status_page_href")), "default"),
+        ),
+        summary_tiles=(
+            ("Deploy status", _string_value(deploy_payload.get("status")) or "-"),
+            (
+                "Promotion path",
+                (
+                    f"{_string_value(record_payload.get('from_instance'))} -> {_string_value(record_payload.get('to_instance'))}"
+                    if _string_value(record_payload.get("from_instance")) or _string_value(record_payload.get("to_instance"))
+                    else "-"
+                ),
+            ),
+            ("Artifact", _string_value(record_payload.get("artifact_id")) or "-"),
+        ),
+        badges=(
+            ("backup", _string_value(backup_gate_payload.get("status"))),
+            ("deploy", _string_value(deploy_payload.get("status"))),
+            ("update", _string_value(post_deploy_update_payload.get("status"))),
+            ("source health", _string_value(source_health_payload.get("status"))),
+            ("dest health", _string_value(destination_health_payload.get("status"))),
+        ),
+        main_panels=(
+            _render_record_panel(
+                "Path",
+                "Promotion request",
+                _render_value_pairs(
+                    (
+                        ("context", record_payload.get("context")),
+                        ("from", record_payload.get("from_instance")),
+                        ("to", record_payload.get("to_instance")),
+                        ("artifact", record_payload.get("artifact_id")),
+                        ("backup record", record_payload.get("backup_record_id")),
+                    )
+                ),
+                actions=(
+                    ("Open backup gate", _string_value(payload.get("backup_record_href")), "default"),
+                ),
+            ),
+            _render_record_panel(
+                "Deployment",
+                "Promotion deploy execution",
+                _render_value_pairs(
+                    (
+                        ("target", deploy_payload.get("target_name")),
+                        ("target type", deploy_payload.get("target_type")),
+                        ("deploy mode", deploy_payload.get("deploy_mode")),
+                        ("deployment id", deploy_payload.get("deployment_id")),
+                        ("status", deploy_payload.get("status")),
+                        ("started", deploy_payload.get("started_at")),
+                        ("finished", deploy_payload.get("finished_at")),
+                    )
+                ),
+            ),
+        ),
+        side_panels=(
+            _render_record_panel(
+                "Backup gate",
+                "Authorization evidence",
+                _render_value_pairs(
+                    (
+                        ("required", backup_gate_payload.get("required")),
+                        ("status", backup_gate_payload.get("status")),
+                    )
+                )
+                + _render_evidence_pairs(backup_gate_payload.get("evidence")),
+                actions=(
+                    ("Open backup gate", _string_value(payload.get("backup_record_href")), "default"),
+                ),
+            ),
+            _render_record_panel(
+                "Source health",
+                "Promotion source verification",
+                _render_value_pairs(
+                    (
+                        ("verified", source_health_payload.get("verified")),
+                        ("status", source_health_payload.get("status")),
+                        ("timeout", source_health_payload.get("timeout_seconds")),
+                        ("urls", ", ".join(_string_sequence(source_health_payload.get("urls")))),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Destination outcome",
+                "Post-ship verification",
+                _render_value_pairs(
+                    (
+                        ("update attempted", post_deploy_update_payload.get("attempted")),
+                        ("update status", post_deploy_update_payload.get("status")),
+                        ("update detail", post_deploy_update_payload.get("detail")),
+                        ("health verified", destination_health_payload.get("verified")),
+                        ("health status", destination_health_payload.get("status")),
+                        (
+                            "health urls",
+                            ", ".join(_string_sequence(destination_health_payload.get("urls"))),
+                        ),
+                    )
+                ),
+            ),
+        ),
+    )
+
+
+def render_backup_gate_record_dashboard(payload: Mapping[str, object]) -> str:
+    record_payload = _mapping_value(payload, "record")
+    return _render_record_dashboard(
+        page_label="Control Plane Backup Gate Record",
+        title=_string_value(record_payload.get("record_id")) or "Backup gate record",
+        summary=(
+            "This page captures one backup-gate authorization record so an operator can inspect whether a rollout "
+            "had the required backup evidence before promotion or other protected actions."
+        ),
+        actions=(
+            ("Operator site", _string_value(payload.get("home_page_href")), "primary"),
+            ("Inventory overview", _string_value(payload.get("inventory_overview_href")), "default"),
+            ("Environment status", _string_value(payload.get("status_page_href")), "default"),
+            ("Environment contract", _string_value(payload.get("contract_page_href")), "default"),
+        ),
+        summary_tiles=(
+            ("Gate status", _string_value(record_payload.get("status")) or "-"),
+            (
+                "Environment",
+                (
+                    f"{_string_value(record_payload.get('context'))} / {_string_value(record_payload.get('instance'))}"
+                    if _string_value(record_payload.get("context")) or _string_value(record_payload.get("instance"))
+                    else "-"
+                ),
+            ),
+            ("Source", _string_value(record_payload.get("source")) or "-"),
+        ),
+        badges=(("backup", _string_value(record_payload.get("status"))),),
+        main_panels=(
+            _render_record_panel(
+                "Record",
+                "Backup gate details",
+                _render_value_pairs(
+                    (
+                        ("context", record_payload.get("context")),
+                        ("instance", record_payload.get("instance")),
+                        ("created", record_payload.get("created_at")),
+                        ("source", record_payload.get("source")),
+                        ("required", record_payload.get("required")),
+                        ("status", record_payload.get("status")),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Evidence",
+                "Stored proof",
+                _render_evidence_pairs(record_payload.get("evidence")),
+            ),
+        ),
+        side_panels=(
+            _render_record_panel(
+                "Operator note",
+                "How to use this record",
+                _render_value_pairs(
+                    (
+                        (
+                            "guidance",
+                            "Use this page to confirm whether the environment had a passing backup gate before a protected rollout.",
+                        ),
+                    )
+                ),
+            ),
+        ),
     )
 
 
@@ -1576,6 +2171,39 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
     home_page_href = _string_value(payload.get("home_page_href"))
     inventory_overview_href = _string_value(payload.get("inventory_overview_href"))
     contract_page_href = _string_value(payload.get("contract_page_href"))
+    live_record_actions = _render_action_group(
+        (
+            ("Open deployment record", _string_value(live_payload.get("deployment_record_href")), "primary"),
+            ("Open promotion record", _string_value(live_payload.get("promotion_record_href")), "default"),
+        ),
+        class_name="panel-actions",
+    )
+    latest_deployment_actions = _render_action_group(
+        (
+            ("Open deployment record", _string_value(latest_deployment_payload.get("record_href")), "primary"),
+        ),
+        class_name="panel-actions",
+    )
+    latest_promotion_actions = _render_action_group(
+        (
+            ("Open promotion record", _string_value(latest_promotion_payload.get("record_href")), "primary"),
+            ("Open backup gate", _string_value(latest_promotion_payload.get("backup_record_href")), "default"),
+        ),
+        class_name="panel-actions",
+    )
+    backup_gate_actions = _render_action_group(
+        (
+            ("Open backup gate", _string_value(backup_gate_payload.get("record_href")), "primary"),
+        ),
+        class_name="panel-actions",
+    )
+    live_promotion_actions = _render_action_group(
+        (
+            ("Open promotion record", _string_value(live_promotion_payload.get("record_href")), "primary"),
+            ("Open backup gate", _string_value(live_promotion_payload.get("backup_record_href")), "default"),
+        ),
+        class_name="panel-actions",
+    )
 
     return f"""<!doctype html>
 <html lang="en">
@@ -1682,6 +2310,13 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
         flex-wrap: wrap;
         gap: 10px;
         margin-top: 20px;
+      }}
+
+      .panel-actions {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 18px;
       }}
 
       .action-link {{
@@ -1955,6 +2590,7 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
               {_render_detail_section("Runtime", live_payload, (("artifact", "artifact_id"), ("source ref", "source_git_ref"), ("updated", "updated_at"), ("promoted from", "promoted_from_instance")))}
               {_render_detail_section("Records", live_payload, (("deployment record", "deployment_record_id"), ("promotion record", "promotion_record_id"), ("deploy status", "deploy_status"), ("health status", "destination_health_status")))}
             </div>
+            {live_record_actions}
           </article>
 
           <article class="panel">
@@ -1969,6 +2605,7 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
                 {_render_value("status", _string_value(latest_deployment_payload.get("deploy_status")))}
                 {_render_value("started", _string_value(latest_deployment_payload.get("started_at")))}
                 {_render_value("finished", _string_value(latest_deployment_payload.get("finished_at")))}
+                {latest_deployment_actions}
               </div>
               <div class="timeline-item">
                 <h3>Latest promotion</h3>
@@ -1976,6 +2613,9 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
                 {_render_value("from", _string_value(latest_promotion_payload.get("from_instance")))}
                 {_render_value("backup record", _string_value(live_promotion_payload.get("backup_record_id")))}
                 {_render_value("status", _string_value(latest_promotion_payload.get("deploy_status")))}
+                {_render_value("started", _string_value(latest_promotion_payload.get("started_at")))}
+                {_render_value("finished", _string_value(latest_promotion_payload.get("finished_at")))}
+                {latest_promotion_actions}
               </div>
             </div>
           </article>
@@ -1991,6 +2631,7 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
               {_render_value("source", _string_value(backup_gate_payload.get("source")))}
               {_render_value("created", _string_value(backup_gate_payload.get("created_at")))}
               {_render_evidence_pairs(backup_gate_payload.get("evidence"))}
+              {backup_gate_actions}
             </article>
 
             <article class="panel">
@@ -2003,6 +2644,7 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
               {_render_value("to", _string_value(live_promotion_payload.get("to_instance")))}
               {_render_value("deploy status", _string_value(live_promotion_payload.get("deploy_status")))}
               {_render_value("health status", _string_value(live_promotion_payload.get("destination_health_status")))}
+              {live_promotion_actions}
             </article>
           </div>
         </div>

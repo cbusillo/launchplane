@@ -25,10 +25,13 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.ui import (
+    render_backup_gate_record_dashboard,
+    render_deployment_record_dashboard,
     render_environment_contract_dashboard,
     render_environment_status_dashboard,
     render_inventory_overview_dashboard,
     render_operator_site_index,
+    render_promotion_record_dashboard,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
@@ -806,7 +809,10 @@ def _summarize_promotion_record(record: PromotionRecord) -> dict[str, object]:
         "backup_status": record.backup_gate.status,
         "deploy_status": record.deploy.status,
         "deployment_id": record.deploy.deployment_id,
+        "started_at": record.deploy.started_at,
+        "finished_at": record.deploy.finished_at,
         "post_deploy_update_status": record.post_deploy_update.status,
+        "source_health_status": record.source_health.status,
         "destination_health_status": record.destination_health.status,
     }
 
@@ -826,6 +832,8 @@ def _summarize_deployment_record(record: DeploymentRecord) -> dict[str, object]:
         "target_id": target_id,
         "deploy_status": record.deploy.status,
         "deployment_id": record.deploy.deployment_id,
+        "started_at": record.deploy.started_at,
+        "finished_at": record.deploy.finished_at,
         "post_deploy_update_status": record.post_deploy_update.status,
         "destination_health_status": record.destination_health.status,
     }
@@ -1056,6 +1064,144 @@ def _site_environment_status_file_name(*, context_name: str, instance_name: str)
 
 def _site_environment_contract_file_name(*, context_name: str, instance_name: str) -> str:
     return f"{context_name}-{instance_name}-contract.html"
+
+
+def _site_deployment_record_file_name(*, record_id: str) -> str:
+    return f"{record_id}.html"
+
+
+def _site_promotion_record_file_name(*, record_id: str) -> str:
+    return f"{record_id}.html"
+
+
+def _site_backup_gate_record_file_name(*, record_id: str) -> str:
+    return f"{record_id}.html"
+
+
+def _site_deployment_record_href(*, record_id: str, relative_prefix: str = "") -> str:
+    if not record_id.strip():
+        return ""
+    return (
+        f"{relative_prefix}records/deployments/"
+        f"{_site_deployment_record_file_name(record_id=record_id)}"
+    )
+
+
+def _site_promotion_record_href(*, record_id: str, relative_prefix: str = "") -> str:
+    if not record_id.strip():
+        return ""
+    return (
+        f"{relative_prefix}records/promotions/"
+        f"{_site_promotion_record_file_name(record_id=record_id)}"
+    )
+
+
+def _site_backup_gate_record_href(*, record_id: str, relative_prefix: str = "") -> str:
+    if not record_id.strip():
+        return ""
+    return (
+        f"{relative_prefix}records/backup-gates/"
+        f"{_site_backup_gate_record_file_name(record_id=record_id)}"
+    )
+
+
+def _with_site_record_links(
+    payload: dict[str, object], *, relative_prefix: str
+) -> dict[str, object]:
+    linked_payload = dict(payload)
+
+    live_payload = payload.get("live")
+    if isinstance(live_payload, dict):
+        linked_live_payload = dict(live_payload)
+        linked_live_payload["deployment_record_href"] = _site_deployment_record_href(
+            record_id=str(linked_live_payload.get("deployment_record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_live_payload["promotion_record_href"] = _site_promotion_record_href(
+            record_id=str(linked_live_payload.get("promotion_record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_payload["live"] = linked_live_payload
+
+    live_promotion_payload = payload.get("live_promotion")
+    if isinstance(live_promotion_payload, dict):
+        linked_live_promotion_payload = dict(live_promotion_payload)
+        linked_live_promotion_payload["record_href"] = _site_promotion_record_href(
+            record_id=str(linked_live_promotion_payload.get("record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_live_promotion_payload["backup_record_href"] = _site_backup_gate_record_href(
+            record_id=str(linked_live_promotion_payload.get("backup_record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_payload["live_promotion"] = linked_live_promotion_payload
+
+    authorized_backup_gate_payload = payload.get("authorized_backup_gate")
+    if isinstance(authorized_backup_gate_payload, dict):
+        linked_backup_gate_payload = dict(authorized_backup_gate_payload)
+        linked_backup_gate_payload["record_href"] = _site_backup_gate_record_href(
+            record_id=str(linked_backup_gate_payload.get("record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_payload["authorized_backup_gate"] = linked_backup_gate_payload
+
+    latest_promotion_payload = payload.get("latest_promotion")
+    if isinstance(latest_promotion_payload, dict):
+        linked_latest_promotion_payload = dict(latest_promotion_payload)
+        linked_latest_promotion_payload["record_href"] = _site_promotion_record_href(
+            record_id=str(linked_latest_promotion_payload.get("record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_latest_promotion_payload["backup_record_href"] = _site_backup_gate_record_href(
+            record_id=str(linked_latest_promotion_payload.get("backup_record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_payload["latest_promotion"] = linked_latest_promotion_payload
+
+    latest_deployment_payload = payload.get("latest_deployment")
+    if isinstance(latest_deployment_payload, dict):
+        linked_latest_deployment_payload = dict(latest_deployment_payload)
+        linked_latest_deployment_payload["record_href"] = _site_deployment_record_href(
+            record_id=str(linked_latest_deployment_payload.get("record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_payload["latest_deployment"] = linked_latest_deployment_payload
+
+    return linked_payload
+
+
+def _build_deployment_record_payload(record: DeploymentRecord) -> dict[str, object]:
+    resolved_target_summary = (
+        record.resolved_target.model_dump(mode="json") if record.resolved_target is not None else {}
+    )
+    return {
+        "record": {
+            **_summarize_deployment_record(record),
+            "wait_for_completion": record.wait_for_completion,
+            "verify_destination_health": record.verify_destination_health,
+            "no_cache": record.no_cache,
+            "delegated_executor": record.delegated_executor,
+        },
+        "resolved_target": resolved_target_summary,
+        "deploy": record.deploy.model_dump(mode="json"),
+        "post_deploy_update": record.post_deploy_update.model_dump(mode="json"),
+        "destination_health": record.destination_health.model_dump(mode="json"),
+    }
+
+
+def _build_promotion_record_payload(record: PromotionRecord) -> dict[str, object]:
+    return {
+        "record": _summarize_promotion_record(record),
+        "source_health": record.source_health.model_dump(mode="json"),
+        "backup_gate": record.backup_gate.model_dump(mode="json"),
+        "deploy": record.deploy.model_dump(mode="json"),
+        "post_deploy_update": record.post_deploy_update.model_dump(mode="json"),
+        "destination_health": record.destination_health.model_dump(mode="json"),
+    }
+
+
+def _build_backup_gate_record_payload(record: BackupGateRecord) -> dict[str, object]:
+    return {"record": _summarize_backup_gate_record(record)}
 
 
 @click.group()
@@ -1372,8 +1518,15 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     environments_dir = output_dir / "environments"
     contracts_dir = output_dir / "contracts"
+    records_dir = output_dir / "records"
+    deployment_records_dir = records_dir / "deployments"
+    promotion_records_dir = records_dir / "promotions"
+    backup_gate_records_dir = records_dir / "backup-gates"
     environments_dir.mkdir(parents=True, exist_ok=True)
     contracts_dir.mkdir(parents=True, exist_ok=True)
+    deployment_records_dir.mkdir(parents=True, exist_ok=True)
+    promotion_records_dir.mkdir(parents=True, exist_ok=True)
+    backup_gate_records_dir.mkdir(parents=True, exist_ok=True)
 
     overview_payloads = _build_environment_overview_payloads(
         record_store=record_store,
@@ -1395,12 +1548,12 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
         status_page_href = f"environments/{status_file_name}"
         contract_page_href = f"contracts/{contract_file_name}"
         overview_payload = {
-            **payload,
+            **_with_site_record_links(payload, relative_prefix=""),
             "status_page_href": status_page_href,
             "contract_page_href": contract_page_href,
         }
         status_payload = {
-            **payload,
+            **_with_site_record_links(payload, relative_prefix="../"),
             "home_page_href": "../index.html",
             "inventory_overview_href": "../inventory-overview.html",
             "contract_page_href": f"../contracts/{contract_file_name}",
@@ -1507,6 +1660,67 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
         site_environment_entries_by_key[key]
         for key in sorted(site_environment_entries_by_key)
     ]
+
+    for deployment_record in record_store.list_deployment_records(
+        context_name=context_name,
+    ):
+        deployment_payload = {
+            **_build_deployment_record_payload(deployment_record),
+            "home_page_href": "../../index.html",
+            "inventory_overview_href": "../../inventory-overview.html",
+            "status_page_href": (
+                f"../../environments/{_site_environment_status_file_name(context_name=deployment_record.context, instance_name=deployment_record.instance)}"
+            ),
+            "contract_page_href": (
+                f"../../contracts/{_site_environment_contract_file_name(context_name=deployment_record.context, instance_name=deployment_record.instance)}"
+            ),
+        }
+        (deployment_records_dir / _site_deployment_record_file_name(record_id=deployment_record.record_id)).write_text(
+            render_deployment_record_dashboard(deployment_payload),
+            encoding="utf-8",
+        )
+
+    for promotion_record in record_store.list_promotion_records(
+        context_name=context_name,
+    ):
+        promotion_payload = {
+            **_build_promotion_record_payload(promotion_record),
+            "home_page_href": "../../index.html",
+            "inventory_overview_href": "../../inventory-overview.html",
+            "source_status_page_href": (
+                f"../../environments/{_site_environment_status_file_name(context_name=promotion_record.context, instance_name=promotion_record.from_instance)}"
+            ),
+            "destination_status_page_href": (
+                f"../../environments/{_site_environment_status_file_name(context_name=promotion_record.context, instance_name=promotion_record.to_instance)}"
+            ),
+            "backup_record_href": _site_backup_gate_record_href(
+                record_id=promotion_record.backup_record_id,
+                relative_prefix="../../",
+            ),
+        }
+        (promotion_records_dir / _site_promotion_record_file_name(record_id=promotion_record.record_id)).write_text(
+            render_promotion_record_dashboard(promotion_payload),
+            encoding="utf-8",
+        )
+
+    for backup_gate_record in record_store.list_backup_gate_records(
+        context_name=context_name,
+    ):
+        backup_gate_payload = {
+            **_build_backup_gate_record_payload(backup_gate_record),
+            "home_page_href": "../../index.html",
+            "inventory_overview_href": "../../inventory-overview.html",
+            "status_page_href": (
+                f"../../environments/{_site_environment_status_file_name(context_name=backup_gate_record.context, instance_name=backup_gate_record.instance)}"
+            ),
+            "contract_page_href": (
+                f"../../contracts/{_site_environment_contract_file_name(context_name=backup_gate_record.context, instance_name=backup_gate_record.instance)}"
+            ),
+        }
+        (backup_gate_records_dir / _site_backup_gate_record_file_name(record_id=backup_gate_record.record_id)).write_text(
+            render_backup_gate_record_dashboard(backup_gate_payload),
+            encoding="utf-8",
+        )
 
     index_output_file = output_dir / "index.html"
     index_output_file.write_text(
