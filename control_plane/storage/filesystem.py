@@ -8,6 +8,8 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -160,3 +162,59 @@ class FilesystemRecordStore:
 
     def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
         return self._list_models(EnvironmentInventory, "inventory")
+
+    def write_preview_record(self, record: PreviewRecord) -> Path:
+        return self._write_model("harbor_previews", record.preview_id, record)
+
+    def read_preview_record(self, preview_id: str) -> PreviewRecord:
+        return PreviewRecord.model_validate(
+            self._read_model(PreviewRecord, "harbor_previews", preview_id).model_dump(mode="json")
+        )
+
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(PreviewRecord, "harbor_previews")
+            if (not context_name or record.context == context_name)
+            and (not anchor_repo or record.anchor_repo == anchor_repo)
+            and (anchor_pr_number is None or record.anchor_pr_number == anchor_pr_number)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.preview_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_generation_record(self, record: PreviewGenerationRecord) -> Path:
+        return self._write_model("harbor_preview_generations", record.generation_id, record)
+
+    def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
+        return PreviewGenerationRecord.model_validate(
+            self._read_model(
+                PreviewGenerationRecord,
+                "harbor_preview_generations",
+                generation_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_preview_generation_records(
+        self,
+        *,
+        preview_id: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewGenerationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(PreviewGenerationRecord, "harbor_preview_generations")
+            if not preview_id or record.preview_id == preview_id
+        ]
+        records.sort(key=lambda record: (record.sequence, record.generation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
