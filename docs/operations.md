@@ -162,6 +162,10 @@ title: Operations
   event under the current label-driven trigger contract and now emits the
   matching Harbor mutation intent. Generation intent remains manifest-resolution
   dependent until Harbor resolves the exact preview build tuple.
+- Harbor preview-request metadata now starts as one Harbor-owned fenced PR-body
+  block using the `harbor-preview` info string with TOML content. Missing blocks
+  are treated as absent metadata; malformed or non-allowlisted companion refs
+  are reported fail-closed in the ingest payload.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.

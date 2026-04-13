@@ -1,7 +1,9 @@
 import re
+import tomllib
 from pathlib import Path
 
 import click
+from pydantic import ValidationError
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
@@ -18,6 +20,11 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_request_metadata import (
+    HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING,
+    HarborPreviewRequestMetadata,
+    HarborPreviewRequestParseResult,
+)
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -31,6 +38,10 @@ HARBOR_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
     "tenant-cm": "cm",
     "tenant-opw": "opw",
 }
+HARBOR_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
+    rf"```{re.escape(HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
+    flags=re.IGNORECASE | re.DOTALL,
+)
 
 
 def find_preview_record(
@@ -118,6 +129,7 @@ def build_pull_request_event_action_payload(
             "preview_exists": preview is not None,
             "context_resolution_required": preview is None and not resolved_context,
         },
+        "request_metadata": parse_preview_request_metadata(pr_body=event.pr_body).model_dump(mode="json"),
         "mutation": mutation_intent.model_dump(mode="json") if mutation_intent is not None else None,
         "preview": (
             {
@@ -204,6 +216,25 @@ def build_pull_request_event_mutation_intent(
             ),
         )
     return None
+
+
+def parse_preview_request_metadata(*, pr_body: str) -> HarborPreviewRequestParseResult:
+    if not pr_body.strip():
+        return HarborPreviewRequestParseResult(status="missing")
+    block_matches = [match.group("body") for match in HARBOR_PREVIEW_REQUEST_BLOCK_PATTERN.finditer(pr_body)]
+    if not block_matches:
+        return HarborPreviewRequestParseResult(status="missing")
+    if len(block_matches) > 1:
+        return HarborPreviewRequestParseResult(
+            status="invalid",
+            error="Harbor preview request metadata must use exactly one fenced block.",
+        )
+    try:
+        payload = tomllib.loads(block_matches[0])
+        metadata = HarborPreviewRequestMetadata.model_validate(payload)
+    except (tomllib.TOMLDecodeError, ValidationError, ValueError) as exc:
+        return HarborPreviewRequestParseResult(status="invalid", error=str(exc))
+    return HarborPreviewRequestParseResult(status="valid", metadata=metadata)
 
 
 def _pull_request_event_timestamp(*, event: GitHubPullRequestEvent) -> str:
