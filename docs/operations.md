@@ -18,6 +18,7 @@ title: Operations
 - `uv run control-plane inventory list`
 - `uv run control-plane ui inventory-overview [--context <ctx>] [--output-file <path>]`
 - `uv run control-plane ui environment-status --context <ctx> --instance <instance> [--output-file <path>]`
+- `uv run control-plane ui environment-contract --context <ctx> --instance <instance> [--output-file <path>]`
 - `uv run control-plane environments resolve --context <ctx> --instance <instance> [--json-output]`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
@@ -103,6 +104,10 @@ title: Operations
   `inventory status`, including linked promotion, deployment, and backup-gate
   details when those records exist, plus a suggested next-step panel with the
   follow-up control-plane commands implied by the current state.
+- `ui environment-contract` renders the control-plane runtime-environment
+  contract for one context and instance, showing global/context/instance
+  layering plus the final resolved environment with sensitive values redacted
+  in the HTML output.
 - Direct `ship` requires an explicit artifact id that already has a stored
   artifact manifest in control-plane state.
 - When a stored artifact manifest is available, ship syncs

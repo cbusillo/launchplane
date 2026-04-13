@@ -25,6 +25,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.ui import (
+    render_environment_contract_dashboard,
     render_environment_status_dashboard,
     render_inventory_overview_dashboard,
 )
@@ -935,6 +936,119 @@ def _build_environment_overview_payloads(
     ]
 
 
+def _build_runtime_environment_rows(
+    *,
+    entries: dict[str, object],
+    source_name: str,
+) -> list[dict[str, object]]:
+    return [
+        {
+            "key": key_name,
+            "value": str(entries[key_name]),
+            "source": source_name,
+            "overrides": (),
+        }
+        for key_name in sorted(entries)
+    ]
+
+
+def _build_environment_contract_payload(*, context_name: str, instance_name: str) -> dict[str, object]:
+    control_plane_root = _control_plane_root()
+    definition = control_plane_runtime_environments.load_runtime_environment_definition(
+        control_plane_root=control_plane_root
+    )
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise click.ClickException(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    instance_definition = context_definition.instances.get(instance_name)
+    if instance_definition is None:
+        raise click.ClickException(
+            f"Runtime environments file has no instance definition for {context_name}/{instance_name}."
+        )
+
+    source_file = control_plane_runtime_environments.resolve_runtime_environments_file(control_plane_root)
+    resolved_environment = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+
+    source_history: dict[str, list[str]] = {}
+    resolved_layers: dict[str, tuple[str, str]] = {}
+    for layer_name, values in (
+        ("global", definition.shared_env),
+        ("context", context_definition.shared_env),
+        ("instance", instance_definition.env),
+    ):
+        for key_name, raw_value in values.items():
+            prior_sources = source_history.setdefault(key_name, [])
+            if key_name in resolved_layers:
+                prior_sources.append(resolved_layers[key_name][0])
+            resolved_layers[key_name] = (layer_name, str(raw_value))
+
+    resolved_rows = [
+        {
+            "key": key_name,
+            "value": value,
+            "source": source_name,
+            "overrides": tuple(source_history.get(key_name, [])),
+        }
+        for key_name, (source_name, value) in sorted(resolved_layers.items())
+    ]
+
+    return {
+        "schema_version": definition.schema_version,
+        "source_file": str(source_file),
+        "context": context_name,
+        "instance": instance_name,
+        "available_contexts": [
+            {
+                "context": name,
+                "instance_count": len(context.instances),
+            }
+            for name, context in sorted(definition.contexts.items())
+        ],
+        "available_instances": sorted(context_definition.instances),
+        "layer_summaries": (
+            {
+                "label": "Global shared",
+                "count": len(definition.shared_env),
+                "note": "Applies to every context.",
+            },
+            {
+                "label": f"{context_name} shared",
+                "count": len(context_definition.shared_env),
+                "note": "Applies across the selected context.",
+            },
+            {
+                "label": f"{instance_name} instance",
+                "count": len(instance_definition.env),
+                "note": "Applies only to the selected instance.",
+            },
+            {
+                "label": "Resolved",
+                "count": len(resolved_environment),
+                "note": "Final merged environment consumed by downstream tools.",
+            },
+        ),
+        "global_rows": _build_runtime_environment_rows(
+            entries=definition.shared_env,
+            source_name="global",
+        ),
+        "context_rows": _build_runtime_environment_rows(
+            entries=context_definition.shared_env,
+            source_name="context",
+        ),
+        "instance_rows": _build_runtime_environment_rows(
+            entries=instance_definition.env,
+            source_name="instance",
+        ),
+        "resolved_rows": resolved_rows,
+    }
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -1206,6 +1320,28 @@ def ui_environment_status(
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(
         render_environment_status_dashboard(payload),
+        encoding="utf-8",
+    )
+    click.echo(output_file)
+
+
+@ui.command("environment-contract")
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", default="local", show_default=True)
+@click.option(
+    "--output-file",
+    type=click.Path(path_type=Path),
+    default=Path("tmp/environment-contract.html"),
+    show_default=True,
+)
+def ui_environment_contract(context_name: str, instance_name: str, output_file: Path) -> None:
+    payload = _build_environment_contract_payload(
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(
+        render_environment_contract_dashboard(payload),
         encoding="utf-8",
     )
     click.echo(output_file)
