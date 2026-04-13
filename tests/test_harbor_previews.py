@@ -1222,6 +1222,87 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "")
             self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
 
+    def test_harbor_previews_ingest_pr_event_enables_preview_when_label_added(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "state": "open",
+                        "head_sha": "aaaa1111",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-pr-event",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "enable_preview")
+            self.assertTrue(payload["decision"]["context_resolution_required"])
+            self.assertIsNone(payload["preview"])
+
+    def test_harbor_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "synchronize",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "state": "open",
+                        "head_sha": "bbbb2222",
+                        "label_names": ["harbor-preview"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-pr-event",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "refresh_preview")
+            self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertEqual(payload["preview"]["preview_id"], "hpr_01jabc")
+
     def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

@@ -77,6 +77,43 @@ def classify_pull_request_event_for_harbor(
     return "ignore"
 
 
+def build_pull_request_event_action_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    event: GitHubPullRequestEvent,
+) -> dict[str, object]:
+    preview = find_preview_record(
+        record_store=record_store,
+        context_name="",
+        anchor_repo=event.repo,
+        anchor_pr_number=event.pr_number,
+    )
+    action = classify_pull_request_event_for_harbor(event=event, preview=preview)
+    return {
+        "event": event.model_dump(mode="json"),
+        "decision": {
+            "action": action,
+            "label_enabled": harbor_preview_label_enabled(label_names=event.label_names),
+            "preview_exists": preview is not None,
+            "context_resolution_required": preview is None,
+        },
+        "preview": (
+            {
+                "preview_id": preview.preview_id,
+                "context": preview.context,
+                "state": preview.state,
+                "preview_label": preview.preview_label,
+                "canonical_url": preview.canonical_url,
+                "active_generation_id": preview.active_generation_id,
+                "serving_generation_id": preview.serving_generation_id,
+                "latest_generation_id": preview.latest_generation_id,
+            }
+            if preview is not None
+            else None
+        ),
+    }
+
+
 def build_preview_label(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:
     return f"{context_name}/{anchor_repo}/pr-{anchor_pr_number}"
 

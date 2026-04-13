@@ -32,6 +32,7 @@ title: Operations
 - `uv run control-plane harbor-previews mark-generation-failed --input-file
 <path>`
 - `uv run control-plane harbor-previews destroy-preview --input-file <path>`
+- `uv run control-plane harbor-previews ingest-pr-event --input-file <path>`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
@@ -124,6 +125,10 @@ title: Operations
 - Harbor preview lifecycle transitions also have thin command wrappers:
   `request-generation`, `mark-generation-ready`, `mark-generation-failed`,
   and `destroy-preview`.
+- Harbor PR-event ingest starts with a manual typed JSON path through
+  `harbor-previews ingest-pr-event`, which parses a GitHub-style PR event,
+  looks up any stored Harbor preview, and returns Harbor's action decision
+  without requiring a webhook server yet.
 - `harbor-previews show` is the one-preview status payload shaped for the
   first Harbor page, including canonical preview URL, trust summary, health,
   and retained evidence for destroyed previews.
@@ -149,6 +154,9 @@ title: Operations
   generation when one exists.
 - `harbor-previews destroy-preview` clears runtime-serving links while keeping
   retained Harbor evidence visible through the read-model surfaces.
+- `harbor-previews ingest-pr-event` is the first explicit event-ingest surface;
+  it classifies whether Harbor should enable, refresh, destroy, or ignore a PR
+  event under the current label-driven trigger contract.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.
