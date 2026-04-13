@@ -25,6 +25,13 @@ title: Operations
 <repo> --pr-number <number>`
 - `uv run control-plane harbor-previews write-preview --input-file <path>`
 - `uv run control-plane harbor-previews write-generation --input-file <path>`
+- `uv run control-plane harbor-previews request-generation --preview-input-file
+<path> --generation-input-file <path>`
+- `uv run control-plane harbor-previews mark-generation-ready --input-file
+<path>`
+- `uv run control-plane harbor-previews mark-generation-failed --input-file
+<path>`
+- `uv run control-plane harbor-previews destroy-preview --input-file <path>`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
@@ -114,6 +121,9 @@ title: Operations
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
+- Harbor preview lifecycle transitions also have thin command wrappers:
+  `request-generation`, `mark-generation-ready`, `mark-generation-failed`,
+  and `destroy-preview`.
 - `harbor-previews show` is the one-preview status payload shaped for the
   first Harbor page, including canonical preview URL, trust summary, health,
   and retained evidence for destroyed previews.
@@ -128,6 +138,17 @@ title: Operations
 - `harbor-previews write-generation` requires an existing preview record for
   the same anchor PR and assigns the next generation sequence automatically
   when the input file does not pin one explicitly.
+- `harbor-previews request-generation` applies Harbor's in-progress replacement
+  semantics in one step: it persists the generation, advances `latest` and
+  `active`, and preserves any older serving generation until cutover.
+- `harbor-previews mark-generation-ready` updates the stored generation and
+  cuts the preview over so `active`, `serving`, and `latest` all point at the
+  now-ready generation.
+- `harbor-previews mark-generation-failed` updates the stored generation and
+  marks the preview failed while preserving any older healthy serving
+  generation when one exists.
+- `harbor-previews destroy-preview` clears runtime-serving links while keeping
+  retained Harbor evidence visible through the read-model surfaces.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.

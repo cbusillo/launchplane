@@ -15,6 +15,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_mutation_request import (
+    PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
@@ -29,11 +30,16 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
+    apply_generation_failed_transition,
+    apply_generation_ready_transition,
+    apply_generation_requested_transition,
+    apply_preview_destroyed_transition,
     build_preview_generation_record_from_request,
     build_preview_history_payload,
     build_preview_inventory_payload,
     build_preview_record_from_request,
     build_preview_status_payload,
+    find_preview_record,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
@@ -1234,6 +1240,187 @@ def harbor_previews_write_generation(state_dir: Path, input_file: Path) -> None:
     click.echo(record_path)
 
 
+@harbor_previews.command("request-generation")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--preview-input-file", type=click.Path(exists=True, path_type=Path), required=True
+)
+@click.option(
+    "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
+)
+def harbor_previews_request_generation(
+    state_dir: Path,
+    preview_input_file: Path,
+    generation_input_file: Path,
+) -> None:
+    record_store = _store(state_dir)
+    preview_request = PreviewMutationRequest.model_validate(_load_json_file(preview_input_file))
+    existing_preview = find_preview_record(
+        record_store=record_store,
+        context_name=preview_request.context,
+        anchor_repo=preview_request.anchor_repo,
+        anchor_pr_number=preview_request.anchor_pr_number,
+    )
+    preview_record = (
+        existing_preview.model_copy(
+            update={
+                "anchor_pr_url": preview_request.anchor_pr_url,
+                "updated_at": preview_request.updated_at.strip() or existing_preview.updated_at,
+                "eligible_at": preview_request.eligible_at.strip() or existing_preview.eligible_at,
+                "paused_at": preview_request.paused_at or existing_preview.paused_at,
+                "destroy_after": preview_request.destroy_after or existing_preview.destroy_after,
+            }
+        )
+        if existing_preview is not None
+        else build_preview_record_from_request(
+            control_plane_root=_control_plane_root(),
+            record_store=record_store,
+            request=preview_request,
+        )
+    )
+    record_store.write_preview_record(preview_record)
+    generation_request = PreviewGenerationMutationRequest.model_validate(
+        _load_json_file(generation_input_file)
+    )
+    generation_record = build_preview_generation_record_from_request(
+        record_store=record_store,
+        request=generation_request,
+    )
+    transitioned_preview = apply_generation_requested_transition(
+        preview=preview_record,
+        generation=generation_record,
+    )
+    generation_path = record_store.write_preview_generation_record(generation_record)
+    preview_path = record_store.write_preview_record(transitioned_preview)
+    click.echo(
+        json.dumps(
+            {
+                "generation_id": generation_record.generation_id,
+                "generation_path": str(generation_path),
+                "preview_id": transitioned_preview.preview_id,
+                "preview_path": str(preview_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@harbor_previews.command("mark-generation-ready")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_mark_generation_ready(state_dir: Path, input_file: Path) -> None:
+    record_store = _store(state_dir)
+    request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
+    if not request.generation_id.strip():
+        raise click.ClickException("Ready-generation transition requires generation_id.")
+    preview_record = _read_harbor_preview_or_fail(
+        record_store=record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    _read_harbor_generation_or_fail(
+        record_store=record_store,
+        preview_id=preview_record.preview_id,
+        generation_id=request.generation_id,
+    )
+    generation_record = build_preview_generation_record_from_request(
+        record_store=record_store,
+        request=request,
+    )
+    transitioned_preview = apply_generation_ready_transition(
+        preview=preview_record,
+        generation=generation_record,
+    )
+    generation_path = record_store.write_preview_generation_record(generation_record)
+    preview_path = record_store.write_preview_record(transitioned_preview)
+    click.echo(
+        json.dumps(
+            {
+                "generation_id": generation_record.generation_id,
+                "generation_path": str(generation_path),
+                "preview_id": transitioned_preview.preview_id,
+                "preview_path": str(preview_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@harbor_previews.command("mark-generation-failed")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_mark_generation_failed(state_dir: Path, input_file: Path) -> None:
+    record_store = _store(state_dir)
+    request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
+    if not request.generation_id.strip():
+        raise click.ClickException("Failed-generation transition requires generation_id.")
+    preview_record = _read_harbor_preview_or_fail(
+        record_store=record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    _read_harbor_generation_or_fail(
+        record_store=record_store,
+        preview_id=preview_record.preview_id,
+        generation_id=request.generation_id,
+    )
+    generation_record = build_preview_generation_record_from_request(
+        record_store=record_store,
+        request=request,
+    )
+    transitioned_preview = apply_generation_failed_transition(
+        preview=preview_record,
+        generation=generation_record,
+    )
+    generation_path = record_store.write_preview_generation_record(generation_record)
+    preview_path = record_store.write_preview_record(transitioned_preview)
+    click.echo(
+        json.dumps(
+            {
+                "generation_id": generation_record.generation_id,
+                "generation_path": str(generation_path),
+                "preview_id": transitioned_preview.preview_id,
+                "preview_path": str(preview_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@harbor_previews.command("destroy-preview")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
+    record_store = _store(state_dir)
+    request = PreviewDestroyMutationRequest.model_validate(_load_json_file(input_file))
+    preview_record = _read_harbor_preview_or_fail(
+        record_store=record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    transitioned_preview = apply_preview_destroyed_transition(
+        preview=preview_record,
+        destroyed_at=request.destroyed_at,
+        destroy_reason=request.destroy_reason,
+    )
+    preview_path = record_store.write_preview_record(transitioned_preview)
+    click.echo(preview_path)
+
+
 @harbor_previews.command("list")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -1297,6 +1484,41 @@ def harbor_previews_history(
             f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
         )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _read_harbor_preview_or_fail(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+):
+    preview_record = find_preview_record(
+        record_store=record_store,
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    if preview_record is None:
+        raise click.ClickException(
+            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
+        )
+    return preview_record
+
+
+def _read_harbor_generation_or_fail(
+    *,
+    record_store: FilesystemRecordStore,
+    preview_id: str,
+    generation_id: str,
+):
+    generations = record_store.list_preview_generation_records(preview_id=preview_id)
+    for generation_record in generations:
+        if generation_record.generation_id == generation_id:
+            return generation_record
+    raise click.ClickException(
+        f"No Harbor preview generation found for {preview_id} generation {generation_id}."
+    )
 
 
 @main.group()

@@ -102,6 +102,9 @@ state/
 - The initial explicit mutation surface is `harbor-previews write-preview`,
   which builds the stored record from typed request input plus the dedicated
   Harbor preview base-url runtime contract.
+- Higher-level transition commands may also rewrite preview records through the
+  tested Harbor transition helpers so operators do not have to hand-edit link
+  fields for common lifecycle states.
 
 ## Harbor Preview Generation Record
 
@@ -116,6 +119,9 @@ state/
 - The initial explicit mutation surface is `harbor-previews write-generation`,
   which requires an existing preview record and can assign the next sequence
   automatically when the input does not pin one.
+- Higher-level transition commands such as generation request/ready/failed
+  reuse the same stored generation records while updating preview linkage
+  semantics through the Harbor transition helpers.
 
 ## Inventory
 
