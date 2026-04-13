@@ -129,6 +129,8 @@ title: Operations
   `harbor-previews ingest-pr-event`, which parses a GitHub-style PR event,
   looks up any stored Harbor preview, and returns Harbor's action decision plus
   the next explicit mutation intent without requiring a webhook server yet.
+  Add `--apply` to let Harbor execute the resolved mutation intent for the
+  currently supported path instead of only printing the dry-run payload.
 - Current Harbor anchor eligibility is tenant-repo only: `tenant-opw -> opw`
   and `tenant-cm -> cm`. `shared-addons` stays companion-only, and infra/tooling
   repos such as `devkit`, `control-plane`, and image repos are ignored.
@@ -171,6 +173,10 @@ title: Operations
   manifest from the anchor PR head SHA plus a control-plane-owned baseline
   release tuple of exact repo SHAs and emits a full generation mutation request
   directly from event ingest.
+- `harbor-previews ingest-pr-event --apply` reuses Harbor's existing preview
+  mutation helpers to write preview/generation records or destroy a preview
+  when the event intent is fully resolved. Unresolved companion cases stay
+  read-only and report an explicit no-op reason instead of guessing.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.
