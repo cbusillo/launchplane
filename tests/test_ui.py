@@ -66,6 +66,9 @@ def _write_deployment_record(
     instance_name: str,
     artifact_id: str,
     deployment_record_id: str,
+    deploy_status: str = "pass",
+    started_at: str = "2026-04-11T05:05:00Z",
+    finished_at: str = "2026-04-11T05:12:00Z",
 ) -> None:
     (deployment_dir / f"{deployment_record_id}.json").write_text(
         json.dumps(
@@ -86,7 +89,9 @@ def _write_deployment_record(
                     "target_type": "compose",
                     "deploy_mode": "dokploy-compose-api",
                     "deployment_id": deployment_record_id,
-                    "status": "pass",
+                    "status": deploy_status,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
                 },
             },
             indent=2,
@@ -124,6 +129,9 @@ def _write_promotion_record(
     from_instance_name: str,
     to_instance_name: str,
     deployment_record_id: str,
+    deploy_status: str = "pass",
+    started_at: str = "2026-04-11T05:15:00Z",
+    finished_at: str = "2026-04-11T05:20:00Z",
 ) -> None:
     (promotion_dir / f"{record_id}.json").write_text(
         json.dumps(
@@ -151,7 +159,9 @@ def _write_promotion_record(
                     "target_type": "compose",
                     "deploy_mode": "dokploy-compose-api",
                     "deployment_id": deployment_record_id,
-                    "status": "pass",
+                    "status": deploy_status,
+                    "started_at": started_at,
+                    "finished_at": finished_at,
                 },
                 "post_deploy_update": {
                     "attempted": True,
@@ -316,23 +326,74 @@ class InventoryOverviewUiTests(unittest.TestCase):
                 },
                 "latest_promotion": {
                     "record_id": "promotion-acme",
+                    "artifact_id": "artifact-acme",
                     "from_instance": "testing",
                     "deploy_status": "pass",
                 },
                 "latest_deployment": {
                     "record_id": "deployment-acme",
+                    "artifact_id": "artifact-acme",
                     "deployment_id": "deploy-1",
                     "target_name": "acme-prod",
                     "deploy_status": "pass",
                 },
+                "recent_promotions": (
+                    {
+                        "record_id": "promotion-acme",
+                        "artifact_id": "artifact-acme",
+                        "from_instance": "testing",
+                        "to_instance": "prod",
+                        "backup_record_id": "backup-acme",
+                        "deployment_id": "deploy-1",
+                        "finished_at": "2026-04-11T05:20:00Z",
+                        "destination_health_status": "pass",
+                        "deploy_status": "pass",
+                    },
+                    {
+                        "record_id": "promotion-acme-prev",
+                        "artifact_id": "artifact-acme-prev",
+                        "from_instance": "testing",
+                        "to_instance": "prod",
+                        "backup_record_id": "backup-acme-prev",
+                        "deployment_id": "deploy-0",
+                        "finished_at": "2026-04-10T05:20:00Z",
+                        "destination_health_status": "pass",
+                        "deploy_status": "pass",
+                    },
+                ),
+                "recent_deployments": (
+                    {
+                        "record_id": "deployment-acme",
+                        "artifact_id": "artifact-acme",
+                        "deployment_id": "deploy-1",
+                        "target_name": "acme-prod",
+                        "target_type": "compose",
+                        "finished_at": "2026-04-11T05:12:00Z",
+                        "destination_health_status": "pass",
+                        "deploy_status": "pass",
+                    },
+                    {
+                        "record_id": "deployment-acme-prev",
+                        "artifact_id": "artifact-acme-prev",
+                        "deployment_id": "deploy-0",
+                        "target_name": "acme-prod",
+                        "target_type": "compose",
+                        "finished_at": "2026-04-10T05:12:00Z",
+                        "destination_health_status": "pass",
+                        "deploy_status": "pass",
+                    },
+                ),
             }
         )
 
         self.assertIn("acme / prod", html)
         self.assertIn("Backup gate", html)
         self.assertIn("promotion-acme", html)
+        self.assertIn("promotion-acme-prev", html)
         self.assertIn("deployment-acme", html)
+        self.assertIn("deployment-acme-prev", html)
         self.assertIn("Suggested next step", html)
+        self.assertIn("Recent rollout history", html)
         self.assertIn("Production is promotion-managed", html)
         self.assertIn("promote resolve", html)
         self.assertIn("acme-snapshot", html)
@@ -551,9 +612,24 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
                 artifact_id="artifact-opw",
                 deployment_record_id="deployment-opw",
             )
+            _write_deployment_record(
+                deployment_dir,
+                context_name="opw",
+                instance_name="testing",
+                artifact_id="artifact-opw-prev",
+                deployment_record_id="deployment-opw-prev",
+                started_at="2026-04-10T05:05:00Z",
+                finished_at="2026-04-10T05:12:00Z",
+            )
             _write_backup_gate_record(
                 backup_gate_dir,
                 record_id="backup-opw",
+                context_name="opw",
+                instance_name="testing",
+            )
+            _write_backup_gate_record(
+                backup_gate_dir,
+                record_id="backup-opw-prev",
                 context_name="opw",
                 instance_name="testing",
             )
@@ -567,7 +643,20 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
                 to_instance_name="testing",
                 deployment_record_id="deployment-opw",
             )
+            _write_promotion_record(
+                promotion_dir,
+                record_id="promotion-opw-prev",
+                artifact_id="artifact-opw-prev",
+                backup_record_id="backup-opw-prev",
+                context_name="opw",
+                from_instance_name="local",
+                to_instance_name="testing",
+                deployment_record_id="deployment-opw-prev",
+                started_at="2026-04-10T05:15:00Z",
+                finished_at="2026-04-10T05:20:00Z",
+            )
             _write_artifact_manifest(artifact_dir, artifact_id="artifact-opw")
+            _write_artifact_manifest(artifact_dir, artifact_id="artifact-opw-prev")
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
             environments_file.parent.mkdir(parents=True, exist_ok=True)
             environments_file.write_text(
@@ -635,8 +724,11 @@ ODOO_DB_PASSWORD = "testing-secret"
             self.assertIn("../contracts/opw-testing-contract.html", status_html)
             self.assertIn("../records/artifacts/artifact-opw.html", status_html)
             self.assertIn("../records/deployments/deployment-opw.html", status_html)
+            self.assertIn("../records/deployments/deployment-opw-prev.html", status_html)
             self.assertIn("../records/promotions/promotion-opw.html", status_html)
+            self.assertIn("../records/promotions/promotion-opw-prev.html", status_html)
             self.assertIn("../records/backup-gates/backup-opw.html", status_html)
+            self.assertIn("Most recent", status_html)
             self.assertIn("../environments/opw-testing-status.html", contract_html)
             self.assertIn("../../records/artifacts/artifact-opw.html", deployment_record_html)
             self.assertIn("../../records/artifacts/artifact-opw.html", promotion_record_html)

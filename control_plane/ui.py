@@ -339,6 +339,97 @@ def _render_value_pairs(fields: Sequence[tuple[str, object]]) -> str:
     return "".join(_render_value(label, _string_value(value)) for label, value in fields)
 
 
+def _mapping_sequence(payload: Mapping[str, object], key: str) -> tuple[Mapping[str, object], ...]:
+    value = payload.get(key)
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
+        return ()
+    return tuple(item for item in value if isinstance(item, Mapping))
+
+
+def _render_recent_record_list(
+    *,
+    title: str,
+    items: Sequence[Mapping[str, object]],
+    record_kind: str,
+    empty_message: str,
+) -> str:
+    if not items:
+        return "".join(
+            (
+                '<section class="history-section">',
+                f'<div class="history-section-header"><h3>{escape(title)}</h3></div>',
+                f'<p class="history-empty">{escape(empty_message)}</p>',
+                '</section>',
+            )
+        )
+
+    rendered_items: list[str] = []
+    for index, item in enumerate(items):
+        status = _string_value(item.get("deploy_status")) or "skipped"
+        record_id = _string_value(item.get("record_id")) or "-"
+        artifact_id = _string_value(item.get("artifact_id")) or "No artifact recorded"
+        detail_fields: tuple[tuple[str, object], ...]
+        actions: tuple[tuple[str, str, str], ...]
+        summary: str
+        if record_kind == "promotion":
+            summary = (
+                f"{artifact_id} from {_string_value(item.get('from_instance')) or '-'} "
+                f"to {_string_value(item.get('to_instance')) or '-'}"
+            )
+            detail_fields = (
+                ("backup", item.get("backup_record_id")),
+                ("deployment", item.get("deployment_id")),
+                ("finished", item.get("finished_at") or item.get("started_at")),
+                ("health", item.get("destination_health_status")),
+            )
+            actions = (
+                ("Open artifact", _string_value(item.get("artifact_href")), "default"),
+                ("Open promotion record", _string_value(item.get("record_href")), "primary"),
+                ("Open backup gate", _string_value(item.get("backup_record_href")), "default"),
+            )
+        else:
+            summary = f"{artifact_id} to {_string_value(item.get('target_name')) or '-'}"
+            detail_fields = (
+                ("deployment", item.get("deployment_id")),
+                ("target type", item.get("target_type")),
+                ("finished", item.get("finished_at") or item.get("started_at")),
+                ("health", item.get("destination_health_status")),
+            )
+            actions = (
+                ("Open artifact", _string_value(item.get("artifact_href")), "default"),
+                ("Open deployment record", _string_value(item.get("record_href")), "primary"),
+            )
+        rendered_items.append(
+            "".join(
+                (
+                    '<article class="history-event">',
+                    '<div class="history-event-top">',
+                    '<div class="history-event-copy">',
+                    f'<p class="history-kicker">{escape("Most recent" if index == 0 else "Recent")}</p>',
+                    f'<h4>{escape(record_id)}</h4>',
+                    f'<p class="history-summary">{escape(summary)}</p>',
+                    '</div>',
+                    _render_status_badge(record_kind, status),
+                    '</div>',
+                    f'<div class="history-meta-grid">{_render_value_pairs(detail_fields)}</div>',
+                    _render_action_group(actions, class_name="panel-actions"),
+                    '</article>',
+                )
+            )
+        )
+
+    return "".join(
+        (
+            '<section class="history-section">',
+            f'<div class="history-section-header"><h3>{escape(title)}</h3></div>',
+            '<div class="history-list">',
+            "".join(rendered_items),
+            '</div>',
+            '</section>',
+        )
+    )
+
+
 def _string_sequence(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes, bytearray)):
         return ()
@@ -2321,8 +2412,10 @@ def render_inventory_overview_dashboard(
 def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
     live_payload = _mapping_value(payload, "live")
     live_promotion_payload = _mapping_value(payload, "live_promotion")
-    latest_promotion_payload = _mapping_value(payload, "latest_promotion")
-    latest_deployment_payload = _mapping_value(payload, "latest_deployment")
+    recent_promotions = _mapping_sequence(payload, "recent_promotions")
+    recent_deployments = _mapping_sequence(payload, "recent_deployments")
+    latest_promotion_payload = recent_promotions[0] if recent_promotions else _mapping_value(payload, "latest_promotion")
+    latest_deployment_payload = recent_deployments[0] if recent_deployments else _mapping_value(payload, "latest_deployment")
     backup_gate_payload = _mapping_value(payload, "authorized_backup_gate")
     next_step = _derive_next_operator_step(payload)
     checklist = next_step.get("checklist", ())
@@ -2344,21 +2437,6 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
             ("Open artifact", _string_value(live_payload.get("artifact_href")), "default"),
             ("Open deployment record", _string_value(live_payload.get("deployment_record_href")), "primary"),
             ("Open promotion record", _string_value(live_payload.get("promotion_record_href")), "default"),
-        ),
-        class_name="panel-actions",
-    )
-    latest_deployment_actions = _render_action_group(
-        (
-            ("Open artifact", _string_value(latest_deployment_payload.get("artifact_href")), "default"),
-            ("Open deployment record", _string_value(latest_deployment_payload.get("record_href")), "primary"),
-        ),
-        class_name="panel-actions",
-    )
-    latest_promotion_actions = _render_action_group(
-        (
-            ("Open artifact", _string_value(latest_promotion_payload.get("artifact_href")), "default"),
-            ("Open promotion record", _string_value(latest_promotion_payload.get("record_href")), "primary"),
-            ("Open backup gate", _string_value(latest_promotion_payload.get("backup_record_href")), "default"),
         ),
         class_name="panel-actions",
     )
@@ -2672,6 +2750,75 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
         margin-top: 18px;
       }}
 
+      .history-grid {{
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 16px;
+        margin-top: 18px;
+      }}
+
+      .history-section {{
+        display: grid;
+        gap: 12px;
+      }}
+
+      .history-section-header h3,
+      .history-event h4 {{
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 700;
+      }}
+
+      .history-list {{
+        display: grid;
+        gap: 12px;
+      }}
+
+      .history-event {{
+        padding: 16px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(252, 248, 242, 0.95);
+      }}
+
+      .history-event-top {{
+        display: flex;
+        gap: 12px;
+        align-items: start;
+        justify-content: space-between;
+      }}
+
+      .history-event-copy {{
+        min-width: 0;
+      }}
+
+      .history-kicker {{
+        margin: 0 0 6px;
+        font-size: 0.72rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }}
+
+      .history-summary {{
+        margin: 8px 0 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }}
+
+      .history-meta-grid {{
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+        gap: 12px;
+        margin-top: 14px;
+      }}
+
+      .history-empty {{
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.5;
+      }}
+
       .timeline-item {{
         padding: 18px;
         border-radius: 18px;
@@ -2700,6 +2847,13 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
         main {{ width: min(100vw - 20px, 1220px); padding: 20px 0 28px; }}
         .hero {{ padding: 22px; border-radius: 24px; }}
         .hero-grid, .layout {{ grid-template-columns: 1fr; }}
+        .history-grid {{ grid-template-columns: 1fr; }}
+      }}
+
+      @media (max-width: 560px) {{
+        .history-event-top {{ flex-direction: column; }}
+        .history-event-top .status-badge {{ align-self: flex-start; }}
+        .history-meta-grid {{ grid-template-columns: repeat(2, minmax(0, 1fr)); }}
       }}
     </style>
   </head>
@@ -2711,8 +2865,8 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
             <p class="eyebrow">Control Plane Environment Status</p>
             <h1>{escape(context_name)} / {escape(instance_name)}</h1>
             <p class="hero-copy">
-              This page renders the single-environment control-plane read model: live inventory, latest deployment,
-              latest promotion, and the backup record that authorized the current promoted state when one exists.
+              This page renders the single-environment control-plane read model: live inventory, recent deployment and
+              promotion history, and the backup record that authorized the current promoted state when one exists.
             </p>
             <div class="hero-actions">
               {_render_action_link("Operator site", home_page_href, tone="primary")}
@@ -2767,28 +2921,10 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
 
           <article class="panel">
             <p class="eyebrow">Timeline</p>
-            <h2>Latest control-plane events</h2>
-            <div class="timeline">
-              <div class="timeline-item">
-                <h3>Latest deployment</h3>
-                {_render_value("record", _string_value(latest_deployment_payload.get("record_id")))}
-                {_render_value("deployment", _string_value(latest_deployment_payload.get("deployment_id")))}
-                {_render_value("target", _string_value(latest_deployment_payload.get("target_name")))}
-                {_render_value("status", _string_value(latest_deployment_payload.get("deploy_status")))}
-                {_render_value("started", _string_value(latest_deployment_payload.get("started_at")))}
-                {_render_value("finished", _string_value(latest_deployment_payload.get("finished_at")))}
-                {latest_deployment_actions}
-              </div>
-              <div class="timeline-item">
-                <h3>Latest promotion</h3>
-                {_render_value("record", _string_value(latest_promotion_payload.get("record_id")))}
-                {_render_value("from", _string_value(latest_promotion_payload.get("from_instance")))}
-                {_render_value("backup record", _string_value(live_promotion_payload.get("backup_record_id")))}
-                {_render_value("status", _string_value(latest_promotion_payload.get("deploy_status")))}
-                {_render_value("started", _string_value(latest_promotion_payload.get("started_at")))}
-                {_render_value("finished", _string_value(latest_promotion_payload.get("finished_at")))}
-                {latest_promotion_actions}
-              </div>
+            <h2>Recent rollout history</h2>
+            <div class="history-grid">
+              {_render_recent_record_list(title="Deployments", items=recent_deployments or ((latest_deployment_payload,) if latest_deployment_payload else ()), record_kind="deployment", empty_message="No deployment records are stored for this environment yet.")}
+              {_render_recent_record_list(title="Promotions", items=recent_promotions or ((latest_promotion_payload,) if latest_promotion_payload else ()), record_kind="promotion", empty_message="No promotion records are stored for this environment yet.")}
             </div>
           </article>
         </div>
