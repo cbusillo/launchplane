@@ -20,6 +20,9 @@ title: Secrets
 - Optional ship-mode overrides such as `DOKPLOY_SHIP_MODE` and
   `DOKPLOY_SHIP_MODE_<CONTEXT>_<INSTANCE>` are also read from the same
   control-plane env surface.
+- Harbor preview routing now uses a dedicated `HARBOR_PREVIEW_BASE_URL`
+  runtime-environment value instead of piggybacking on ordinary live-instance
+  web base URLs.
 - If you need a non-default secret file location, set
   `ODOO_CONTROL_PLANE_ENV_FILE` to an alternate untracked env file path.
 
@@ -35,8 +38,12 @@ title: Secrets
 
 ## Local Runtime Contract
 
-- `uv run control-plane environments resolve --context <ctx> --instance <instance> --json-output`
+- `uv run control-plane environments resolve --context <ctx> --instance
+<instance> --json-output`
   emits the resolved runtime environment payload for a tenant environment.
+- Harbor preview write/build helpers read `HARBOR_PREVIEW_BASE_URL` from the
+  shared plus context-scoped runtime environment contract, with shared values
+  providing the default and context values allowed to override it.
 - `odoo-devkit` may consume that contract when the operator points
   `ODOO_CONTROL_PLANE_ROOT` at a valid `odoo-control-plane` checkout.
 - When `odoo-devkit` is configured to use the control-plane contract, legacy

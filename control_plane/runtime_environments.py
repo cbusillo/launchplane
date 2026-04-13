@@ -83,6 +83,22 @@ def resolve_runtime_environment_values(
     return merged_values
 
 
+def resolve_runtime_context_values(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+) -> dict[str, str]:
+    definition = load_runtime_environment_definition(control_plane_root=control_plane_root)
+    merged_values: dict[str, str] = _normalize_scalar_map(definition.shared_env)
+    context_definition = definition.contexts.get(context_name)
+    if context_definition is None:
+        raise click.ClickException(
+            f"Runtime environments file has no context definition for {context_name!r}."
+        )
+    merged_values.update(_normalize_scalar_map(context_definition.shared_env))
+    return merged_values
+
+
 def _parse_runtime_environment_definition(
     payload: dict[str, object],
     *,

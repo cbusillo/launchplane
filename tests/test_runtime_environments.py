@@ -78,6 +78,35 @@ ODOO_DB_PASSWORD = "testing-secret"
                     instance_name="local",
                 )
 
+    def test_resolve_runtime_context_values_merges_shared_and_context_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+ODOO_MASTER_PASSWORD = "shared-master"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            resolved_values = control_plane_runtime_environments.resolve_runtime_context_values(
+                control_plane_root=control_plane_root,
+                context_name="opw",
+            )
+
+        self.assertEqual(resolved_values["HARBOR_PREVIEW_BASE_URL"], "https://harbor.example")
+        self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
+        self.assertEqual(resolved_values["ENV_OVERRIDE_DISABLE_CRON"], "True")
+
     def test_environments_resolve_command_emits_json_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
