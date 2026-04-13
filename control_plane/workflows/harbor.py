@@ -12,12 +12,16 @@ from control_plane.contracts.preview_generation_record import (
     PreviewSourceRecord,
 )
 from control_plane.contracts.preview_mutation_request import (
+    HarborPullRequestMutationIntent,
+    PreviewDestroyMutationRequest,
+    PreviewGenerationIntentRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.ship import utc_now_timestamp
 
 RECENT_GENERATION_LIMIT = 3
 HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
@@ -94,17 +98,16 @@ def build_pull_request_event_action_payload(
     record_store: FilesystemRecordStore,
     event: GitHubPullRequestEvent,
 ) -> dict[str, object]:
-    resolved_context = harbor_anchor_repo_context(repo=event.repo)
-    preview = find_preview_record(
+    action, resolved_context, preview = resolve_pull_request_event_decision(
         record_store=record_store,
-        context_name="",
-        anchor_repo=event.repo,
-        anchor_pr_number=event.pr_number,
+        event=event,
     )
-    if preview is None and not resolved_context:
-        action = "ignore"
-    else:
-        action = classify_pull_request_event_for_harbor(event=event, preview=preview)
+    mutation_intent = build_pull_request_event_mutation_intent(
+        event=event,
+        action=action,
+        resolved_context=resolved_context,
+        preview=preview,
+    )
     return {
         "event": event.model_dump(mode="json"),
         "decision": {
@@ -115,6 +118,7 @@ def build_pull_request_event_action_payload(
             "preview_exists": preview is not None,
             "context_resolution_required": preview is None and not resolved_context,
         },
+        "mutation": mutation_intent.model_dump(mode="json") if mutation_intent is not None else None,
         "preview": (
             {
                 "preview_id": preview.preview_id,
@@ -130,6 +134,90 @@ def build_pull_request_event_action_payload(
             else None
         ),
     }
+
+
+def resolve_pull_request_event_decision(
+    *,
+    record_store: FilesystemRecordStore,
+    event: GitHubPullRequestEvent,
+) -> tuple[HarborPullRequestAction, str, PreviewRecord | None]:
+    resolved_context = harbor_anchor_repo_context(repo=event.repo)
+    preview = find_preview_record(
+        record_store=record_store,
+        context_name="",
+        anchor_repo=event.repo,
+        anchor_pr_number=event.pr_number,
+    )
+    if preview is None and not resolved_context:
+        action = "ignore"
+    else:
+        action = classify_pull_request_event_for_harbor(event=event, preview=preview)
+    return action, resolved_context, preview
+
+
+def build_pull_request_event_mutation_intent(
+    *,
+    event: GitHubPullRequestEvent,
+    action: HarborPullRequestAction,
+    resolved_context: str,
+    preview: PreviewRecord | None,
+) -> HarborPullRequestMutationIntent | None:
+    effective_context = preview.context if preview is not None else resolved_context
+    if action in {"enable_preview", "refresh_preview"}:
+        if not effective_context:
+            return None
+        occurred_at = _pull_request_event_timestamp(event=event)
+        preview_request = PreviewMutationRequest(
+            context=effective_context,
+            anchor_repo=event.repo,
+            anchor_pr_number=event.pr_number,
+            anchor_pr_url=event.pr_url,
+            created_at=occurred_at if preview is None else "",
+            updated_at=occurred_at,
+            eligible_at=occurred_at if preview is None else "",
+        )
+        generation_request_seed = PreviewGenerationIntentRequest(
+            context=effective_context,
+            anchor_repo=event.repo,
+            anchor_pr_number=event.pr_number,
+            anchor_pr_url=event.pr_url,
+            anchor_head_sha=event.head_sha,
+            state="resolving",
+            requested_reason=_pull_request_event_generation_reason(action=action),
+            requested_at=occurred_at,
+        )
+        return HarborPullRequestMutationIntent(
+            command="request-generation",
+            manifest_resolution_required=True,
+            preview_request=preview_request,
+            generation_request_seed=generation_request_seed,
+        )
+    if action == "destroy_preview" and preview is not None:
+        return HarborPullRequestMutationIntent(
+            command="destroy-preview",
+            destroy_request=PreviewDestroyMutationRequest(
+                context=preview.context,
+                anchor_repo=preview.anchor_repo,
+                anchor_pr_number=preview.anchor_pr_number,
+                destroyed_at=_pull_request_event_timestamp(event=event),
+                destroy_reason=_pull_request_event_destroy_reason(event=event),
+            ),
+        )
+    return None
+
+
+def _pull_request_event_timestamp(*, event: GitHubPullRequestEvent) -> str:
+    return event.occurred_at.strip() or utc_now_timestamp()
+
+
+def _pull_request_event_generation_reason(*, action: HarborPullRequestAction) -> str:
+    return f"github_pr_event_{action}"
+
+
+def _pull_request_event_destroy_reason(*, event: GitHubPullRequestEvent) -> str:
+    if event.merged:
+        return "pull_request_merged"
+    return "pull_request_closed"
 
 
 def build_preview_label(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:

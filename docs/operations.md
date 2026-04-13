@@ -127,8 +127,8 @@ title: Operations
   and `destroy-preview`.
 - Harbor PR-event ingest starts with a manual typed JSON path through
   `harbor-previews ingest-pr-event`, which parses a GitHub-style PR event,
-  looks up any stored Harbor preview, and returns Harbor's action decision
-  without requiring a webhook server yet.
+  looks up any stored Harbor preview, and returns Harbor's action decision plus
+  the next explicit mutation intent without requiring a webhook server yet.
 - Current Harbor anchor eligibility is tenant-repo only: `tenant-opw -> opw`
   and `tenant-cm -> cm`. `shared-addons` stays companion-only, and infra/tooling
   repos such as `devkit`, `control-plane`, and image repos are ignored.
@@ -159,7 +159,9 @@ title: Operations
   retained Harbor evidence visible through the read-model surfaces.
 - `harbor-previews ingest-pr-event` is the first explicit event-ingest surface;
   it classifies whether Harbor should enable, refresh, destroy, or ignore a PR
-  event under the current label-driven trigger contract.
+  event under the current label-driven trigger contract and now emits the
+  matching Harbor mutation intent. Generation intent remains manifest-resolution
+  dependent until Harbor resolves the exact preview build tuple.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.
