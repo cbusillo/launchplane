@@ -24,6 +24,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.harbor import build_preview_status_payload
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
     build_executed_promotion_record,
@@ -1184,6 +1185,37 @@ def inventory_status(state_dir: Path, context_name: str, instance_name: str) -> 
         context_name=context_name,
         instance_name=instance_name,
     )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@main.group("harbor-previews")
+def harbor_previews() -> None:
+    """Harbor preview read-model commands."""
+
+
+@harbor_previews.command("show")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--anchor-repo", required=True)
+@click.option("--pr-number", "anchor_pr_number", type=click.IntRange(min=1), required=True)
+def harbor_previews_show(
+    state_dir: Path,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> None:
+    payload = build_preview_status_payload(
+        record_store=_store(state_dir),
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    if payload is None:
+        raise click.ClickException(
+            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
+        )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
