@@ -23,6 +23,10 @@ RECENT_GENERATION_LIMIT = 3
 HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
 HARBOR_PREVIEW_ENABLE_LABEL = "harbor-preview"
 HarborPullRequestAction = str
+HARBOR_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
+    "tenant-cm": "cm",
+    "tenant-opw": "opw",
+}
 
 
 def find_preview_record(
@@ -45,6 +49,14 @@ def find_preview_record(
 
 def harbor_preview_label_enabled(*, label_names: tuple[str, ...]) -> bool:
     return HARBOR_PREVIEW_ENABLE_LABEL in {label_name.strip() for label_name in label_names}
+
+
+def harbor_anchor_repo_context(*, repo: str) -> str:
+    return HARBOR_TENANT_ANCHOR_CONTEXTS.get(repo.strip(), "")
+
+
+def harbor_anchor_repo_eligible(*, repo: str) -> bool:
+    return bool(harbor_anchor_repo_context(repo=repo))
 
 
 def classify_pull_request_event_for_harbor(
@@ -82,20 +94,26 @@ def build_pull_request_event_action_payload(
     record_store: FilesystemRecordStore,
     event: GitHubPullRequestEvent,
 ) -> dict[str, object]:
+    resolved_context = harbor_anchor_repo_context(repo=event.repo)
     preview = find_preview_record(
         record_store=record_store,
         context_name="",
         anchor_repo=event.repo,
         anchor_pr_number=event.pr_number,
     )
-    action = classify_pull_request_event_for_harbor(event=event, preview=preview)
+    if preview is None and not resolved_context:
+        action = "ignore"
+    else:
+        action = classify_pull_request_event_for_harbor(event=event, preview=preview)
     return {
         "event": event.model_dump(mode="json"),
         "decision": {
             "action": action,
+            "anchor_repo_eligible": bool(resolved_context),
+            "resolved_context": resolved_context,
             "label_enabled": harbor_preview_label_enabled(label_names=event.label_names),
             "preview_exists": preview is not None,
-            "context_resolution_required": preview is None,
+            "context_resolution_required": preview is None and not resolved_context,
         },
         "preview": (
             {

@@ -129,6 +129,9 @@ title: Operations
   `harbor-previews ingest-pr-event`, which parses a GitHub-style PR event,
   looks up any stored Harbor preview, and returns Harbor's action decision
   without requiring a webhook server yet.
+- Current Harbor anchor eligibility is tenant-repo only: `tenant-opw -> opw`
+  and `tenant-cm -> cm`. `shared-addons` stays companion-only, and infra/tooling
+  repos such as `devkit`, `control-plane`, and image repos are ignored.
 - `harbor-previews show` is the one-preview status payload shaped for the
   first Harbor page, including canonical preview URL, trust summary, health,
   and retained evidence for destroyed previews.

@@ -26,6 +26,8 @@ from control_plane.workflows.harbor import (
     build_preview_record,
     build_preview_route_path,
     classify_pull_request_event_for_harbor,
+    harbor_anchor_repo_context,
+    harbor_anchor_repo_eligible,
     generate_preview_generation_id,
     generate_preview_id,
     harbor_preview_label_enabled,
@@ -384,6 +386,14 @@ ODOO_DB_PASSWORD = "local-secret"
     def test_harbor_preview_label_enabled_matches_configured_label(self) -> None:
         self.assertTrue(harbor_preview_label_enabled(label_names=("bug", "harbor-preview")))
         self.assertFalse(harbor_preview_label_enabled(label_names=("bug", "needs-review")))
+
+    def test_harbor_anchor_repo_resolution_accepts_tenant_repos_only(self) -> None:
+        self.assertEqual(harbor_anchor_repo_context(repo="tenant-opw"), "opw")
+        self.assertEqual(harbor_anchor_repo_context(repo="tenant-cm"), "cm")
+        self.assertTrue(harbor_anchor_repo_eligible(repo="tenant-opw"))
+        self.assertTrue(harbor_anchor_repo_eligible(repo="tenant-cm"))
+        self.assertFalse(harbor_anchor_repo_eligible(repo="shared-addons"))
+        self.assertFalse(harbor_anchor_repo_eligible(repo="control-plane"))
 
     def test_classify_pull_request_event_for_harbor_enables_preview_when_label_added(self) -> None:
         event = GitHubPullRequestEvent(
@@ -1259,7 +1269,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(result.exit_code, 0, msg=result.output)
             payload = json.loads(result.output)
             self.assertEqual(payload["decision"]["action"], "enable_preview")
-            self.assertTrue(payload["decision"]["context_resolution_required"])
+            self.assertEqual(payload["decision"]["resolved_context"], "opw")
+            self.assertTrue(payload["decision"]["anchor_repo_eligible"])
+            self.assertFalse(payload["decision"]["context_resolution_required"])
             self.assertIsNone(payload["preview"])
 
     def test_harbor_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
@@ -1302,6 +1314,46 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["decision"]["action"], "refresh_preview")
             self.assertFalse(payload["decision"]["context_resolution_required"])
             self.assertEqual(payload["preview"]["preview_id"], "hpr_01jabc")
+
+    def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "shared-addons",
+                        "pr_number": 456,
+                        "pr_url": "https://github.com/every/shared-addons/pull/456",
+                        "state": "open",
+                        "head_sha": "bbbb2222",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-pr-event",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "ignore")
+            self.assertFalse(payload["decision"]["anchor_repo_eligible"])
+            self.assertEqual(payload["decision"]["resolved_context"], "")
 
     def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
         runner = CliRunner()
