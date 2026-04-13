@@ -31,6 +31,7 @@ from control_plane.workflows.harbor import (
     generate_preview_generation_id,
     generate_preview_id,
     harbor_preview_label_enabled,
+    parse_preview_request_metadata,
     resolve_harbor_preview_base_url,
 )
 
@@ -480,6 +481,48 @@ ODOO_DB_PASSWORD = "local-secret"
         action = classify_pull_request_event_for_harbor(event=event, preview=None)
 
         self.assertEqual(action, "ignore")
+
+    def test_parse_preview_request_metadata_reads_harbor_fenced_block(self) -> None:
+        result = parse_preview_request_metadata(
+            pr_body=(
+                "Some intro text\n\n"
+                "```harbor-preview\n"
+                "schema_version = 1\n"
+                "\n"
+                "[[companions]]\n"
+                'repo = "shared-addons"\n'
+                "pr_number = 456\n"
+                "```\n"
+            )
+        )
+
+        self.assertEqual(result.status, "valid")
+        self.assertIsNotNone(result.metadata)
+        assert result.metadata is not None
+        self.assertEqual(result.metadata.companions[0].repo, "shared-addons")
+        self.assertEqual(result.metadata.companions[0].pr_number, 456)
+
+    def test_parse_preview_request_metadata_is_missing_without_harbor_block(self) -> None:
+        result = parse_preview_request_metadata(pr_body="Regular PR body without Harbor metadata.")
+
+        self.assertEqual(result.status, "missing")
+        self.assertIsNone(result.metadata)
+
+    def test_parse_preview_request_metadata_fails_closed_for_invalid_companion_repo(self) -> None:
+        result = parse_preview_request_metadata(
+            pr_body=(
+                "```harbor-preview\n"
+                "schema_version = 1\n"
+                "\n"
+                "[[companions]]\n"
+                'repo = "tenant-cm"\n'
+                "pr_number = 456\n"
+                "```\n"
+            )
+        )
+
+        self.assertEqual(result.status, "invalid")
+        self.assertIn("not allowlisted", result.error)
 
     def test_filesystem_store_lists_preview_records_and_generations(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1246,6 +1289,15 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:15:00Z",
+                        "pr_body": (
+                            "```harbor-preview\n"
+                            "schema_version = 1\n"
+                            "\n"
+                            "[[companions]]\n"
+                            'repo = "shared-addons"\n'
+                            "pr_number = 456\n"
+                            "```\n"
+                        ),
                         "state": "open",
                         "head_sha": "aaaa1111",
                         "label_names": ["harbor-preview"],
@@ -1273,6 +1325,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["decision"]["resolved_context"], "opw")
             self.assertTrue(payload["decision"]["anchor_repo_eligible"])
             self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertEqual(payload["request_metadata"]["status"], "valid")
+            self.assertEqual(payload["request_metadata"]["metadata"]["companions"][0]["repo"], "shared-addons")
             self.assertEqual(payload["mutation"]["command"], "request-generation")
             self.assertTrue(payload["mutation"]["manifest_resolution_required"])
             self.assertEqual(payload["mutation"]["preview_request"]["context"], "opw")
@@ -1303,6 +1357,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:16:00Z",
+                        "pr_body": "No Harbor metadata yet.",
                         "state": "open",
                         "head_sha": "bbbb2222",
                         "label_names": ["harbor-preview"],
@@ -1327,6 +1382,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertEqual(payload["decision"]["action"], "refresh_preview")
             self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertEqual(payload["request_metadata"]["status"], "missing")
             self.assertEqual(payload["mutation"]["command"], "request-generation")
             self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "")
             self.assertEqual(payload["mutation"]["preview_request"]["updated_at"], "2026-04-13T12:16:00Z")
@@ -1352,6 +1408,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:17:00Z",
+                        "pr_body": "No Harbor metadata needed for close.",
                         "state": "closed",
                         "merged": True,
                         "head_sha": "cccc3333",
@@ -1397,6 +1454,15 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_number": 456,
                         "pr_url": "https://github.com/every/shared-addons/pull/456",
                         "occurred_at": "2026-04-13T12:18:00Z",
+                        "pr_body": (
+                            "```harbor-preview\n"
+                            "schema_version = 1\n"
+                            "\n"
+                            "[[companions]]\n"
+                            'repo = "tenant-cm"\n'
+                            "pr_number = 10\n"
+                            "```\n"
+                        ),
                         "state": "open",
                         "head_sha": "bbbb2222",
                         "label_names": ["harbor-preview"],
@@ -1423,6 +1489,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["decision"]["action"], "ignore")
             self.assertFalse(payload["decision"]["anchor_repo_eligible"])
             self.assertEqual(payload["decision"]["resolved_context"], "")
+            self.assertEqual(payload["request_metadata"]["status"], "invalid")
             self.assertIsNone(payload["mutation"])
 
     def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
