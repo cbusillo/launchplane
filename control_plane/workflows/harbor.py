@@ -181,6 +181,54 @@ def build_pull_request_event_action_payload(
     return payload
 
 
+def adapt_github_webhook_pull_request_event(
+    *, event_name: str, webhook_payload: dict[str, object]
+) -> GitHubPullRequestEvent:
+    normalized_event_name = event_name.strip()
+    if normalized_event_name != "pull_request":
+        raise click.ClickException(
+            f"Harbor GitHub webhook adapter only supports event_name='pull_request', got {normalized_event_name!r}."
+        )
+
+    action = _require_webhook_string(webhook_payload, "action")
+    if action not in GitHubPullRequestEvent.model_fields["action"].annotation.__args__:
+        raise click.ClickException(
+            f"Harbor does not support GitHub pull_request action {action!r}."
+        )
+
+    repository_payload = _require_webhook_mapping(webhook_payload, "repository")
+    pull_request_payload = _require_webhook_mapping(webhook_payload, "pull_request")
+    label_payload = webhook_payload.get("label")
+    label_mapping = label_payload if isinstance(label_payload, dict) else None
+    pr_number = _require_webhook_int(webhook_payload, "number")
+    labels = _webhook_pull_request_labels(pull_request_payload=pull_request_payload)
+    action_label = _webhook_action_label(action=action, label_payload=label_mapping)
+
+    adapted_payload = {
+        "action": action,
+        "repo": _require_webhook_string(repository_payload, "name"),
+        "pr_number": pr_number,
+        "pr_url": _require_webhook_string(pull_request_payload, "html_url"),
+        "occurred_at": _webhook_occurred_at(
+            action=action,
+            pull_request_payload=pull_request_payload,
+        ),
+        "pr_body": _optional_webhook_string(pull_request_payload, "body"),
+        "state": _require_webhook_string(pull_request_payload, "state"),
+        "merged": _optional_webhook_bool(pull_request_payload, "merged"),
+        "head_sha": _require_webhook_string(
+            _require_webhook_mapping(pull_request_payload, "head"),
+            "sha",
+        ),
+        "label_names": labels,
+        "action_label": action_label,
+    }
+    try:
+        return GitHubPullRequestEvent.model_validate(adapted_payload)
+    except ValidationError as exc:
+        raise click.ClickException(f"Invalid adapted GitHub pull request event: {exc}") from exc
+
+
 def build_pull_request_feedback_payload(
     *,
     record_store: FilesystemRecordStore,
@@ -581,6 +629,79 @@ def _format_feedback_pr_summary(item: dict[str, object]) -> str:
     if isinstance(head_sha, str) and head_sha.strip():
         return f"{ref} at `{head_sha[:12]}`"
     return ref
+
+
+def _require_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, object]:
+    value = payload.get(key)
+    if not isinstance(value, dict):
+        raise click.ClickException(f"GitHub webhook payload requires object field {key!r}.")
+    return value
+
+
+def _require_webhook_string(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise click.ClickException(f"GitHub webhook payload requires string field {key!r}.")
+    return value.strip()
+
+
+def _optional_webhook_string(payload: dict[str, object], key: str) -> str:
+    value = payload.get(key)
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
+def _require_webhook_int(payload: dict[str, object], key: str) -> int:
+    value = payload.get(key)
+    if not isinstance(value, int) or value < 1:
+        raise click.ClickException(f"GitHub webhook payload requires positive integer field {key!r}.")
+    return value
+
+
+def _optional_webhook_bool(payload: dict[str, object], key: str) -> bool:
+    value = payload.get(key)
+    return value if isinstance(value, bool) else False
+
+
+def _webhook_pull_request_labels(*, pull_request_payload: dict[str, object]) -> tuple[str, ...]:
+    labels_payload = pull_request_payload.get("labels")
+    if not isinstance(labels_payload, list):
+        return ()
+    label_names: list[str] = []
+    for item in labels_payload:
+        if not isinstance(item, dict):
+            continue
+        name = item.get("name")
+        if isinstance(name, str) and name.strip():
+            label_names.append(name.strip())
+    return tuple(label_names)
+
+
+def _webhook_action_label(*, action: str, label_payload: dict[str, object] | None) -> str:
+    if action not in {"labeled", "unlabeled"} or label_payload is None:
+        return ""
+    name = label_payload.get("name")
+    if not isinstance(name, str) or not name.strip():
+        raise click.ClickException(
+            f"GitHub pull_request action {action!r} requires label.name in the webhook payload."
+        )
+    return name.strip()
+
+
+def _webhook_occurred_at(*, action: str, pull_request_payload: dict[str, object]) -> str:
+    if action == "opened":
+        return _optional_webhook_string(pull_request_payload, "created_at")
+    if action == "closed":
+        return (
+            _optional_webhook_string(pull_request_payload, "closed_at")
+            or _optional_webhook_string(pull_request_payload, "merged_at")
+            or _optional_webhook_string(pull_request_payload, "updated_at")
+        )
+    return (
+        _optional_webhook_string(pull_request_payload, "updated_at")
+        or _optional_webhook_string(pull_request_payload, "created_at")
+    )
 
 
 def github_pull_request_reference(pr_url: str) -> dict[str, object] | None:
