@@ -177,6 +177,10 @@ title: Operations
   mutation helpers to write preview/generation records or destroy a preview
   when the event intent is fully resolved. Unresolved companion cases stay
   read-only and report an explicit no-op reason instead of guessing.
+- `harbor-previews ingest-pr-event` now also emits a reviewer-facing Harbor
+  `feedback` payload with concise markdown plus structured preview/apply facts.
+  On applied preview paths it includes the canonical preview URL and manifest
+  evidence; on unresolved paths it explains why Harbor stayed fail-closed.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases

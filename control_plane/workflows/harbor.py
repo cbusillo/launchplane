@@ -140,7 +140,7 @@ def build_pull_request_event_action_payload(
         request_metadata=request_metadata,
         resolved_manifest=resolved_manifest,
     )
-    return {
+    payload = {
         "event": event.model_dump(mode="json"),
         "decision": {
             "action": action,
@@ -169,6 +169,331 @@ def build_pull_request_event_action_payload(
             else None
         ),
     }
+    payload["feedback"] = build_pull_request_feedback_payload(
+        record_store=record_store,
+        event=event,
+        action=action,
+        preview=preview,
+        request_metadata=request_metadata,
+        resolved_manifest=resolved_manifest,
+    )
+    return payload
+
+
+def build_pull_request_feedback_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    event: GitHubPullRequestEvent,
+    action: HarborPullRequestAction,
+    preview: PreviewRecord | None,
+    request_metadata: HarborPreviewRequestParseResult,
+    resolved_manifest: HarborResolvedPreviewManifest | None,
+    apply_result: dict[str, object] | None = None,
+) -> dict[str, object]:
+    current_preview = find_preview_record(
+        record_store=record_store,
+        context_name="",
+        anchor_repo=event.repo,
+        anchor_pr_number=event.pr_number,
+    )
+    if current_preview is None:
+        current_preview = preview
+
+    preview_status_payload = None
+    if current_preview is not None:
+        preview_status_payload = build_preview_status_payload(
+            record_store=record_store,
+            context_name=current_preview.context,
+            anchor_repo=current_preview.anchor_repo,
+            anchor_pr_number=current_preview.anchor_pr_number,
+        )
+
+    apply_state, apply_reason = _feedback_apply_outcome(apply_result=apply_result)
+    canonical_url = _feedback_preview_value(
+        preview_status_payload=preview_status_payload,
+        preview=current_preview,
+        section="preview",
+        key="canonical_url",
+    )
+    preview_label = _feedback_preview_value(
+        preview_status_payload=preview_status_payload,
+        preview=current_preview,
+        section="preview",
+        key="preview_label",
+    )
+    preview_state = _feedback_preview_value(
+        preview_status_payload=preview_status_payload,
+        preview=current_preview,
+        section="preview",
+        key="state",
+    )
+    manifest_fingerprint = _feedback_manifest_value(
+        preview_status_payload=preview_status_payload,
+        resolved_manifest=resolved_manifest,
+        key="resolved_manifest_fingerprint",
+    )
+    baseline_release_tuple_id = _feedback_manifest_value(
+        preview_status_payload=preview_status_payload,
+        resolved_manifest=resolved_manifest,
+        key="baseline_release_tuple_id",
+    )
+    source_summary = _feedback_source_summary(
+        preview_status_payload=preview_status_payload,
+        event=event,
+        request_metadata=request_metadata,
+    )
+    status, headline, detail = _feedback_status_summary(
+        action=action,
+        preview_state=preview_state,
+        apply_state=apply_state,
+        apply_reason=apply_reason,
+        request_metadata=request_metadata,
+        source_summary=source_summary,
+        resolved_manifest=resolved_manifest,
+    )
+    return {
+        "status": status,
+        "headline": headline,
+        "detail": detail,
+        "apply_state": apply_state,
+        "apply_reason": apply_reason,
+        "preview_state": preview_state,
+        "preview_label": preview_label,
+        "canonical_url": canonical_url,
+        "manifest_fingerprint": manifest_fingerprint,
+        "baseline_release_tuple_id": baseline_release_tuple_id,
+        "source_summary": source_summary,
+        "comment_markdown": _render_pull_request_feedback_markdown(
+            headline=headline,
+            detail=detail,
+            canonical_url=canonical_url,
+            preview_label=preview_label,
+            preview_state=preview_state,
+            manifest_fingerprint=manifest_fingerprint,
+            baseline_release_tuple_id=baseline_release_tuple_id,
+            source_summary=source_summary,
+            apply_state=apply_state,
+            apply_reason=apply_reason,
+        ),
+    }
+
+
+def _feedback_apply_outcome(*, apply_result: dict[str, object] | None) -> tuple[str, str]:
+    if not isinstance(apply_result, dict):
+        return "not_requested", ""
+    if apply_result.get("applied") is True:
+        return "applied", ""
+    reason = apply_result.get("reason")
+    return "noop", reason if isinstance(reason, str) else ""
+
+
+def _feedback_preview_value(
+    *,
+    preview_status_payload: dict[str, object] | None,
+    preview: PreviewRecord | None,
+    section: str,
+    key: str,
+) -> str:
+    if preview_status_payload is not None:
+        payload_section = preview_status_payload.get(section)
+        if isinstance(payload_section, dict):
+            value = payload_section.get(key)
+            if isinstance(value, str):
+                return value
+    if preview is None:
+        return ""
+    value = getattr(preview, key, "")
+    return value if isinstance(value, str) else ""
+
+
+def _feedback_manifest_value(
+    *,
+    preview_status_payload: dict[str, object] | None,
+    resolved_manifest: HarborResolvedPreviewManifest | None,
+    key: str,
+) -> str:
+    if preview_status_payload is not None:
+        input_summary = preview_status_payload.get("input_summary")
+        if isinstance(input_summary, dict):
+            value = input_summary.get(key)
+            if isinstance(value, str):
+                return value
+    if resolved_manifest is None:
+        return ""
+    value = getattr(resolved_manifest, key, "")
+    return value if isinstance(value, str) else ""
+
+
+def _feedback_source_summary(
+    *,
+    preview_status_payload: dict[str, object] | None,
+    event: GitHubPullRequestEvent,
+    request_metadata: HarborPreviewRequestParseResult,
+) -> dict[str, object]:
+    if preview_status_payload is not None:
+        input_summary = preview_status_payload.get("input_summary")
+        if isinstance(input_summary, dict):
+            anchor = input_summary.get("anchor")
+            companions = input_summary.get("companions")
+            if isinstance(anchor, dict) and isinstance(companions, list):
+                return {
+                    "anchor": anchor,
+                    "companions": companions,
+                }
+
+    companion_requests = []
+    if request_metadata.metadata is not None:
+        companion_requests = [
+            {
+                "repo": companion.repo,
+                "pr_number": companion.pr_number,
+                "head_sha": "",
+                "pr_url": "",
+            }
+            for companion in request_metadata.metadata.companions
+        ]
+    return {
+        "anchor": {
+            "repo": event.repo,
+            "pr_number": event.pr_number,
+            "head_sha": event.head_sha,
+            "pr_url": event.pr_url,
+        },
+        "companions": companion_requests,
+    }
+
+
+def _feedback_status_summary(
+    *,
+    action: HarborPullRequestAction,
+    preview_state: str,
+    apply_state: str,
+    apply_reason: str,
+    request_metadata: HarborPreviewRequestParseResult,
+    source_summary: dict[str, object],
+    resolved_manifest: HarborResolvedPreviewManifest | None,
+) -> tuple[str, str, str]:
+    anchor = source_summary.get("anchor")
+    repo = anchor.get("repo", "") if isinstance(anchor, dict) else ""
+    pr_number = anchor.get("pr_number", "") if isinstance(anchor, dict) else ""
+    anchor_ref = f"{repo}#{pr_number}" if repo and pr_number else "this pull request"
+
+    if preview_state == "destroyed":
+        return (
+            "preview_destroyed",
+            f"Harbor preview closed for {anchor_ref}.",
+            "The stored Harbor preview was destroyed and its retained evidence remains available.",
+        )
+    if apply_state == "applied":
+        return (
+            "preview_updated",
+            f"Harbor preview updated for {anchor_ref}.",
+            "The reviewer-facing preview record now reflects the latest exact Harbor inputs.",
+        )
+    if apply_state == "noop" and apply_reason == "manifest_resolution_required":
+        if request_metadata.status == "invalid":
+            return (
+                "preview_unresolved",
+                f"Harbor could not apply a preview for {anchor_ref}.",
+                "The Harbor preview request metadata is invalid, so Harbor kept the event fail-closed instead of guessing build inputs.",
+            )
+        companions = source_summary.get("companions")
+        if isinstance(companions, list) and companions:
+            return (
+                "preview_unresolved",
+                f"Harbor could not apply a preview for {anchor_ref}.",
+                "Harbor could not prove the exact companion pull request head SHA, so the preview path stayed an explicit no-op.",
+            )
+        return (
+            "preview_unresolved",
+            f"Harbor could not apply a preview for {anchor_ref}.",
+            "Harbor could not resolve the exact preview manifest, so the preview path stayed an explicit no-op.",
+        )
+    if action == "ignore":
+        return (
+            "no_action",
+            f"Harbor took no preview action for {anchor_ref}.",
+            "This pull request event did not meet the current Harbor trigger and eligibility rules.",
+        )
+    if request_metadata.status == "invalid":
+        return (
+            "preview_unresolved",
+            f"Harbor could not resolve preview inputs for {anchor_ref}.",
+            "The Harbor preview request metadata is invalid, so Harbor did not produce preview build truth from it.",
+        )
+    if resolved_manifest is not None:
+        return (
+            "preview_resolved",
+            f"Harbor resolved preview inputs for {anchor_ref}.",
+            "The exact preview manifest is ready, but this run did not apply the Harbor mutation helpers.",
+        )
+    return (
+        "preview_unresolved",
+        f"Harbor could not resolve preview inputs for {anchor_ref}.",
+        "Harbor kept the event fail-closed because it could not prove the exact preview inputs yet.",
+    )
+
+
+def _render_pull_request_feedback_markdown(
+    *,
+    headline: str,
+    detail: str,
+    canonical_url: str,
+    preview_label: str,
+    preview_state: str,
+    manifest_fingerprint: str,
+    baseline_release_tuple_id: str,
+    source_summary: dict[str, object],
+    apply_state: str,
+    apply_reason: str,
+) -> str:
+    lines = [headline, "", detail, ""]
+    if canonical_url:
+        lines.append(f"- Preview URL: {canonical_url}")
+    if preview_label:
+        lines.append(f"- Preview label: `{preview_label}`")
+    if preview_state:
+        lines.append(f"- Preview state: `{preview_state}`")
+    if manifest_fingerprint:
+        lines.append(f"- Manifest fingerprint: `{manifest_fingerprint}`")
+    if baseline_release_tuple_id:
+        lines.append(f"- Baseline release tuple: `{baseline_release_tuple_id}`")
+
+    anchor = source_summary.get("anchor")
+    if isinstance(anchor, dict):
+        lines.append(f"- Anchor input: {_format_feedback_pr_summary(anchor)}")
+
+    companions = source_summary.get("companions")
+    if isinstance(companions, list) and companions:
+        companion_summary = ", ".join(
+            _format_feedback_pr_summary(item)
+            for item in companions
+            if isinstance(item, dict)
+        )
+        lines.append(f"- Companion inputs: {companion_summary}")
+
+    if apply_state == "applied":
+        lines.append("- Apply outcome: Harbor updated stored preview state.")
+    elif apply_state == "noop":
+        if apply_reason:
+            lines.append(f"- Apply outcome: no-op (`{apply_reason}`)")
+        else:
+            lines.append("- Apply outcome: no-op")
+    else:
+        lines.append("- Apply outcome: dry-run only")
+    return "\n".join(lines)
+
+
+def _format_feedback_pr_summary(item: dict[str, object]) -> str:
+    repo = item.get("repo")
+    pr_number = item.get("pr_number")
+    head_sha = item.get("head_sha")
+    if not isinstance(repo, str) or not repo.strip():
+        return "unknown"
+    ref = f"`{repo}#{pr_number}`" if isinstance(pr_number, int) else f"`{repo}`"
+    if isinstance(head_sha, str) and head_sha.strip():
+        return f"{ref} at `{head_sha[:12]}`"
+    return ref
 
 
 def resolve_pull_request_event_decision(
