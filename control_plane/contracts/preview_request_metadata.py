@@ -31,10 +31,13 @@ class HarborPreviewRequestMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
+    baseline_channel: str = "testing"
     companions: tuple[HarborCompanionPullRequestReference, ...] = ()
 
     @model_validator(mode="after")
     def _validate_metadata(self) -> "HarborPreviewRequestMetadata":
+        if not self.baseline_channel.strip():
+            raise ValueError("Harbor preview request metadata requires baseline_channel")
         seen_repos: set[str] = set()
         for companion in self.companions:
             normalized_repo = companion.repo.strip()

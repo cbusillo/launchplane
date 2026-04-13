@@ -1,3 +1,5 @@
+import hashlib
+import json
 import re
 import tomllib
 from pathlib import Path
@@ -6,6 +8,7 @@ import click
 from pydantic import ValidationError
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -13,6 +16,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
     PreviewSourceRecord,
 )
+from control_plane.contracts.preview_manifest import HarborResolvedPreviewManifest
 from control_plane.contracts.preview_mutation_request import (
     HarborPullRequestMutationIntent,
     PreviewDestroyMutationRequest,
@@ -33,6 +37,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 RECENT_GENERATION_LIMIT = 3
 HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
 HARBOR_PREVIEW_ENABLE_LABEL = "harbor-preview"
+DEFAULT_HARBOR_BASELINE_CHANNEL = "testing"
 HarborPullRequestAction = str
 HARBOR_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
     "tenant-cm": "cm",
@@ -106,18 +111,29 @@ def classify_pull_request_event_for_harbor(
 
 def build_pull_request_event_action_payload(
     *,
+    control_plane_root: Path,
     record_store: FilesystemRecordStore,
     event: GitHubPullRequestEvent,
 ) -> dict[str, object]:
+    request_metadata = parse_preview_request_metadata(pr_body=event.pr_body)
     action, resolved_context, preview = resolve_pull_request_event_decision(
         record_store=record_store,
         event=event,
+    )
+    resolved_manifest = resolve_pull_request_event_manifest(
+        control_plane_root=control_plane_root,
+        event=event,
+        resolved_context=resolved_context,
+        preview=preview,
+        request_metadata=request_metadata,
     )
     mutation_intent = build_pull_request_event_mutation_intent(
         event=event,
         action=action,
         resolved_context=resolved_context,
         preview=preview,
+        request_metadata=request_metadata,
+        resolved_manifest=resolved_manifest,
     )
     return {
         "event": event.model_dump(mode="json"),
@@ -128,8 +144,10 @@ def build_pull_request_event_action_payload(
             "label_enabled": harbor_preview_label_enabled(label_names=event.label_names),
             "preview_exists": preview is not None,
             "context_resolution_required": preview is None and not resolved_context,
+            "manifest_resolved": resolved_manifest is not None,
         },
-        "request_metadata": parse_preview_request_metadata(pr_body=event.pr_body).model_dump(mode="json"),
+        "request_metadata": request_metadata.model_dump(mode="json"),
+        "manifest": resolved_manifest.model_dump(mode="json") if resolved_manifest is not None else None,
         "mutation": mutation_intent.model_dump(mode="json") if mutation_intent is not None else None,
         "preview": (
             {
@@ -173,6 +191,8 @@ def build_pull_request_event_mutation_intent(
     action: HarborPullRequestAction,
     resolved_context: str,
     preview: PreviewRecord | None,
+    request_metadata: HarborPreviewRequestParseResult,
+    resolved_manifest: HarborResolvedPreviewManifest | None,
 ) -> HarborPullRequestMutationIntent | None:
     effective_context = preview.context if preview is not None else resolved_context
     if action in {"enable_preview", "refresh_preview"}:
@@ -188,6 +208,25 @@ def build_pull_request_event_mutation_intent(
             updated_at=occurred_at,
             eligible_at=occurred_at if preview is None else "",
         )
+        if resolved_manifest is not None:
+            generation_request = PreviewGenerationMutationRequest(
+                context=effective_context,
+                anchor_repo=event.repo,
+                anchor_pr_number=event.pr_number,
+                anchor_pr_url=event.pr_url,
+                anchor_head_sha=event.head_sha,
+                state="resolving",
+                requested_reason=_pull_request_event_generation_reason(action=action),
+                requested_at=occurred_at,
+                resolved_manifest_fingerprint=resolved_manifest.resolved_manifest_fingerprint,
+                baseline_release_tuple_id=resolved_manifest.baseline_release_tuple_id,
+                source_map=resolved_manifest.source_map,
+            )
+            return HarborPullRequestMutationIntent(
+                command="request-generation",
+                preview_request=preview_request,
+                generation_request=generation_request,
+            )
         generation_request_seed = PreviewGenerationIntentRequest(
             context=effective_context,
             anchor_repo=event.repo,
@@ -235,6 +274,83 @@ def parse_preview_request_metadata(*, pr_body: str) -> HarborPreviewRequestParse
     except (tomllib.TOMLDecodeError, ValidationError, ValueError) as exc:
         return HarborPreviewRequestParseResult(status="invalid", error=str(exc))
     return HarborPreviewRequestParseResult(status="valid", metadata=metadata)
+
+
+def resolve_pull_request_event_manifest(
+    *,
+    control_plane_root: Path,
+    event: GitHubPullRequestEvent,
+    resolved_context: str,
+    preview: PreviewRecord | None,
+    request_metadata: HarborPreviewRequestParseResult,
+) -> HarborResolvedPreviewManifest | None:
+    effective_context = preview.context if preview is not None else resolved_context
+    if not effective_context:
+        return None
+    metadata = _resolved_preview_request_metadata(request_metadata=request_metadata)
+    if metadata is None or metadata.companions:
+        return None
+    try:
+        release_tuple = control_plane_release_tuples.resolve_release_tuple(
+            control_plane_root=control_plane_root,
+            context_name=effective_context,
+            channel_name=metadata.baseline_channel,
+        )
+    except click.ClickException:
+        return None
+    source_map = tuple(
+        [
+            PreviewSourceRecord(repo=event.repo, git_sha=event.head_sha, selection="anchor"),
+            *[
+                PreviewSourceRecord(repo=repo_name, git_sha=git_sha, selection="baseline")
+                for repo_name, git_sha in sorted(release_tuple.repo_shas.items())
+                if repo_name != event.repo
+            ],
+        ]
+    )
+    return HarborResolvedPreviewManifest(
+        context=effective_context,
+        baseline_channel=metadata.baseline_channel,
+        baseline_release_tuple_id=release_tuple.tuple_id,
+        resolved_manifest_fingerprint=generate_preview_manifest_fingerprint(
+            baseline_channel=metadata.baseline_channel,
+            baseline_release_tuple_id=release_tuple.tuple_id,
+            source_map=source_map,
+        ),
+        source_map=source_map,
+    )
+
+
+def generate_preview_manifest_fingerprint(
+    *,
+    baseline_channel: str,
+    baseline_release_tuple_id: str,
+    source_map: tuple[PreviewSourceRecord, ...],
+) -> str:
+    fingerprint_payload = {
+        "baseline_channel": baseline_channel,
+        "baseline_release_tuple_id": baseline_release_tuple_id,
+        "source_map": [
+            {
+                "repo": item.repo,
+                "git_sha": item.git_sha,
+                "selection": item.selection,
+            }
+            for item in source_map
+        ],
+    }
+    normalized_payload = json.dumps(fingerprint_payload, separators=(",", ":"), sort_keys=True)
+    return f"harbor-manifest-{hashlib.sha256(normalized_payload.encode('utf-8')).hexdigest()[:16]}"
+
+
+def _resolved_preview_request_metadata(
+    *, request_metadata: HarborPreviewRequestParseResult
+) -> HarborPreviewRequestMetadata | None:
+    if request_metadata.status == "invalid":
+        return None
+    if request_metadata.metadata is not None:
+        return request_metadata.metadata
+    return HarborPreviewRequestMetadata(baseline_channel=DEFAULT_HARBOR_BASELINE_CHANNEL)
 
 
 def _pull_request_event_timestamp(*, event: GitHubPullRequestEvent) -> str:

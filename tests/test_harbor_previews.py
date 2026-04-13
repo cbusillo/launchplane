@@ -139,6 +139,32 @@ def _generation_record(
     )
 
 
+def _write_release_tuples_file(control_plane_root: Path) -> None:
+    release_tuples_file = control_plane_root / "config" / "release-tuples.toml"
+    release_tuples_file.parent.mkdir(parents=True, exist_ok=True)
+    release_tuples_file.write_text(
+        """
+schema_version = 1
+
+[contexts.opw.channels.testing]
+tuple_id = "opw-testing-2026-04-13"
+
+[contexts.opw.channels.testing.repo_shas]
+tenant-opw = "1111111111111111111111111111111111111111"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[contexts.cm.channels.testing]
+tuple_id = "cm-testing-2026-04-13"
+
+[contexts.cm.channels.testing.repo_shas]
+tenant-cm = "3333333333333333333333333333333333333333"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""".strip()
+        + "\n",
+        encoding="utf-8",
+    )
+
+
 class HarborPreviewReadModelTests(unittest.TestCase):
     def test_harbor_preview_identity_helpers_are_deterministic(self) -> None:
         self.assertEqual(
@@ -499,6 +525,7 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(result.status, "valid")
         self.assertIsNotNone(result.metadata)
         assert result.metadata is not None
+        self.assertEqual(result.metadata.baseline_channel, "testing")
         self.assertEqual(result.metadata.companions[0].repo, "shared-addons")
         self.assertEqual(result.metadata.companions[0].pr_number, 456)
 
@@ -1279,6 +1306,130 @@ ENV_OVERRIDE_DISABLE_CRON = true
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:15:00Z",
+                        "pr_body": (
+                            "```harbor-preview\n"
+                            "schema_version = 1\n"
+                            'baseline_channel = "testing"\n'
+                            "```\n"
+                        ),
+                        "state": "open",
+                        "head_sha": "aaaa1111",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "enable_preview")
+            self.assertEqual(payload["decision"]["resolved_context"], "opw")
+            self.assertTrue(payload["decision"]["anchor_repo_eligible"])
+            self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertTrue(payload["decision"]["manifest_resolved"])
+            self.assertEqual(payload["request_metadata"]["status"], "valid")
+            self.assertEqual(payload["request_metadata"]["metadata"]["baseline_channel"], "testing")
+            self.assertEqual(payload["mutation"]["command"], "request-generation")
+            self.assertFalse(payload["mutation"]["manifest_resolution_required"])
+            self.assertEqual(payload["mutation"]["preview_request"]["context"], "opw")
+            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "2026-04-13T12:15:00Z")
+            self.assertEqual(payload["mutation"]["generation_request"]["baseline_release_tuple_id"], "opw-testing-2026-04-13")
+            self.assertEqual(payload["mutation"]["generation_request"]["source_map"][0]["git_sha"], "aaaa1111")
+            self.assertEqual(
+                payload["mutation"]["generation_request"]["requested_reason"],
+                "github_pr_event_enable_preview",
+            )
+            self.assertEqual(
+                payload["mutation"]["generation_request"]["requested_at"],
+                "2026-04-13T12:15:00Z",
+            )
+            self.assertEqual(payload["manifest"]["baseline_release_tuple_id"], "opw-testing-2026-04-13")
+            self.assertIsNone(payload["preview"])
+
+    def test_harbor_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "synchronize",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:16:00Z",
+                        "pr_body": "No Harbor metadata yet.",
+                        "state": "open",
+                        "head_sha": "bbbb2222",
+                        "label_names": ["harbor-preview"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "refresh_preview")
+            self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertTrue(payload["decision"]["manifest_resolved"])
+            self.assertEqual(payload["request_metadata"]["status"], "missing")
+            self.assertEqual(payload["mutation"]["command"], "request-generation")
+            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "")
+            self.assertEqual(payload["mutation"]["preview_request"]["updated_at"], "2026-04-13T12:16:00Z")
+            self.assertEqual(
+                payload["mutation"]["generation_request"]["requested_reason"],
+                "github_pr_event_refresh_preview",
+            )
+            self.assertEqual(payload["preview"]["preview_id"], "hpr_01jabc")
+
+    def test_harbor_previews_ingest_pr_event_keeps_companion_requests_unresolved(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
             state_dir = control_plane_root / "state"
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
@@ -1307,95 +1458,31 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 encoding="utf-8",
             )
 
-            result = runner.invoke(
-                main,
-                [
-                    "harbor-previews",
-                    "ingest-pr-event",
-                    "--state-dir",
-                    str(state_dir),
-                    "--input-file",
-                    str(input_file),
-                ],
-            )
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             payload = json.loads(result.output)
-            self.assertEqual(payload["decision"]["action"], "enable_preview")
-            self.assertEqual(payload["decision"]["resolved_context"], "opw")
-            self.assertTrue(payload["decision"]["anchor_repo_eligible"])
-            self.assertFalse(payload["decision"]["context_resolution_required"])
-            self.assertEqual(payload["request_metadata"]["status"], "valid")
-            self.assertEqual(payload["request_metadata"]["metadata"]["companions"][0]["repo"], "shared-addons")
-            self.assertEqual(payload["mutation"]["command"], "request-generation")
+            self.assertFalse(payload["decision"]["manifest_resolved"])
+            self.assertIsNone(payload["manifest"])
             self.assertTrue(payload["mutation"]["manifest_resolution_required"])
-            self.assertEqual(payload["mutation"]["preview_request"]["context"], "opw")
-            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "2026-04-13T12:15:00Z")
-            self.assertEqual(
-                payload["mutation"]["generation_request_seed"]["requested_reason"],
-                "github_pr_event_enable_preview",
-            )
-            self.assertEqual(
-                payload["mutation"]["generation_request_seed"]["requested_at"],
-                "2026-04-13T12:15:00Z",
-            )
-            self.assertIsNone(payload["preview"])
-
-    def test_harbor_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            state_dir = control_plane_root / "state"
-            store = FilesystemRecordStore(state_dir=state_dir)
-            store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
-            input_file = control_plane_root / "pr-event.json"
-            input_file.write_text(
-                json.dumps(
-                    {
-                        "action": "synchronize",
-                        "repo": "tenant-opw",
-                        "pr_number": 123,
-                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
-                        "occurred_at": "2026-04-13T12:16:00Z",
-                        "pr_body": "No Harbor metadata yet.",
-                        "state": "open",
-                        "head_sha": "bbbb2222",
-                        "label_names": ["harbor-preview"],
-                    }
-                ),
-                encoding="utf-8",
-            )
-
-            result = runner.invoke(
-                main,
-                [
-                    "harbor-previews",
-                    "ingest-pr-event",
-                    "--state-dir",
-                    str(state_dir),
-                    "--input-file",
-                    str(input_file),
-                ],
-            )
-
-            self.assertEqual(result.exit_code, 0, msg=result.output)
-            payload = json.loads(result.output)
-            self.assertEqual(payload["decision"]["action"], "refresh_preview")
-            self.assertFalse(payload["decision"]["context_resolution_required"])
-            self.assertEqual(payload["request_metadata"]["status"], "missing")
-            self.assertEqual(payload["mutation"]["command"], "request-generation")
-            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "")
-            self.assertEqual(payload["mutation"]["preview_request"]["updated_at"], "2026-04-13T12:16:00Z")
-            self.assertEqual(
-                payload["mutation"]["generation_request_seed"]["requested_reason"],
-                "github_pr_event_refresh_preview",
-            )
-            self.assertEqual(payload["preview"]["preview_id"], "hpr_01jabc")
+            self.assertIn("generation_request_seed", payload["mutation"])
 
     def test_harbor_previews_ingest_pr_event_emits_destroy_intent_for_closed_preview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
             state_dir = control_plane_root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
@@ -1418,17 +1505,18 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 encoding="utf-8",
             )
 
-            result = runner.invoke(
-                main,
-                [
-                    "harbor-previews",
-                    "ingest-pr-event",
-                    "--state-dir",
-                    str(state_dir),
-                    "--input-file",
-                    str(input_file),
-                ],
-            )
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             payload = json.loads(result.output)
@@ -1444,6 +1532,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
             state_dir = control_plane_root / "state"
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
@@ -1472,17 +1561,18 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 encoding="utf-8",
             )
 
-            result = runner.invoke(
-                main,
-                [
-                    "harbor-previews",
-                    "ingest-pr-event",
-                    "--state-dir",
-                    str(state_dir),
-                    "--input-file",
-                    str(input_file),
-                ],
-            )
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             payload = json.loads(result.output)
