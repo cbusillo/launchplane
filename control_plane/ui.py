@@ -75,12 +75,14 @@ def _render_environment_card(payload: Mapping[str, object]) -> str:
     promoted_from_instance = _string_value(live_payload.get("promoted_from_instance"))
     status_page_href = _string_value(payload.get("status_page_href"))
     contract_page_href = _string_value(payload.get("contract_page_href"))
+    artifact_href = _string_value(live_payload.get("artifact_href"))
     actions_markup = ""
-    if status_page_href or contract_page_href:
+    if status_page_href or contract_page_href or artifact_href:
         actions_markup = "".join(
             (
                 '<div class="card-actions">',
                 _render_action_link("Open status", status_page_href, tone="primary"),
+                _render_action_link("Open artifact", artifact_href),
                 _render_action_link("Open contract", contract_page_href),
                 '</div>',
             )
@@ -362,6 +364,53 @@ def _render_record_panel(
     )
 
 
+def _render_related_link_list(
+    title: str, items: Sequence[Mapping[str, object]], *, empty_message: str
+) -> str:
+    if not items:
+        return "".join(
+            (
+                '<article class="panel">',
+                f'<p class="eyebrow">Related</p><h2>{escape(title)}</h2>',
+                f'<div class="meta-item"><span class="meta-value">{escape(empty_message)}</span></div>',
+                '</article>',
+            )
+        )
+    list_markup = "".join(
+        "".join(
+            (
+                '<div class="meta-item">',
+                f'<span class="meta-label">{escape(_string_value(item.get("label")) or title)}</span>',
+                f'<span class="meta-value">{escape(_string_value(item.get("summary")) or "-")}</span>',
+                _render_action_group(
+                    (
+                        (("Open status", _string_value(item.get("href")), "primary"),)
+                        if _string_value(item.get("href"))
+                        and _string_value(item.get("href"))
+                        == _string_value(item.get("status_href"))
+                        else (
+                            ("Open record", _string_value(item.get("href")), "primary"),
+                            ("Status", _string_value(item.get("status_href")), "default"),
+                        )
+                    ),
+                    class_name="panel-actions",
+                ),
+                '</div>',
+            )
+        )
+        for item in items
+        if isinstance(item, Mapping)
+    )
+    return "".join(
+        (
+            '<article class="panel">',
+            f'<p class="eyebrow">Related</p><h2>{escape(title)}</h2>',
+            list_markup,
+            '</article>',
+        )
+    )
+
+
 def _render_record_dashboard(
     *,
     page_label: str,
@@ -524,7 +573,9 @@ def _render_record_dashboard(
         display: block;
         margin-top: 8px;
         font-family: Georgia, "Times New Roman", serif;
-        font-size: 1.6rem;
+        font-size: clamp(1.1rem, 2.2vw, 1.6rem);
+        line-height: 1.08;
+        overflow-wrap: anywhere;
       }}
 
       .status-badge {{
@@ -643,6 +694,7 @@ def render_deployment_record_dashboard(payload: Mapping[str, object]) -> str:
             ("Inventory overview", _string_value(payload.get("inventory_overview_href")), "default"),
             ("Environment status", _string_value(payload.get("status_page_href")), "default"),
             ("Environment contract", _string_value(payload.get("contract_page_href")), "default"),
+            ("Artifact manifest", _string_value(payload.get("artifact_href")), "default"),
         ),
         summary_tiles=(
             ("Deploy status", _string_value(deploy_payload.get("status")) or "-"),
@@ -750,6 +802,7 @@ def render_promotion_record_dashboard(payload: Mapping[str, object]) -> str:
             ("Inventory overview", _string_value(payload.get("inventory_overview_href")), "default"),
             ("Source status", _string_value(payload.get("source_status_page_href")), "default"),
             ("Destination status", _string_value(payload.get("destination_status_page_href")), "default"),
+            ("Artifact manifest", _string_value(payload.get("artifact_href")), "default"),
         ),
         summary_tiles=(
             ("Deploy status", _string_value(deploy_payload.get("status")) or "-"),
@@ -912,6 +965,121 @@ def render_backup_gate_record_dashboard(payload: Mapping[str, object]) -> str:
                         ),
                     )
                 ),
+            ),
+        ),
+    )
+
+
+def render_artifact_manifest_dashboard(payload: Mapping[str, object]) -> str:
+    manifest_payload = _mapping_value(payload, "manifest")
+    image_payload = _mapping_value(payload, "image")
+    openupgrade_payload = _mapping_value(payload, "openupgrade_inputs")
+    build_flags_payload = _mapping_value(payload, "build_flags")
+    addon_sources = payload.get("addon_sources", ())
+    if not isinstance(addon_sources, Sequence):
+        addon_sources = ()
+    related_environments = payload.get("related_environments", ())
+    if not isinstance(related_environments, Sequence):
+        related_environments = ()
+    related_deployments = payload.get("related_deployments", ())
+    if not isinstance(related_deployments, Sequence):
+        related_deployments = ()
+    related_promotions = payload.get("related_promotions", ())
+    if not isinstance(related_promotions, Sequence):
+        related_promotions = ()
+    addon_sources_markup = "".join(
+        _render_value(
+            _string_value(source.get("repository")),
+            _string_value(source.get("ref")),
+        )
+        for source in addon_sources
+        if isinstance(source, Mapping)
+    ) or _render_value("addon sources", "(none)")
+    addon_skip_flags = ", ".join(_string_sequence(build_flags_payload.get("addon_skip_flags")))
+    build_flag_values = _render_evidence_pairs(build_flags_payload.get("values"))
+    return _render_record_dashboard(
+        page_label="Control Plane Artifact Manifest",
+        title=_string_value(manifest_payload.get("artifact_id")) or "Artifact manifest",
+        summary=(
+            "This page captures the immutable build contract for one artifact: source commit, enterprise base, addon "
+            "inputs, build flags, and the final image reference that downstream deployments and promotions point at."
+        ),
+        actions=(
+            ("Operator site", _string_value(payload.get("home_page_href")), "primary"),
+            ("Inventory overview", _string_value(payload.get("inventory_overview_href")), "default"),
+        ),
+        summary_tiles=(
+            ("Source commit", _string_value(manifest_payload.get("source_commit")) or "-"),
+            ("Enterprise base", _string_value(manifest_payload.get("enterprise_base_digest")) or "-"),
+            (
+                "Image",
+                (
+                    f"{_string_value(image_payload.get('repository'))}@{_string_value(image_payload.get('digest'))}"
+                    if _string_value(image_payload.get("repository"))
+                    else "-"
+                ),
+            ),
+        ),
+        badges=(),
+        main_panels=(
+            _render_record_panel(
+                "Contract",
+                "Immutable build inputs",
+                _render_value_pairs(
+                    (
+                        ("artifact id", manifest_payload.get("artifact_id")),
+                        ("source commit", manifest_payload.get("source_commit")),
+                        ("enterprise base digest", manifest_payload.get("enterprise_base_digest")),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Image",
+                "Published image reference",
+                _render_value_pairs(
+                    (
+                        ("repository", image_payload.get("repository")),
+                        ("digest", image_payload.get("digest")),
+                        ("tags", ", ".join(_string_sequence(image_payload.get("tags")))),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Addon sources",
+                "Addon repository inputs",
+                addon_sources_markup,
+            ),
+        ),
+        side_panels=(
+            _render_record_panel(
+                "OpenUpgrade",
+                "Upgrade-specific inputs",
+                _render_value_pairs(
+                    (
+                        ("addon repository", openupgrade_payload.get("addon_repository")),
+                        ("install spec", openupgrade_payload.get("install_spec")),
+                    )
+                ),
+            ),
+            _render_record_panel(
+                "Build flags",
+                "Flag-derived behavior",
+                _render_value_pairs((("addon skip flags", addon_skip_flags),)) + build_flag_values,
+            ),
+            _render_related_link_list(
+                "Environments using this artifact",
+                tuple(item for item in related_environments if isinstance(item, Mapping)),
+                empty_message="No live environment inventory currently points at this artifact.",
+            ),
+            _render_related_link_list(
+                "Deployments using this artifact",
+                tuple(item for item in related_deployments if isinstance(item, Mapping)),
+                empty_message="No deployment records currently point at this artifact.",
+            ),
+            _render_related_link_list(
+                "Promotions using this artifact",
+                tuple(item for item in related_promotions if isinstance(item, Mapping)),
+                empty_message="No promotion records currently point at this artifact.",
             ),
         ),
     )
@@ -2173,6 +2341,7 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
     contract_page_href = _string_value(payload.get("contract_page_href"))
     live_record_actions = _render_action_group(
         (
+            ("Open artifact", _string_value(live_payload.get("artifact_href")), "default"),
             ("Open deployment record", _string_value(live_payload.get("deployment_record_href")), "primary"),
             ("Open promotion record", _string_value(live_payload.get("promotion_record_href")), "default"),
         ),
@@ -2180,12 +2349,14 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
     )
     latest_deployment_actions = _render_action_group(
         (
+            ("Open artifact", _string_value(latest_deployment_payload.get("artifact_href")), "default"),
             ("Open deployment record", _string_value(latest_deployment_payload.get("record_href")), "primary"),
         ),
         class_name="panel-actions",
     )
     latest_promotion_actions = _render_action_group(
         (
+            ("Open artifact", _string_value(latest_promotion_payload.get("artifact_href")), "default"),
             ("Open promotion record", _string_value(latest_promotion_payload.get("record_href")), "primary"),
             ("Open backup gate", _string_value(latest_promotion_payload.get("backup_record_href")), "default"),
         ),
@@ -2199,6 +2370,7 @@ def render_environment_status_dashboard(payload: Mapping[str, object]) -> str:
     )
     live_promotion_actions = _render_action_group(
         (
+            ("Open artifact", _string_value(live_promotion_payload.get("artifact_href")), "default"),
             ("Open promotion record", _string_value(live_promotion_payload.get("record_href")), "primary"),
             ("Open backup gate", _string_value(live_promotion_payload.get("backup_record_href")), "default"),
         ),

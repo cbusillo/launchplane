@@ -171,6 +171,38 @@ def _write_promotion_record(
     )
 
 
+def _write_artifact_manifest(artifact_dir: Path, *, artifact_id: str) -> None:
+    (artifact_dir / f"{artifact_id}.json").write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "artifact_id": artifact_id,
+                "source_commit": "abcdef1234567890",
+                "enterprise_base_digest": "sha256:enterprisebase",
+                "addon_sources": [
+                    {"repository": "git@github.com:every/opw-addons.git", "ref": "main"},
+                    {"repository": "git@github.com:every/shared-addons.git", "ref": "stable"},
+                ],
+                "openupgrade_inputs": {
+                    "addon_repository": "git@github.com:OCA/OpenUpgrade.git",
+                    "install_spec": "openupgradelib==3.10.0",
+                },
+                "build_flags": {
+                    "addon_skip_flags": ["skip_demo"],
+                    "values": {"ODOO_VERSION": "18.0"},
+                },
+                "image": {
+                    "repository": "ghcr.io/every/opw",
+                    "digest": "sha256:artifactdigest",
+                    "tags": [artifact_id, "latest-testing"],
+                },
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+
 class InventoryOverviewUiTests(unittest.TestCase):
     def test_render_inventory_overview_dashboard_includes_summary_and_cards(self) -> None:
         html = render_inventory_overview_dashboard(
@@ -491,10 +523,12 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
             deployment_dir = state_dir / "deployments"
             promotion_dir = state_dir / "promotions"
             backup_gate_dir = state_dir / "backup_gates"
+            artifact_dir = state_dir / "artifacts"
             inventory_dir.mkdir(parents=True, exist_ok=True)
             deployment_dir.mkdir(parents=True, exist_ok=True)
             promotion_dir.mkdir(parents=True, exist_ok=True)
             backup_gate_dir.mkdir(parents=True, exist_ok=True)
+            artifact_dir.mkdir(parents=True, exist_ok=True)
             _write_inventory_record(
                 inventory_dir,
                 context_name="opw",
@@ -533,6 +567,7 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
                 to_instance_name="testing",
                 deployment_record_id="deployment-opw",
             )
+            _write_artifact_manifest(artifact_dir, artifact_id="artifact-opw")
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
             environments_file.parent.mkdir(parents=True, exist_ok=True)
             environments_file.write_text(
@@ -585,6 +620,9 @@ ODOO_DB_PASSWORD = "testing-secret"
             backup_gate_record_html = (
                 output_dir / "records" / "backup-gates" / "backup-opw.html"
             ).read_text(encoding="utf-8")
+            artifact_record_html = (
+                output_dir / "records" / "artifacts" / "artifact-opw.html"
+            ).read_text(encoding="utf-8")
 
             self.assertIn("Operator cockpit for opw", index_html)
             self.assertIn("inventory-overview.html", index_html)
@@ -592,16 +630,24 @@ ODOO_DB_PASSWORD = "testing-secret"
             self.assertIn("environments/opw-testing-status.html", index_html)
             self.assertIn("index.html", overview_html)
             self.assertIn("environments/opw-testing-status.html", overview_html)
+            self.assertIn("records/artifacts/artifact-opw.html", overview_html)
             self.assertIn("../inventory-overview.html", status_html)
             self.assertIn("../contracts/opw-testing-contract.html", status_html)
+            self.assertIn("../records/artifacts/artifact-opw.html", status_html)
             self.assertIn("../records/deployments/deployment-opw.html", status_html)
             self.assertIn("../records/promotions/promotion-opw.html", status_html)
             self.assertIn("../records/backup-gates/backup-opw.html", status_html)
             self.assertIn("../environments/opw-testing-status.html", contract_html)
+            self.assertIn("../../records/artifacts/artifact-opw.html", deployment_record_html)
+            self.assertIn("../../records/artifacts/artifact-opw.html", promotion_record_html)
             self.assertIn("../../environments/opw-testing-status.html", deployment_record_html)
             self.assertIn("../../environments/opw-local-status.html", promotion_record_html)
             self.assertIn("../../records/backup-gates/backup-opw.html", promotion_record_html)
             self.assertIn("../../environments/opw-testing-status.html", backup_gate_record_html)
+            self.assertIn("abcdef1234567890", artifact_record_html)
+            self.assertIn("../../environments/opw-testing-status.html", artifact_record_html)
+            self.assertIn("../../records/deployments/deployment-opw.html", artifact_record_html)
+            self.assertIn("../../records/promotions/promotion-opw.html", artifact_record_html)
 
     def test_ui_build_site_generates_placeholder_status_when_inventory_missing(self) -> None:
         runner = CliRunner()

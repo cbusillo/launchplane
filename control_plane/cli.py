@@ -25,6 +25,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.ui import (
+    render_artifact_manifest_dashboard,
     render_backup_gate_record_dashboard,
     render_deployment_record_dashboard,
     render_environment_contract_dashboard,
@@ -1078,6 +1079,10 @@ def _site_backup_gate_record_file_name(*, record_id: str) -> str:
     return f"{record_id}.html"
 
 
+def _site_artifact_manifest_file_name(*, artifact_id: str) -> str:
+    return f"{artifact_id}.html"
+
+
 def _site_deployment_record_href(*, record_id: str, relative_prefix: str = "") -> str:
     if not record_id.strip():
         return ""
@@ -1105,6 +1110,15 @@ def _site_backup_gate_record_href(*, record_id: str, relative_prefix: str = "") 
     )
 
 
+def _site_artifact_manifest_href(*, artifact_id: str, relative_prefix: str = "") -> str:
+    if not artifact_id.strip():
+        return ""
+    return (
+        f"{relative_prefix}records/artifacts/"
+        f"{_site_artifact_manifest_file_name(artifact_id=artifact_id)}"
+    )
+
+
 def _with_site_record_links(
     payload: dict[str, object], *, relative_prefix: str
 ) -> dict[str, object]:
@@ -1113,6 +1127,10 @@ def _with_site_record_links(
     live_payload = payload.get("live")
     if isinstance(live_payload, dict):
         linked_live_payload = dict(live_payload)
+        linked_live_payload["artifact_href"] = _site_artifact_manifest_href(
+            artifact_id=str(linked_live_payload.get("artifact_id", "")),
+            relative_prefix=relative_prefix,
+        )
         linked_live_payload["deployment_record_href"] = _site_deployment_record_href(
             record_id=str(linked_live_payload.get("deployment_record_id", "")),
             relative_prefix=relative_prefix,
@@ -1126,6 +1144,10 @@ def _with_site_record_links(
     live_promotion_payload = payload.get("live_promotion")
     if isinstance(live_promotion_payload, dict):
         linked_live_promotion_payload = dict(live_promotion_payload)
+        linked_live_promotion_payload["artifact_href"] = _site_artifact_manifest_href(
+            artifact_id=str(linked_live_promotion_payload.get("artifact_id", "")),
+            relative_prefix=relative_prefix,
+        )
         linked_live_promotion_payload["record_href"] = _site_promotion_record_href(
             record_id=str(linked_live_promotion_payload.get("record_id", "")),
             relative_prefix=relative_prefix,
@@ -1148,6 +1170,10 @@ def _with_site_record_links(
     latest_promotion_payload = payload.get("latest_promotion")
     if isinstance(latest_promotion_payload, dict):
         linked_latest_promotion_payload = dict(latest_promotion_payload)
+        linked_latest_promotion_payload["artifact_href"] = _site_artifact_manifest_href(
+            artifact_id=str(linked_latest_promotion_payload.get("artifact_id", "")),
+            relative_prefix=relative_prefix,
+        )
         linked_latest_promotion_payload["record_href"] = _site_promotion_record_href(
             record_id=str(linked_latest_promotion_payload.get("record_id", "")),
             relative_prefix=relative_prefix,
@@ -1161,6 +1187,10 @@ def _with_site_record_links(
     latest_deployment_payload = payload.get("latest_deployment")
     if isinstance(latest_deployment_payload, dict):
         linked_latest_deployment_payload = dict(latest_deployment_payload)
+        linked_latest_deployment_payload["artifact_href"] = _site_artifact_manifest_href(
+            artifact_id=str(linked_latest_deployment_payload.get("artifact_id", "")),
+            relative_prefix=relative_prefix,
+        )
         linked_latest_deployment_payload["record_href"] = _site_deployment_record_href(
             record_id=str(linked_latest_deployment_payload.get("record_id", "")),
             relative_prefix=relative_prefix,
@@ -1202,6 +1232,56 @@ def _build_promotion_record_payload(record: PromotionRecord) -> dict[str, object
 
 def _build_backup_gate_record_payload(record: BackupGateRecord) -> dict[str, object]:
     return {"record": _summarize_backup_gate_record(record)}
+
+
+def _build_artifact_manifest_payload(
+    manifest: ArtifactIdentityManifest,
+    *,
+    record_store: FilesystemRecordStore,
+    relative_prefix: str,
+    context_name: str = "",
+) -> dict[str, object]:
+    related_environments = [
+        {
+            "label": f"{record.context}/{record.instance}",
+            "summary": f"Live inventory updated {record.updated_at or '-'}.",
+            "href": f"{relative_prefix}environments/{_site_environment_status_file_name(context_name=record.context, instance_name=record.instance)}",
+            "status_href": f"{relative_prefix}environments/{_site_environment_status_file_name(context_name=record.context, instance_name=record.instance)}",
+        }
+        for record in record_store.list_environment_inventory()
+        if _artifact_id_or_empty(record.artifact_identity) == manifest.artifact_id
+        and (not context_name or record.context == context_name)
+    ]
+    related_deployments = [
+        {
+            "label": record.record_id,
+            "summary": f"{record.context}/{record.instance} deploy status {record.deploy.status}.",
+            "href": _site_deployment_record_href(record_id=record.record_id, relative_prefix=relative_prefix),
+            "status_href": f"{relative_prefix}environments/{_site_environment_status_file_name(context_name=record.context, instance_name=record.instance)}",
+        }
+        for record in record_store.list_deployment_records(context_name=context_name)
+        if _artifact_id_or_empty(record.artifact_identity) == manifest.artifact_id
+    ]
+    related_promotions = [
+        {
+            "label": record.record_id,
+            "summary": f"{record.context} {record.from_instance}->{record.to_instance} deploy status {record.deploy.status}.",
+            "href": _site_promotion_record_href(record_id=record.record_id, relative_prefix=relative_prefix),
+            "status_href": f"{relative_prefix}environments/{_site_environment_status_file_name(context_name=record.context, instance_name=record.to_instance)}",
+        }
+        for record in record_store.list_promotion_records(context_name=context_name)
+        if _artifact_id_or_empty(record.artifact_identity) == manifest.artifact_id
+    ]
+    return {
+        "manifest": manifest.model_dump(mode="json"),
+        "image": manifest.image.model_dump(mode="json"),
+        "openupgrade_inputs": manifest.openupgrade_inputs.model_dump(mode="json"),
+        "build_flags": manifest.build_flags.model_dump(mode="json"),
+        "addon_sources": tuple(source.model_dump(mode="json") for source in manifest.addon_sources),
+        "related_environments": tuple(related_environments),
+        "related_deployments": tuple(related_deployments),
+        "related_promotions": tuple(related_promotions),
+    }
 
 
 @click.group()
@@ -1519,11 +1599,13 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
     environments_dir = output_dir / "environments"
     contracts_dir = output_dir / "contracts"
     records_dir = output_dir / "records"
+    artifact_records_dir = records_dir / "artifacts"
     deployment_records_dir = records_dir / "deployments"
     promotion_records_dir = records_dir / "promotions"
     backup_gate_records_dir = records_dir / "backup-gates"
     environments_dir.mkdir(parents=True, exist_ok=True)
     contracts_dir.mkdir(parents=True, exist_ok=True)
+    artifact_records_dir.mkdir(parents=True, exist_ok=True)
     deployment_records_dir.mkdir(parents=True, exist_ok=True)
     promotion_records_dir.mkdir(parents=True, exist_ok=True)
     backup_gate_records_dir.mkdir(parents=True, exist_ok=True)
@@ -1661,6 +1743,41 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
         for key in sorted(site_environment_entries_by_key)
     ]
 
+    relevant_artifact_ids = {
+        _artifact_id_or_empty(record.artifact_identity)
+        for record in record_store.list_environment_inventory()
+        if _artifact_id_or_empty(record.artifact_identity)
+        and (not context_name or record.context == context_name)
+    }
+    relevant_artifact_ids.update(
+        _artifact_id_or_empty(record.artifact_identity)
+        for record in record_store.list_deployment_records(context_name=context_name)
+        if _artifact_id_or_empty(record.artifact_identity)
+    )
+    relevant_artifact_ids.update(
+        _artifact_id_or_empty(record.artifact_identity)
+        for record in record_store.list_promotion_records(context_name=context_name)
+        if _artifact_id_or_empty(record.artifact_identity)
+    )
+
+    for artifact_manifest in record_store.list_artifact_manifests():
+        if context_name and artifact_manifest.artifact_id not in relevant_artifact_ids:
+            continue
+        artifact_payload = {
+            **_build_artifact_manifest_payload(
+                artifact_manifest,
+                record_store=record_store,
+                relative_prefix="../../",
+                context_name=context_name,
+            ),
+            "home_page_href": "../../index.html",
+            "inventory_overview_href": "../../inventory-overview.html",
+        }
+        (artifact_records_dir / _site_artifact_manifest_file_name(artifact_id=artifact_manifest.artifact_id)).write_text(
+            render_artifact_manifest_dashboard(artifact_payload),
+            encoding="utf-8",
+        )
+
     for deployment_record in record_store.list_deployment_records(
         context_name=context_name,
     ):
@@ -1668,6 +1785,10 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
             **_build_deployment_record_payload(deployment_record),
             "home_page_href": "../../index.html",
             "inventory_overview_href": "../../inventory-overview.html",
+            "artifact_href": _site_artifact_manifest_href(
+                artifact_id=_artifact_id_or_empty(deployment_record.artifact_identity),
+                relative_prefix="../../",
+            ),
             "status_page_href": (
                 f"../../environments/{_site_environment_status_file_name(context_name=deployment_record.context, instance_name=deployment_record.instance)}"
             ),
@@ -1687,6 +1808,10 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
             **_build_promotion_record_payload(promotion_record),
             "home_page_href": "../../index.html",
             "inventory_overview_href": "../../inventory-overview.html",
+            "artifact_href": _site_artifact_manifest_href(
+                artifact_id=_artifact_id_or_empty(promotion_record.artifact_identity),
+                relative_prefix="../../",
+            ),
             "source_status_page_href": (
                 f"../../environments/{_site_environment_status_file_name(context_name=promotion_record.context, instance_name=promotion_record.from_instance)}"
             ),

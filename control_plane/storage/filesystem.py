@@ -60,6 +60,11 @@ class FilesystemRecordStore:
             self._read_model(ArtifactIdentityManifest, "artifacts", artifact_id).model_dump(mode="json")
         )
 
+    def list_artifact_manifests(self) -> tuple[ArtifactIdentityManifest, ...]:
+        records = list(self._list_models(ArtifactIdentityManifest, "artifacts"))
+        records.sort(key=lambda record: record.artifact_id, reverse=True)
+        return tuple(records)
+
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:
         return self._write_model("backup_gates", record.record_id, record)
 
