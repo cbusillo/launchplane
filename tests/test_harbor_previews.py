@@ -1788,6 +1788,169 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.state, "destroyed")
             self.assertEqual(preview.destroy_reason, "pull_request_closed")
 
+    def test_harbor_previews_ingest_pr_event_delivers_feedback_by_creating_comment(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:15:00Z",
+                        "state": "open",
+                        "head_sha": "aaaa1111",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch("control_plane.workflows.harbor.resolve_harbor_github_token", return_value="token"),
+                patch("control_plane.workflows.harbor.find_github_issue_comment_by_marker", return_value=None),
+                patch(
+                    "control_plane.workflows.harbor.create_github_issue_comment",
+                    return_value={
+                        "id": 987,
+                        "html_url": "https://github.com/every/tenant-opw/pull/123#issuecomment-987",
+                    },
+                ) as create_comment,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--deliver-feedback",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertTrue(payload["feedback_delivery"]["delivered"])
+            self.assertEqual(payload["feedback_delivery"]["action"], "created_comment")
+            create_kwargs = create_comment.call_args.kwargs
+            self.assertIn("harbor-control-plane:pr-feedback", create_kwargs["body"])
+            self.assertIn("Harbor resolved preview inputs", create_kwargs["body"])
+
+    def test_harbor_previews_ingest_pr_event_delivers_feedback_by_updating_existing_comment(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:15:00Z",
+                        "state": "open",
+                        "head_sha": "aaaa1111",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch("control_plane.workflows.harbor.resolve_harbor_github_token", return_value="token"),
+                patch(
+                    "control_plane.workflows.harbor.find_github_issue_comment_by_marker",
+                    return_value={"id": 321, "body": "<!-- harbor-control-plane:pr-feedback -->\nold"},
+                ),
+                patch(
+                    "control_plane.workflows.harbor.update_github_issue_comment",
+                    return_value={
+                        "id": 321,
+                        "html_url": "https://github.com/every/tenant-opw/pull/123#issuecomment-321",
+                    },
+                ) as update_comment,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--deliver-feedback",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertTrue(payload["feedback_delivery"]["delivered"])
+            self.assertEqual(payload["feedback_delivery"]["action"], "updated_comment")
+            self.assertEqual(payload["feedback_delivery"]["comment_id"], 321)
+            update_kwargs = update_comment.call_args.kwargs
+            self.assertIn("harbor-control-plane:pr-feedback", update_kwargs["body"])
+
+    def test_harbor_previews_ingest_pr_event_feedback_delivery_fails_closed_without_token(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:15:00Z",
+                        "state": "open",
+                        "head_sha": "aaaa1111",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--deliver-feedback",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertFalse(payload["feedback_delivery"]["delivered"])
+            self.assertEqual(payload["feedback_delivery"]["reason"], "github_token_missing")
+
     def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

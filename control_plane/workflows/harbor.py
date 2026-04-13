@@ -52,6 +52,7 @@ HARBOR_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
     flags=re.IGNORECASE | re.DOTALL,
 )
 GITHUB_PULL_REQUEST_URL_PATTERN = re.compile(r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$")
+HARBOR_PR_FEEDBACK_COMMENT_MARKER = "<!-- harbor-control-plane:pr-feedback -->"
 
 
 def find_preview_record(
@@ -278,6 +279,92 @@ def build_pull_request_feedback_payload(
     }
 
 
+def deliver_pull_request_feedback(
+    *,
+    control_plane_root: Path,
+    record_store: FilesystemRecordStore,
+    event: GitHubPullRequestEvent,
+    resolved_context: str,
+    feedback_payload: dict[str, object],
+) -> dict[str, object]:
+    github_reference = github_pull_request_reference(pr_url=event.pr_url)
+    if github_reference is None:
+        return {
+            "delivered": False,
+            "reason": "github_pull_request_reference_missing",
+        }
+
+    current_preview = find_preview_record(
+        record_store=record_store,
+        context_name="",
+        anchor_repo=event.repo,
+        anchor_pr_number=event.pr_number,
+    )
+    effective_context = current_preview.context if current_preview is not None else resolved_context.strip()
+    if not effective_context:
+        return {
+            "delivered": False,
+            "reason": "github_context_missing",
+        }
+
+    github_token = resolve_harbor_github_token(
+        control_plane_root=control_plane_root,
+        context_name=effective_context,
+    )
+    if not github_token:
+        return {
+            "delivered": False,
+            "reason": "github_token_missing",
+        }
+
+    comment_body = feedback_payload.get("comment_markdown")
+    if not isinstance(comment_body, str) or not comment_body.strip():
+        return {
+            "delivered": False,
+            "reason": "feedback_comment_missing",
+        }
+
+    existing_comment = find_github_issue_comment_by_marker(
+        owner=github_reference["owner"],
+        repo=github_reference["repo"],
+        issue_number=github_reference["pr_number"],
+        token=github_token,
+        marker=HARBOR_PR_FEEDBACK_COMMENT_MARKER,
+    )
+    if existing_comment is not None:
+        comment_id = existing_comment.get("id")
+        if not isinstance(comment_id, int):
+            raise click.ClickException("Existing Harbor PR feedback comment is missing a numeric id.")
+        updated_comment = update_github_issue_comment(
+            owner=github_reference["owner"],
+            repo=github_reference["repo"],
+            comment_id=comment_id,
+            token=github_token,
+            body=comment_body,
+        )
+        return {
+            "delivered": True,
+            "action": "updated_comment",
+            "comment_id": comment_id,
+            "comment_url": _github_comment_url(updated_comment),
+        }
+
+    created_comment = create_github_issue_comment(
+        owner=github_reference["owner"],
+        repo=github_reference["repo"],
+        issue_number=github_reference["pr_number"],
+        token=github_token,
+        body=comment_body,
+    )
+    created_comment_id = created_comment.get("id")
+    return {
+        "delivered": True,
+        "action": "created_comment",
+        "comment_id": created_comment_id if isinstance(created_comment_id, int) else 0,
+        "comment_url": _github_comment_url(created_comment),
+    }
+
+
 def _feedback_apply_outcome(*, apply_result: dict[str, object] | None) -> tuple[str, str]:
     if not isinstance(apply_result, dict):
         return "not_requested", ""
@@ -447,7 +534,7 @@ def _render_pull_request_feedback_markdown(
     apply_state: str,
     apply_reason: str,
 ) -> str:
-    lines = [headline, "", detail, ""]
+    lines = [HARBOR_PR_FEEDBACK_COMMENT_MARKER, "", headline, "", detail, ""]
     if canonical_url:
         lines.append(f"- Preview URL: {canonical_url}")
     if preview_label:
@@ -494,6 +581,116 @@ def _format_feedback_pr_summary(item: dict[str, object]) -> str:
     if isinstance(head_sha, str) and head_sha.strip():
         return f"{ref} at `{head_sha[:12]}`"
     return ref
+
+
+def github_pull_request_reference(pr_url: str) -> dict[str, object] | None:
+    parsed_url = urlparse(pr_url)
+    if parsed_url.netloc.strip().lower() != "github.com":
+        return None
+    match = GITHUB_PULL_REQUEST_URL_PATTERN.match(parsed_url.path)
+    if match is None:
+        return None
+    try:
+        pr_number = int(match.group("number"))
+    except ValueError:
+        return None
+    return {
+        "owner": match.group("owner").strip(),
+        "repo": match.group("repo").strip(),
+        "pr_number": pr_number,
+    }
+
+
+def github_pr_owner(*, pr_url: str) -> str:
+    reference = github_pull_request_reference(pr_url)
+    if reference is None:
+        return ""
+    owner = reference.get("owner")
+    return owner if isinstance(owner, str) else ""
+
+
+def find_github_issue_comment_by_marker(
+    *, owner: str, repo: str, issue_number: int, token: str, marker: str
+) -> dict[str, object] | None:
+    payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+        token=token,
+    )
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            f"GitHub issue comments response for {owner}/{repo}#{issue_number} must be a list."
+        )
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        body = item.get("body")
+        if isinstance(body, str) and marker in body:
+            return item
+    return None
+
+
+def create_github_issue_comment(
+    *, owner: str, repo: str, issue_number: int, token: str, body: str
+) -> dict[str, object]:
+    payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/issues/{issue_number}/comments",
+        token=token,
+        method="POST",
+        body={"body": body},
+    )
+    if not isinstance(payload, dict):
+        raise click.ClickException(
+            f"GitHub comment create response for {owner}/{repo}#{issue_number} must be an object."
+        )
+    return payload
+
+
+def update_github_issue_comment(
+    *, owner: str, repo: str, comment_id: int, token: str, body: str
+) -> dict[str, object]:
+    payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+        token=token,
+        method="PATCH",
+        body={"body": body},
+    )
+    if not isinstance(payload, dict):
+        raise click.ClickException(
+            f"GitHub comment update response for {owner}/{repo} comment {comment_id} must be an object."
+        )
+    return payload
+
+
+def github_api_request(
+    *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+) -> object:
+    request_body = None
+    headers = {
+        "Accept": "application/vnd.github+json",
+        "Authorization": f"Bearer {token}",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    if body is not None:
+        request_body = json.dumps(body).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+    request = Request(
+        url=f"https://api.github.com{path}",
+        method=method,
+        headers=headers,
+        data=request_body,
+    )
+    try:
+        with urlopen(request, timeout=15) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+        raise click.ClickException(f"GitHub API request failed for {path}: {exc}") from exc
+
+
+def _github_comment_url(comment_payload: dict[str, object]) -> str:
+    html_url = comment_payload.get("html_url")
+    if isinstance(html_url, str):
+        return html_url.strip()
+    return ""
 
 
 def resolve_pull_request_event_decision(
@@ -751,32 +948,15 @@ def resolve_harbor_github_token(*, control_plane_root: Path, context_name: str) 
     return context_values.get(HARBOR_GITHUB_TOKEN_ENV_KEY, "").strip()
 
 
-def github_pr_owner(*, pr_url: str) -> str:
-    parsed_url = urlparse(pr_url)
-    if parsed_url.netloc.strip().lower() != "github.com":
-        return ""
-    match = GITHUB_PULL_REQUEST_URL_PATTERN.match(parsed_url.path)
-    if match is None:
-        return ""
-    return match.group("owner").strip()
-
-
 def fetch_github_pull_request_head(*, owner: str, repo: str, pr_number: int, token: str) -> tuple[str, str]:
-    request = Request(
-        url=f"https://api.github.com/repos/{owner}/{repo}/pulls/{pr_number}",
-        headers={
-            "Accept": "application/vnd.github+json",
-            "Authorization": f"Bearer {token}",
-            "X-GitHub-Api-Version": "2022-11-28",
-        },
+    payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/pulls/{pr_number}",
+        token=token,
     )
-    try:
-        with urlopen(request, timeout=15) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
+    if not isinstance(payload, dict):
         raise click.ClickException(
-            f"Unable to resolve GitHub pull request {owner}/{repo}#{pr_number}: {exc}"
-        ) from exc
+            f"GitHub pull request response for {owner}/{repo}#{pr_number} must be an object."
+        )
     head = payload.get("head")
     if not isinstance(head, dict):
         raise click.ClickException(
