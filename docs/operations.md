@@ -18,6 +18,11 @@ title: Operations
 - `uv run control-plane inventory list`
 - `uv run control-plane environments resolve --context <ctx> --instance
 <instance> [--json-output]`
+- `uv run control-plane harbor-previews list [--context <ctx>]`
+- `uv run control-plane harbor-previews show --context <ctx> --anchor-repo
+<repo> --pr-number <number>`
+- `uv run control-plane harbor-previews history --context <ctx> --anchor-repo
+<repo> --pr-number <number>`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
@@ -101,8 +106,20 @@ title: Operations
   entries, with an optional context filter for tenant-scoped operator views.
 - The legacy static operator UI was intentionally removed during the Harbor
   reset so preview/product work does not inherit the old dashboard model.
-- Until Harbor ships a replacement surface, use the inventory and environment
-  JSON commands as the source of truth for live control-plane state.
+- Harbor preview inspection now starts with JSON read surfaces owned by this
+  repo: `harbor-previews list`, `harbor-previews show`, and
+  `harbor-previews history`.
+- `harbor-previews show` is the one-preview status payload shaped for the
+  first Harbor page, including canonical preview URL, trust summary, health,
+  and retained evidence for destroyed previews.
+- `harbor-previews list` is a compact inventory surface for operator review;
+  destroyed previews remain visible there rather than disappearing.
+- `harbor-previews history` exposes full generation ordering and serving/latest
+  markers so operators can distinguish a failed replacement from the last
+  healthy serving generation.
+- Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
+  preview state and the inventory/environment JSON commands for live shared
+  environment state.
 - Direct `ship` requires an explicit artifact id that already has a stored
   artifact manifest in control-plane state.
 - When a stored artifact manifest is available, ship syncs
