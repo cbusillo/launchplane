@@ -16,19 +16,20 @@ title: Operations
 - `uv run control-plane inventory overview [--context <ctx>]`
 - `uv run control-plane inventory show --context <ctx> --instance <instance>`
 - `uv run control-plane inventory list`
-- `uv run control-plane ui inventory-overview [--context <ctx>] [--output-file <path>]`
-- `uv run control-plane ui environment-status --context <ctx> --instance <instance> [--output-file <path>]`
-- `uv run control-plane ui environment-contract --context <ctx> --instance <instance> [--output-file <path>]`
-- `uv run control-plane ui build-site [--state-dir <path>] [--context <ctx>] [--output-dir <path>]`
-- `uv run control-plane environments resolve --context <ctx> --instance <instance> [--json-output]`
+- `uv run control-plane environments resolve --context <ctx> --instance
+<instance> [--json-output]`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
-- `uv run control-plane promote record --artifact-id <artifact-id> --context <ctx> --from-instance testing --to-instance prod`
-- `uv run control-plane promote resolve --context <ctx> --from-instance <instance> --to-instance <instance> --artifact-id <artifact-id> --backup-record-id <record-id>`
+- `uv run control-plane promote record --artifact-id <artifact-id> --context
+<ctx> --from-instance testing --to-instance prod`
+- `uv run control-plane promote resolve --context <ctx> --from-instance
+<instance> --to-instance <instance> --artifact-id <artifact-id>
+--backup-record-id <record-id>`
 - `uv run control-plane promote execute --input-file <path> [--env-file <path>]`
 - `uv run control-plane ship plan --input-file <path>`
-- `uv run control-plane ship resolve --context <ctx> --instance <instance> --artifact-id <artifact-id>`
+- `uv run control-plane ship resolve --context <ctx> --instance <instance>
+--artifact-id <artifact-id>`
 - `uv run control-plane ship execute --input-file <path> [--env-file <path>]`
 
 ## Operational Rules
@@ -98,20 +99,10 @@ title: Operations
   backup authorized it, and what happened last without opening raw JSON.
 - `inventory overview` renders that same read model across all live inventory
   entries, with an optional context filter for tenant-scoped operator views.
-- `ui inventory-overview` renders a self-contained operator dashboard from the
-  same read model so the first operator UI can evolve without introducing a
-  server stack yet.
-- `ui environment-status` renders the single-environment drilldown view from
-  `inventory status`, including linked promotion, deployment, and backup-gate
-  details when those records exist, plus a suggested next-step panel with the
-  follow-up control-plane commands implied by the current state.
-- `ui environment-contract` renders the control-plane runtime-environment
-  contract for one context and instance, showing global/context/instance
-  layering plus the final resolved environment with sensitive values redacted
-  in the HTML output.
-- `ui build-site` generates a linked static operator site with an index page,
-  inventory overview, per-environment status pages, and per-environment
-  environment-contract pages under one output directory.
+- The legacy static operator UI was intentionally removed during the Harbor
+  reset so preview/product work does not inherit the old dashboard model.
+- Until Harbor ships a replacement surface, use the inventory and environment
+  JSON commands as the source of truth for live control-plane state.
 - Direct `ship` requires an explicit artifact id that already has a stored
   artifact manifest in control-plane state.
 - When a stored artifact manifest is available, ship syncs
