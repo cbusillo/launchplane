@@ -1499,6 +1499,71 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(payload["mutation"]["manifest_resolution_required"])
             self.assertIn("generation_request_seed", payload["mutation"])
 
+    def test_harbor_previews_ingest_pr_event_resolves_allowlisted_companion_when_lookup_succeeds(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "labeled",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:15:00Z",
+                        "pr_body": (
+                            "```harbor-preview\n"
+                            "schema_version = 1\n"
+                            "\n"
+                            "[[companions]]\n"
+                            'repo = "shared-addons"\n'
+                            "pr_number = 456\n"
+                            "```\n"
+                        ),
+                        "state": "open",
+                        "head_sha": "aaaa1111",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch("control_plane.workflows.harbor.resolve_harbor_github_token", return_value="token"),
+                patch(
+                    "control_plane.workflows.harbor.fetch_github_pull_request_head",
+                    return_value=(
+                        "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+                        "https://github.com/every/shared-addons/pull/456",
+                    ),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-pr-event",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertTrue(payload["decision"]["manifest_resolved"])
+            self.assertEqual(payload["manifest"]["source_map"][1]["selection"], "companion")
+            self.assertEqual(
+                payload["mutation"]["generation_request"]["companion_summaries"][0]["repo"],
+                "shared-addons",
+            )
+
     def test_harbor_previews_ingest_pr_event_apply_writes_preview_and_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
