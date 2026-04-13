@@ -6,10 +6,16 @@ import click
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
+    PreviewGenerationState,
     PreviewPullRequestSummary,
     PreviewSourceRecord,
 )
-from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_mutation_request import (
+    PreviewGenerationMutationRequest,
+    PreviewMutationRequest,
+)
+from control_plane.contracts.preview_record import PreviewRecord, PreviewState
+from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 RECENT_GENERATION_LIMIT = 3
@@ -91,7 +97,7 @@ def build_preview_record(
     updated_at: str = "",
     eligible_at: str = "",
     preview_base_url: str,
-    state: str = "pending",
+    state: PreviewState = "pending",
     preview_id: str = "",
     paused_at: str = "",
     destroy_after: str = "",
@@ -143,7 +149,7 @@ def build_preview_generation_record(
     *,
     preview_id: str,
     sequence: int,
-    state: str,
+    state: PreviewGenerationState,
     requested_reason: str,
     requested_at: str,
     resolved_manifest_fingerprint: str,
@@ -162,9 +168,9 @@ def build_preview_generation_record(
     baseline_release_tuple_id: str = "",
     source_map: tuple[PreviewSourceRecord, ...] = (),
     companion_summaries: tuple[PreviewPullRequestSummary, ...] = (),
-    deploy_status: str = "pending",
-    verify_status: str = "pending",
-    overall_health_status: str = "pending",
+    deploy_status: ReleaseStatus = "pending",
+    verify_status: ReleaseStatus = "pending",
+    overall_health_status: ReleaseStatus = "pending",
     failure_stage: str = "",
     failure_summary: str = "",
 ) -> PreviewGenerationRecord:
@@ -201,6 +207,131 @@ def build_preview_generation_record(
         overall_health_status=overall_health_status,
         failure_stage=failure_stage,
         failure_summary=failure_summary,
+    )
+
+
+def build_preview_record_from_request(
+    *,
+    control_plane_root: Path,
+    record_store: FilesystemRecordStore,
+    request: PreviewMutationRequest,
+) -> PreviewRecord:
+    existing_preview = find_preview_record(
+        record_store=record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    resolved_created_at = request.created_at.strip() or (
+        existing_preview.created_at if existing_preview is not None else ""
+    )
+    if not resolved_created_at:
+        raise click.ClickException(
+            "Preview mutation requires created_at when no existing Harbor preview is stored."
+        )
+    resolved_updated_at = request.updated_at.strip() or resolved_created_at
+    resolved_eligible_at = request.eligible_at.strip() or (
+        existing_preview.eligible_at if existing_preview is not None else resolved_created_at
+    )
+    resolved_preview_id = (
+        existing_preview.preview_id
+        if existing_preview is not None
+        else generate_preview_id(
+            context_name=request.context,
+            anchor_repo=request.anchor_repo,
+            anchor_pr_number=request.anchor_pr_number,
+        )
+    )
+    preview_base_url = resolve_harbor_preview_base_url(
+        control_plane_root=control_plane_root,
+        context_name=request.context,
+    )
+    return build_preview_record(
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+        anchor_pr_url=request.anchor_pr_url,
+        created_at=resolved_created_at,
+        updated_at=resolved_updated_at,
+        eligible_at=resolved_eligible_at,
+        preview_base_url=preview_base_url,
+        state=request.state,
+        preview_id=resolved_preview_id,
+        paused_at=request.paused_at,
+        destroy_after=request.destroy_after,
+        destroyed_at=request.destroyed_at,
+        destroy_reason=request.destroy_reason,
+        active_generation_id=request.active_generation_id,
+        serving_generation_id=request.serving_generation_id,
+        latest_generation_id=request.latest_generation_id,
+        latest_manifest_fingerprint=request.latest_manifest_fingerprint,
+    )
+
+
+def build_preview_generation_record_from_request(
+    *,
+    record_store: FilesystemRecordStore,
+    request: PreviewGenerationMutationRequest,
+) -> PreviewGenerationRecord:
+    preview = find_preview_record(
+        record_store=record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    if preview is None:
+        raise click.ClickException(
+            f"No Harbor preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
+        )
+
+    existing_generations = record_store.list_preview_generation_records(preview_id=preview.preview_id)
+    existing_generation = next(
+        (
+            record
+            for record in existing_generations
+            if request.generation_id.strip() and record.generation_id == request.generation_id
+        ),
+        None,
+    )
+    if existing_generation is not None:
+        resolved_sequence = request.sequence or existing_generation.sequence
+        resolved_generation_id = existing_generation.generation_id
+    else:
+        resolved_sequence = request.sequence or _next_preview_generation_sequence(
+            existing_generations=existing_generations
+        )
+        resolved_generation_id = request.generation_id.strip() or generate_preview_generation_id(
+            preview_id=preview.preview_id,
+            sequence=resolved_sequence,
+        )
+
+    return build_preview_generation_record(
+        preview_id=preview.preview_id,
+        sequence=resolved_sequence,
+        state=request.state,
+        requested_reason=request.requested_reason,
+        requested_at=request.requested_at,
+        resolved_manifest_fingerprint=request.resolved_manifest_fingerprint,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+        anchor_pr_url=request.anchor_pr_url,
+        anchor_head_sha=request.anchor_head_sha,
+        generation_id=resolved_generation_id,
+        started_at=request.started_at,
+        ready_at=request.ready_at,
+        finished_at=request.finished_at,
+        superseded_at=request.superseded_at,
+        failed_at=request.failed_at,
+        expires_at=request.expires_at,
+        artifact_id=request.artifact_id,
+        baseline_release_tuple_id=request.baseline_release_tuple_id,
+        source_map=request.source_map,
+        companion_summaries=request.companion_summaries,
+        deploy_status=request.deploy_status,
+        verify_status=request.verify_status,
+        overall_health_status=request.overall_health_status,
+        failure_stage=request.failure_stage,
+        failure_summary=request.failure_summary,
     )
 
 
@@ -465,6 +596,14 @@ def _generation_brief(record: PreviewGenerationRecord) -> dict[str, object]:
 
 def _generation_payload_required(record: PreviewGenerationRecord) -> dict[str, object]:
     return _generation_payload(record) or {}
+
+
+def _next_preview_generation_sequence(
+    *, existing_generations: tuple[PreviewGenerationRecord, ...]
+) -> int:
+    if not existing_generations:
+        return 1
+    return max(record.sequence for record in existing_generations) + 1
 
 
 def _status_summary(

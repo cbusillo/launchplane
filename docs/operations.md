@@ -23,6 +23,8 @@ title: Operations
 <repo> --pr-number <number>`
 - `uv run control-plane harbor-previews history --context <ctx> --anchor-repo
 <repo> --pr-number <number>`
+- `uv run control-plane harbor-previews write-preview --input-file <path>`
+- `uv run control-plane harbor-previews write-generation --input-file <path>`
 - `uv run control-plane promotions list --context <ctx> --to-instance <instance>`
 - `uv run control-plane promotions write --input-file <path>`
 - `uv run control-plane promotions show --record-id <record-id>`
@@ -109,6 +111,9 @@ title: Operations
 - Harbor preview inspection now starts with JSON read surfaces owned by this
   repo: `harbor-previews list`, `harbor-previews show`, and
   `harbor-previews history`.
+- Harbor preview record mutation also starts here through builder-backed
+  `harbor-previews write-preview` and `harbor-previews write-generation`
+  commands that accept typed JSON input files.
 - `harbor-previews show` is the one-preview status payload shaped for the
   first Harbor page, including canonical preview URL, trust summary, health,
   and retained evidence for destroyed previews.
@@ -117,6 +122,12 @@ title: Operations
 - `harbor-previews history` exposes full generation ordering and serving/latest
   markers so operators can distinguish a failed replacement from the last
   healthy serving generation.
+- `harbor-previews write-preview` resolves the dedicated Harbor preview base
+  URL from runtime environment config, reuses any stored preview identity for
+  the same anchor PR, and fails closed when preview routing config is missing.
+- `harbor-previews write-generation` requires an existing preview record for
+  the same anchor PR and assigns the next generation sequence automatically
+  when the input file does not pin one explicitly.
 - Until Harbor ships a replacement UI, use the Harbor preview JSON commands for
   preview state and the inventory/environment JSON commands for live shared
   environment state.
