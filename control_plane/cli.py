@@ -48,6 +48,7 @@ from control_plane.workflows.ship import (
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
+ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
 
 
 def _store(state_dir: Path) -> FilesystemRecordStore:
@@ -891,22 +892,24 @@ def _build_environment_status_payload(
                 ) from None
             authorized_backup_gate_summary = _summarize_backup_gate_record(live_backup_gate_record)
 
-    latest_promotion = next(
-        iter(
-            record_store.list_promotion_records(
-                context_name=context_name, to_instance_name=instance_name, limit=1
-            )
-        ),
-        None,
+    recent_promotion_records = record_store.list_promotion_records(
+        context_name=context_name,
+        to_instance_name=instance_name,
+        limit=ENVIRONMENT_STATUS_HISTORY_LIMIT,
     )
-    latest_deployment = next(
-        iter(
-            record_store.list_deployment_records(
-                context_name=context_name, instance_name=instance_name, limit=1
-            )
-        ),
-        None,
+    recent_deployment_records = record_store.list_deployment_records(
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=ENVIRONMENT_STATUS_HISTORY_LIMIT,
     )
+    recent_promotions = tuple(
+        _summarize_promotion_record(record) for record in recent_promotion_records
+    )
+    recent_deployments = tuple(
+        _summarize_deployment_record(record) for record in recent_deployment_records
+    )
+    latest_promotion = recent_promotions[0] if recent_promotions else None
+    latest_deployment = recent_deployments[0] if recent_deployments else None
 
     return {
         "context": context_name,
@@ -914,12 +917,10 @@ def _build_environment_status_payload(
         "live": _summarize_environment_inventory(live_inventory),
         "live_promotion": live_promotion_summary,
         "authorized_backup_gate": authorized_backup_gate_summary,
-        "latest_promotion": _summarize_promotion_record(latest_promotion)
-        if latest_promotion is not None
-        else None,
-        "latest_deployment": _summarize_deployment_record(latest_deployment)
-        if latest_deployment is not None
-        else None,
+        "latest_promotion": latest_promotion,
+        "latest_deployment": latest_deployment,
+        "recent_promotions": recent_promotions,
+        "recent_deployments": recent_deployments,
     }
 
 
@@ -1124,6 +1125,34 @@ def _with_site_record_links(
 ) -> dict[str, object]:
     linked_payload = dict(payload)
 
+    def _link_promotion_summary(summary: dict[str, object]) -> dict[str, object]:
+        linked_summary = dict(summary)
+        linked_summary["artifact_href"] = _site_artifact_manifest_href(
+            artifact_id=str(linked_summary.get("artifact_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_summary["record_href"] = _site_promotion_record_href(
+            record_id=str(linked_summary.get("record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_summary["backup_record_href"] = _site_backup_gate_record_href(
+            record_id=str(linked_summary.get("backup_record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        return linked_summary
+
+    def _link_deployment_summary(summary: dict[str, object]) -> dict[str, object]:
+        linked_summary = dict(summary)
+        linked_summary["artifact_href"] = _site_artifact_manifest_href(
+            artifact_id=str(linked_summary.get("artifact_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        linked_summary["record_href"] = _site_deployment_record_href(
+            record_id=str(linked_summary.get("record_id", "")),
+            relative_prefix=relative_prefix,
+        )
+        return linked_summary
+
     live_payload = payload.get("live")
     if isinstance(live_payload, dict):
         linked_live_payload = dict(live_payload)
@@ -1169,33 +1198,27 @@ def _with_site_record_links(
 
     latest_promotion_payload = payload.get("latest_promotion")
     if isinstance(latest_promotion_payload, dict):
-        linked_latest_promotion_payload = dict(latest_promotion_payload)
-        linked_latest_promotion_payload["artifact_href"] = _site_artifact_manifest_href(
-            artifact_id=str(linked_latest_promotion_payload.get("artifact_id", "")),
-            relative_prefix=relative_prefix,
-        )
-        linked_latest_promotion_payload["record_href"] = _site_promotion_record_href(
-            record_id=str(linked_latest_promotion_payload.get("record_id", "")),
-            relative_prefix=relative_prefix,
-        )
-        linked_latest_promotion_payload["backup_record_href"] = _site_backup_gate_record_href(
-            record_id=str(linked_latest_promotion_payload.get("backup_record_id", "")),
-            relative_prefix=relative_prefix,
-        )
-        linked_payload["latest_promotion"] = linked_latest_promotion_payload
+        linked_payload["latest_promotion"] = _link_promotion_summary(latest_promotion_payload)
 
     latest_deployment_payload = payload.get("latest_deployment")
     if isinstance(latest_deployment_payload, dict):
-        linked_latest_deployment_payload = dict(latest_deployment_payload)
-        linked_latest_deployment_payload["artifact_href"] = _site_artifact_manifest_href(
-            artifact_id=str(linked_latest_deployment_payload.get("artifact_id", "")),
-            relative_prefix=relative_prefix,
+        linked_payload["latest_deployment"] = _link_deployment_summary(latest_deployment_payload)
+
+    recent_promotions_payload = payload.get("recent_promotions")
+    if isinstance(recent_promotions_payload, (list, tuple)):
+        linked_payload["recent_promotions"] = tuple(
+            _link_promotion_summary(item)
+            for item in recent_promotions_payload
+            if isinstance(item, dict)
         )
-        linked_latest_deployment_payload["record_href"] = _site_deployment_record_href(
-            record_id=str(linked_latest_deployment_payload.get("record_id", "")),
-            relative_prefix=relative_prefix,
+
+    recent_deployments_payload = payload.get("recent_deployments")
+    if isinstance(recent_deployments_payload, (list, tuple)):
+        linked_payload["recent_deployments"] = tuple(
+            _link_deployment_summary(item)
+            for item in recent_deployments_payload
+            if isinstance(item, dict)
         )
-        linked_payload["latest_deployment"] = linked_latest_deployment_payload
 
     return linked_payload
 
