@@ -158,6 +158,37 @@ def _derive_next_operator_step(payload: Mapping[str, object]) -> dict[str, objec
     live_payload = _mapping_value(payload, "live")
     backup_gate_payload = _mapping_value(payload, "authorized_backup_gate")
 
+    if not live_payload or (
+        not _string_value(live_payload.get("artifact_id"))
+        and not _string_value(live_payload.get("deployment_record_id"))
+    ):
+        return {
+            "tone": "skipped",
+            "title": "No live inventory record yet",
+            "summary": (
+                "The control plane does not have a current live-inventory record for this environment yet. "
+                "Use the environment contract to confirm the intended runtime inputs, then refresh inventory from "
+                "a successful ship or promote flow before relying on this status page as the source of truth."
+            ),
+            "commands": (
+                f"uv run control-plane ui environment-contract --context {context_name} --instance {instance_name}",
+                f"uv run control-plane inventory status --context {context_name} --instance {instance_name}",
+                f"uv run control-plane inventory overview --context {context_name}",
+            ),
+            "checklist": (
+                {
+                    "label": "Inventory present",
+                    "status": "skipped",
+                    "detail": "No current live inventory record is stored for this environment.",
+                },
+                {
+                    "label": "Contract available",
+                    "status": "pass",
+                    "detail": "The control-plane environment contract can still be reviewed now.",
+                },
+            ),
+        }
+
     live_promotion_record_id = _string_value(live_payload.get("promotion_record_id"))
     backup_status = _string_value(backup_gate_payload.get("status"))
 
