@@ -13,6 +13,7 @@ title: Architecture
 `odoo-control-plane` owns:
 
 - artifact manifests
+- release tuple catalogs
 - backup-gate records
 - promotion records
 - deployment records
@@ -40,6 +41,9 @@ Code and local-DX repos own:
   `config/dokploy.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
   paths.
+- Harbor baseline release tuples also belong here as explicit control-plane
+  data rather than inferred runtime state. Those tuples should carry exact repo
+  SHAs for preview-manifest resolution, not floating branch names.
 - Live Dokploy `target_id` values load from operator-local
   `config/dokploy-targets.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` override for alternate local
