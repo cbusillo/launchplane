@@ -18,6 +18,10 @@ state/
     <record-id>.json
   deployments/
     <record-id>.json
+  harbor_preview_generations/
+    <generation-id>.json
+  harbor_previews/
+    <preview-id>.json
   promotions/
     <record-id>.json
   inventory/
@@ -84,6 +88,28 @@ state/
   pending, passed, or failed.
 - Direct `ship` and `promote` execution should fail closed if the referenced
   artifact id does not already have a stored manifest in control-plane state.
+
+## Harbor Preview Record
+
+- One file per stable Harbor preview identity.
+- Record the anchor PR identity, deterministic preview label, canonical preview
+  URL, lifecycle timestamps, current preview state, and the active/serving/
+  latest generation links.
+- Destroyed previews should remain readable durable evidence instead of being
+  removed from state.
+- Preview records should preserve one stable identity per anchor PR even when
+  Harbor replaces the serving generation over time.
+
+## Harbor Preview Generation Record
+
+- One file per Harbor preview generation.
+- Record the resolved manifest fingerprint, exact repo-to-SHA source map,
+  baseline release tuple, artifact identity, health evidence, and failure
+  details when a replacement does not become ready.
+- Generation history should remain ordered and inspectable even when the latest
+  generation failed and an older generation is still serving.
+- Harbor read models should derive status/list/history payloads from these
+  durable generation facts rather than storing separate page blobs.
 
 ## Inventory
 
