@@ -2,6 +2,7 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -472,6 +473,266 @@ ODOO_DB_PASSWORD = "local-secret"
                 "merged_after_grace_window",
             )
             self.assertIn("destroyed", payload["health_summary"]["status_summary"].lower())
+
+    def test_harbor_previews_write_preview_creates_record_from_request(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            input_file = control_plane_root / "preview-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "state": "pending",
+                        "created_at": "2026-04-13T12:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "write-preview",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            record = FilesystemRecordStore(state_dir=state_dir).read_preview_record(
+                "preview-opw-tenant-opw-pr-123"
+            )
+            self.assertEqual(record.preview_label, "opw/tenant-opw/pr-123")
+            self.assertEqual(
+                record.canonical_url,
+                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+            )
+
+    def test_harbor_previews_write_preview_reuses_existing_identity_and_created_at(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_legacy",
+                    created_at="2026-04-10T10:00:00Z",
+                    updated_at="2026-04-10T10:00:00Z",
+                )
+            )
+            input_file = control_plane_root / "preview-update-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "state": "paused",
+                        "updated_at": "2026-04-13T12:30:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "write-preview",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            record = store.read_preview_record("hpr_legacy")
+            self.assertEqual(record.preview_id, "hpr_legacy")
+            self.assertEqual(record.created_at, "2026-04-10T10:00:00Z")
+            self.assertEqual(record.updated_at, "2026-04-13T12:30:00Z")
+            self.assertEqual(record.state, "paused")
+
+    def test_harbor_previews_write_preview_fails_closed_when_base_url_missing(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            input_file = control_plane_root / "preview-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "state": "pending",
+                        "created_at": "2026-04-13T12:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "write-preview",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("HARBOR_PREVIEW_BASE_URL", result.output)
+
+    def test_harbor_previews_write_generation_assigns_next_sequence(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(_preview_record(preview_id="hpr_01jabc"))
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hpr_01jabc-generation-0001",
+                    preview_id="hpr_01jabc",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            input_file = control_plane_root / "generation-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "anchor_head_sha": "aaaa2222",
+                        "state": "building",
+                        "requested_reason": "manifest_changed",
+                        "requested_at": "2026-04-13T12:20:00Z",
+                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "write-generation",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            record = store.read_preview_generation_record("hpr_01jabc-generation-0002")
+            self.assertEqual(record.sequence, 2)
+            self.assertEqual(record.state, "building")
+            self.assertEqual(record.anchor_summary.head_sha, "aaaa2222")
+
+    def test_harbor_previews_write_generation_fails_when_preview_missing(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "generation-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "anchor_head_sha": "aaaa2222",
+                        "state": "building",
+                        "requested_reason": "initial_create",
+                        "requested_at": "2026-04-13T12:20:00Z",
+                        "resolved_manifest_fingerprint": "harbor-manifest-001",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "write-generation",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("No Harbor preview found", result.output)
 
     def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
         runner = CliRunner()

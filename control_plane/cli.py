@@ -14,6 +14,10 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.preview_mutation_request import (
+    PreviewGenerationMutationRequest,
+    PreviewMutationRequest,
+)
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
@@ -25,8 +29,10 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
+    build_preview_generation_record_from_request,
     build_preview_history_payload,
     build_preview_inventory_payload,
+    build_preview_record_from_request,
     build_preview_status_payload,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -1194,7 +1200,38 @@ def inventory_status(state_dir: Path, context_name: str, instance_name: str) -> 
 
 @main.group("harbor-previews")
 def harbor_previews() -> None:
-    """Harbor preview read-model commands."""
+    """Harbor preview record and read-model commands."""
+
+
+@harbor_previews.command("write-preview")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_write_preview(state_dir: Path, input_file: Path) -> None:
+    request = PreviewMutationRequest.model_validate(_load_json_file(input_file))
+    record = build_preview_record_from_request(
+        control_plane_root=_control_plane_root(),
+        record_store=_store(state_dir),
+        request=request,
+    )
+    record_path = _store(state_dir).write_preview_record(record)
+    click.echo(record_path)
+
+
+@harbor_previews.command("write-generation")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_write_generation(state_dir: Path, input_file: Path) -> None:
+    request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
+    record = build_preview_generation_record_from_request(
+        record_store=_store(state_dir),
+        request=request,
+    )
+    record_path = _store(state_dir).write_preview_generation_record(record)
+    click.echo(record_path)
 
 
 @harbor_previews.command("list")

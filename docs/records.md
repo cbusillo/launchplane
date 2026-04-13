@@ -99,6 +99,9 @@ state/
   removed from state.
 - Preview records should preserve one stable identity per anchor PR even when
   Harbor replaces the serving generation over time.
+- The initial explicit mutation surface is `harbor-previews write-preview`,
+  which builds the stored record from typed request input plus the dedicated
+  Harbor preview base-url runtime contract.
 
 ## Harbor Preview Generation Record
 
@@ -110,6 +113,9 @@ state/
   generation failed and an older generation is still serving.
 - Harbor read models should derive status/list/history payloads from these
   durable generation facts rather than storing separate page blobs.
+- The initial explicit mutation surface is `harbor-previews write-generation`,
+  which requires an existing preview record and can assign the next sequence
+  automatically when the input does not pin one.
 
 ## Inventory
 
