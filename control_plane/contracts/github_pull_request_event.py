@@ -24,6 +24,7 @@ class GitHubPullRequestEvent(BaseModel):
     repo: str
     pr_number: int = Field(ge=1)
     pr_url: str
+    occurred_at: str = ""
     state: PullRequestState
     merged: bool = False
     head_sha: str

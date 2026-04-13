@@ -1245,6 +1245,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "repo": "tenant-opw",
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:15:00Z",
                         "state": "open",
                         "head_sha": "aaaa1111",
                         "label_names": ["harbor-preview"],
@@ -1272,6 +1273,18 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["decision"]["resolved_context"], "opw")
             self.assertTrue(payload["decision"]["anchor_repo_eligible"])
             self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertEqual(payload["mutation"]["command"], "request-generation")
+            self.assertTrue(payload["mutation"]["manifest_resolution_required"])
+            self.assertEqual(payload["mutation"]["preview_request"]["context"], "opw")
+            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "2026-04-13T12:15:00Z")
+            self.assertEqual(
+                payload["mutation"]["generation_request_seed"]["requested_reason"],
+                "github_pr_event_enable_preview",
+            )
+            self.assertEqual(
+                payload["mutation"]["generation_request_seed"]["requested_at"],
+                "2026-04-13T12:15:00Z",
+            )
             self.assertIsNone(payload["preview"])
 
     def test_harbor_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
@@ -1289,6 +1302,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "repo": "tenant-opw",
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:16:00Z",
                         "state": "open",
                         "head_sha": "bbbb2222",
                         "label_names": ["harbor-preview"],
@@ -1313,7 +1327,61 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertEqual(payload["decision"]["action"], "refresh_preview")
             self.assertFalse(payload["decision"]["context_resolution_required"])
+            self.assertEqual(payload["mutation"]["command"], "request-generation")
+            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "")
+            self.assertEqual(payload["mutation"]["preview_request"]["updated_at"], "2026-04-13T12:16:00Z")
+            self.assertEqual(
+                payload["mutation"]["generation_request_seed"]["requested_reason"],
+                "github_pr_event_refresh_preview",
+            )
             self.assertEqual(payload["preview"]["preview_id"], "hpr_01jabc")
+
+    def test_harbor_previews_ingest_pr_event_emits_destroy_intent_for_closed_preview(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
+            input_file = control_plane_root / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "closed",
+                        "repo": "tenant-opw",
+                        "pr_number": 123,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "occurred_at": "2026-04-13T12:17:00Z",
+                        "state": "closed",
+                        "merged": True,
+                        "head_sha": "cccc3333",
+                        "label_names": ["harbor-preview"],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-pr-event",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "destroy_preview")
+            self.assertEqual(payload["mutation"]["command"], "destroy-preview")
+            self.assertEqual(payload["mutation"]["destroy_request"]["context"], "opw")
+            self.assertEqual(
+                payload["mutation"]["destroy_request"]["destroy_reason"],
+                "pull_request_merged",
+            )
 
     def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
         runner = CliRunner()
@@ -1328,6 +1396,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "repo": "shared-addons",
                         "pr_number": 456,
                         "pr_url": "https://github.com/every/shared-addons/pull/456",
+                        "occurred_at": "2026-04-13T12:18:00Z",
                         "state": "open",
                         "head_sha": "bbbb2222",
                         "label_names": ["harbor-preview"],
@@ -1354,6 +1423,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["decision"]["action"], "ignore")
             self.assertFalse(payload["decision"]["anchor_repo_eligible"])
             self.assertEqual(payload["decision"]["resolved_context"], "")
+            self.assertIsNone(payload["mutation"])
 
     def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
         runner = CliRunner()
