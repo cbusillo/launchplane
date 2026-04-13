@@ -181,6 +181,11 @@ title: Operations
   `feedback` payload with concise markdown plus structured preview/apply facts.
   On applied preview paths it includes the canonical preview URL and manifest
   evidence; on unresolved paths it explains why Harbor stayed fail-closed.
+- Add `--deliver-feedback` to `harbor-previews ingest-pr-event` to post that
+  same Harbor feedback payload back to the anchor PR through GitHub. Harbor
+  uses one hidden marker so later runs update the Harbor-owned PR comment
+  instead of spamming duplicates, and it stays explicit no-op when GitHub auth
+  or PR ownership context is missing.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases

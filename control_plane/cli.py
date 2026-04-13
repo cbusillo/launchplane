@@ -45,6 +45,7 @@ from control_plane.workflows.harbor import (
     build_pull_request_event_action_payload,
     build_preview_record_from_request,
     build_preview_status_payload,
+    deliver_pull_request_feedback,
     find_preview_record,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -1386,7 +1387,10 @@ def harbor_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
-def harbor_previews_ingest_pr_event(state_dir: Path, input_file: Path, apply_intent: bool) -> None:
+@click.option("--deliver-feedback", is_flag=True)
+def harbor_previews_ingest_pr_event(
+    state_dir: Path, input_file: Path, apply_intent: bool, deliver_feedback: bool
+) -> None:
     event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
     control_plane_root = _control_plane_root()
     record_store = _store(state_dir)
@@ -1416,6 +1420,21 @@ def harbor_previews_ingest_pr_event(state_dir: Path, input_file: Path, apply_int
                 else None
             ),
             apply_result=payload["apply"],
+        )
+    if deliver_feedback:
+        decision_payload = payload.get("decision")
+        resolved_context = (
+            decision_payload.get("resolved_context", "") if isinstance(decision_payload, dict) else ""
+        )
+        feedback_payload = payload.get("feedback")
+        if not isinstance(feedback_payload, dict):
+            raise click.ClickException("Harbor feedback payload is missing before delivery.")
+        payload["feedback_delivery"] = deliver_pull_request_feedback(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            event=event,
+            resolved_context=resolved_context if isinstance(resolved_context, str) else "",
+            feedback_payload=feedback_payload,
         )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
