@@ -13,6 +13,16 @@ from control_plane.contracts.preview_generation_record import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.harbor import (
+    build_preview_canonical_url,
+    build_preview_generation_record,
+    build_preview_label,
+    build_preview_record,
+    build_preview_route_path,
+    generate_preview_generation_id,
+    generate_preview_id,
+    resolve_harbor_preview_base_url,
+)
 
 
 def _preview_record(
@@ -119,6 +129,153 @@ def _generation_record(
 
 
 class HarborPreviewReadModelTests(unittest.TestCase):
+    def test_harbor_preview_identity_helpers_are_deterministic(self) -> None:
+        self.assertEqual(
+            build_preview_label(
+                context_name="opw",
+                anchor_repo="tenant-opw",
+                anchor_pr_number=123,
+            ),
+            "opw/tenant-opw/pr-123",
+        )
+        self.assertEqual(
+            build_preview_route_path(
+                context_name="opw",
+                anchor_repo="tenant-opw",
+                anchor_pr_number=123,
+            ),
+            "/previews/opw/tenant-opw/pr-123",
+        )
+        self.assertEqual(
+            generate_preview_id(
+                context_name="opw",
+                anchor_repo="tenant-opw",
+                anchor_pr_number=123,
+            ),
+            "preview-opw-tenant-opw-pr-123",
+        )
+        self.assertEqual(
+            generate_preview_generation_id(
+                preview_id="preview-opw-tenant-opw-pr-123",
+                sequence=2,
+            ),
+            "preview-opw-tenant-opw-pr-123-generation-0002",
+        )
+        self.assertEqual(
+            build_preview_canonical_url(
+                preview_base_url="https://harbor.example",
+                context_name="opw",
+                anchor_repo="tenant-opw",
+                anchor_pr_number=123,
+            ),
+            "https://harbor.example/previews/opw/tenant-opw/pr-123",
+        )
+
+    def test_build_preview_record_reuses_stable_identity_for_same_anchor(self) -> None:
+        first_record = build_preview_record(
+            context_name="opw",
+            anchor_repo="tenant-opw",
+            anchor_pr_number=123,
+            anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
+            created_at="2026-04-13T12:00:00Z",
+            updated_at="2026-04-13T12:10:00Z",
+            preview_base_url="https://harbor.example",
+            state="active",
+        )
+        reopened_record = build_preview_record(
+            context_name="opw",
+            anchor_repo="tenant-opw",
+            anchor_pr_number=123,
+            anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
+            created_at="2026-04-14T09:00:00Z",
+            updated_at="2026-04-14T09:05:00Z",
+            preview_base_url="https://harbor.example",
+            state="pending",
+        )
+
+        self.assertEqual(first_record.preview_id, reopened_record.preview_id)
+        self.assertEqual(first_record.preview_label, reopened_record.preview_label)
+        self.assertEqual(first_record.canonical_url, reopened_record.canonical_url)
+
+    def test_resolve_harbor_preview_base_url_reads_context_runtime_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            resolved_base_url = resolve_harbor_preview_base_url(
+                control_plane_root=control_plane_root,
+                context_name="opw",
+            )
+
+        self.assertEqual(resolved_base_url, "https://harbor.example")
+
+    def test_resolve_harbor_preview_base_url_fails_closed_when_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(Exception, "HARBOR_PREVIEW_BASE_URL"):
+                resolve_harbor_preview_base_url(
+                    control_plane_root=control_plane_root,
+                    context_name="opw",
+                )
+
+    def test_build_preview_generation_record_links_anchor_and_sequence(self) -> None:
+        generation_record = build_preview_generation_record(
+            preview_id="preview-opw-tenant-opw-pr-123",
+            sequence=2,
+            state="failed",
+            requested_reason="manifest_changed",
+            requested_at="2026-04-13T12:10:00Z",
+            resolved_manifest_fingerprint="harbor-manifest-002",
+            anchor_repo="tenant-opw",
+            anchor_pr_number=123,
+            anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
+            anchor_head_sha="aaaa1111",
+            artifact_id="artifact-opw-124",
+            deploy_status="fail",
+            verify_status="skipped",
+            overall_health_status="fail",
+            failure_stage="deploying",
+            failure_summary="Replacement generation failed during deploy.",
+        )
+
+        self.assertEqual(
+            generation_record.generation_id,
+            "preview-opw-tenant-opw-pr-123-generation-0002",
+        )
+        self.assertEqual(generation_record.anchor_summary.repo, "tenant-opw")
+        self.assertEqual(generation_record.anchor_summary.pr_number, 123)
+        self.assertEqual(generation_record.failure_stage, "deploying")
+
     def test_filesystem_store_lists_preview_records_and_generations(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)
