@@ -1607,6 +1607,23 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertTrue(payload["apply"]["applied"])
             self.assertEqual(payload["apply"]["command"], "request-generation")
+            self.assertEqual(payload["feedback"]["status"], "preview_updated")
+            self.assertEqual(
+                payload["feedback"]["canonical_url"],
+                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+            )
+            self.assertEqual(
+                payload["feedback"]["manifest_fingerprint"],
+                payload["manifest"]["resolved_manifest_fingerprint"],
+            )
+            self.assertIn(
+                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+                payload["feedback"]["comment_markdown"],
+            )
+            self.assertIn(
+                payload["manifest"]["resolved_manifest_fingerprint"],
+                payload["feedback"]["comment_markdown"],
+            )
             store = FilesystemRecordStore(state_dir=state_dir)
             preview = store.read_preview_record(payload["apply"]["result"]["preview_id"])
             generation = store.read_preview_generation_record(payload["apply"]["result"]["generation_id"])
@@ -1666,6 +1683,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertFalse(payload["apply"]["applied"])
             self.assertEqual(payload["apply"]["reason"], "manifest_resolution_required")
+            self.assertEqual(payload["feedback"]["status"], "preview_unresolved")
+            self.assertEqual(payload["feedback"]["apply_state"], "noop")
+            self.assertIn("companion pull request head SHA", payload["feedback"]["detail"])
+            self.assertIn("shared-addons#456", payload["feedback"]["comment_markdown"])
             store = FilesystemRecordStore(state_dir=state_dir)
             self.assertEqual(store.list_preview_records(), ())
 

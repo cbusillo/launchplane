@@ -21,6 +21,8 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_manifest import HarborResolvedPreviewManifest
+from control_plane.contracts.preview_request_metadata import HarborPreviewRequestParseResult
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
@@ -36,6 +38,7 @@ from control_plane.workflows.harbor import (
     apply_generation_ready_transition,
     apply_generation_requested_transition,
     apply_preview_destroyed_transition,
+    build_pull_request_feedback_payload,
     build_preview_generation_record_from_request,
     build_preview_history_payload,
     build_preview_inventory_payload,
@@ -1397,6 +1400,22 @@ def harbor_previews_ingest_pr_event(state_dir: Path, input_file: Path, apply_int
             control_plane_root=control_plane_root,
             record_store=record_store,
             payload=payload,
+        )
+        decision_payload = payload.get("decision")
+        request_metadata_payload = payload.get("request_metadata")
+        action = decision_payload.get("action", "") if isinstance(decision_payload, dict) else ""
+        payload["feedback"] = build_pull_request_feedback_payload(
+            record_store=record_store,
+            event=event,
+            action=action if isinstance(action, str) else "",
+            preview=None,
+            request_metadata=HarborPreviewRequestParseResult.model_validate(request_metadata_payload),
+            resolved_manifest=(
+                HarborResolvedPreviewManifest.model_validate(payload["manifest"])
+                if isinstance(payload.get("manifest"), dict)
+                else None
+            ),
+            apply_result=payload["apply"],
         )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
