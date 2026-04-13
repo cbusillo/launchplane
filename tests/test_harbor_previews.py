@@ -7,6 +7,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -24,8 +25,10 @@ from control_plane.workflows.harbor import (
     build_preview_label,
     build_preview_record,
     build_preview_route_path,
+    classify_pull_request_event_for_harbor,
     generate_preview_generation_id,
     generate_preview_id,
+    harbor_preview_label_enabled,
     resolve_harbor_preview_base_url,
 )
 
@@ -377,6 +380,96 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(transitioned.serving_generation_id, "")
         self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
         self.assertEqual(transitioned.destroy_reason, "merged_after_grace_window")
+
+    def test_harbor_preview_label_enabled_matches_configured_label(self) -> None:
+        self.assertTrue(harbor_preview_label_enabled(label_names=("bug", "harbor-preview")))
+        self.assertFalse(harbor_preview_label_enabled(label_names=("bug", "needs-review")))
+
+    def test_classify_pull_request_event_for_harbor_enables_preview_when_label_added(self) -> None:
+        event = GitHubPullRequestEvent(
+            action="labeled",
+            repo="tenant-opw",
+            pr_number=123,
+            pr_url="https://github.com/every/tenant-opw/pull/123",
+            state="open",
+            head_sha="aaaa1111",
+            label_names=("harbor-preview",),
+            action_label="harbor-preview",
+        )
+
+        action = classify_pull_request_event_for_harbor(event=event, preview=None)
+
+        self.assertEqual(action, "enable_preview")
+
+    def test_classify_pull_request_event_for_harbor_refreshes_enabled_preview_on_sync(self) -> None:
+        event = GitHubPullRequestEvent(
+            action="synchronize",
+            repo="tenant-opw",
+            pr_number=123,
+            pr_url="https://github.com/every/tenant-opw/pull/123",
+            state="open",
+            head_sha="bbbb2222",
+            label_names=("harbor-preview",),
+        )
+
+        action = classify_pull_request_event_for_harbor(
+            event=event,
+            preview=_preview_record(state="active"),
+        )
+
+        self.assertEqual(action, "refresh_preview")
+
+    def test_classify_pull_request_event_for_harbor_destroys_preview_on_close(self) -> None:
+        event = GitHubPullRequestEvent(
+            action="closed",
+            repo="tenant-opw",
+            pr_number=123,
+            pr_url="https://github.com/every/tenant-opw/pull/123",
+            state="closed",
+            merged=False,
+            head_sha="bbbb2222",
+            label_names=("harbor-preview",),
+        )
+
+        action = classify_pull_request_event_for_harbor(
+            event=event,
+            preview=_preview_record(state="active"),
+        )
+
+        self.assertEqual(action, "destroy_preview")
+
+    def test_classify_pull_request_event_for_harbor_reenables_destroyed_preview_on_reopen(self) -> None:
+        event = GitHubPullRequestEvent(
+            action="reopened",
+            repo="tenant-opw",
+            pr_number=123,
+            pr_url="https://github.com/every/tenant-opw/pull/123",
+            state="open",
+            head_sha="cccc3333",
+            label_names=("harbor-preview",),
+        )
+
+        action = classify_pull_request_event_for_harbor(
+            event=event,
+            preview=_preview_record(state="destroyed"),
+        )
+
+        self.assertEqual(action, "enable_preview")
+
+    def test_classify_pull_request_event_for_harbor_ignores_unlabeled_open_pr(self) -> None:
+        event = GitHubPullRequestEvent(
+            action="opened",
+            repo="tenant-opw",
+            pr_number=123,
+            pr_url="https://github.com/every/tenant-opw/pull/123",
+            state="open",
+            head_sha="cccc3333",
+            label_names=("bug",),
+        )
+
+        action = classify_pull_request_event_for_harbor(event=event, preview=None)
+
+        self.assertEqual(action, "ignore")
 
     def test_filesystem_store_lists_preview_records_and_generations(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

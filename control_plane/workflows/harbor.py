@@ -4,6 +4,7 @@ from pathlib import Path
 import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewGenerationState,
@@ -20,6 +21,8 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 
 RECENT_GENERATION_LIMIT = 3
 HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
+HARBOR_PREVIEW_ENABLE_LABEL = "harbor-preview"
+HarborPullRequestAction = str
 
 
 def find_preview_record(
@@ -38,6 +41,40 @@ def find_preview_record(
     if not records:
         return None
     return records[0]
+
+
+def harbor_preview_label_enabled(*, label_names: tuple[str, ...]) -> bool:
+    return HARBOR_PREVIEW_ENABLE_LABEL in {label_name.strip() for label_name in label_names}
+
+
+def classify_pull_request_event_for_harbor(
+    *,
+    event: GitHubPullRequestEvent,
+    preview: PreviewRecord | None,
+) -> HarborPullRequestAction:
+    preview_enabled = harbor_preview_label_enabled(label_names=event.label_names)
+    if event.action == "closed":
+        if preview is not None and preview.state != "destroyed":
+            return "destroy_preview"
+        return "ignore"
+
+    if preview is None:
+        if event.action == "labeled" and event.action_label == HARBOR_PREVIEW_ENABLE_LABEL:
+            return "enable_preview"
+        if event.action in {"opened", "reopened"} and preview_enabled:
+            return "enable_preview"
+        return "ignore"
+
+    if preview.state == "destroyed":
+        if event.action == "reopened" and preview_enabled:
+            return "enable_preview"
+        return "ignore"
+
+    if not preview_enabled:
+        return "ignore"
+    if event.action in {"synchronize", "edited", "reopened"}:
+        return "refresh_preview"
+    return "ignore"
 
 
 def build_preview_label(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:
