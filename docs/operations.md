@@ -131,6 +131,10 @@ title: Operations
   the next explicit mutation intent without requiring a webhook server yet.
   Add `--apply` to let Harbor execute the resolved mutation intent for the
   currently supported path instead of only printing the dry-run payload.
+- Harbor also accepts raw GitHub `pull_request` webhook payloads through
+  `harbor-previews ingest-github-webhook --event-name pull_request`, which
+  adapts the raw delivery into Harbor's typed PR-event contract and then reuses
+  the same classify/resolve/apply/feedback path.
 - Current Harbor anchor eligibility is tenant-repo only: `tenant-opw -> opw`
   and `tenant-cm -> cm`. `shared-addons` stays companion-only, and infra/tooling
   repos such as `devkit`, `control-plane`, and image repos are ignored.
@@ -186,6 +190,9 @@ title: Operations
   uses one hidden marker so later runs update the Harbor-owned PR comment
   instead of spamming duplicates, and it stays explicit no-op when GitHub auth
   or PR ownership context is missing.
+- `harbor-previews ingest-github-webhook` supports the same `--apply` and
+  `--deliver-feedback` flags after adaptation, so Harbor can process a raw
+  GitHub webhook delivery without a hand-authored intermediate event file.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases

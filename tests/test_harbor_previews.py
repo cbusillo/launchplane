@@ -186,6 +186,50 @@ ENV_OVERRIDE_DISABLE_CRON = true
     )
 
 
+def _github_pull_request_webhook_payload(
+    *,
+    action: str = "labeled",
+    repo: str = "tenant-opw",
+    pr_number: int = 123,
+    pr_url: str = "https://github.com/every/tenant-opw/pull/123",
+    body: str = (
+        "```harbor-preview\n"
+        "schema_version = 1\n"
+        'baseline_channel = "testing"\n'
+        "```\n"
+    ),
+    state: str = "open",
+    merged: bool = False,
+    head_sha: str = "aaaa1111",
+    labels: list[dict[str, str]] | None = None,
+    action_label: str = "harbor-preview",
+    created_at: str = "2026-04-13T12:00:00Z",
+    updated_at: str = "2026-04-13T12:15:00Z",
+    closed_at: str = "2026-04-13T12:17:00Z",
+) -> dict[str, object]:
+    resolved_labels = labels if labels is not None else [{"name": "harbor-preview"}]
+    payload: dict[str, object] = {
+        "action": action,
+        "number": pr_number,
+        "repository": {"name": repo},
+        "pull_request": {
+            "html_url": pr_url,
+            "body": body,
+            "state": state,
+            "merged": merged,
+            "head": {"sha": head_sha},
+            "labels": resolved_labels,
+            "created_at": created_at,
+            "updated_at": updated_at,
+            "closed_at": closed_at,
+            "merged_at": closed_at if merged else None,
+        },
+    }
+    if action in {"labeled", "unlabeled"}:
+        payload["label"] = {"name": action_label}
+    return payload
+
+
 class HarborPreviewReadModelTests(unittest.TestCase):
     def test_harbor_preview_identity_helpers_are_deterministic(self) -> None:
         self.assertEqual(
@@ -1950,6 +1994,133 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertFalse(payload["feedback_delivery"]["delivered"])
             self.assertEqual(payload["feedback_delivery"]["reason"], "github_token_missing")
+
+    def test_harbor_previews_ingest_github_webhook_adapts_pull_request_event_and_reuses_apply_flow(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "github-webhook.json"
+            input_file.write_text(
+                json.dumps(_github_pull_request_webhook_payload()),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["webhook"]["event_name"], "pull_request")
+            self.assertEqual(payload["decision"]["action"], "enable_preview")
+            self.assertTrue(payload["apply"]["applied"])
+            self.assertEqual(payload["feedback"]["status"], "preview_updated")
+            self.assertEqual(payload["event"]["action_label"], "harbor-preview")
+            self.assertEqual(payload["event"]["occurred_at"], "2026-04-13T12:15:00Z")
+
+    def test_harbor_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
+            input_file = control_plane_root / "github-webhook.json"
+            input_file.write_text(
+                json.dumps(
+                    _github_pull_request_webhook_payload(
+                        action="closed",
+                        state="closed",
+                        merged=True,
+                        labels=[{"name": "harbor-preview"}],
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "destroy_preview")
+            self.assertEqual(
+                payload["mutation"]["destroy_request"]["destroyed_at"],
+                "2026-04-13T12:17:00Z",
+            )
+            self.assertEqual(
+                payload["mutation"]["destroy_request"]["destroy_reason"],
+                "pull_request_merged",
+            )
+
+    def test_harbor_previews_ingest_github_webhook_fails_closed_for_unsupported_event_name(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            input_file = Path(temporary_directory_name) / "github-webhook.json"
+            input_file.write_text(
+                json.dumps(_github_pull_request_webhook_payload()),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-github-webhook",
+                    "--input-file",
+                    str(input_file),
+                    "--event-name",
+                    "issues",
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("event_name='pull_request'", result.output)
+
+    def test_harbor_previews_ingest_github_webhook_fails_closed_for_malformed_payload(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            input_file = Path(temporary_directory_name) / "github-webhook.json"
+            malformed_payload = _github_pull_request_webhook_payload()
+            malformed_payload["repository"] = {}
+            input_file.write_text(json.dumps(malformed_payload), encoding="utf-8")
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-github-webhook",
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("requires string field 'name'", result.output)
 
     def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
         runner = CliRunner()

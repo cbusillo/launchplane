@@ -34,6 +34,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
+    adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
     apply_generation_ready_transition,
     apply_generation_requested_transition,
@@ -1392,6 +1393,54 @@ def harbor_previews_ingest_pr_event(
     state_dir: Path, input_file: Path, apply_intent: bool, deliver_feedback: bool
 ) -> None:
     event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
+    payload = _ingest_harbor_pr_event_payload(
+        state_dir=state_dir,
+        event=event,
+        apply_intent=apply_intent,
+        deliver_feedback=deliver_feedback,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@harbor_previews.command("ingest-github-webhook")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--event-name", default="pull_request", show_default=True)
+@click.option("--apply", "apply_intent", is_flag=True)
+@click.option("--deliver-feedback", is_flag=True)
+def harbor_previews_ingest_github_webhook(
+    state_dir: Path,
+    input_file: Path,
+    event_name: str,
+    apply_intent: bool,
+    deliver_feedback: bool,
+) -> None:
+    event = adapt_github_webhook_pull_request_event(
+        event_name=event_name,
+        webhook_payload=_load_json_file(input_file),
+    )
+    payload = _ingest_harbor_pr_event_payload(
+        state_dir=state_dir,
+        event=event,
+        apply_intent=apply_intent,
+        deliver_feedback=deliver_feedback,
+    )
+    payload["webhook"] = {
+        "event_name": event_name,
+        "adapter": "github_pull_request",
+    }
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _ingest_harbor_pr_event_payload(
+    *,
+    state_dir: Path,
+    event: GitHubPullRequestEvent,
+    apply_intent: bool,
+    deliver_feedback: bool,
+) -> dict[str, object]:
     control_plane_root = _control_plane_root()
     record_store = _store(state_dir)
     payload = build_pull_request_event_action_payload(
@@ -1436,7 +1485,7 @@ def harbor_previews_ingest_pr_event(
             resolved_context=resolved_context if isinstance(resolved_context, str) else "",
             feedback_payload=feedback_payload,
         )
-    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    return payload
 
 
 @harbor_previews.command("list")
