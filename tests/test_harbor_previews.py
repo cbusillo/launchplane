@@ -1,3 +1,5 @@
+import hashlib
+import hmac
 import json
 import unittest
 from pathlib import Path
@@ -174,6 +176,7 @@ schema_version = 1
 
 [shared_env]
 HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+GITHUB_WEBHOOK_SECRET = "harbor-webhook-secret"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
@@ -228,6 +231,12 @@ def _github_pull_request_webhook_payload(
     if action in {"labeled", "unlabeled"}:
         payload["label"] = {"name": action_label}
     return payload
+
+
+def _github_webhook_signature(payload: dict[str, object], secret: str = "harbor-webhook-secret") -> str:
+    payload_bytes = json.dumps(payload).encode("utf-8")
+    digest = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
+    return f"sha256={digest}"
 
 
 class HarborPreviewReadModelTests(unittest.TestCase):
@@ -1441,6 +1450,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
@@ -1739,6 +1749,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
@@ -2003,10 +2014,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
             input_file = control_plane_root / "github-webhook.json"
-            input_file.write_text(
-                json.dumps(_github_pull_request_webhook_payload()),
-                encoding="utf-8",
-            )
+            webhook_payload = _github_pull_request_webhook_payload()
+            input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
@@ -2018,6 +2027,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(state_dir),
                         "--input-file",
                         str(input_file),
+                        "--signature-256",
+                        _github_webhook_signature(webhook_payload),
                         "--apply",
                     ],
                 )
@@ -2036,21 +2047,18 @@ ENV_OVERRIDE_DISABLE_CRON = true
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
             input_file = control_plane_root / "github-webhook.json"
-            input_file.write_text(
-                json.dumps(
-                    _github_pull_request_webhook_payload(
-                        action="closed",
-                        state="closed",
-                        merged=True,
-                        labels=[{"name": "harbor-preview"}],
-                    )
-                ),
-                encoding="utf-8",
+            webhook_payload = _github_pull_request_webhook_payload(
+                action="closed",
+                state="closed",
+                merged=True,
+                labels=[{"name": "harbor-preview"}],
             )
+            input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 result = runner.invoke(
@@ -2062,6 +2070,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(state_dir),
                         "--input-file",
                         str(input_file),
+                        "--signature-256",
+                        _github_webhook_signature(webhook_payload),
                     ],
                 )
 
@@ -2095,6 +2105,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     str(input_file),
                     "--event-name",
                     "issues",
+                    "--allow-unsigned",
                 ],
             )
 
@@ -2116,11 +2127,68 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     "ingest-github-webhook",
                     "--input-file",
                     str(input_file),
+                    "--allow-unsigned",
                 ],
             )
 
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("requires string field 'name'", result.output)
+
+    def test_harbor_previews_ingest_github_webhook_rejects_invalid_signature(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            input_file = control_plane_root / "github-webhook.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-github-webhook",
+                        "--input-file",
+                        str(input_file),
+                        "--signature-256",
+                        "sha256=deadbeef",
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("signature verification failed", result.output)
+
+    def test_harbor_previews_ingest_github_webhook_allows_explicit_unsigned_bypass(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "github-webhook.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "ingest-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--allow-unsigned",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["webhook"]["signature_verification"]["mode"], "bypass")
+            self.assertFalse(payload["webhook"]["signature_verification"]["verified"])
 
     def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
         runner = CliRunner()

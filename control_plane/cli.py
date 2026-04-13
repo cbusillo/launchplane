@@ -1,6 +1,7 @@
 import json
 import subprocess
 import time
+from json import JSONDecodeError
 from pathlib import Path
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -48,6 +49,9 @@ from control_plane.workflows.harbor import (
     build_preview_status_payload,
     deliver_pull_request_feedback,
     find_preview_record,
+    harbor_anchor_repo_context,
+    resolve_harbor_github_webhook_secret,
+    verify_github_webhook_signature,
 )
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.promote import (
@@ -1408,18 +1412,39 @@ def harbor_previews_ingest_pr_event(
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--event-name", default="pull_request", show_default=True)
+@click.option("--signature-256", default="", help="Raw X-Hub-Signature-256 header value.")
+@click.option("--allow-unsigned", is_flag=True, help="Explicit local/manual bypass for signature verification.")
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
 def harbor_previews_ingest_github_webhook(
     state_dir: Path,
     input_file: Path,
     event_name: str,
+    signature_256: str,
+    allow_unsigned: bool,
     apply_intent: bool,
     deliver_feedback: bool,
 ) -> None:
+    raw_payload_bytes = input_file.read_bytes()
+    try:
+        webhook_payload = json.loads(raw_payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError) as exc:
+        raise click.ClickException(f"GitHub webhook input file must be valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(webhook_payload, dict):
+        raise click.ClickException("GitHub webhook input file must decode to a JSON object.")
+
+    control_plane_root = _control_plane_root()
+    signature_verification = _verify_harbor_github_webhook_signature(
+        control_plane_root=control_plane_root,
+        event_name=event_name,
+        webhook_payload=webhook_payload,
+        raw_payload_bytes=raw_payload_bytes,
+        signature_256=signature_256,
+        allow_unsigned=allow_unsigned,
+    )
     event = adapt_github_webhook_pull_request_event(
         event_name=event_name,
-        webhook_payload=_load_json_file(input_file),
+        webhook_payload=webhook_payload,
     )
     payload = _ingest_harbor_pr_event_payload(
         state_dir=state_dir,
@@ -1430,6 +1455,7 @@ def harbor_previews_ingest_github_webhook(
     payload["webhook"] = {
         "event_name": event_name,
         "adapter": "github_pull_request",
+        "signature_verification": signature_verification,
     }
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -1486,6 +1512,62 @@ def _ingest_harbor_pr_event_payload(
             feedback_payload=feedback_payload,
         )
     return payload
+
+
+def _verify_harbor_github_webhook_signature(
+    *,
+    control_plane_root: Path,
+    event_name: str,
+    webhook_payload: dict[str, object],
+    raw_payload_bytes: bytes,
+    signature_256: str,
+    allow_unsigned: bool,
+) -> dict[str, object]:
+    if allow_unsigned:
+        return {
+            "mode": "bypass",
+            "verified": False,
+            "reason": "allow_unsigned",
+        }
+
+    context_name = _resolve_harbor_github_webhook_context(
+        event_name=event_name,
+        webhook_payload=webhook_payload,
+    )
+    if not context_name:
+        raise click.ClickException(
+            "GitHub webhook signature verification could not resolve a Harbor context from the raw payload."
+        )
+    secret = resolve_harbor_github_webhook_secret(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+    )
+    if not secret:
+        raise click.ClickException(
+            f"Runtime environments file is missing GITHUB_WEBHOOK_SECRET for Harbor context {context_name!r}."
+        )
+    verify_github_webhook_signature(
+        payload_bytes=raw_payload_bytes,
+        signature_header=signature_256,
+        secret=secret,
+    )
+    return {
+        "mode": "verified",
+        "verified": True,
+        "context": context_name,
+    }
+
+
+def _resolve_harbor_github_webhook_context(*, event_name: str, webhook_payload: dict[str, object]) -> str:
+    if event_name.strip() != "pull_request":
+        return ""
+    repository_payload = webhook_payload.get("repository")
+    if not isinstance(repository_payload, dict):
+        return ""
+    repo_name = repository_payload.get("name")
+    if not isinstance(repo_name, str) or not repo_name.strip():
+        return ""
+    return harbor_anchor_repo_context(repo=repo_name)
 
 
 @harbor_previews.command("list")

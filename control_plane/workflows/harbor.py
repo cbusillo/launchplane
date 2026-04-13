@@ -1,4 +1,5 @@
 import hashlib
+import hmac
 import json
 import re
 import tomllib
@@ -41,6 +42,7 @@ RECENT_GENERATION_LIMIT = 3
 HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
 HARBOR_PREVIEW_ENABLE_LABEL = "harbor-preview"
 HARBOR_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
+HARBOR_GITHUB_WEBHOOK_SECRET_ENV_KEY = "GITHUB_WEBHOOK_SECRET"
 DEFAULT_HARBOR_BASELINE_CHANNEL = "testing"
 HarborPullRequestAction = str
 HARBOR_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
@@ -227,6 +229,40 @@ def adapt_github_webhook_pull_request_event(
         return GitHubPullRequestEvent.model_validate(adapted_payload)
     except ValidationError as exc:
         raise click.ClickException(f"Invalid adapted GitHub pull request event: {exc}") from exc
+
+
+def resolve_harbor_github_webhook_secret(*, control_plane_root: Path, context_name: str) -> str:
+    try:
+        context_values = control_plane_runtime_environments.resolve_runtime_context_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+        )
+    except click.ClickException:
+        return ""
+    return context_values.get(HARBOR_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
+
+
+def verify_github_webhook_signature(*, payload_bytes: bytes, signature_header: str, secret: str) -> None:
+    normalized_signature = signature_header.strip()
+    if not normalized_signature:
+        raise click.ClickException("GitHub webhook signature header is required.")
+    if not normalized_signature.startswith("sha256="):
+        raise click.ClickException(
+            "GitHub webhook signature must use the X-Hub-Signature-256 format 'sha256=<hex>'."
+        )
+    signature_value = normalized_signature.split("=", 1)[1].strip()
+    if not signature_value:
+        raise click.ClickException("GitHub webhook signature is missing the sha256 digest value.")
+    if not secret.strip():
+        raise click.ClickException("GitHub webhook verification requires a configured shared secret.")
+
+    expected_signature = hmac.new(
+        secret.encode("utf-8"),
+        payload_bytes,
+        hashlib.sha256,
+    ).hexdigest()
+    if not hmac.compare_digest(signature_value, expected_signature):
+        raise click.ClickException("GitHub webhook signature verification failed.")
 
 
 def build_pull_request_feedback_payload(
