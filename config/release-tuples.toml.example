@@ -1,0 +1,29 @@
+schema_version = 1
+
+[contexts.opw.channels.testing]
+tuple_id = "opw-testing-2026-04-13"
+
+[contexts.opw.channels.testing.repo_shas]
+tenant-opw = "1111111111111111111111111111111111111111"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[contexts.opw.channels.prod]
+tuple_id = "opw-prod-2026-04-13"
+
+[contexts.opw.channels.prod.repo_shas]
+tenant-opw = "2222222222222222222222222222222222222222"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[contexts.cm.channels.testing]
+tuple_id = "cm-testing-2026-04-13"
+
+[contexts.cm.channels.testing.repo_shas]
+tenant-cm = "3333333333333333333333333333333333333333"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
+[contexts.cm.channels.prod]
+tuple_id = "cm-prod-2026-04-13"
+
+[contexts.cm.channels.prod.repo_shas]
+tenant-cm = "4444444444444444444444444444444444444444"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
