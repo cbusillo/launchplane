@@ -15,6 +15,10 @@ from control_plane.contracts.preview_generation_record import (
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
+    apply_generation_failed_transition,
+    apply_generation_ready_transition,
+    apply_generation_requested_transition,
+    apply_preview_destroyed_transition,
     build_preview_canonical_url,
     build_preview_generation_record,
     build_preview_label,
@@ -276,6 +280,103 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(generation_record.anchor_summary.repo, "tenant-opw")
         self.assertEqual(generation_record.anchor_summary.pr_number, 123)
         self.assertEqual(generation_record.failure_stage, "deploying")
+
+    def test_apply_generation_requested_transition_keeps_existing_serving_generation(self) -> None:
+        preview = _preview_record(
+            state="active",
+            active_generation_id="hgen_01jabc_1",
+            serving_generation_id="hgen_01jabc_1",
+            latest_generation_id="hgen_01jabc_1",
+        )
+        generation = _generation_record(
+            "hgen_01jabc_2",
+            sequence=2,
+            state="building",
+            manifest_fingerprint="harbor-manifest-002",
+            artifact_id="artifact-opw-124",
+            ready_at="",
+        )
+
+        transitioned = apply_generation_requested_transition(
+            preview=preview,
+            generation=generation,
+        )
+
+        self.assertEqual(transitioned.state, "active")
+        self.assertEqual(transitioned.active_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.serving_generation_id, "hgen_01jabc_1")
+
+    def test_apply_generation_ready_transition_cuts_over_serving_generation(self) -> None:
+        preview = _preview_record(
+            state="active",
+            active_generation_id="hgen_01jabc_2",
+            serving_generation_id="hgen_01jabc_1",
+            latest_generation_id="hgen_01jabc_2",
+        )
+        generation = _generation_record(
+            "hgen_01jabc_2",
+            sequence=2,
+            state="ready",
+            manifest_fingerprint="harbor-manifest-002",
+            artifact_id="artifact-opw-124",
+        )
+
+        transitioned = apply_generation_ready_transition(
+            preview=preview,
+            generation=generation,
+        )
+
+        self.assertEqual(transitioned.state, "active")
+        self.assertEqual(transitioned.active_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.serving_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
+
+    def test_apply_generation_failed_transition_keeps_older_serving_generation(self) -> None:
+        preview = _preview_record(
+            state="active",
+            active_generation_id="hgen_01jabc_2",
+            serving_generation_id="hgen_01jabc_1",
+            latest_generation_id="hgen_01jabc_2",
+        )
+        generation = _generation_record(
+            "hgen_01jabc_2",
+            sequence=2,
+            state="failed",
+            manifest_fingerprint="harbor-manifest-002",
+            artifact_id="artifact-opw-124",
+            failed_at="2026-04-13T12:16:00Z",
+        )
+
+        transitioned = apply_generation_failed_transition(
+            preview=preview,
+            generation=generation,
+        )
+
+        self.assertEqual(transitioned.state, "failed")
+        self.assertEqual(transitioned.active_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.serving_generation_id, "hgen_01jabc_1")
+
+    def test_apply_preview_destroyed_transition_clears_runtime_links_and_keeps_evidence(self) -> None:
+        preview = _preview_record(
+            state="teardown_pending",
+            active_generation_id="hgen_01jabc_2",
+            serving_generation_id="hgen_01jabc_1",
+            latest_generation_id="hgen_01jabc_2",
+        )
+
+        transitioned = apply_preview_destroyed_transition(
+            preview=preview,
+            destroyed_at="2026-04-14T12:14:00Z",
+            destroy_reason="merged_after_grace_window",
+        )
+
+        self.assertEqual(transitioned.state, "destroyed")
+        self.assertEqual(transitioned.active_generation_id, "")
+        self.assertEqual(transitioned.serving_generation_id, "")
+        self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
+        self.assertEqual(transitioned.destroy_reason, "merged_after_grace_window")
 
     def test_filesystem_store_lists_preview_records_and_generations(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
