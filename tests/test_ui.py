@@ -556,6 +556,51 @@ ODOO_DB_PASSWORD = "testing-secret"
             self.assertIn("../contracts/opw-testing-contract.html", status_html)
             self.assertIn("../environments/opw-testing-status.html", contract_html)
 
+    def test_ui_build_site_generates_placeholder_status_when_inventory_missing(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            state_dir.mkdir(parents=True, exist_ok=True)
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_DB_USER = "odoo"
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            output_dir = control_plane_root / "tmp" / "operator-ui"
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ui",
+                        "build-site",
+                        "--context",
+                        "opw",
+                        "--output-dir",
+                        str(output_dir),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
+            status_html = (output_dir / "environments" / "opw-local-status.html").read_text(encoding="utf-8")
+
+            self.assertIn("No live inventory record yet", index_html)
+            self.assertIn("environments/opw-local-status.html", index_html)
+            self.assertIn("No live inventory record yet", status_html)
+            self.assertIn("../contracts/opw-local-contract.html", status_html)
+
 
 if __name__ == "__main__":
     unittest.main()

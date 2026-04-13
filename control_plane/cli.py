@@ -1446,18 +1446,41 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
                 context_name=payload_context,
                 instance_name=payload_instance,
             )
+            status_file_name = _site_environment_status_file_name(
+                context_name=payload_context,
+                instance_name=payload_instance,
+            )
             contract_file_name = _site_environment_contract_file_name(
                 context_name=payload_context,
                 instance_name=payload_instance,
             )
+            status_output_file = environments_dir / status_file_name
             contract_output_file = contracts_dir / contract_file_name
+            if not status_output_file.exists():
+                status_output_file.write_text(
+                    render_environment_status_dashboard(
+                        {
+                            "context": payload_context,
+                            "instance": payload_instance,
+                            "live": {},
+                            "live_promotion": {},
+                            "authorized_backup_gate": {},
+                            "latest_promotion": {},
+                            "latest_deployment": {},
+                            "home_page_href": "../index.html",
+                            "inventory_overview_href": "../inventory-overview.html",
+                            "contract_page_href": f"../contracts/{contract_file_name}",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
             contract_output_file.write_text(
                 render_environment_contract_dashboard(
                     {
                         **contract_payload,
                         "home_page_href": "../index.html",
                         "inventory_overview_href": "../inventory-overview.html",
-                        "status_page_href": f"../environments/{_site_environment_status_file_name(context_name=payload_context, instance_name=payload_instance)}",
+                        "status_page_href": f"../environments/{status_file_name}",
                     }
                 ),
                 encoding="utf-8",
@@ -1475,7 +1498,7 @@ def ui_build_site(state_dir: Path, context_name: str, output_dir: Path) -> None:
                     "context": payload_context,
                     "instance": payload_instance,
                     "summary": "No live inventory record yet. Use the contract page to inspect environment truth first.",
-                    "status_href": "",
+                    "status_href": f"environments/{status_file_name}",
                     "contract_href": f"contracts/{contract_file_name}",
                 },
             )
