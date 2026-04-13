@@ -142,6 +142,105 @@ def build_preview_status_payload(
     }
 
 
+def build_preview_inventory_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str = "",
+) -> dict[str, object]:
+    previews = record_store.list_preview_records(context_name=context_name)
+    preview_rows = []
+    for preview in previews:
+        generations = record_store.list_preview_generation_records(preview_id=preview.preview_id)
+        generations_by_id = {record.generation_id: record for record in generations}
+        serving_generation = generations_by_id.get(preview.serving_generation_id)
+        latest_generation = generations_by_id.get(preview.latest_generation_id)
+        input_generation = serving_generation or latest_generation
+        evidence_generation = serving_generation or latest_generation
+        preview_rows.append(
+            {
+                "preview_id": preview.preview_id,
+                "context": preview.context,
+                "anchor_repo": preview.anchor_repo,
+                "anchor_pr_number": preview.anchor_pr_number,
+                "preview_label": preview.preview_label,
+                "canonical_url": preview.canonical_url,
+                "state": preview.state,
+                "updated_at": preview.updated_at,
+                "destroy_after": preview.destroy_after,
+                "destroyed_at": preview.destroyed_at,
+                "destroy_reason": preview.destroy_reason,
+                "serving_generation_id": preview.serving_generation_id,
+                "latest_generation_id": preview.latest_generation_id,
+                "artifact_id": evidence_generation.artifact_id if evidence_generation is not None else "",
+                "manifest_fingerprint": (
+                    input_generation.resolved_manifest_fingerprint if input_generation is not None else ""
+                ),
+                "overall_health_status": (
+                    evidence_generation.overall_health_status if evidence_generation is not None else "pending"
+                ),
+                "status_summary": _status_summary(
+                    preview=preview,
+                    serving_generation=serving_generation,
+                    latest_generation=latest_generation,
+                ),
+                "next_action": _next_action(
+                    preview=preview,
+                    serving_generation=serving_generation,
+                    latest_generation=latest_generation,
+                ),
+            }
+        )
+    return {
+        "context": context_name,
+        "count": len(preview_rows),
+        "previews": preview_rows,
+    }
+
+
+def build_preview_history_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> dict[str, object] | None:
+    preview = find_preview_record(
+        record_store=record_store,
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    if preview is None:
+        return None
+
+    generations = record_store.list_preview_generation_records(preview_id=preview.preview_id)
+    return {
+        "preview": {
+            "preview_id": preview.preview_id,
+            "context": preview.context,
+            "anchor_repo": preview.anchor_repo,
+            "anchor_pr_number": preview.anchor_pr_number,
+            "preview_label": preview.preview_label,
+            "canonical_url": preview.canonical_url,
+            "state": preview.state,
+            "updated_at": preview.updated_at,
+            "serving_generation_id": preview.serving_generation_id,
+            "latest_generation_id": preview.latest_generation_id,
+            "active_generation_id": preview.active_generation_id,
+        },
+        "generation_count": len(generations),
+        "generations": [
+            {
+                **_generation_payload_required(record),
+                "is_active": record.generation_id == preview.active_generation_id,
+                "is_serving": record.generation_id == preview.serving_generation_id,
+                "is_latest": record.generation_id == preview.latest_generation_id,
+            }
+            for record in generations
+        ],
+    }
+
+
 def _generation_payload(record: PreviewGenerationRecord | None) -> dict[str, object] | None:
     if record is None:
         return None
@@ -181,6 +280,10 @@ def _generation_brief(record: PreviewGenerationRecord) -> dict[str, object]:
         "failed_at": record.failed_at,
         "failure_stage": record.failure_stage,
     }
+
+
+def _generation_payload_required(record: PreviewGenerationRecord) -> dict[str, object]:
+    return _generation_payload(record) or {}
 
 
 def _status_summary(

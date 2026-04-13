@@ -17,27 +17,37 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 
 def _preview_record(
     *,
+    preview_id: str = "hpr_01jabc",
+    context: str = "opw",
+    anchor_repo: str = "tenant-opw",
+    anchor_pr_number: int = 123,
+    anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
+    preview_label: str = "opw/tenant-opw/pr-123",
+    canonical_url: str = "https://harbor.example/previews/opw/tenant-opw/pr-123",
     state: str = "active",
     active_generation_id: str = "hgen_01jabc_1",
     serving_generation_id: str = "hgen_01jabc_1",
     latest_generation_id: str = "hgen_01jabc_1",
     latest_manifest_fingerprint: str = "harbor-manifest-001",
+    created_at: str = "2026-04-13T12:00:00Z",
+    updated_at: str = "2026-04-13T12:14:00Z",
+    eligible_at: str = "2026-04-13T12:00:00Z",
     destroy_after: str = "2026-04-20T12:14:00Z",
     destroyed_at: str = "",
     destroy_reason: str = "",
 ) -> PreviewRecord:
     return PreviewRecord(
-        preview_id="hpr_01jabc",
-        context="opw",
-        anchor_repo="tenant-opw",
-        anchor_pr_number=123,
-        anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
-        preview_label="opw/tenant-opw/pr-123",
-        canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-123",
+        preview_id=preview_id,
+        context=context,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=anchor_pr_url,
+        preview_label=preview_label,
+        canonical_url=canonical_url,
         state=state,
-        created_at="2026-04-13T12:00:00Z",
-        updated_at="2026-04-13T12:14:00Z",
-        eligible_at="2026-04-13T12:00:00Z",
+        created_at=created_at,
+        updated_at=updated_at,
+        eligible_at=eligible_at,
         destroy_after=destroy_after,
         destroyed_at=destroyed_at,
         destroy_reason=destroy_reason,
@@ -51,6 +61,11 @@ def _preview_record(
 def _generation_record(
     generation_id: str,
     *,
+    preview_id: str = "hpr_01jabc",
+    anchor_repo: str = "tenant-opw",
+    anchor_pr_number: int = 123,
+    anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
+    anchor_head_sha: str = "aaaa1111",
     sequence: int,
     state: str,
     manifest_fingerprint: str,
@@ -65,7 +80,7 @@ def _generation_record(
 ) -> PreviewGenerationRecord:
     return PreviewGenerationRecord(
         generation_id=generation_id,
-        preview_id="hpr_01jabc",
+        preview_id=preview_id,
         sequence=sequence,
         state=state,
         requested_reason="manifest_changed" if sequence > 1 else "initial_create",
@@ -78,14 +93,14 @@ def _generation_record(
         artifact_id=artifact_id,
         baseline_release_tuple_id="opw-testing-2026-04-13",
         source_map=(
-            PreviewSourceRecord(repo="tenant-opw", git_sha="aaaa1111", selection="anchor"),
+            PreviewSourceRecord(repo=anchor_repo, git_sha=anchor_head_sha, selection="anchor"),
             PreviewSourceRecord(repo="shared-addons", git_sha="bbbb2222", selection="companion"),
         ),
         anchor_summary=PreviewPullRequestSummary(
-            repo="tenant-opw",
-            pr_number=123,
-            head_sha="aaaa1111",
-            pr_url="https://github.com/every/tenant-opw/pull/123",
+            repo=anchor_repo,
+            pr_number=anchor_pr_number,
+            head_sha=anchor_head_sha,
+            pr_url=anchor_pr_url,
         ),
         companion_summaries=(
             PreviewPullRequestSummary(
@@ -300,6 +315,176 @@ class HarborPreviewReadModelTests(unittest.TestCase):
                 "merged_after_grace_window",
             )
             self.assertIn("destroyed", payload["health_summary"]["status_summary"].lower())
+
+    def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jabc",
+                    updated_at="2026-04-13T12:14:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    preview_id="hpr_01jabc",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jxyz",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    preview_label="opw/tenant-opw/pr-124",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    state="destroyed",
+                    active_generation_id="",
+                    serving_generation_id="",
+                    latest_generation_id="hgen_01jxyz_1",
+                    latest_manifest_fingerprint="harbor-manifest-099",
+                    updated_at="2026-04-13T12:18:00Z",
+                    destroyed_at="2026-04-13T12:18:00Z",
+                    destroy_reason="closed_without_merge",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jxyz_1",
+                    preview_id="hpr_01jxyz",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-099",
+                    artifact_id="artifact-opw-124",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_01jcm",
+                    context="cm",
+                    anchor_repo="tenant-cm",
+                    anchor_pr_number=10,
+                    anchor_pr_url="https://github.com/every/tenant-cm/pull/10",
+                    preview_label="cm/tenant-cm/pr-10",
+                    canonical_url="https://harbor.example/previews/cm/tenant-cm/pr-10",
+                    updated_at="2026-04-13T12:19:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jcm_1",
+                    preview_id="hpr_01jcm",
+                    anchor_repo="tenant-cm",
+                    anchor_pr_number=10,
+                    anchor_pr_url="https://github.com/every/tenant-cm/pull/10",
+                    anchor_head_sha="cccc3333",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-cm-001",
+                    artifact_id="artifact-cm-010",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "list",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["count"], 2)
+            self.assertEqual(
+                [row["preview_id"] for row in payload["previews"]],
+                ["hpr_01jxyz", "hpr_01jabc"],
+            )
+            self.assertEqual(payload["previews"][0]["state"], "destroyed")
+            self.assertEqual(payload["previews"][0]["artifact_id"], "artifact-opw-124")
+            self.assertIn("destroyed", payload["previews"][0]["status_summary"].lower())
+
+    def test_harbor_previews_history_marks_latest_and_serving_generations(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    state="failed",
+                    active_generation_id="hgen_01jabc_2",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_2",
+                    latest_manifest_fingerprint="harbor-manifest-002",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_2",
+                    sequence=2,
+                    state="failed",
+                    manifest_fingerprint="harbor-manifest-002",
+                    artifact_id="artifact-opw-124",
+                    deploy_status="fail",
+                    verify_status="skipped",
+                    overall_health_status="fail",
+                    failure_stage="deploying",
+                    failure_summary="Replacement generation failed during deploy.",
+                    ready_at="",
+                    failed_at="2026-04-13T12:15:00Z",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "history",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["generation_count"], 2)
+            self.assertEqual(
+                [item["generation_id"] for item in payload["generations"]],
+                ["hgen_01jabc_2", "hgen_01jabc_1"],
+            )
+            self.assertTrue(payload["generations"][0]["is_latest"])
+            self.assertTrue(payload["generations"][0]["is_active"])
+            self.assertFalse(payload["generations"][0]["is_serving"])
+            self.assertFalse(payload["generations"][1]["is_latest"])
+            self.assertFalse(payload["generations"][1]["is_active"])
+            self.assertTrue(payload["generations"][1]["is_serving"])
 
 
 if __name__ == "__main__":
