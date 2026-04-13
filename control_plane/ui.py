@@ -268,6 +268,591 @@ def _render_evidence_pairs(evidence: object) -> str:
     )
 
 
+def _is_sensitive_environment_key(key_name: str) -> bool:
+    normalized_key = key_name.upper()
+    if normalized_key in {"GITHUB_TOKEN", "ODOO_KEY"}:
+        return True
+    for fragment in (
+        "PASSWORD",
+        "TOKEN",
+        "SECRET",
+        "WEBHOOK_KEY",
+        "MASTER_PASSWORD",
+        "PRIVATE_KEY",
+        "ACCESS_KEY",
+        "AUTH_KEY",
+    ):
+        if fragment in normalized_key:
+            return True
+    return False
+
+
+def _redact_environment_value(key_name: str, value: str) -> tuple[str, bool]:
+    if value == "":
+        return "(empty)", False
+    if not _is_sensitive_environment_key(key_name):
+        return value, False
+    if len(value) <= 4:
+        return "[redacted]", True
+    return f"[redacted ending {value[-4:]}]", True
+
+
+def _render_environment_row(row: Mapping[str, object], *, row_class: str) -> str:
+    key_name = _string_value(row.get("key"))
+    source = _string_value(row.get("source"))
+    overrides = row.get("overrides", ())
+    if not isinstance(overrides, Sequence):
+        overrides = ()
+    display_value, was_redacted = _redact_environment_value(key_name, _string_value(row.get("value")))
+    override_note = ""
+    if overrides:
+        prior_sources = ", ".join(_string_value(item) for item in overrides if _string_value(item))
+        if prior_sources:
+            override_note = f'<span class="source-note">Overrides {escape(prior_sources)}</span>'
+    sensitivity_badge = (
+        '<span class="value-badge value-badge-sensitive">redacted</span>' if was_redacted else ""
+    )
+    return "".join(
+        (
+            f'<tr class="{escape(row_class)}">',
+            f'<td class="env-key">{escape(key_name)}</td>',
+            '<td class="env-value-cell">',
+            f'<code class="env-value">{escape(display_value)}</code>',
+            sensitivity_badge,
+            '</td>',
+            '<td class="env-source-cell">',
+            f'<span class="source-badge source-{escape(source)}">{escape(source)}</span>',
+            override_note,
+            '</td>',
+            '</tr>',
+        )
+    )
+
+
+def _render_environment_rows(rows: Sequence[Mapping[str, object]], *, row_class: str) -> str:
+    if not rows:
+        return (
+            '<div class="empty-state compact-empty">'
+            '<h3>No values in this layer</h3>'
+            '<p>This section does not contribute any environment keys.</p>'
+            '</div>'
+        )
+    table_rows = "".join(_render_environment_row(row, row_class=row_class) for row in rows)
+    return "".join(
+        (
+            '<div class="table-shell">',
+            '<table class="env-table">',
+            '<thead><tr><th>Key</th><th>Value</th><th>Source</th></tr></thead>',
+            f'<tbody>{table_rows}</tbody>',
+            '</table>',
+            '</div>',
+        )
+    )
+
+
+def render_environment_contract_dashboard(payload: Mapping[str, object]) -> str:
+    context_name = _string_value(payload.get("context"))
+    instance_name = _string_value(payload.get("instance"))
+    source_file = _string_value(payload.get("source_file"))
+    generated_at = datetime.now(tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+
+    available_contexts = payload.get("available_contexts", ())
+    if not isinstance(available_contexts, Sequence):
+        available_contexts = ()
+    available_instances = payload.get("available_instances", ())
+    if not isinstance(available_instances, Sequence):
+        available_instances = ()
+
+    layer_summaries = payload.get("layer_summaries", ())
+    if not isinstance(layer_summaries, Sequence):
+        layer_summaries = ()
+
+    resolved_rows = payload.get("resolved_rows", ())
+    if not isinstance(resolved_rows, Sequence):
+        resolved_rows = ()
+    global_rows = payload.get("global_rows", ())
+    if not isinstance(global_rows, Sequence):
+        global_rows = ()
+    context_rows = payload.get("context_rows", ())
+    if not isinstance(context_rows, Sequence):
+        context_rows = ()
+    instance_rows = payload.get("instance_rows", ())
+    if not isinstance(instance_rows, Sequence):
+        instance_rows = ()
+
+    layer_summary_markup = "".join(
+        "".join(
+            (
+                '<article class="summary-tile">',
+                f'<span class="eyebrow">{escape(_string_value(layer.get("label")))}</span>',
+                f'<span class="summary-value">{escape(_string_value(layer.get("count")))}</span>',
+                f'<p class="tile-note">{escape(_string_value(layer.get("note")))}</p>',
+                '</article>',
+            )
+        )
+        for layer in layer_summaries
+        if isinstance(layer, Mapping)
+    )
+
+    context_markup = "".join(
+        "".join(
+            (
+                '<article class="context-chip">',
+                f'<span class="context-name">{escape(_string_value(context_payload.get("context")))}</span>',
+                f'<span class="context-meta">{escape(_string_value(context_payload.get("instance_count")))} instances</span>',
+                '</article>',
+            )
+        )
+        for context_payload in available_contexts
+        if isinstance(context_payload, Mapping)
+    )
+
+    instance_markup = "".join(
+        (
+            f'<span class="instance-chip{" instance-chip-active" if _string_value(instance) == instance_name else ""}">'
+            f'{escape(_string_value(instance))}'
+            '</span>'
+        )
+        for instance in available_instances
+    )
+
+    resolved_count = len(resolved_rows)
+
+    return f"""<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Control Plane Environment Contract</title>
+    <style>
+      :root {{
+        --canvas: #f3ecdf;
+        --ink: #1b1612;
+        --muted: #5b5248;
+        --line: rgba(27, 22, 18, 0.12);
+        --panel: rgba(255, 251, 245, 0.92);
+        --panel-strong: rgba(249, 242, 231, 0.96);
+        --shadow: 0 22px 54px rgba(27, 22, 18, 0.14);
+        --accent: #0f766e;
+        --accent-soft: rgba(15, 118, 110, 0.14);
+        --global: #7c3aed;
+        --context: #0f766e;
+        --instance: #b45309;
+        --resolved: #1d4ed8;
+        --sensitive: #991b1b;
+      }}
+
+      * {{ box-sizing: border-box; }}
+
+      body {{
+        margin: 0;
+        min-height: 100vh;
+        color: var(--ink);
+        background:
+          radial-gradient(circle at top left, rgba(15, 118, 110, 0.14), transparent 26%),
+          radial-gradient(circle at top right, rgba(124, 58, 237, 0.12), transparent 24%),
+          linear-gradient(180deg, #f0e6d7 0%, var(--canvas) 56%, #ece4d8 100%);
+        font-family: "Avenir Next", "Trebuchet MS", sans-serif;
+      }}
+
+      main {{
+        width: min(1280px, calc(100vw - 32px));
+        margin: 0 auto;
+        padding: 32px 0 56px;
+      }}
+
+      .hero, .panel {{
+        border: 1px solid var(--line);
+        border-radius: 28px;
+        background: var(--panel);
+        box-shadow: var(--shadow);
+      }}
+
+      .hero {{
+        padding: 30px;
+        background: linear-gradient(135deg, rgba(255, 251, 245, 0.96), rgba(244, 236, 224, 0.86));
+      }}
+
+      .eyebrow {{
+        margin: 0 0 8px;
+        letter-spacing: 0.18em;
+        text-transform: uppercase;
+        color: var(--muted);
+        font-size: 0.74rem;
+      }}
+
+      h1, h2, h3 {{
+        margin: 0;
+        font-family: Georgia, "Times New Roman", serif;
+        font-weight: 700;
+      }}
+
+      h1 {{
+        font-size: clamp(2.2rem, 5vw, 4.3rem);
+        line-height: 0.96;
+        max-width: 12ch;
+      }}
+
+      .hero-grid {{
+        display: grid;
+        grid-template-columns: minmax(0, 1.3fr) minmax(260px, 0.7fr);
+        gap: 24px;
+        align-items: end;
+      }}
+
+      .hero-copy, .panel-copy, .tile-note, .source-note, .meta-note {{
+        color: var(--muted);
+        line-height: 1.6;
+      }}
+
+      .hero-copy {{
+        margin-top: 16px;
+        max-width: 70ch;
+      }}
+
+      .hero-meta {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 18px;
+        color: var(--muted);
+        font-size: 0.94rem;
+      }}
+
+      .summary-grid, .panel-grid {{
+        display: grid;
+        gap: 16px;
+      }}
+
+      .summary-grid {{
+        grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        margin-top: 28px;
+      }}
+
+      .summary-tile {{
+        padding: 18px;
+        border-radius: 22px;
+        background: var(--panel-strong);
+        border: 1px solid var(--line);
+      }}
+
+      .summary-value {{
+        display: block;
+        margin-top: 8px;
+        font-family: Georgia, "Times New Roman", serif;
+        font-size: 2rem;
+      }}
+
+      .surface {{
+        display: grid;
+        grid-template-columns: minmax(0, 1.2fr) minmax(280px, 0.8fr);
+        gap: 18px;
+        margin-top: 24px;
+      }}
+
+      .column, .panel-stack {{
+        display: grid;
+        gap: 18px;
+      }}
+
+      .panel {{
+        padding: 24px;
+      }}
+
+      .panel-header {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: end;
+        justify-content: space-between;
+        margin-bottom: 18px;
+      }}
+
+      .search-box {{
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        width: min(380px, 100%);
+        padding: 14px 16px;
+        border-radius: 999px;
+        border: 1px solid var(--line);
+        background: rgba(255, 251, 245, 0.9);
+      }}
+
+      .search-box input {{
+        width: 100%;
+        border: 0;
+        background: transparent;
+        color: var(--ink);
+        font: inherit;
+        outline: none;
+      }}
+
+      .context-chip-row, .instance-chip-row {{
+        display: flex;
+        flex-wrap: wrap;
+        gap: 10px;
+        margin-top: 12px;
+      }}
+
+      .context-chip, .instance-chip {{
+        display: inline-flex;
+        flex-direction: column;
+        gap: 4px;
+        padding: 12px 14px;
+        border-radius: 18px;
+        border: 1px solid var(--line);
+        background: rgba(249, 242, 231, 0.92);
+      }}
+
+      .instance-chip {{
+        flex-direction: row;
+        align-items: center;
+        padding: 10px 12px;
+      }}
+
+      .instance-chip-active {{
+        background: var(--accent-soft);
+        border-color: rgba(15, 118, 110, 0.22);
+      }}
+
+      .context-name {{
+        font-weight: 700;
+      }}
+
+      .context-meta {{
+        color: var(--muted);
+        font-size: 0.86rem;
+      }}
+
+      .table-shell {{
+        overflow-x: auto;
+        border-radius: 20px;
+        border: 1px solid var(--line);
+        background: rgba(255, 252, 247, 0.82);
+      }}
+
+      .env-table {{
+        width: 100%;
+        border-collapse: collapse;
+      }}
+
+      .env-table th,
+      .env-table td {{
+        padding: 14px 16px;
+        text-align: left;
+        vertical-align: top;
+        border-bottom: 1px solid var(--line);
+      }}
+
+      .env-table th {{
+        position: sticky;
+        top: 0;
+        background: rgba(245, 236, 223, 0.96);
+        font-size: 0.76rem;
+        letter-spacing: 0.14em;
+        text-transform: uppercase;
+        color: var(--muted);
+      }}
+
+      .env-key {{
+        min-width: 280px;
+        font-weight: 700;
+        word-break: break-word;
+      }}
+
+      .env-value {{
+        display: inline-block;
+        padding: 3px 6px;
+        border-radius: 8px;
+        background: rgba(27, 22, 18, 0.05);
+        font-family: "SFMono-Regular", "Menlo", monospace;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }}
+
+      .env-value-cell {{
+        min-width: 320px;
+      }}
+
+      .value-badge, .source-badge {{
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 28px;
+        padding: 4px 10px;
+        border-radius: 999px;
+        font-size: 0.76rem;
+        font-weight: 700;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+      }}
+
+      .value-badge {{
+        margin-left: 10px;
+      }}
+
+      .value-badge-sensitive {{
+        color: var(--sensitive);
+        background: rgba(153, 27, 27, 0.12);
+      }}
+
+      .source-global {{ color: var(--global); background: rgba(124, 58, 237, 0.12); }}
+      .source-context {{ color: var(--context); background: rgba(15, 118, 110, 0.12); }}
+      .source-instance {{ color: var(--instance); background: rgba(180, 83, 9, 0.12); }}
+      .source-resolved {{ color: var(--resolved); background: rgba(29, 78, 216, 0.12); }}
+
+      .source-note {{
+        display: block;
+        margin-top: 8px;
+        font-size: 0.86rem;
+      }}
+
+      .compact-empty {{
+        margin-top: 0;
+        padding: 24px 20px;
+      }}
+
+      .hidden {{ display: none; }}
+
+      @media (max-width: 900px) {{
+        main {{ width: min(100vw - 20px, 1280px); padding: 20px 0 32px; }}
+        .hero {{ padding: 22px; }}
+        .hero-grid, .surface {{ grid-template-columns: 1fr; }}
+        .panel {{ padding: 18px; }}
+      }}
+    </style>
+  </head>
+  <body>
+    <main>
+      <section class="hero">
+        <div class="hero-grid">
+          <div>
+            <p class="eyebrow">Control Plane Environment Truth</p>
+            <h1>Environment contract for {escape(context_name)}/{escape(instance_name)}</h1>
+            <p class="hero-copy">
+              This page renders the control-plane runtime-environment contract for one context and instance. It shows
+              the global, context, and instance layers alongside the final resolved environment that downstream tools
+              consume. Sensitive values are redacted here by design; use a trusted terminal command when you truly need
+              the raw value.
+            </p>
+            <div class="hero-meta">
+              <span>Generated at {escape(generated_at)}</span>
+              <span>Source file: <strong>{escape(source_file)}</strong></span>
+              <span>Resolved keys: <strong id="visible-count">{resolved_count}</strong></span>
+            </div>
+          </div>
+          <div class="summary-stack">
+            <article class="summary-tile">
+              <span class="eyebrow">Selected instance</span>
+              <span class="summary-value">{escape(instance_name)}</span>
+              <p class="tile-note">Context <strong>{escape(context_name)}</strong> currently exposes {resolved_count} resolved keys.</p>
+            </article>
+            <article class="summary-tile">
+              <span class="eyebrow">Safe raw fallback</span>
+              <p class="tile-note">`uv run control-plane environments resolve --context {escape(context_name)} --instance {escape(instance_name)}`</p>
+            </article>
+          </div>
+        </div>
+        <div class="summary-grid">
+          {layer_summary_markup}
+        </div>
+      </section>
+
+      <section class="surface">
+        <div class="column">
+          <article class="panel">
+            <div class="panel-header">
+              <div>
+                <p class="eyebrow">Resolved view</p>
+                <h2>Final merged environment</h2>
+                <p class="panel-copy">Each row shows the final winning layer for a key. Instance overrides context, and context overrides global shared values.</p>
+              </div>
+              <label class="search-box" for="env-filter">
+                <span>Filter</span>
+                <input id="env-filter" type="search" placeholder="Search keys or layer names">
+              </label>
+            </div>
+            {_render_environment_rows(resolved_rows, row_class="env-row")}
+          </article>
+
+          <div class="panel-grid">
+            <article class="panel">
+              <p class="eyebrow">Layer</p>
+              <h2>Global shared values</h2>
+              <p class="panel-copy">These keys apply to every context unless a more specific layer overrides them.</p>
+              {_render_environment_rows(global_rows, row_class="env-layer-row")}
+            </article>
+
+            <article class="panel">
+              <p class="eyebrow">Layer</p>
+              <h2>{escape(context_name)} shared values</h2>
+              <p class="panel-copy">These keys apply to every instance inside the selected context.</p>
+              {_render_environment_rows(context_rows, row_class="env-layer-row")}
+            </article>
+
+            <article class="panel">
+              <p class="eyebrow">Layer</p>
+              <h2>{escape(instance_name)} instance values</h2>
+              <p class="panel-copy">These keys apply only to the selected instance and win last during resolution.</p>
+              {_render_environment_rows(instance_rows, row_class="env-layer-row")}
+            </article>
+          </div>
+        </div>
+
+        <div class="column">
+          <div class="panel-stack">
+            <article class="panel">
+              <p class="eyebrow">Navigation</p>
+              <h2>Available contexts</h2>
+              <p class="panel-copy">The contract file currently defines these tenant contexts.</p>
+              <div class="context-chip-row">{context_markup}</div>
+            </article>
+
+            <article class="panel">
+              <p class="eyebrow">Selection</p>
+              <h2>Instances in {escape(context_name)}</h2>
+              <p class="panel-copy">Render this page again with a different `--instance` value to inspect another environment contract.</p>
+              <div class="instance-chip-row">{instance_markup}</div>
+            </article>
+
+            <article class="panel">
+              <p class="eyebrow">Safety</p>
+              <h2>Secret handling</h2>
+              <p class="panel-copy">This UI deliberately redacts values that look like passwords, tokens, secrets, or other sensitive keys. The goal is to make the control-plane contract inspectable without turning a static HTML page into a secret dump.</p>
+              <p class="meta-note">If a value is redacted here, use the CLI in a trusted local terminal session when you truly need the raw value.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+    </main>
+    <script>
+      const filterInput = document.getElementById("env-filter");
+      const rows = Array.from(document.querySelectorAll(".env-row"));
+      const visibleCount = document.getElementById("visible-count");
+
+      function syncFilter() {{
+        const query = filterInput.value.trim().toLowerCase();
+        let visible = 0;
+        for (const row of rows) {{
+          const haystack = row.innerText.toLowerCase();
+          const matches = query === "" || haystack.includes(query);
+          row.classList.toggle("hidden", !matches);
+          if (matches) {{
+            visible += 1;
+          }}
+        }}
+        visibleCount.textContent = String(visible);
+      }}
+
+      filterInput.addEventListener("input", syncFilter);
+      syncFilter();
+    </script>
+  </body>
+</html>
+"""
+
+
 def render_inventory_overview_dashboard(
     payloads: Sequence[Mapping[str, object]],
     *,

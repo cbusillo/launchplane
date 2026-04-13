@@ -2,11 +2,16 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from control_plane.cli import main
-from control_plane.ui import render_environment_status_dashboard, render_inventory_overview_dashboard
+from control_plane.ui import (
+    render_environment_contract_dashboard,
+    render_environment_status_dashboard,
+    render_inventory_overview_dashboard,
+)
 
 
 def _write_inventory_record(
@@ -376,6 +381,106 @@ class InventoryOverviewUiTests(unittest.TestCase):
             self.assertIn("Production is promotion-managed", rendered_html)
             self.assertIn("promote execute --input-file tmp/promotion-request.json", rendered_html)
             self.assertIn("pbs", rendered_html)
+
+    def test_render_environment_contract_dashboard_redacts_sensitive_values(self) -> None:
+        html = render_environment_contract_dashboard(
+            {
+                "context": "opw",
+                "instance": "local",
+                "source_file": "/tmp/runtime-environments.toml",
+                "available_contexts": (
+                    {"context": "cm", "instance_count": 4},
+                    {"context": "opw", "instance_count": 3},
+                ),
+                "available_instances": ("local", "testing", "prod"),
+                "layer_summaries": (
+                    {"label": "Global shared", "count": 2, "note": "Applies everywhere."},
+                    {"label": "opw shared", "count": 1, "note": "Context defaults."},
+                    {"label": "local instance", "count": 1, "note": "Instance overrides."},
+                    {"label": "Resolved", "count": 3, "note": "Merged."},
+                ),
+                "resolved_rows": (
+                    {
+                        "key": "ODOO_DB_PASSWORD",
+                        "value": "super-secret-password",
+                        "source": "instance",
+                        "overrides": ("global",),
+                    },
+                    {
+                        "key": "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL",
+                        "value": "https://opw-local.example.com",
+                        "source": "context",
+                        "overrides": (),
+                    },
+                ),
+                "global_rows": (
+                    {
+                        "key": "ODOO_DB_USER",
+                        "value": "odoo",
+                        "source": "global",
+                        "overrides": (),
+                    },
+                ),
+                "context_rows": (),
+                "instance_rows": (),
+            }
+        )
+
+        self.assertIn("Environment contract for opw/local", html)
+        self.assertIn("Final merged environment", html)
+        self.assertIn("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", html)
+        self.assertIn("https://opw-local.example.com", html)
+        self.assertIn("[redacted ending word]", html)
+        self.assertNotIn("super-secret-password", html)
+
+    def test_ui_environment_contract_writes_static_dashboard_file(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_DB_USER = "odoo"
+ODOO_MASTER_PASSWORD = "shared-master"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-local.example.com"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            output_file = control_plane_root / "tmp" / "environment-contract.html"
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ui",
+                        "environment-contract",
+                        "--context",
+                        "opw",
+                        "--instance",
+                        "local",
+                        "--output-file",
+                        str(output_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Environment contract for opw/local", rendered_html)
+            self.assertIn("https://opw-local.example.com", rendered_html)
+            self.assertIn("ODOO_MASTER_PASSWORD", rendered_html)
+            self.assertIn("[redacted ending ster]", rendered_html)
+            self.assertNotIn("shared-master", rendered_html)
 
 
 if __name__ == "__main__":
