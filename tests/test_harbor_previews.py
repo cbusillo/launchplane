@@ -841,6 +841,10 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("artifact-opw-123", rendered_html)
             self.assertIn("harbor-manifest-001", rendered_html)
             self.assertIn("Serving the latest requested generation.", rendered_html)
+            self.assertIn(
+                "This preview is live at the stable Harbor route and serving the latest requested generation.",
+                rendered_html,
+            )
             self.assertIn("Raw page JSON", rendered_html)
             self.assertIn("Open preview URL", rendered_html)
 
