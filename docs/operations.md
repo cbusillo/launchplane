@@ -134,6 +134,9 @@ title: Operations
   burying it in secondary generation detail.
 - The same rendered page also keeps destroyed previews visible as retained
   historical evidence instead of making them look like missing or empty state.
+- The rendered page also makes its primary actions state-aware, so destroyed
+  previews lead with the anchor PR while the old preview URL is demoted to
+  retained evidence instead of remaining the main call-to-action.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.

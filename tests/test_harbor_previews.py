@@ -840,6 +840,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("harbor-manifest-001", rendered_html)
             self.assertIn("Serving the latest requested generation.", rendered_html)
             self.assertIn("Raw page JSON", rendered_html)
+            self.assertIn("Open preview URL", rendered_html)
 
     def test_harbor_previews_render_status_page_calls_out_failed_latest_replacement(self) -> None:
         runner = CliRunner()
@@ -961,6 +962,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("2026-04-14T12:14:00Z", rendered_html)
             self.assertIn("Retained generation", rendered_html)
             self.assertIn("hgen_01jabc_1", rendered_html)
+            self.assertIn("Open anchor pull request", rendered_html)
+            self.assertIn("Retained preview URL", rendered_html)
+            self.assertNotIn("Open preview URL", rendered_html)
             self.assertNotIn(
                 "Latest replacement failed. Harbor is still serving the older preview.",
                 rendered_html,

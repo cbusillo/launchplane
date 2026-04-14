@@ -135,6 +135,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
 
     preview_label = escape(str(preview.get("preview_label", "Harbor preview")))
     canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
+    anchor_pr_url = escape(str(links.get("anchor_pr_url", "")))
     preview_state = str(preview.get("state", "unknown"))
     status_summary = escape(str(health_summary.get("status_summary", "No Harbor preview summary available.")))
     next_action = escape(str(lifecycle_summary.get("next_action", "")))
@@ -152,9 +153,17 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
     generation_label = "Serving generation"
     generation_value = serving_generation_id or "Unavailable"
+    primary_cta_label = "Open preview URL"
+    primary_cta_href = canonical_url
+    secondary_cta_label = "Anchor pull request"
+    secondary_cta_href = anchor_pr_url
     if preview_state.strip().lower() == "destroyed":
         generation_label = "Retained generation"
         generation_value = latest_generation_id or "Unavailable"
+        primary_cta_label = "Open anchor pull request"
+        primary_cta_href = anchor_pr_url
+        secondary_cta_label = "Retained preview URL"
+        secondary_cta_href = canonical_url
     replacement_callout_html = ""
     destroyed_callout_html = ""
     if preview_state.strip().lower() == "destroyed":
@@ -327,8 +336,8 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         {destroyed_callout_html}
         {replacement_callout_html}
         <div class=\"cta-row\">
-          <a class=\"cta\" href=\"{canonical_url}\">Open preview URL</a>
-          <a class=\"subtle\" href=\"{escape(str(links.get('anchor_pr_url', '')))}\">Anchor pull request</a>
+          <a class=\"cta\" href=\"{primary_cta_href}\">{primary_cta_label}</a>
+          <a class=\"subtle\" href=\"{secondary_cta_href}\">{secondary_cta_label}</a>
         </div>
         <div class=\"metric-grid\">
           <div class=\"metric\"><label>Artifact</label><code>{artifact_id or 'Unavailable'}</code></div>
