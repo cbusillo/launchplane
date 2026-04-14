@@ -1206,6 +1206,61 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Not created yet", rendered_html)
             self.assertNotIn("Open preview URL", rendered_html)
 
+    def test_harbor_previews_render_status_page_calls_out_no_serving_preview(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    state="active",
+                    active_generation_id="hgen_01jabc_1",
+                    serving_generation_id="",
+                    latest_generation_id="hgen_01jabc_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-status-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "Harbor has generation evidence for this preview, but nothing is serving yet.",
+                rendered_html,
+            )
+            self.assertIn("Preview route (not serving yet)", rendered_html)
+            self.assertIn("Open anchor pull request", rendered_html)
+            self.assertIn("Health unavailable", rendered_html)
+            self.assertIn("Latest generation", rendered_html)
+            self.assertIn("hgen_01jabc_1", rendered_html)
+            self.assertNotIn("Open preview URL", rendered_html)
+
     def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

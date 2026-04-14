@@ -107,7 +107,7 @@ def _status_tone(value: str) -> str:
         return "good"
     if normalized_value in {"fail", "failed", "destroyed"}:
         return "bad"
-    if normalized_value in {"pending", "building", "deploying", "verifying", "requested", "paused"}:
+    if normalized_value in {"pending", "building", "deploying", "verifying", "requested", "paused", "unavailable"}:
         return "warn"
     return "neutral"
 
@@ -163,6 +163,8 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     latest_generation_state = str(latest_generation.get("state", ""))
     latest_requested_at = escape(str(latest_generation.get("requested_at", "")))
     serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
+    no_serving_preview = bool(latest_generation) and not serving_generation
+    display_health_status = "unavailable" if no_serving_preview else overall_health_status
     generation_label = "Serving generation"
     generation_value = serving_generation_id or "Unavailable"
     primary_cta_label = "Open preview URL"
@@ -176,6 +178,13 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         primary_cta_href = anchor_pr_url
         secondary_cta_label = "Preview route (not live yet)"
         secondary_cta_href = canonical_url
+    elif no_serving_preview:
+        generation_label = "Latest generation"
+        generation_value = latest_generation_id or "Unavailable"
+        primary_cta_label = "Open anchor pull request"
+        primary_cta_href = anchor_pr_url
+        secondary_cta_label = "Preview route (not serving yet)"
+        secondary_cta_href = canonical_url
     if preview_state.strip().lower() == "destroyed":
         generation_label = "Retained generation"
         generation_value = latest_generation_id or "Unavailable"
@@ -185,6 +194,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         secondary_cta_href = canonical_url
     replacement_callout_html = ""
     in_progress_callout_html = ""
+    no_serving_callout_html = ""
     startup_callout_html = ""
     paused_callout_html = ""
     teardown_callout_html = ""
@@ -222,6 +232,19 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
           <dl>
             <div><dt>Current stage</dt><dd>{escape(_status_label(latest_generation_state)) or 'Unavailable'}</dd></div>
             <div><dt>Serving now</dt><dd><code>{progress_serving_value}</code></dd></div>
+            <div><dt>Requested at</dt><dd>{latest_requested_at or 'Unavailable'}</dd></div>
+          </dl>
+        </div>
+        """
+    if no_serving_preview and not _generation_in_progress(latest_generation_state):
+        no_serving_callout_html = f"""
+        <div class=\"callout callout-warn\">
+          <div class=\"eyebrow\">Availability gap</div>
+          <h2>Harbor has generation evidence for this preview, but nothing is serving yet.</h2>
+          <p>{next_action or status_summary}</p>
+          <dl>
+            <div><dt>Latest generation</dt><dd><code>{latest_generation_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Current state</dt><dd>{escape(_status_label(latest_generation_state)) or 'Unavailable'}</dd></div>
             <div><dt>Requested at</dt><dd>{latest_requested_at or 'Unavailable'}</dd></div>
           </dl>
         </div>
@@ -426,6 +449,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <p class=\"lede\">{status_summary}</p>
         {startup_callout_html}
         {in_progress_callout_html}
+        {no_serving_callout_html}
         {teardown_callout_html}
         {paused_callout_html}
         {destroyed_callout_html}
@@ -443,7 +467,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
       <aside class=\"sidebar\">
         <div class=\"status-chip tone-{_status_tone(preview_state)}\">Preview {escape(_status_label(preview_state))}</div>
         <div style=\"height:12px\"></div>
-        <div class=\"status-chip tone-{_status_tone(overall_health_status)}\">Health {escape(_status_label(overall_health_status))}</div>
+        <div class=\"status-chip tone-{_status_tone(display_health_status)}\">Health {escape(_status_label(display_health_status))}</div>
         <div class=\"stack\">
           <div>
             <div class=\"eyebrow\">Next action</div>
