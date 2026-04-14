@@ -250,6 +250,9 @@ title: Operations
   `X-HTTP-Method-Override` or `X-Method-Override`, Harbor now also requires
   them to stay aligned with the captured `POST` request shape and rejects
   conflicting override values early.
+- If that supported HTTP capture includes `Transfer-Encoding`, Harbor currently
+  only tolerates the explicit no-transform `identity` case and rejects
+  unsupported values such as `chunked` for the local saved-capture path.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
