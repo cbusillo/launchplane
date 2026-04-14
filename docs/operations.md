@@ -249,6 +249,8 @@ title: Operations
 - Harbor also preserves standards-based distributed tracing headers such as
   `traceparent`, `tracestate`, and `b3` as observational replay metadata for
   the same debugging reason.
+- Harbor redacts `baggage` before writing replay metadata because it can carry
+  arbitrary application or user context that replay does not need.
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.
