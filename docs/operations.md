@@ -146,6 +146,9 @@ title: Operations
 - In-progress replacement generations now also get an explicit progress
   callout on that rendered page, so operators can tell when Harbor is still
   serving the old preview while a newer generation is building or deploying.
+- Preview records with no generation yet now also get an explicit startup
+  callout on that rendered page, so expected first-build waiting reads
+  differently from both live preview state and preview failures.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.

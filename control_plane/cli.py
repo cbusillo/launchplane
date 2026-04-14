@@ -169,6 +169,13 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     primary_cta_href = canonical_url
     secondary_cta_label = "Anchor pull request"
     secondary_cta_href = anchor_pr_url
+    if not latest_generation:
+        generation_label = "Latest generation"
+        generation_value = "Not created yet"
+        primary_cta_label = "Open anchor pull request"
+        primary_cta_href = anchor_pr_url
+        secondary_cta_label = "Preview route (not live yet)"
+        secondary_cta_href = canonical_url
     if preview_state.strip().lower() == "destroyed":
         generation_label = "Retained generation"
         generation_value = latest_generation_id or "Unavailable"
@@ -178,9 +185,23 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         secondary_cta_href = canonical_url
     replacement_callout_html = ""
     in_progress_callout_html = ""
+    startup_callout_html = ""
     paused_callout_html = ""
     teardown_callout_html = ""
     destroyed_callout_html = ""
+    if not latest_generation:
+        startup_callout_html = f"""
+        <div class=\"callout callout-neutral\">
+          <div class=\"eyebrow\">Startup pending</div>
+          <h2>Harbor has created this preview record, but the first generation has not been requested yet.</h2>
+          <p>{next_action or status_summary}</p>
+          <dl>
+            <div><dt>Preview route</dt><dd>{canonical_url or 'Unavailable'}</dd></div>
+            <div><dt>Generation status</dt><dd>Not created yet</dd></div>
+            <div><dt>What happens next</dt><dd>Harbor needs the first generation request before this preview becomes live.</dd></div>
+          </dl>
+        </div>
+        """
     if _generation_in_progress(latest_generation_state):
         progress_title = (
             "A replacement generation is in progress. Harbor is still serving the current preview."
@@ -365,14 +386,14 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     .metric-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 24px; }}
     .metric {{ padding-top: 16px; border-top: 1px solid var(--line); }}
     .metric label {{ display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
-    .metric strong, .metric code {{ display: block; margin-top: 8px; font-size: 15px; }}
+    .metric strong, .metric code {{ display: block; margin-top: 8px; font-size: 15px; overflow-wrap: anywhere; }}
     .stack {{ display: grid; gap: 18px; margin-top: 24px; }}
     .callout {{ margin-top: 20px; padding: 18px 20px; border-radius: 22px; border: 1px solid var(--line); }}
     .callout h2 {{ margin: 8px 0; font-size: 24px; line-height: 1.1; }}
     .callout p {{ margin: 8px 0 0; color: var(--text); line-height: 1.5; }}
     .callout dl {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0 0; }}
     .callout dt {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
-    .callout dd {{ margin: 6px 0 0; }}
+    .callout dd {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
     .callout-warn {{ background: rgba(154, 106, 17, 0.08); border-color: rgba(154, 106, 17, 0.18); }}
     .callout-neutral {{ background: rgba(79, 68, 56, 0.06); border-color: rgba(79, 68, 56, 0.16); }}
     .section {{ border-radius: 24px; padding: 24px; }}
@@ -403,6 +424,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {startup_callout_html}
         {in_progress_callout_html}
         {teardown_callout_html}
         {paused_callout_html}
