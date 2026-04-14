@@ -246,6 +246,8 @@ def _github_webhook_replay_envelope(
     signature_256: str = "",
     allow_unsigned: bool = False,
     event_name: str = "pull_request",
+    delivery_id: str = "",
+    delivery_source: str = "replay-envelope",
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -253,6 +255,8 @@ def _github_webhook_replay_envelope(
         "event_name": event_name,
         "signature_256": signature_256,
         "allow_unsigned": allow_unsigned,
+        "delivery_id": delivery_id,
+        "delivery_source": delivery_source,
         "payload_text": payload_text,
         "payload": payload,
     }
@@ -2046,6 +2050,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(state_dir),
                         "--input-file",
                         str(input_file),
+                        "--delivery-id",
+                        "gh-delivery-123",
                         "--signature-256",
                         _github_webhook_signature(webhook_payload),
                         "--apply",
@@ -2060,6 +2066,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["feedback"]["status"], "preview_updated")
             self.assertEqual(payload["event"]["action_label"], "harbor-preview")
             self.assertEqual(payload["event"]["occurred_at"], "2026-04-13T12:15:00Z")
+            self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "gh-delivery-123")
+            self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "github-webhook")
 
     def test_harbor_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(self) -> None:
         runner = CliRunner()
@@ -2224,6 +2232,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     _github_webhook_replay_envelope(
                         payload_text=payload_text,
                         signature_256=_github_webhook_signature(webhook_payload),
+                        delivery_id="replay-456",
+                        delivery_source="local-capture",
                     )
                 ),
                 encoding="utf-8",
@@ -2246,9 +2256,13 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(result.exit_code, 0, msg=result.output)
             payload = json.loads(result.output)
             self.assertEqual(payload["webhook_replay"]["event_name"], "pull_request")
+            self.assertEqual(payload["webhook_replay"]["delivery_id"], "replay-456")
+            self.assertEqual(payload["webhook_replay"]["delivery_source"], "local-capture")
             self.assertEqual(payload["decision"]["action"], "enable_preview")
             self.assertTrue(payload["apply"]["applied"])
             self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
+            self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "replay-456")
+            self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "local-capture")
 
     def test_harbor_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(self) -> None:
         runner = CliRunner()
