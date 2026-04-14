@@ -249,6 +249,9 @@ title: Operations
 - Harbor also preserves standards-based distributed tracing headers such as
   `traceparent`, `tracestate`, and `b3` as observational replay metadata for
   the same debugging reason.
+- Harbor likewise preserves vendor-specific tracing headers such as
+  `sentry-trace`, `x-cloud-trace-context`, and `x-datadog-trace-id` as
+  observational replay metadata for the same debugging reason.
 - Harbor redacts `baggage` before writing replay metadata because it can carry
   arbitrary application or user context that replay does not need.
 - The builder currently packages the raw payload as `payload_text` so signed
