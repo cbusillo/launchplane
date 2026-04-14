@@ -2428,6 +2428,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 json.dumps(
                     {
                         "Authorization": "Bearer super-secret-token",
+                        "baggage": "userId=123,tenant=cm,debug=true",
                         "Cookie": "session=secret-cookie",
                         "CF-Connecting-IP": "203.0.113.43",
                         "Proxy-Authorization": "Basic c2VjcmV0",
@@ -2461,6 +2462,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             envelope_payload = json.loads(result.output)
             self.assertEqual(
                 envelope_payload["capture"]["headers"]["Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["baggage"],
                 "[redacted]",
             )
             self.assertEqual(
@@ -2912,6 +2917,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "POST /github/webhook HTTP/1.1",
                         "Host: harbor.example",
                         "Authorization: Bearer super-secret-token",
+                        "baggage: userId=123,tenant=cm,debug=true",
                         "Cookie: session=secret-cookie",
                         "CF-Connecting-IP: 203.0.113.43",
                         "Proxy-Authorization: Basic c2VjcmV0",
@@ -2945,6 +2951,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             envelope_payload = json.loads(result.output)
             self.assertEqual(
                 envelope_payload["capture"]["headers"]["Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["baggage"],
                 "[redacted]",
             )
             self.assertEqual(
