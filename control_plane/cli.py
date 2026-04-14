@@ -1551,6 +1551,11 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
         raise click.ClickException(
             "GitHub webhook HTTP capture Trailer declarations are unsupported for the saved-capture replay path."
         )
+    declared_expect = _github_webhook_capture_header_value(headers, "Expect")
+    if declared_expect:
+        raise click.ClickException(
+            "GitHub webhook HTTP capture Expect declarations are unsupported for the saved-capture replay path."
+        )
     declared_content_type = _github_webhook_capture_header_value(headers, "Content-Type")
     if declared_content_type:
         normalized_media_type = declared_content_type.split(";", 1)[0].strip().lower()
