@@ -2467,6 +2467,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "http-capture-123",
             )
             self.assertEqual(built_envelope["capture"]["source"], "saved-http-capture")
+            self.assertEqual(
+                built_envelope["capture"]["evidence"]["http_request"]["request_line"],
+                "POST /github/webhook HTTP/1.1",
+            )
 
             with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
                 replay_result = runner.invoke(
@@ -2488,6 +2492,54 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(replay_payload["webhook"]["signature_verification"]["verified"])
             self.assertEqual(replay_payload["webhook"]["delivery"]["delivery_id"], "http-capture-123")
             self.assertEqual(replay_payload["webhook_replay"]["capture"]["source"], "saved-http-capture")
+            self.assertEqual(
+                replay_payload["webhook_replay"]["capture"]["evidence"]["http_request"]["request_line"],
+                "POST /github/webhook HTTP/1.1",
+            )
+
+    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_request_evidence(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            evidence_file = Path(temporary_directory_name) / "github-webhook-evidence.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "X-GitHub-Event: pull_request",
+                        "",
+                        json.dumps(webhook_payload),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            evidence_file.write_text(
+                json.dumps(
+                    {
+                        "http_request": {
+                            "request_line": "POST /other HTTP/1.1",
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                    "--evidence-file",
+                    str(evidence_file),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("request_line conflicts", result.output)
 
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(self) -> None:
         runner = CliRunner()
