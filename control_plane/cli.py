@@ -1414,6 +1414,7 @@ def harbor_previews_ingest_pr_event(
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--event-name", default="pull_request", show_default=True)
+@click.option("--delivery-id", default="", help="Optional GitHub delivery id for traceability.")
 @click.option("--signature-256", default="", help="Raw X-Hub-Signature-256 header value.")
 @click.option("--allow-unsigned", is_flag=True, help="Explicit local/manual bypass for signature verification.")
 @click.option("--apply", "apply_intent", is_flag=True)
@@ -1422,6 +1423,7 @@ def harbor_previews_ingest_github_webhook(
     state_dir: Path,
     input_file: Path,
     event_name: str,
+    delivery_id: str,
     signature_256: str,
     allow_unsigned: bool,
     apply_intent: bool,
@@ -1433,6 +1435,8 @@ def harbor_previews_ingest_github_webhook(
         event_name=event_name,
         raw_payload_bytes=raw_payload_bytes,
         webhook_payload=webhook_payload,
+        delivery_id=delivery_id,
+        delivery_source="github-webhook",
         signature_256=signature_256,
         allow_unsigned=allow_unsigned,
         apply_intent=apply_intent,
@@ -1464,6 +1468,8 @@ def harbor_previews_replay_github_webhook(
         event_name=envelope.event_name,
         raw_payload_bytes=raw_payload_bytes,
         webhook_payload=webhook_payload,
+        delivery_id=envelope.delivery_id,
+        delivery_source=envelope.delivery_source or "replay-envelope",
         signature_256=envelope.signature_256,
         allow_unsigned=envelope.allow_unsigned,
         apply_intent=apply_intent,
@@ -1472,6 +1478,8 @@ def harbor_previews_replay_github_webhook(
     payload["webhook_replay"] = {
         "adapter": envelope.adapter,
         "event_name": envelope.event_name,
+        "delivery_id": envelope.delivery_id,
+        "delivery_source": envelope.delivery_source or "replay-envelope",
     }
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -1536,6 +1544,8 @@ def _ingest_harbor_github_webhook_payload(
     event_name: str,
     raw_payload_bytes: bytes,
     webhook_payload: dict[str, object],
+    delivery_id: str,
+    delivery_source: str,
     signature_256: str,
     allow_unsigned: bool,
     apply_intent: bool,
@@ -1563,6 +1573,10 @@ def _ingest_harbor_github_webhook_payload(
     payload["webhook"] = {
         "event_name": event_name,
         "adapter": "github_pull_request",
+        "delivery": {
+            "delivery_id": delivery_id.strip(),
+            "delivery_source": delivery_source.strip() or "github-webhook",
+        },
         "signature_verification": signature_verification,
     }
     return payload

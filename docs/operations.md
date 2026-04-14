@@ -206,6 +206,10 @@ title: Operations
 - Signed replay envelopes must include the raw `payload_text` so Harbor can
   verify the original bytes; unsigned replay remains available only through the
   explicit `allow_unsigned` envelope path.
+- Both raw webhook ingest and replay now surface lightweight delivery metadata
+  such as GitHub delivery id and delivery source alongside the existing webhook
+  verification/adaptation payload so traces remain identifiable without
+  affecting Harbor preview decisions.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
