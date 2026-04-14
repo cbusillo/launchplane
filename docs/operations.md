@@ -119,6 +119,10 @@ title: Operations
 - Harbor preview inspection now starts with JSON read surfaces owned by this
   repo: `harbor-previews list`, `harbor-previews show`, and
   `harbor-previews history`.
+- `harbor-previews show` is already the one-preview, page-oriented JSON surface
+  for the future first Harbor page: it leads with stable preview identity and
+  URL, then trust, health, inputs, and lifecycle summaries derived from the
+  durable preview and generation records.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
