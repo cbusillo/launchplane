@@ -841,6 +841,72 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Serving the latest requested generation.", rendered_html)
             self.assertIn("Raw page JSON", rendered_html)
 
+    def test_harbor_previews_render_status_page_calls_out_failed_latest_replacement(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    state="failed",
+                    active_generation_id="hgen_01jabc_2",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_2",
+                    latest_manifest_fingerprint="harbor-manifest-002",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_2",
+                    sequence=2,
+                    state="failed",
+                    manifest_fingerprint="harbor-manifest-002",
+                    artifact_id="artifact-opw-124",
+                    deploy_status="fail",
+                    verify_status="skipped",
+                    overall_health_status="fail",
+                    failure_stage="deploying",
+                    failure_summary="Replacement generation failed during deploy.",
+                    ready_at="",
+                    failed_at="2026-04-13T12:15:00Z",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-status-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Latest replacement failed. Harbor is still serving the older preview.", rendered_html)
+            self.assertIn("Replacement generation failed during deploy.", rendered_html)
+            self.assertIn("hgen_01jabc_1", rendered_html)
+            self.assertIn("hgen_01jabc_2", rendered_html)
+
     def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

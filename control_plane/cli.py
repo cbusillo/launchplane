@@ -129,6 +129,9 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     serving_generation = (
         payload.get("serving_generation") if isinstance(payload.get("serving_generation"), dict) else {}
     )
+    latest_generation = (
+        payload.get("latest_generation") if isinstance(payload.get("latest_generation"), dict) else {}
+    )
 
     preview_label = escape(str(preview.get("preview_label", "Harbor preview")))
     canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
@@ -140,6 +143,26 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     destroy_after = escape(str(lifecycle_summary.get("destroy_after", "")))
     overall_health_status = str(health_summary.get("overall_health_status", "pending"))
     raw_payload_json = escape(json.dumps(payload, indent=2, sort_keys=True))
+    serving_matches_latest = bool(health_summary.get("serving_matches_latest", False))
+    latest_failure_summary = escape(str(latest_generation.get("failure_summary", "")))
+    latest_failure_stage = escape(str(latest_generation.get("failure_stage", "")))
+    latest_generation_id = escape(str(latest_generation.get("generation_id", "")))
+    serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
+    replacement_callout_html = ""
+    if not serving_matches_latest and latest_generation:
+        replacement_callout_html = f"""
+        <div class=\"callout callout-warn\">
+          <div class=\"eyebrow\">Replacement status</div>
+          <h2>Latest replacement failed. Harbor is still serving the older preview.</h2>
+          <p>{status_summary}</p>
+          <dl>
+            <div><dt>Serving now</dt><dd><code>{serving_generation_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Failed replacement</dt><dd><code>{latest_generation_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Failure stage</dt><dd>{latest_failure_stage or 'Unavailable'}</dd></div>
+          </dl>
+          <p>{latest_failure_summary or 'Harbor recorded a failed replacement without an additional summary.'}</p>
+        </div>
+        """
 
     source_map_rows = "".join(
         (
@@ -244,6 +267,13 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     .metric label {{ display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
     .metric strong, .metric code {{ display: block; margin-top: 8px; font-size: 15px; }}
     .stack {{ display: grid; gap: 18px; margin-top: 24px; }}
+    .callout {{ margin-top: 20px; padding: 18px 20px; border-radius: 22px; border: 1px solid var(--line); }}
+    .callout h2 {{ margin: 8px 0; font-size: 24px; line-height: 1.1; }}
+    .callout p {{ margin: 8px 0 0; color: var(--text); line-height: 1.5; }}
+    .callout dl {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0 0; }}
+    .callout dt {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
+    .callout dd {{ margin: 6px 0 0; }}
+    .callout-warn {{ background: rgba(154, 106, 17, 0.08); border-color: rgba(154, 106, 17, 0.18); }}
     .section {{ border-radius: 24px; padding: 24px; }}
     .section h2 {{ margin: 0 0 10px; font-size: 24px; }}
     .section p {{ margin: 0; color: var(--muted); line-height: 1.6; }}
@@ -259,6 +289,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     pre {{ overflow: auto; padding: 18px; background: #1e1a16; color: #f4ede3; border-radius: 18px; font-size: 12px; }}
     @media (max-width: 760px) {{
       .hero, .columns, .metric-grid {{ grid-template-columns: 1fr; }}
+      .callout dl {{ grid-template-columns: 1fr; }}
       main {{ padding: 20px 16px 40px; }}
       .headline, .sidebar, .section {{ border-radius: 22px; }}
     }}
@@ -271,6 +302,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {replacement_callout_html}
         <div class=\"cta-row\">
           <a class=\"cta\" href=\"{canonical_url}\">Open preview URL</a>
           <a class=\"subtle\" href=\"{escape(str(links.get('anchor_pr_url', '')))}\">Anchor pull request</a>

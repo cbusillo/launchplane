@@ -129,6 +129,9 @@ title: Operations
   model into a standalone HTML status page so Harbor can start UI work as a
   thin surface over the existing typed contract instead of inventing a second
   orchestration layer.
+- That rendered status page now also carries Harbor's failed-latest-versus-
+  serving-older distinction forward as an explicit warning band instead of
+  burying it in secondary generation detail.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
