@@ -1541,6 +1541,11 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
         raise click.ClickException(
             "GitHub webhook HTTP capture Transfer-Encoding is unsupported for the saved-capture replay path."
         )
+    declared_content_encoding = _github_webhook_capture_header_value(headers, "Content-Encoding")
+    if declared_content_encoding and declared_content_encoding.lower() != "identity":
+        raise click.ClickException(
+            "GitHub webhook HTTP capture Content-Encoding is unsupported for the saved-capture replay path."
+        )
     declared_content_type = _github_webhook_capture_header_value(headers, "Content-Type")
     if declared_content_type:
         normalized_media_type = declared_content_type.split(";", 1)[0].strip().lower()
