@@ -55,6 +55,7 @@ def _preview_record(
     created_at: str = "2026-04-13T12:00:00Z",
     updated_at: str = "2026-04-13T12:14:00Z",
     eligible_at: str = "2026-04-13T12:00:00Z",
+    paused_at: str = "",
     destroy_after: str = "2026-04-20T12:14:00Z",
     destroyed_at: str = "",
     destroy_reason: str = "",
@@ -71,6 +72,7 @@ def _preview_record(
         created_at=created_at,
         updated_at=updated_at,
         eligible_at=eligible_at,
+        paused_at=paused_at,
         destroy_after=destroy_after,
         destroyed_at=destroyed_at,
         destroy_reason=destroy_reason,
@@ -967,6 +969,63 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertNotIn("Open preview URL", rendered_html)
             self.assertNotIn(
                 "Latest replacement failed. Harbor is still serving the older preview.",
+                rendered_html,
+            )
+
+    def test_harbor_previews_render_status_page_calls_out_paused_preview_state(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    state="paused",
+                    paused_at="2026-04-14T16:20:00Z",
+                    active_generation_id="hgen_01jabc_1",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-status-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "This preview is intentionally paused. Harbor is holding the current review evidence in place.",
+                rendered_html,
+            )
+            self.assertIn("2026-04-14T16:20:00Z", rendered_html)
+            self.assertIn("Blocked until Harbor resumes the preview.", rendered_html)
+            self.assertIn("Open preview URL", rendered_html)
+            self.assertNotIn(
+                "This preview has already been destroyed. Harbor is retaining the record as evidence.",
                 rendered_html,
             )
 

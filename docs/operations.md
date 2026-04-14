@@ -137,6 +137,9 @@ title: Operations
 - The rendered page also makes its primary actions state-aware, so destroyed
   previews lead with the anchor PR while the old preview URL is demoted to
   retained evidence instead of remaining the main call-to-action.
+- Paused previews now get their own explicit status callout on that rendered
+  page, so operators can tell the difference between an intentionally held
+  review environment and a healthy active preview at first glance.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
