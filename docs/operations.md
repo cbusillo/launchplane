@@ -246,6 +246,10 @@ title: Operations
 - If a supported saved HTTP capture includes `Content-Type`, Harbor now also
   requires a JSON media type such as `application/json` or `application/*+json`
   and fails closed for clearly non-JSON values before replay packaging.
+- If that supported HTTP capture includes common method-override headers such as
+  `X-HTTP-Method-Override` or `X-Method-Override`, Harbor now also requires
+  them to stay aligned with the captured `POST` request shape and rejects
+  conflicting override values early.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases

@@ -1530,6 +1530,12 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
         headers[normalized_name] = header_value.strip()
     if not headers:
         raise click.ClickException("GitHub webhook HTTP capture must include at least one header.")
+    for override_header_name in ("X-HTTP-Method-Override", "X-Method-Override"):
+        override_method = _github_webhook_capture_header_value(headers, override_header_name)
+        if override_method and override_method.upper() != "POST":
+            raise click.ClickException(
+                f"GitHub webhook HTTP capture {override_header_name} must not conflict with the captured POST request."
+            )
     declared_content_type = _github_webhook_capture_header_value(headers, "Content-Type")
     if declared_content_type:
         normalized_media_type = declared_content_type.split(";", 1)[0].strip().lower()

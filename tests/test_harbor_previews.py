@@ -2435,6 +2435,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         f"X-Hub-Signature-256: {signature_256}",
+                        "X-HTTP-Method-Override: POST",
                         f"Content-Length: {len(payload_text.encode('utf-8'))}",
                         "Content-Type: application/json; charset=utf-8",
                         "",
@@ -2637,6 +2638,38 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Type must be JSON", result.output)
+
+    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_method_override(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            payload_text = json.dumps(_github_pull_request_webhook_payload())
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "X-GitHub-Event: pull_request",
+                        "X-HTTP-Method-Override: PATCH",
+                        "",
+                        payload_text,
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("X-HTTP-Method-Override must not conflict", result.output)
 
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(self) -> None:
         runner = CliRunner()
