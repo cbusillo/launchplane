@@ -1491,6 +1491,21 @@ def _github_webhook_capture_header_value(headers: dict[str, str], name: str) -> 
     return ""
 
 
+def _github_webhook_capture_metadata_headers(headers: dict[str, str]) -> dict[str, str]:
+    redacted_header_names = {
+        "authorization",
+        "cookie",
+        "proxy-authorization",
+    }
+    metadata_headers: dict[str, str] = {}
+    for header_name, header_value in headers.items():
+        if header_name.strip().lower() in redacted_header_names:
+            metadata_headers[header_name] = "[redacted]"
+            continue
+        metadata_headers[header_name] = header_value
+    return metadata_headers
+
+
 def _split_http_capture_text(http_capture_text: str) -> tuple[str, str]:
     for delimiter in ("\r\n\r\n", "\n\n"):
         if delimiter in http_capture_text:
@@ -1724,8 +1739,9 @@ def harbor_previews_build_github_webhook_replay_envelope(
             capture_payload["recorded_at"] = recorded_at.strip()
         if capture_source.strip():
             capture_payload["source"] = capture_source.strip()
-        if capture_headers:
-            capture_payload["headers"] = capture_headers
+        capture_metadata_headers = _github_webhook_capture_metadata_headers(capture_headers)
+        if capture_metadata_headers:
+            capture_payload["headers"] = capture_metadata_headers
         if evidence_payload is not None:
             capture_payload["evidence"] = evidence_payload
 

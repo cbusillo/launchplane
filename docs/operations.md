@@ -231,6 +231,12 @@ title: Operations
 - Replay output also surfaces the optional `webhook_replay.capture` metadata for
   local traceability, but Harbor treats that capture evidence as observational
   only rather than part of preview decision logic.
+- Saved HTTP capture headers that Harbor does not explicitly reject or use for
+  replay resolution, such as proxy trace headers like `Via`, are currently
+  preserved under `webhook_replay.capture.headers` as observational evidence.
+- That observational capture metadata now redacts obvious secret-bearing
+  request headers such as `Authorization`, `Cookie`, and
+  `Proxy-Authorization` before Harbor writes the replay envelope.
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.
