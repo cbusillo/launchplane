@@ -243,6 +243,9 @@ title: Operations
 - If a supported saved HTTP capture includes `Content-Length`, Harbor now also
   validates that declared length against the saved request body bytes and fails
   closed for mismatched or malformed values before it emits a replay envelope.
+- If a supported saved HTTP capture includes `Content-Type`, Harbor now also
+  requires a JSON media type such as `application/json` or `application/*+json`
+  and fails closed for clearly non-JSON values before replay packaging.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
