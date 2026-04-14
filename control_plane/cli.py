@@ -1445,6 +1445,113 @@ def harbor_previews_ingest_github_webhook(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+def _load_json_object_file(input_file: Path, *, description: str) -> dict[str, object]:
+    try:
+        payload = json.loads(input_file.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError) as exc:
+        raise click.ClickException(f"{description} must be valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise click.ClickException(f"{description} must decode to a JSON object.")
+    return payload
+
+
+def _load_github_webhook_capture_headers(input_file: Path) -> dict[str, str]:
+    payload = _load_json_object_file(input_file, description="GitHub webhook headers file")
+    headers: dict[str, str] = {}
+    for header_name, header_value in payload.items():
+        if not isinstance(header_value, str):
+            raise click.ClickException(
+                "GitHub webhook headers file must map header names to string values."
+            )
+        headers[str(header_name)] = header_value
+    return headers
+
+
+def _github_webhook_capture_header_value(headers: dict[str, str], name: str) -> str:
+    normalized_name = name.strip().lower()
+    if not normalized_name:
+        return ""
+    for header_name, header_value in headers.items():
+        if header_name.strip().lower() == normalized_name:
+            return header_value.strip()
+    return ""
+
+
+@harbor_previews.command("build-github-webhook-replay-envelope")
+@click.option("--payload-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--headers-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--event-name", default="", help="Optional GitHub event name override.")
+@click.option("--signature-256", default="", help="Optional X-Hub-Signature-256 override.")
+@click.option("--delivery-id", default="", help="Optional GitHub delivery id override.")
+@click.option("--delivery-source", default="", help="Optional top-level delivery source override.")
+@click.option("--allow-unsigned", is_flag=True, help="Emit an explicit unsigned replay envelope.")
+@click.option("--recorded-at", default="", help="Optional capture timestamp for traceability.")
+@click.option("--capture-source", default="", help="Optional capture source label for replay metadata.")
+@click.option("--evidence-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--output-file", type=click.Path(path_type=Path))
+def harbor_previews_build_github_webhook_replay_envelope(
+    payload_file: Path,
+    headers_file: Path | None,
+    event_name: str,
+    signature_256: str,
+    delivery_id: str,
+    delivery_source: str,
+    allow_unsigned: bool,
+    recorded_at: str,
+    capture_source: str,
+    evidence_file: Path | None,
+    output_file: Path | None,
+) -> None:
+    raw_payload_bytes, _ = _load_github_webhook_json_file(payload_file)
+    capture_headers = (
+        _load_github_webhook_capture_headers(headers_file) if headers_file is not None else {}
+    )
+    capture_event_name = _github_webhook_capture_header_value(capture_headers, "X-GitHub-Event")
+    evidence_payload = (
+        _load_json_object_file(evidence_file, description="GitHub webhook evidence file")
+        if evidence_file is not None
+        else None
+    )
+
+    capture_payload: dict[str, object] | None = None
+    if capture_headers or recorded_at.strip() or capture_source.strip() or evidence_payload is not None:
+        capture_payload = {}
+        if recorded_at.strip():
+            capture_payload["recorded_at"] = recorded_at.strip()
+        if capture_source.strip():
+            capture_payload["source"] = capture_source.strip()
+        if capture_headers:
+            capture_payload["headers"] = capture_headers
+        if evidence_payload is not None:
+            capture_payload["evidence"] = evidence_payload
+
+    resolved_event_name = event_name.strip() or capture_event_name or "pull_request"
+    top_level_event_name = event_name.strip() or ("" if capture_event_name else resolved_event_name)
+    top_level_signature_256 = signature_256.strip()
+    top_level_delivery_id = delivery_id.strip()
+    envelope = GitHubWebhookReplayEnvelope.model_validate(
+        {
+            "schema_version": 1,
+            "adapter": "github_webhook",
+            "event_name": top_level_event_name,
+            "signature_256": top_level_signature_256,
+            "allow_unsigned": allow_unsigned,
+            "delivery_id": top_level_delivery_id,
+            "delivery_source": delivery_source.strip(),
+            "payload_text": raw_payload_bytes.decode("utf-8"),
+            "capture": capture_payload,
+        }
+    )
+    envelope_json = json.dumps(
+        envelope.model_dump(mode="json", exclude_none=True),
+        indent=2,
+        sort_keys=True,
+    )
+    if output_file is not None:
+        output_file.write_text(f"{envelope_json}\n", encoding="utf-8")
+    click.echo(envelope_json)
+
+
 @harbor_previews.command("replay-github-webhook")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True

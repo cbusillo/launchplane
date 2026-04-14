@@ -138,6 +138,12 @@ title: Operations
 - For captured/local replay, Harbor also accepts a single replay envelope file
   through `harbor-previews replay-github-webhook`, so event name, signature,
   and payload travel together instead of requiring separate CLI flags.
+- To generate that envelope from saved local inputs, use
+  `harbor-previews build-github-webhook-replay-envelope` with a raw payload
+  JSON file plus optional captured headers/evidence files. The helper emits the
+  same replay-envelope contract that `replay-github-webhook` already consumes,
+  so capture-to-replay stays one format instead of splitting into a second
+  local-only shape.
 - Replay envelopes now also accept an optional captured-delivery `capture`
   block with recorded-at/source metadata plus selected headers/evidence. When
   the top-level envelope omits `event_name`, `signature_256`, or `delivery_id`,
@@ -219,6 +225,9 @@ title: Operations
 - Replay output also surfaces the optional `webhook_replay.capture` metadata for
   local traceability, but Harbor treats that capture evidence as observational
   only rather than part of preview decision logic.
+- The builder currently packages the raw payload as `payload_text` so signed
+  replays preserve the exact bytes Harbor verifies, even when the envelope also
+  carries parsed capture metadata for operator traceability.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
