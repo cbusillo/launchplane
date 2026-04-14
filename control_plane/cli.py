@@ -1,3 +1,4 @@
+from html import escape
 import json
 import subprocess
 import time
@@ -78,6 +79,257 @@ def _store(state_dir: Path) -> FilesystemRecordStore:
 
 def _control_plane_root() -> Path:
     return Path(__file__).resolve().parent.parent
+
+
+def _require_harbor_preview_status_payload(
+    *,
+    state_dir: Path,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> dict[str, object]:
+    payload = build_preview_status_payload(
+        record_store=_store(state_dir),
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    if payload is None:
+        raise click.ClickException(
+            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
+        )
+    return payload
+
+
+def _status_tone(value: str) -> str:
+    normalized_value = value.strip().lower()
+    if normalized_value in {"pass", "ready", "healthy", "serving"}:
+        return "good"
+    if normalized_value in {"fail", "failed", "destroyed"}:
+        return "bad"
+    if normalized_value in {"pending", "building", "deploying", "verifying", "requested", "paused"}:
+        return "warn"
+    return "neutral"
+
+
+def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
+    preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
+    trust_summary = payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
+    health_summary = payload.get("health_summary") if isinstance(payload.get("health_summary"), dict) else {}
+    input_summary = payload.get("input_summary") if isinstance(payload.get("input_summary"), dict) else {}
+    lifecycle_summary = (
+        payload.get("lifecycle_summary") if isinstance(payload.get("lifecycle_summary"), dict) else {}
+    )
+    links = payload.get("links") if isinstance(payload.get("links"), dict) else {}
+    recent_generations = (
+        payload.get("recent_generations") if isinstance(payload.get("recent_generations"), list) else []
+    )
+    source_map = input_summary.get("source_map") if isinstance(input_summary.get("source_map"), list) else []
+    companions = input_summary.get("companions") if isinstance(input_summary.get("companions"), list) else []
+    serving_generation = (
+        payload.get("serving_generation") if isinstance(payload.get("serving_generation"), dict) else {}
+    )
+
+    preview_label = escape(str(preview.get("preview_label", "Harbor preview")))
+    canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
+    preview_state = str(preview.get("state", "unknown"))
+    status_summary = escape(str(health_summary.get("status_summary", "No Harbor preview summary available.")))
+    next_action = escape(str(lifecycle_summary.get("next_action", "")))
+    artifact_id = escape(str(trust_summary.get("artifact_id", "")))
+    manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
+    destroy_after = escape(str(lifecycle_summary.get("destroy_after", "")))
+    overall_health_status = str(health_summary.get("overall_health_status", "pending"))
+    raw_payload_json = escape(json.dumps(payload, indent=2, sort_keys=True))
+
+    source_map_rows = "".join(
+        (
+            "<tr>"
+            f"<td>{escape(str(item.get('repo', '')))}</td>"
+            f"<td><code>{escape(str(item.get('git_sha', '')))}</code></td>"
+            f"<td>{escape(str(item.get('selection', '')))}</td>"
+            "</tr>"
+        )
+        for item in source_map
+        if isinstance(item, dict)
+    )
+    companion_items = "".join(
+        f"<li><span>{escape(str(item.get('repo', '')))}</span><code>PR {escape(str(item.get('pr_number', '')))}</code></li>"
+        for item in companions
+        if isinstance(item, dict)
+    )
+    recent_generation_items = "".join(
+        (
+            "<li>"
+            f"<strong>{escape(str(item.get('generation_id', '')))}</strong>"
+            f"<span>{escape(str(item.get('state', '')))}</span>"
+            f"<code>{escape(str(item.get('artifact_id', '')))}</code>"
+            "</li>"
+        )
+        for item in recent_generations
+        if isinstance(item, dict)
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>{preview_label} · Harbor status</title>
+  <style>
+    :root {{
+      --bg: #f3efe7;
+      --panel: rgba(255, 252, 247, 0.88);
+      --panel-strong: #fffdfa;
+      --text: #1d1a17;
+      --muted: #6b6257;
+      --line: rgba(37, 28, 20, 0.14);
+      --accent: #1d5c4d;
+      --good: #1f6a3a;
+      --warn: #9a6a11;
+      --bad: #9b2f2a;
+      --shadow: 0 18px 50px rgba(43, 33, 23, 0.08);
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      color: var(--text);
+      background:
+        radial-gradient(circle at top left, rgba(29, 92, 77, 0.08), transparent 24%),
+        linear-gradient(180deg, #f7f2ea 0%, var(--bg) 100%);
+    }}
+    main {{ max-width: 1200px; margin: 0 auto; padding: 40px 24px 64px; }}
+    .hero {{
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
+      gap: 22px;
+      align-items: start;
+    }}
+    .headline, .sidebar, .section {{
+      background: var(--panel);
+      backdrop-filter: blur(12px);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+    }}
+    .headline {{ padding: 30px; border-radius: 28px; }}
+    .sidebar {{ padding: 22px; border-radius: 24px; }}
+    .eyebrow {{
+      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 12px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    h1 {{ font-size: clamp(32px, 5vw, 56px); line-height: 0.95; margin: 12px 0 14px; }}
+    .lede {{ color: var(--muted); font-size: 17px; line-height: 1.6; max-width: 58ch; margin: 0; }}
+    .cta-row {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }}
+    .cta, .subtle {{
+      display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
+      border-radius: 999px; padding: 12px 16px; border: 1px solid var(--line);
+      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px;
+    }}
+    .cta {{ background: var(--accent); color: #f9f6f0; border-color: transparent; }}
+    .subtle {{ color: var(--text); background: rgba(255,255,255,0.55); }}
+    .status-chip {{
+      display: inline-flex; align-items: center; gap: 8px; border-radius: 999px;
+      padding: 8px 12px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+      font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
+    }}
+    .tone-good {{ background: rgba(31, 106, 58, 0.1); color: var(--good); }}
+    .tone-warn {{ background: rgba(154, 106, 17, 0.12); color: var(--warn); }}
+    .tone-bad {{ background: rgba(155, 47, 42, 0.12); color: var(--bad); }}
+    .tone-neutral {{ background: rgba(79, 68, 56, 0.1); color: #4f4438; }}
+    .metric-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 24px; }}
+    .metric {{ padding-top: 16px; border-top: 1px solid var(--line); }}
+    .metric label {{ display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
+    .metric strong, .metric code {{ display: block; margin-top: 8px; font-size: 15px; }}
+    .stack {{ display: grid; gap: 18px; margin-top: 24px; }}
+    .section {{ border-radius: 24px; padding: 24px; }}
+    .section h2 {{ margin: 0 0 10px; font-size: 24px; }}
+    .section p {{ margin: 0; color: var(--muted); line-height: 1.6; }}
+    .columns {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr); gap: 18px; margin-top: 18px; }}
+    table {{ width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 14px; }}
+    th, td {{ text-align: left; padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }}
+    th {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
+    ul {{ list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 10px; }}
+    li {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }}
+    code {{ font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; }}
+    details {{ margin-top: 18px; }}
+    summary {{ cursor: pointer; color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }}
+    pre {{ overflow: auto; padding: 18px; background: #1e1a16; color: #f4ede3; border-radius: 18px; font-size: 12px; }}
+    @media (max-width: 760px) {{
+      .hero, .columns, .metric-grid {{ grid-template-columns: 1fr; }}
+      main {{ padding: 20px 16px 40px; }}
+      .headline, .sidebar, .section {{ border-radius: 22px; }}
+    }}
+  </style>
+</head>
+<body>
+  <main>
+    <section class=\"hero\">
+      <article class=\"headline\">
+        <div class=\"eyebrow\">Harbor preview status</div>
+        <h1>{preview_label}</h1>
+        <p class=\"lede\">{status_summary}</p>
+        <div class=\"cta-row\">
+          <a class=\"cta\" href=\"{canonical_url}\">Open preview URL</a>
+          <a class=\"subtle\" href=\"{escape(str(links.get('anchor_pr_url', '')))}\">Anchor pull request</a>
+        </div>
+        <div class=\"metric-grid\">
+          <div class=\"metric\"><label>Artifact</label><code>{artifact_id or 'Unavailable'}</code></div>
+          <div class=\"metric\"><label>Manifest</label><code>{manifest_fingerprint or 'Unavailable'}</code></div>
+          <div class=\"metric\"><label>Serving generation</label><code>{escape(str(serving_generation.get('generation_id', 'Unavailable')))}</code></div>
+        </div>
+      </article>
+      <aside class=\"sidebar\">
+        <div class=\"status-chip tone-{_status_tone(preview_state)}\">Preview {escape(preview_state)}</div>
+        <div style=\"height:12px\"></div>
+        <div class=\"status-chip tone-{_status_tone(overall_health_status)}\">Health {escape(overall_health_status)}</div>
+        <div class=\"stack\">
+          <div>
+            <div class=\"eyebrow\">Next action</div>
+            <p>{next_action or 'No next action recorded.'}</p>
+          </div>
+          <div>
+            <div class=\"eyebrow\">Destroy after</div>
+            <p>{destroy_after or 'No destroy-after deadline recorded.'}</p>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class=\"columns\">
+      <article class=\"section\">
+        <div class=\"eyebrow\">Exact inputs</div>
+        <h2>Serving manifest evidence</h2>
+        <p>Harbor keeps the exact repo-to-SHA map and companion intent visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
+        <table>
+          <thead><tr><th>Repo</th><th>SHA</th><th>Selection</th></tr></thead>
+          <tbody>{source_map_rows or '<tr><td colspan="3">No source map recorded.</td></tr>'}</tbody>
+        </table>
+      </article>
+      <article class=\"section\">
+        <div class=\"eyebrow\">Companions</div>
+        <h2>Linked pull requests</h2>
+        <p>Companion refs stay explicit and secondary to the anchor preview narrative.</p>
+        <ul>{companion_items or '<li><span>No companions recorded.</span></li>'}</ul>
+      </article>
+    </section>
+
+    <section class=\"section\" style=\"margin-top:18px;\">
+      <div class=\"eyebrow\">Recent activity</div>
+      <h2>Generation trail</h2>
+      <p>Generation history stays visible as evidence, but the stable preview URL remains the primary narrative.</p>
+      <ul>{recent_generation_items or '<li><span>No recent generations recorded.</span></li>'}</ul>
+      <details>
+        <summary>Raw page JSON</summary>
+        <pre>{raw_payload_json}</pre>
+      </details>
+    </section>
+  </main>
+</body>
+</html>
+"""
 
 
 def _load_json_file(input_file: Path) -> dict[str, object]:
@@ -2035,17 +2287,41 @@ def harbor_previews_show(
     anchor_repo: str,
     anchor_pr_number: int,
 ) -> None:
-    payload = build_preview_status_payload(
-        record_store=_store(state_dir),
+    payload = _require_harbor_preview_status_payload(
+        state_dir=state_dir,
         context_name=context_name,
         anchor_repo=anchor_repo,
         anchor_pr_number=anchor_pr_number,
     )
-    if payload is None:
-        raise click.ClickException(
-            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
-        )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@harbor_previews.command("render-status-page")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--anchor-repo", required=True)
+@click.option("--pr-number", "anchor_pr_number", type=click.IntRange(min=1), required=True)
+@click.option("--output-file", type=click.Path(path_type=Path))
+def harbor_previews_render_status_page(
+    state_dir: Path,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+    output_file: Path | None,
+) -> None:
+    payload = _require_harbor_preview_status_payload(
+        state_dir=state_dir,
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+    )
+    html_output = _render_harbor_preview_status_page_html(payload)
+    if output_file is not None:
+        output_file.write_text(html_output, encoding="utf-8")
+        return
+    click.echo(html_output)
 
 
 @harbor_previews.command("history")

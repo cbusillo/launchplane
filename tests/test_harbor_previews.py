@@ -790,6 +790,57 @@ ODOO_DB_PASSWORD = "local-secret"
                 "tenant-opw",
             )
 
+    def test_harbor_previews_render_status_page_writes_html_summary(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    active_generation_id="hgen_01jabc_1",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_1",
+                    destroy_after="2026-04-20T12:10:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-status-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("opw/tenant-opw/pr-123", rendered_html)
+            self.assertIn("https://harbor.example/previews/opw/tenant-opw/pr-123", rendered_html)
+            self.assertIn("artifact-opw-123", rendered_html)
+            self.assertIn("harbor-manifest-001", rendered_html)
+            self.assertIn("Serving the latest requested generation.", rendered_html)
+            self.assertIn("Raw page JSON", rendered_html)
+
     def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
