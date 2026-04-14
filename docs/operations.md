@@ -280,6 +280,9 @@ title: Operations
 - If that supported HTTP capture declares `Keep-Alive`, Harbor also rejects it
   early on the local saved-capture path because the replay helper does not
   model persistent-connection tuning semantics.
+- If that supported HTTP capture declares `Proxy-Connection`, Harbor also
+  rejects it early on the local saved-capture path because the replay helper
+  does not model proxy hop-by-hop semantics.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
