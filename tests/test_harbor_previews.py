@@ -2429,10 +2429,13 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     {
                         "Authorization": "Bearer super-secret-token",
                         "Cookie": "session=secret-cookie",
+                        "CF-Connecting-IP": "203.0.113.43",
                         "Proxy-Authorization": "Basic c2VjcmV0",
+                        "True-Client-IP": "203.0.113.44",
                         "Forwarded": "for=203.0.113.43;proto=https;host=harbor.example",
                         "X-Forwarded-For": "203.0.113.43",
                         "X-Forwarded-Host": "harbor.example",
+                        "X-Real-IP": "203.0.113.45",
                         "X-GitHub-Event": "pull_request",
                         "X-GitHub-Delivery": "redacted-headers-123",
                         "Via": "1.1 proxy.example",
@@ -2465,7 +2468,15 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "[redacted]",
             )
             self.assertEqual(
+                envelope_payload["capture"]["headers"]["CF-Connecting-IP"],
+                "[redacted]",
+            )
+            self.assertEqual(
                 envelope_payload["capture"]["headers"]["Proxy-Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["True-Client-IP"],
                 "[redacted]",
             )
             self.assertEqual(
@@ -2478,6 +2489,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
             self.assertEqual(
                 envelope_payload["capture"]["headers"]["X-Forwarded-Host"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Real-IP"],
                 "[redacted]",
             )
             self.assertEqual(
@@ -2700,10 +2715,13 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "Host: harbor.example",
                         "Authorization: Bearer super-secret-token",
                         "Cookie: session=secret-cookie",
+                        "CF-Connecting-IP: 203.0.113.43",
                         "Proxy-Authorization: Basic c2VjcmV0",
+                        "True-Client-IP: 203.0.113.44",
                         "Forwarded: for=203.0.113.43;proto=https;host=harbor.example",
                         "X-Forwarded-For: 203.0.113.43",
                         "X-Forwarded-Proto: https",
+                        "X-Real-IP: 203.0.113.45",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: redacted-http-123",
                         "Via: 1.1 proxy.example",
@@ -2736,7 +2754,15 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "[redacted]",
             )
             self.assertEqual(
+                envelope_payload["capture"]["headers"]["CF-Connecting-IP"],
+                "[redacted]",
+            )
+            self.assertEqual(
                 envelope_payload["capture"]["headers"]["Proxy-Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["True-Client-IP"],
                 "[redacted]",
             )
             self.assertEqual(
@@ -2749,6 +2775,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
             self.assertEqual(
                 envelope_payload["capture"]["headers"]["X-Forwarded-Proto"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Real-IP"],
                 "[redacted]",
             )
             self.assertEqual(

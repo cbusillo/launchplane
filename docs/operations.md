@@ -240,6 +240,9 @@ title: Operations
 - Harbor also redacts forwarded topology headers such as `Forwarded` and
   `X-Forwarded-*` before writing replay metadata, while still preserving less
   sensitive trace headers like `Via` for local debugging context.
+- Harbor likewise redacts vendor-specific client IP trace headers such as
+  `X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP` before writing replay
+  metadata because replay does not need that network-identifying detail.
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.
