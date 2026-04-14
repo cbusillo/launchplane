@@ -143,6 +143,9 @@ title: Operations
 - Teardown-pending previews now also get an explicit cleanup-in-progress
   callout on that rendered page, so scheduled removal reads differently from
   both paused and already-destroyed preview states.
+- In-progress replacement generations now also get an explicit progress
+  callout on that rendered page, so operators can tell when Harbor is still
+  serving the old preview while a newer generation is building or deploying.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
