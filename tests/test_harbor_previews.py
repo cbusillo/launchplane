@@ -2590,6 +2590,56 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "POST /github/webhook HTTP/1.1",
             )
 
+    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_correlation_headers_file_values(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            payload_file = Path(temporary_directory_name) / "github-webhook.json"
+            headers_file = Path(temporary_directory_name) / "github-webhook-headers.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            payload_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
+            headers_file.write_text(
+                json.dumps(
+                    {
+                        "CF-Ray": "8d2f4bb7c9d7abcd-SJC",
+                        "X-Amzn-Trace-Id": "Root=1-abcdef01-23456789abcdef0123456789",
+                        "X-Request-Id": "trace-123",
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "correlation-headers-123",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--payload-file",
+                    str(payload_file),
+                    "--headers-file",
+                    str(headers_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            envelope_payload = json.loads(result.output)
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["CF-Ray"],
+                "8d2f4bb7c9d7abcd-SJC",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Amzn-Trace-Id"],
+                "Root=1-abcdef01-23456789abcdef0123456789",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Request-Id"],
+                "trace-123",
+            )
+
     def test_harbor_previews_build_github_webhook_replay_envelope_preserves_observational_http_capture_headers(
         self,
     ) -> None:
@@ -2662,6 +2712,55 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(
                 replay_payload["webhook_replay"]["capture"]["headers"]["Via"],
                 "1.1 proxy.example",
+            )
+
+    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_http_capture_correlation_headers(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "Host: harbor.example",
+                        "CF-Ray: 8d2f4bb7c9d7abcd-SJC",
+                        "X-Amzn-Trace-Id: Root=1-abcdef01-23456789abcdef0123456789",
+                        "X-Request-Id: trace-123",
+                        "X-GitHub-Event: pull_request",
+                        "X-GitHub-Delivery: correlation-http-123",
+                        "",
+                        json.dumps(_github_pull_request_webhook_payload()),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            envelope_payload = json.loads(result.output)
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["CF-Ray"],
+                "8d2f4bb7c9d7abcd-SJC",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Amzn-Trace-Id"],
+                "Root=1-abcdef01-23456789abcdef0123456789",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Request-Id"],
+                "trace-123",
             )
 
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_cache_control(

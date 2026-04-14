@@ -243,6 +243,9 @@ title: Operations
 - Harbor likewise redacts vendor-specific client IP trace headers such as
   `X-Real-IP`, `True-Client-IP`, and `CF-Connecting-IP` before writing replay
   metadata because replay does not need that network-identifying detail.
+- Harbor still preserves request-correlation headers such as `CF-Ray`,
+  `X-Amzn-Trace-Id`, and `X-Request-Id` as observational replay metadata
+  because they are useful debugging breadcrumbs without steering replay.
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.
