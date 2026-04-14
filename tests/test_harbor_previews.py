@@ -730,6 +730,66 @@ ODOO_DB_PASSWORD = "local-secret"
                 "Serving the latest requested generation.",
             )
 
+    def test_harbor_previews_show_surfaces_first_page_summary_fields(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    active_generation_id="hgen_01jabc_1",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_1",
+                    destroy_after="2026-04-20T12:10:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "show",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(
+                payload["preview"]["canonical_url"],
+                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+            )
+            self.assertEqual(payload["preview"]["preview_label"], "opw/tenant-opw/pr-123")
+            self.assertEqual(payload["trust_summary"]["artifact_id"], "artifact-opw-123")
+            self.assertEqual(
+                payload["trust_summary"]["manifest_fingerprint"],
+                "harbor-manifest-001",
+            )
+            self.assertEqual(
+                payload["lifecycle_summary"]["next_action"],
+                "Harbor will keep this preview until the current destroy-after deadline or a lifecycle event replaces it.",
+            )
+            self.assertEqual(
+                payload["input_summary"]["source_map"][0]["repo"],
+                "tenant-opw",
+            )
+
     def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
