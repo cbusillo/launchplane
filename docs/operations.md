@@ -246,6 +246,9 @@ title: Operations
 - Harbor still preserves request-correlation headers such as `CF-Ray`,
   `X-Amzn-Trace-Id`, and `X-Request-Id` as observational replay metadata
   because they are useful debugging breadcrumbs without steering replay.
+- Harbor also preserves standards-based distributed tracing headers such as
+  `traceparent`, `tracestate`, and `b3` as observational replay metadata for
+  the same debugging reason.
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.
