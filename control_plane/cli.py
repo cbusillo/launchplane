@@ -1495,7 +1495,10 @@ def _github_webhook_capture_metadata_headers(headers: dict[str, str]) -> dict[st
     exact_redacted_header_names = {
         "authorization",
         "cookie",
+        "cf-connecting-ip",
         "proxy-authorization",
+        "true-client-ip",
+        "x-real-ip",
     }
     metadata_headers: dict[str, str] = {}
     for header_name, header_value in headers.items():
