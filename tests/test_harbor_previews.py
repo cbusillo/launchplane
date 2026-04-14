@@ -2737,6 +2737,38 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Encoding is unsupported", result.output)
 
+    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_trailer_declarations(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            payload_text = json.dumps(_github_pull_request_webhook_payload())
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "X-GitHub-Event: pull_request",
+                        "Trailer: X-GitHub-Delivery",
+                        "",
+                        payload_text,
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("Trailer declarations are unsupported", result.output)
+
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
