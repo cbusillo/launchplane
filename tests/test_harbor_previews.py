@@ -239,6 +239,25 @@ def _github_webhook_signature(payload: dict[str, object], secret: str = "harbor-
     return f"sha256={digest}"
 
 
+def _github_webhook_replay_envelope(
+    *,
+    payload: dict[str, object] | None = None,
+    payload_text: str = "",
+    signature_256: str = "",
+    allow_unsigned: bool = False,
+    event_name: str = "pull_request",
+) -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "adapter": "github_webhook",
+        "event_name": event_name,
+        "signature_256": signature_256,
+        "allow_unsigned": allow_unsigned,
+        "payload_text": payload_text,
+        "payload": payload,
+    }
+
+
 class HarborPreviewReadModelTests(unittest.TestCase):
     def test_harbor_preview_identity_helpers_are_deterministic(self) -> None:
         self.assertEqual(
@@ -2189,6 +2208,74 @@ ENV_OVERRIDE_DISABLE_CRON = true
             payload = json.loads(result.output)
             self.assertEqual(payload["webhook"]["signature_verification"]["mode"], "bypass")
             self.assertFalse(payload["webhook"]["signature_verification"]["verified"])
+
+    def test_harbor_previews_replay_github_webhook_reuses_verified_webhook_flow(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "github-webhook-replay.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            payload_text = json.dumps(webhook_payload)
+            input_file.write_text(
+                json.dumps(
+                    _github_webhook_replay_envelope(
+                        payload_text=payload_text,
+                        signature_256=_github_webhook_signature(webhook_payload),
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "replay-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["webhook_replay"]["event_name"], "pull_request")
+            self.assertEqual(payload["decision"]["action"], "enable_preview")
+            self.assertTrue(payload["apply"]["applied"])
+            self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
+
+    def test_harbor_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            input_file = Path(temporary_directory_name) / "github-webhook-replay.json"
+            input_file.write_text(
+                json.dumps(
+                    _github_webhook_replay_envelope(
+                        payload=_github_pull_request_webhook_payload(),
+                        signature_256="sha256=deadbeef",
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "replay-github-webhook",
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("requires payload_text", result.output)
 
     def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
         runner = CliRunner()

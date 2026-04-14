@@ -135,6 +135,9 @@ title: Operations
   `harbor-previews ingest-github-webhook --event-name pull_request`, which
   adapts the raw delivery into Harbor's typed PR-event contract and then reuses
   the same classify/resolve/apply/feedback path.
+- For captured/local replay, Harbor also accepts a single replay envelope file
+  through `harbor-previews replay-github-webhook`, so event name, signature,
+  and payload travel together instead of requiring separate CLI flags.
 - By default `harbor-previews ingest-github-webhook` now verifies the raw body
   against `--signature-256` using `GITHUB_WEBHOOK_SECRET` from the resolved
   Harbor context before it trusts the payload. Use `--allow-unsigned` only for
@@ -200,6 +203,9 @@ title: Operations
   GitHub webhook delivery without a hand-authored intermediate event file.
 - If signature verification fails, Harbor rejects the raw delivery before event
   adaptation or preview decision logic runs.
+- Signed replay envelopes must include the raw `payload_text` so Harbor can
+  verify the original bytes; unsigned replay remains available only through the
+  explicit `allow_unsigned` envelope path.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
