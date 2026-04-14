@@ -142,6 +142,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     artifact_id = escape(str(trust_summary.get("artifact_id", "")))
     manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
     destroy_after = escape(str(lifecycle_summary.get("destroy_after", "")))
+    paused_at = escape(str(preview.get("paused_at", "")))
     destroyed_at = escape(str(lifecycle_summary.get("destroyed_at", preview.get("destroyed_at", ""))))
     destroy_reason = escape(str(lifecycle_summary.get("destroy_reason", preview.get("destroy_reason", ""))))
     overall_health_status = str(health_summary.get("overall_health_status", "pending"))
@@ -165,7 +166,21 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         secondary_cta_label = "Retained preview URL"
         secondary_cta_href = canonical_url
     replacement_callout_html = ""
+    paused_callout_html = ""
     destroyed_callout_html = ""
+    if preview_state.strip().lower() == "paused":
+        paused_callout_html = f"""
+        <div class=\"callout callout-warn\">
+          <div class=\"eyebrow\">Paused state</div>
+          <h2>This preview is intentionally paused. Harbor is holding the current review evidence in place.</h2>
+          <p>{status_summary}</p>
+          <dl>
+            <div><dt>Paused at</dt><dd>{paused_at or 'Unavailable'}</dd></div>
+            <div><dt>Serving now</dt><dd><code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Resume behavior</dt><dd>Blocked until Harbor resumes the preview.</dd></div>
+          </dl>
+        </div>
+        """
     if preview_state.strip().lower() == "destroyed":
         destroyed_callout_html = f"""
         <div class=\"callout callout-neutral\">
@@ -333,6 +348,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {paused_callout_html}
         {destroyed_callout_html}
         {replacement_callout_html}
         <div class=\"cta-row\">
