@@ -1586,6 +1586,11 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
         raise click.ClickException(
             "GitHub webhook HTTP capture Keep-Alive declarations are unsupported for the saved-capture replay path."
         )
+    declared_proxy_connection = _github_webhook_capture_header_value(headers, "Proxy-Connection")
+    if declared_proxy_connection:
+        raise click.ClickException(
+            "GitHub webhook HTTP capture Proxy-Connection declarations are unsupported for the saved-capture replay path."
+        )
     declared_content_type = _github_webhook_capture_header_value(headers, "Content-Type")
     if declared_content_type:
         normalized_media_type = declared_content_type.split(";", 1)[0].strip().lower()
