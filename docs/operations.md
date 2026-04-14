@@ -240,6 +240,9 @@ title: Operations
 - That HTTP-capture path now also preserves the original request line under
   `capture.evidence.http_request.request_line` so local replay traces keep the
   saved request shape without turning it into a Harbor decision input.
+- If a supported saved HTTP capture includes `Content-Length`, Harbor now also
+  validates that declared length against the saved request body bytes and fails
+  closed for mismatched or malformed values before it emits a replay envelope.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
