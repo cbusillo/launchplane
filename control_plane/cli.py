@@ -1530,7 +1530,24 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
         headers[normalized_name] = header_value.strip()
     if not headers:
         raise click.ClickException("GitHub webhook HTTP capture must include at least one header.")
-    return request_line, headers, body_text.encode("utf-8")
+    body_bytes = body_text.encode("utf-8")
+    declared_content_length = _github_webhook_capture_header_value(headers, "Content-Length")
+    if declared_content_length:
+        try:
+            expected_content_length = int(declared_content_length)
+        except ValueError as exc:
+            raise click.ClickException(
+                "GitHub webhook HTTP capture Content-Length header must be an integer when present."
+            ) from exc
+        if expected_content_length < 0:
+            raise click.ClickException(
+                "GitHub webhook HTTP capture Content-Length header must not be negative."
+            )
+        if expected_content_length != len(body_bytes):
+            raise click.ClickException(
+                "GitHub webhook HTTP capture Content-Length does not match the saved body bytes."
+            )
+    return request_line, headers, body_bytes
 
 
 def _merge_github_webhook_capture_evidence(
