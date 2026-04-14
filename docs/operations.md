@@ -237,6 +237,9 @@ title: Operations
 - That observational capture metadata now redacts obvious secret-bearing
   request headers such as `Authorization`, `Cookie`, and
   `Proxy-Authorization` before Harbor writes the replay envelope.
+- Harbor also redacts forwarded topology headers such as `Forwarded` and
+  `X-Forwarded-*` before writing replay metadata, while still preserving less
+  sensitive trace headers like `Via` for local debugging context.
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.

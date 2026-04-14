@@ -2430,8 +2430,12 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "Authorization": "Bearer super-secret-token",
                         "Cookie": "session=secret-cookie",
                         "Proxy-Authorization": "Basic c2VjcmV0",
+                        "Forwarded": "for=203.0.113.43;proto=https;host=harbor.example",
+                        "X-Forwarded-For": "203.0.113.43",
+                        "X-Forwarded-Host": "harbor.example",
                         "X-GitHub-Event": "pull_request",
                         "X-GitHub-Delivery": "redacted-headers-123",
+                        "Via": "1.1 proxy.example",
                     }
                 ),
                 encoding="utf-8",
@@ -2465,8 +2469,24 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "[redacted]",
             )
             self.assertEqual(
+                envelope_payload["capture"]["headers"]["Forwarded"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Forwarded-For"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Forwarded-Host"],
+                "[redacted]",
+            )
+            self.assertEqual(
                 envelope_payload["capture"]["headers"]["X-GitHub-Delivery"],
                 "redacted-headers-123",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Via"],
+                "1.1 proxy.example",
             )
 
     def test_harbor_previews_build_github_webhook_replay_envelope_accepts_http_capture_file(self) -> None:
@@ -2681,8 +2701,12 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "Authorization: Bearer super-secret-token",
                         "Cookie: session=secret-cookie",
                         "Proxy-Authorization: Basic c2VjcmV0",
+                        "Forwarded: for=203.0.113.43;proto=https;host=harbor.example",
+                        "X-Forwarded-For: 203.0.113.43",
+                        "X-Forwarded-Proto: https",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: redacted-http-123",
+                        "Via: 1.1 proxy.example",
                         "",
                         json.dumps(_github_pull_request_webhook_payload()),
                     ]
@@ -2716,8 +2740,24 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "[redacted]",
             )
             self.assertEqual(
+                envelope_payload["capture"]["headers"]["Forwarded"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Forwarded-For"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-Forwarded-Proto"],
+                "[redacted]",
+            )
+            self.assertEqual(
                 envelope_payload["capture"]["headers"]["X-GitHub-Delivery"],
                 "redacted-http-123",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Via"],
+                "1.1 proxy.example",
             )
 
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_upgrade(
