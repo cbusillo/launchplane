@@ -1501,7 +1501,7 @@ def _split_http_capture_text(http_capture_text: str) -> tuple[str, str]:
     )
 
 
-def _parse_github_webhook_http_capture(input_file: Path) -> tuple[dict[str, str], bytes]:
+def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str, str], bytes]:
     try:
         http_capture_text = input_file.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
@@ -1530,7 +1530,43 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[dict[str, str]
         headers[normalized_name] = header_value.strip()
     if not headers:
         raise click.ClickException("GitHub webhook HTTP capture must include at least one header.")
-    return headers, body_text.encode("utf-8")
+    return request_line, headers, body_text.encode("utf-8")
+
+
+def _merge_github_webhook_capture_evidence(
+    *,
+    evidence_payload: dict[str, object] | None,
+    request_line: str,
+) -> dict[str, object] | None:
+    if not request_line.strip():
+        return evidence_payload
+
+    merged_evidence = dict(evidence_payload) if evidence_payload is not None else {}
+    http_request_payload = merged_evidence.get("http_request")
+    if http_request_payload is None:
+        merged_evidence["http_request"] = {"request_line": request_line}
+        return merged_evidence
+    if not isinstance(http_request_payload, dict):
+        raise click.ClickException(
+            "GitHub webhook evidence file field 'http_request' must be a JSON object when provided."
+        )
+
+    request_line_payload = http_request_payload.get("request_line")
+    if request_line_payload is not None:
+        if not isinstance(request_line_payload, str):
+            raise click.ClickException(
+                "GitHub webhook evidence file field 'http_request.request_line' must be a string when provided."
+            )
+        if request_line_payload != request_line:
+            raise click.ClickException(
+                "GitHub webhook evidence file request_line conflicts with the saved HTTP capture request line."
+            )
+        return merged_evidence
+
+    merged_http_request_payload = dict(http_request_payload)
+    merged_http_request_payload["request_line"] = request_line
+    merged_evidence["http_request"] = merged_http_request_payload
+    return merged_evidence
 
 
 @harbor_previews.command("build-github-webhook-replay-envelope")
@@ -1570,8 +1606,11 @@ def harbor_previews_build_github_webhook_replay_envelope(
         )
 
     capture_headers: dict[str, str] = {}
+    captured_request_line = ""
     if http_capture_file is not None:
-        capture_headers, raw_payload_bytes = _parse_github_webhook_http_capture(http_capture_file)
+        captured_request_line, capture_headers, raw_payload_bytes = _parse_github_webhook_http_capture(
+            http_capture_file
+        )
         _load_github_webhook_json_bytes(raw_payload_bytes, description="GitHub webhook HTTP capture body")
     else:
         assert payload_file is not None
@@ -1584,6 +1623,10 @@ def harbor_previews_build_github_webhook_replay_envelope(
         _load_json_object_file(evidence_file, description="GitHub webhook evidence file")
         if evidence_file is not None
         else None
+    )
+    evidence_payload = _merge_github_webhook_capture_evidence(
+        evidence_payload=evidence_payload,
+        request_line=captured_request_line,
     )
     raw_payload_text = raw_payload_bytes.decode("utf-8")
 

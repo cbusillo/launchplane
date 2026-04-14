@@ -237,6 +237,9 @@ title: Operations
 - When `--http-capture-file` is used, Harbor parses headers from that capture
   directly and rejects malformed request lines or header syntax before it emits
   a replay envelope.
+- That HTTP-capture path now also preserves the original request line under
+  `capture.evidence.http_request.request_line` so local replay traces keep the
+  saved request shape without turning it into a Harbor decision input.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
