@@ -268,6 +268,9 @@ title: Operations
 - If that supported HTTP capture declares `Pragma`, Harbor also rejects it
   early on the local saved-capture path because the replay helper does not
   model cache or proxy semantics.
+- If that supported HTTP capture declares `Cache-Control`, Harbor also rejects
+  it early on the local saved-capture path because the replay helper does not
+  model cache semantics.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
