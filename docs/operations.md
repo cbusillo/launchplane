@@ -21,6 +21,8 @@ title: Operations
 - `uv run control-plane harbor-previews list [--context <ctx>]`
 - `uv run control-plane harbor-previews show --context <ctx> --anchor-repo
 <repo> --pr-number <number>`
+- `uv run control-plane harbor-previews render-status-page --context <ctx>
+--anchor-repo <repo> --pr-number <number> [--output-file <path>]`
 - `uv run control-plane harbor-previews history --context <ctx> --anchor-repo
 <repo> --pr-number <number>`
 - `uv run control-plane harbor-previews write-preview --input-file <path>`
@@ -123,6 +125,10 @@ title: Operations
   for the future first Harbor page: it leads with stable preview identity and
   URL, then trust, health, inputs, and lifecycle summaries derived from the
   durable preview and generation records.
+- `harbor-previews render-status-page` now renders that same one-preview read
+  model into a standalone HTML status page so Harbor can start UI work as a
+  thin surface over the existing typed contract instead of inventing a second
+  orchestration layer.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
