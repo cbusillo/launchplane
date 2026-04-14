@@ -256,6 +256,9 @@ title: Operations
 - If that supported HTTP capture includes `Content-Encoding`, Harbor likewise
   only tolerates the explicit no-transform `identity` case and rejects
   unsupported values such as `gzip` for the local saved-capture path.
+- If that supported HTTP capture declares `Trailer`, Harbor rejects it early on
+  the local saved-capture path because the replay helper does not parse trailing
+  headers.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
