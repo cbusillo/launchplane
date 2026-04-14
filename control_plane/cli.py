@@ -1462,25 +1462,31 @@ def harbor_previews_replay_github_webhook(
         envelope = GitHubWebhookReplayEnvelope.model_validate(_load_json_file(input_file))
     except ValidationError as exc:
         raise click.ClickException(f"Invalid GitHub webhook replay envelope: {exc}") from exc
+    resolved_event_name = envelope.resolved_event_name()
+    resolved_delivery_id = envelope.resolved_delivery_id()
+    resolved_delivery_source = envelope.resolved_delivery_source()
     raw_payload_bytes, webhook_payload = _load_github_webhook_replay_envelope(envelope)
     payload = _ingest_harbor_github_webhook_payload(
         state_dir=state_dir,
-        event_name=envelope.event_name,
+        event_name=resolved_event_name,
         raw_payload_bytes=raw_payload_bytes,
         webhook_payload=webhook_payload,
-        delivery_id=envelope.delivery_id,
-        delivery_source=envelope.delivery_source or "replay-envelope",
-        signature_256=envelope.signature_256,
+        delivery_id=resolved_delivery_id,
+        delivery_source=resolved_delivery_source,
+        signature_256=envelope.resolved_signature_256(),
         allow_unsigned=envelope.allow_unsigned,
         apply_intent=apply_intent,
         deliver_feedback=deliver_feedback,
     )
     payload["webhook_replay"] = {
         "adapter": envelope.adapter,
-        "event_name": envelope.event_name,
-        "delivery_id": envelope.delivery_id,
-        "delivery_source": envelope.delivery_source or "replay-envelope",
+        "event_name": resolved_event_name,
+        "delivery_id": resolved_delivery_id,
+        "delivery_source": resolved_delivery_source,
     }
+    replay_capture_payload = envelope.replay_capture_payload()
+    if replay_capture_payload is not None:
+        payload["webhook_replay"]["capture"] = replay_capture_payload
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 

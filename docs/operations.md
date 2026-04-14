@@ -138,6 +138,12 @@ title: Operations
 - For captured/local replay, Harbor also accepts a single replay envelope file
   through `harbor-previews replay-github-webhook`, so event name, signature,
   and payload travel together instead of requiring separate CLI flags.
+- Replay envelopes now also accept an optional captured-delivery `capture`
+  block with recorded-at/source metadata plus selected headers/evidence. When
+  the top-level envelope omits `event_name`, `signature_256`, or `delivery_id`,
+  Harbor can resolve those fields from captured GitHub headers such as
+  `X-GitHub-Event`, `X-Hub-Signature-256`, and `X-GitHub-Delivery` while still
+  reusing the same verification and adaptation path.
 - By default `harbor-previews ingest-github-webhook` now verifies the raw body
   against `--signature-256` using `GITHUB_WEBHOOK_SECRET` from the resolved
   Harbor context before it trusts the payload. Use `--allow-unsigned` only for
@@ -210,6 +216,9 @@ title: Operations
   such as GitHub delivery id and delivery source alongside the existing webhook
   verification/adaptation payload so traces remain identifiable without
   affecting Harbor preview decisions.
+- Replay output also surfaces the optional `webhook_replay.capture` metadata for
+  local traceability, but Harbor treats that capture evidence as observational
+  only rather than part of preview decision logic.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases

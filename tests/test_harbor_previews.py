@@ -248,6 +248,7 @@ def _github_webhook_replay_envelope(
     event_name: str = "pull_request",
     delivery_id: str = "",
     delivery_source: str = "replay-envelope",
+    capture: dict[str, object] | None = None,
 ) -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -259,6 +260,7 @@ def _github_webhook_replay_envelope(
         "delivery_source": delivery_source,
         "payload_text": payload_text,
         "payload": payload,
+        "capture": capture,
     }
 
 
@@ -2263,6 +2265,108 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "replay-456")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "local-capture")
+
+    def test_harbor_previews_replay_github_webhook_accepts_richer_capture_shape(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "github-webhook-replay.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            payload_text = json.dumps(webhook_payload)
+            signature_256 = _github_webhook_signature(webhook_payload)
+            input_file.write_text(
+                json.dumps(
+                    _github_webhook_replay_envelope(
+                        event_name="",
+                        delivery_id="",
+                        delivery_source="",
+                        payload_text=payload_text,
+                        signature_256="",
+                        capture={
+                            "recorded_at": "2026-04-13T12:20:00Z",
+                            "source": "captured-http-request",
+                            "headers": {
+                                "X-GitHub-Event": "pull_request",
+                                "X-GitHub-Delivery": "replay-789",
+                                "X-Hub-Signature-256": signature_256,
+                                "X-GitHub-Hook-ID": "hook-42",
+                            },
+                            "evidence": {
+                                "capture_file": "fixtures/github/replay-789.json",
+                                "operator_note": "captured from staging tunnel",
+                            },
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "replay-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["decision"]["action"], "enable_preview")
+            self.assertTrue(payload["apply"]["applied"])
+            self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
+            self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "replay-789")
+            self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "captured-http-request")
+            self.assertEqual(payload["webhook_replay"]["event_name"], "pull_request")
+            self.assertEqual(payload["webhook_replay"]["capture"]["recorded_at"], "2026-04-13T12:20:00Z")
+            self.assertEqual(
+                payload["webhook_replay"]["capture"]["headers"]["X-GitHub-Hook-ID"],
+                "hook-42",
+            )
+            self.assertEqual(
+                payload["webhook_replay"]["capture"]["evidence"]["capture_file"],
+                "fixtures/github/replay-789.json",
+            )
+
+    def test_harbor_previews_replay_github_webhook_fails_closed_for_conflicting_capture_headers(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            input_file = Path(temporary_directory_name) / "github-webhook-replay.json"
+            input_file.write_text(
+                json.dumps(
+                    _github_webhook_replay_envelope(
+                        payload_text=json.dumps(_github_pull_request_webhook_payload()),
+                        allow_unsigned=True,
+                        capture={
+                            "headers": {
+                                "X-GitHub-Event": "issues",
+                            }
+                        },
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "replay-github-webhook",
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("conflicts with capture header X-GitHub-Event", result.output)
 
     def test_harbor_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(self) -> None:
         runner = CliRunner()
