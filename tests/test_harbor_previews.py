@@ -1029,6 +1029,67 @@ ODOO_DB_PASSWORD = "local-secret"
                 rendered_html,
             )
 
+    def test_harbor_previews_render_status_page_calls_out_teardown_pending_state(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    state="teardown_pending",
+                    destroy_after="2026-04-15T18:00:00Z",
+                    active_generation_id="hgen_01jabc_1",
+                    serving_generation_id="hgen_01jabc_1",
+                    latest_generation_id="hgen_01jabc_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-status-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "This preview is queued for teardown. Harbor is keeping the current runtime available until cleanup completes.",
+                rendered_html,
+            )
+            self.assertIn("2026-04-15T18:00:00Z", rendered_html)
+            self.assertIn(
+                "Anchor PR and generation history remain after runtime cleanup.",
+                rendered_html,
+            )
+            self.assertIn("Preview teardown pending", rendered_html)
+            self.assertIn("Open preview URL", rendered_html)
+            self.assertNotIn(
+                "This preview is intentionally paused. Harbor is holding the current review evidence in place.",
+                rendered_html,
+            )
+
     def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

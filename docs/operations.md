@@ -140,6 +140,9 @@ title: Operations
 - Paused previews now get their own explicit status callout on that rendered
   page, so operators can tell the difference between an intentionally held
   review environment and a healthy active preview at first glance.
+- Teardown-pending previews now also get an explicit cleanup-in-progress
+  callout on that rendered page, so scheduled removal reads differently from
+  both paused and already-destroyed preview states.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
