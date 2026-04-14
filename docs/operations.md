@@ -262,6 +262,9 @@ title: Operations
 - If that supported HTTP capture declares `Expect`, Harbor also rejects it
   early on the local saved-capture path because the replay helper does not
   implement request-handshake semantics such as `100-continue`.
+- If that supported HTTP capture declares `Connection`, Harbor also rejects it
+  early on the local saved-capture path because the replay helper does not
+  model hop-by-hop connection semantics.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
