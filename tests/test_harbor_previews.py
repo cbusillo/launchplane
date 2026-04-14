@@ -2415,6 +2415,60 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("map header names to string values", result.output)
 
+    def test_harbor_previews_build_github_webhook_replay_envelope_redacts_sensitive_headers_file_values(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            payload_file = Path(temporary_directory_name) / "github-webhook.json"
+            headers_file = Path(temporary_directory_name) / "github-webhook-headers.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            payload_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
+            headers_file.write_text(
+                json.dumps(
+                    {
+                        "Authorization": "Bearer super-secret-token",
+                        "Cookie": "session=secret-cookie",
+                        "Proxy-Authorization": "Basic c2VjcmV0",
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "redacted-headers-123",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--payload-file",
+                    str(payload_file),
+                    "--headers-file",
+                    str(headers_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            envelope_payload = json.loads(result.output)
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Cookie"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Proxy-Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-GitHub-Delivery"],
+                "redacted-headers-123",
+            )
+
     def test_harbor_previews_build_github_webhook_replay_envelope_accepts_http_capture_file(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -2501,6 +2555,80 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "POST /github/webhook HTTP/1.1",
             )
 
+    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_observational_http_capture_headers(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            http_capture_file = control_plane_root / "github-webhook.http"
+            envelope_file = control_plane_root / "github-webhook-replay.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            payload_text = json.dumps(webhook_payload)
+            signature_256 = _github_webhook_signature(webhook_payload)
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "Host: harbor.example",
+                        "Via: 1.1 proxy.example",
+                        "X-GitHub-Event: pull_request",
+                        "X-GitHub-Delivery: http-capture-via-123",
+                        f"X-Hub-Signature-256: {signature_256}",
+                        f"Content-Length: {len(payload_text.encode('utf-8'))}",
+                        "Content-Type: application/json; charset=utf-8",
+                        "",
+                        payload_text,
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            build_result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--capture-source",
+                    "saved-http-capture",
+                    "--output-file",
+                    str(envelope_file),
+                ],
+            )
+
+            self.assertEqual(build_result.exit_code, 0, msg=build_result.output)
+            built_envelope = json.loads(envelope_file.read_text(encoding="utf-8"))
+            self.assertEqual(
+                built_envelope["capture"]["headers"]["Via"],
+                "1.1 proxy.example",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                replay_result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "replay-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(envelope_file),
+                    ],
+                )
+
+            self.assertEqual(replay_result.exit_code, 0, msg=replay_result.output)
+            replay_payload = json.loads(replay_result.output)
+            self.assertEqual(replay_payload["decision"]["action"], "enable_preview")
+            self.assertEqual(
+                replay_payload["webhook_replay"]["capture"]["headers"]["Via"],
+                "1.1 proxy.example",
+            )
+
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_cache_control(
         self,
     ) -> None:
@@ -2537,6 +2665,59 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertIn(
                 "Cache-Control declarations are unsupported",
                 result.output,
+            )
+
+    def test_harbor_previews_build_github_webhook_replay_envelope_redacts_sensitive_http_capture_headers(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "Host: harbor.example",
+                        "Authorization: Bearer super-secret-token",
+                        "Cookie: session=secret-cookie",
+                        "Proxy-Authorization: Basic c2VjcmV0",
+                        "X-GitHub-Event: pull_request",
+                        "X-GitHub-Delivery: redacted-http-123",
+                        "",
+                        json.dumps(_github_pull_request_webhook_payload()),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            envelope_payload = json.loads(result.output)
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Cookie"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["Proxy-Authorization"],
+                "[redacted]",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["X-GitHub-Delivery"],
+                "redacted-http-123",
             )
 
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_upgrade(
