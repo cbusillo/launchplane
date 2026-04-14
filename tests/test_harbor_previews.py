@@ -2640,6 +2640,56 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "trace-123",
             )
 
+    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_distributed_tracing_headers_file_values(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            payload_file = Path(temporary_directory_name) / "github-webhook.json"
+            headers_file = Path(temporary_directory_name) / "github-webhook-headers.json"
+            webhook_payload = _github_pull_request_webhook_payload()
+            payload_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
+            headers_file.write_text(
+                json.dumps(
+                    {
+                        "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+                        "tracestate": "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
+                        "b3": "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
+                        "X-GitHub-Event": "pull_request",
+                        "X-GitHub-Delivery": "trace-context-123",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--payload-file",
+                    str(payload_file),
+                    "--headers-file",
+                    str(headers_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            envelope_payload = json.loads(result.output)
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["traceparent"],
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["tracestate"],
+                "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["b3"],
+                "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
+            )
+
     def test_harbor_previews_build_github_webhook_replay_envelope_preserves_observational_http_capture_headers(
         self,
     ) -> None:
@@ -2761,6 +2811,55 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(
                 envelope_payload["capture"]["headers"]["X-Request-Id"],
                 "trace-123",
+            )
+
+    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_http_capture_distributed_tracing_headers(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "Host: harbor.example",
+                        "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+                        "tracestate: rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
+                        "b3: 4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
+                        "X-GitHub-Event: pull_request",
+                        "X-GitHub-Delivery: trace-context-http-123",
+                        "",
+                        json.dumps(_github_pull_request_webhook_payload()),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            envelope_payload = json.loads(result.output)
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["traceparent"],
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["tracestate"],
+                "rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
+            )
+            self.assertEqual(
+                envelope_payload["capture"]["headers"]["b3"],
+                "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
             )
 
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_cache_control(
