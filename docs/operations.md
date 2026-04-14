@@ -149,6 +149,10 @@ title: Operations
 - Preview records with no generation yet now also get an explicit startup
   callout on that rendered page, so expected first-build waiting reads
   differently from both live preview state and preview failures.
+- Previews with generation evidence but no serving preview now also get an
+  explicit availability-gap callout on that rendered page, so operators can
+  tell the difference between startup waiting and a preview that still is not
+  serving anything yet.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
