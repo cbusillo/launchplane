@@ -132,6 +132,8 @@ title: Operations
 - That rendered status page now also carries Harbor's failed-latest-versus-
   serving-older distinction forward as an explicit warning band instead of
   burying it in secondary generation detail.
+- The same rendered page also keeps destroyed previews visible as retained
+  historical evidence instead of making them look like missing or empty state.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.

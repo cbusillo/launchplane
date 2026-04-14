@@ -141,6 +141,8 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     artifact_id = escape(str(trust_summary.get("artifact_id", "")))
     manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
     destroy_after = escape(str(lifecycle_summary.get("destroy_after", "")))
+    destroyed_at = escape(str(lifecycle_summary.get("destroyed_at", preview.get("destroyed_at", ""))))
+    destroy_reason = escape(str(lifecycle_summary.get("destroy_reason", preview.get("destroy_reason", ""))))
     overall_health_status = str(health_summary.get("overall_health_status", "pending"))
     raw_payload_json = escape(json.dumps(payload, indent=2, sort_keys=True))
     serving_matches_latest = bool(health_summary.get("serving_matches_latest", False))
@@ -148,8 +150,27 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     latest_failure_stage = escape(str(latest_generation.get("failure_stage", "")))
     latest_generation_id = escape(str(latest_generation.get("generation_id", "")))
     serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
+    generation_label = "Serving generation"
+    generation_value = serving_generation_id or "Unavailable"
+    if preview_state.strip().lower() == "destroyed":
+        generation_label = "Retained generation"
+        generation_value = latest_generation_id or "Unavailable"
     replacement_callout_html = ""
-    if not serving_matches_latest and latest_generation:
+    destroyed_callout_html = ""
+    if preview_state.strip().lower() == "destroyed":
+        destroyed_callout_html = f"""
+        <div class=\"callout callout-neutral\">
+          <div class=\"eyebrow\">Historical evidence</div>
+          <h2>This preview has already been destroyed. Harbor is retaining the record as evidence.</h2>
+          <p>{status_summary}</p>
+          <dl>
+            <div><dt>Destroyed at</dt><dd>{destroyed_at or 'Unavailable'}</dd></div>
+            <div><dt>Destroy reason</dt><dd>{destroy_reason or 'Unavailable'}</dd></div>
+            <div><dt>Retained generation</dt><dd><code>{latest_generation_id or 'Unavailable'}</code></dd></div>
+          </dl>
+        </div>
+        """
+    if preview_state.strip().lower() != "destroyed" and not serving_matches_latest and latest_generation:
         replacement_callout_html = f"""
         <div class=\"callout callout-warn\">
           <div class=\"eyebrow\">Replacement status</div>
@@ -274,6 +295,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     .callout dt {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
     .callout dd {{ margin: 6px 0 0; }}
     .callout-warn {{ background: rgba(154, 106, 17, 0.08); border-color: rgba(154, 106, 17, 0.18); }}
+    .callout-neutral {{ background: rgba(79, 68, 56, 0.06); border-color: rgba(79, 68, 56, 0.16); }}
     .section {{ border-radius: 24px; padding: 24px; }}
     .section h2 {{ margin: 0 0 10px; font-size: 24px; }}
     .section p {{ margin: 0; color: var(--muted); line-height: 1.6; }}
@@ -302,6 +324,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {destroyed_callout_html}
         {replacement_callout_html}
         <div class=\"cta-row\">
           <a class=\"cta\" href=\"{canonical_url}\">Open preview URL</a>
@@ -310,7 +333,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"metric-grid\">
           <div class=\"metric\"><label>Artifact</label><code>{artifact_id or 'Unavailable'}</code></div>
           <div class=\"metric\"><label>Manifest</label><code>{manifest_fingerprint or 'Unavailable'}</code></div>
-          <div class=\"metric\"><label>Serving generation</label><code>{escape(str(serving_generation.get('generation_id', 'Unavailable')))}</code></div>
+          <div class=\"metric\"><label>{generation_label}</label><code>{generation_value}</code></div>
         </div>
       </article>
       <aside class=\"sidebar\">

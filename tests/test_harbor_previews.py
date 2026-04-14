@@ -907,6 +907,65 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("hgen_01jabc_1", rendered_html)
             self.assertIn("hgen_01jabc_2", rendered_html)
 
+    def test_harbor_previews_render_status_page_preserves_destroyed_preview_evidence(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    state="destroyed",
+                    active_generation_id="",
+                    serving_generation_id="",
+                    latest_generation_id="hgen_01jabc_1",
+                    destroyed_at="2026-04-14T12:14:00Z",
+                    destroy_reason="merged_after_grace_window",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-001",
+                    artifact_id="artifact-opw-123",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-status-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--anchor-repo",
+                    "tenant-opw",
+                    "--pr-number",
+                    "123",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn(
+                "This preview has already been destroyed. Harbor is retaining the record as evidence.",
+                rendered_html,
+            )
+            self.assertIn("merged_after_grace_window", rendered_html)
+            self.assertIn("2026-04-14T12:14:00Z", rendered_html)
+            self.assertIn("Retained generation", rendered_html)
+            self.assertIn("hgen_01jabc_1", rendered_html)
+            self.assertNotIn(
+                "Latest replacement failed. Harbor is still serving the older preview.",
+                rendered_html,
+            )
+
     def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
