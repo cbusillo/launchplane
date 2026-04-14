@@ -112,6 +112,11 @@ def _status_tone(value: str) -> str:
     return "neutral"
 
 
+def _status_label(value: str) -> str:
+    normalized_value = value.strip().replace("_", " ")
+    return normalized_value or "unknown"
+
+
 def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
     trust_summary = payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
@@ -167,7 +172,21 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         secondary_cta_href = canonical_url
     replacement_callout_html = ""
     paused_callout_html = ""
+    teardown_callout_html = ""
     destroyed_callout_html = ""
+    if preview_state.strip().lower() == "teardown_pending":
+        teardown_callout_html = f"""
+        <div class=\"callout callout-warn\">
+          <div class=\"eyebrow\">Scheduled cleanup</div>
+          <h2>This preview is queued for teardown. Harbor is keeping the current runtime available until cleanup completes.</h2>
+          <p>{next_action or status_summary}</p>
+          <dl>
+            <div><dt>Destroy after</dt><dd>{destroy_after or 'Unavailable'}</dd></div>
+            <div><dt>Serving now</dt><dd><code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Evidence retained</dt><dd>Anchor PR and generation history remain after runtime cleanup.</dd></div>
+          </dl>
+        </div>
+        """
     if preview_state.strip().lower() == "paused":
         paused_callout_html = f"""
         <div class=\"callout callout-warn\">
@@ -348,6 +367,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {teardown_callout_html}
         {paused_callout_html}
         {destroyed_callout_html}
         {replacement_callout_html}
@@ -362,9 +382,9 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         </div>
       </article>
       <aside class=\"sidebar\">
-        <div class=\"status-chip tone-{_status_tone(preview_state)}\">Preview {escape(preview_state)}</div>
+        <div class=\"status-chip tone-{_status_tone(preview_state)}\">Preview {escape(_status_label(preview_state))}</div>
         <div style=\"height:12px\"></div>
-        <div class=\"status-chip tone-{_status_tone(overall_health_status)}\">Health {escape(overall_health_status)}</div>
+        <div class=\"status-chip tone-{_status_tone(overall_health_status)}\">Health {escape(_status_label(overall_health_status))}</div>
         <div class=\"stack\">
           <div>
             <div class=\"eyebrow\">Next action</div>
