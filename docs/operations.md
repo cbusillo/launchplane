@@ -153,6 +153,9 @@ title: Operations
   explicit availability-gap callout on that rendered page, so operators can
   tell the difference between startup waiting and a preview that still is not
   serving anything yet.
+- Healthy steady-state previews now also get an explicit live-review callout
+  on that rendered page, so the default active case reads as an intentional
+  stable review surface instead of only the absence of exceptional-state UI.
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.

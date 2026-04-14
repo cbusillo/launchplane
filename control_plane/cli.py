@@ -165,6 +165,13 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
     no_serving_preview = bool(latest_generation) and not serving_generation
     display_health_status = "unavailable" if no_serving_preview else overall_health_status
+    healthy_live_preview = (
+        preview_state.strip().lower() == "active"
+        and serving_matches_latest
+        and bool(serving_generation)
+        and latest_generation_state.strip().lower() == "ready"
+        and overall_health_status.strip().lower() == "pass"
+    )
     generation_label = "Serving generation"
     generation_value = serving_generation_id or "Unavailable"
     primary_cta_label = "Open preview URL"
@@ -196,9 +203,23 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     in_progress_callout_html = ""
     no_serving_callout_html = ""
     startup_callout_html = ""
+    healthy_callout_html = ""
     paused_callout_html = ""
     teardown_callout_html = ""
     destroyed_callout_html = ""
+    if healthy_live_preview:
+        healthy_callout_html = f"""
+        <div class=\"callout callout-good\">
+          <div class=\"eyebrow\">Review is live</div>
+          <h2>This preview is live at the stable Harbor route and serving the latest requested generation.</h2>
+          <p>{next_action or status_summary}</p>
+          <dl>
+            <div><dt>Serving generation</dt><dd><code>{serving_generation_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Artifact</dt><dd><code>{artifact_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Destroy after</dt><dd>{destroy_after or 'Unavailable'}</dd></div>
+          </dl>
+        </div>
+        """
     if not latest_generation:
         startup_callout_html = f"""
         <div class=\"callout callout-neutral\">
@@ -418,6 +439,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     .callout dt {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
     .callout dd {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
     .callout-warn {{ background: rgba(154, 106, 17, 0.08); border-color: rgba(154, 106, 17, 0.18); }}
+    .callout-good {{ background: rgba(31, 106, 58, 0.08); border-color: rgba(31, 106, 58, 0.16); }}
     .callout-neutral {{ background: rgba(79, 68, 56, 0.06); border-color: rgba(79, 68, 56, 0.16); }}
     .section {{ border-radius: 24px; padding: 24px; }}
     .section h2 {{ margin: 0 0 10px; font-size: 24px; }}
@@ -447,6 +469,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {healthy_callout_html}
         {startup_callout_html}
         {in_progress_callout_html}
         {no_serving_callout_html}
