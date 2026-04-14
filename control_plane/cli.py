@@ -117,6 +117,10 @@ def _status_label(value: str) -> str:
     return normalized_value or "unknown"
 
 
+def _generation_in_progress(value: str) -> bool:
+    return value.strip().lower() in {"resolving", "building", "deploying", "verifying"}
+
+
 def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
     trust_summary = payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
@@ -156,6 +160,8 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     latest_failure_summary = escape(str(latest_generation.get("failure_summary", "")))
     latest_failure_stage = escape(str(latest_generation.get("failure_stage", "")))
     latest_generation_id = escape(str(latest_generation.get("generation_id", "")))
+    latest_generation_state = str(latest_generation.get("state", ""))
+    latest_requested_at = escape(str(latest_generation.get("requested_at", "")))
     serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
     generation_label = "Serving generation"
     generation_value = serving_generation_id or "Unavailable"
@@ -171,9 +177,34 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         secondary_cta_label = "Retained preview URL"
         secondary_cta_href = canonical_url
     replacement_callout_html = ""
+    in_progress_callout_html = ""
     paused_callout_html = ""
     teardown_callout_html = ""
     destroyed_callout_html = ""
+    if _generation_in_progress(latest_generation_state):
+        progress_title = (
+            "A replacement generation is in progress. Harbor is still serving the current preview."
+            if serving_generation_id
+            else "The first preview generation is in progress. Harbor is preparing this preview now."
+        )
+        progress_summary = (
+            next_action
+            if next_action
+            else "Harbor is advancing the latest generation toward a reviewable preview."
+        )
+        progress_serving_value = serving_generation_id or "No serving preview yet"
+        in_progress_callout_html = f"""
+        <div class=\"callout callout-warn\">
+          <div class=\"eyebrow\">Replacement in flight</div>
+          <h2>{progress_title}</h2>
+          <p>{progress_summary}</p>
+          <dl>
+            <div><dt>Current stage</dt><dd>{escape(_status_label(latest_generation_state)) or 'Unavailable'}</dd></div>
+            <div><dt>Serving now</dt><dd><code>{progress_serving_value}</code></dd></div>
+            <div><dt>Requested at</dt><dd>{latest_requested_at or 'Unavailable'}</dd></div>
+          </dl>
+        </div>
+        """
     if preview_state.strip().lower() == "teardown_pending":
         teardown_callout_html = f"""
         <div class=\"callout callout-warn\">
@@ -213,7 +244,12 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
           </dl>
         </div>
         """
-    if preview_state.strip().lower() != "destroyed" and not serving_matches_latest and latest_generation:
+    if (
+        preview_state.strip().lower() != "destroyed"
+        and not serving_matches_latest
+        and latest_generation
+        and latest_generation_state.strip().lower() == "failed"
+    ):
         replacement_callout_html = f"""
         <div class=\"callout callout-warn\">
           <div class=\"eyebrow\">Replacement status</div>
@@ -367,6 +403,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         <div class=\"eyebrow\">Harbor preview status</div>
         <h1>{preview_label}</h1>
         <p class=\"lede\">{status_summary}</p>
+        {in_progress_callout_html}
         {teardown_callout_html}
         {paused_callout_html}
         {destroyed_callout_html}
