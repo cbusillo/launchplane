@@ -84,6 +84,20 @@ def _load_json_file(input_file: Path) -> dict[str, object]:
     return json.loads(input_file.read_text(encoding="utf-8"))
 
 
+def _load_github_webhook_json_bytes(
+    raw_payload_bytes: bytes,
+    *,
+    description: str = "GitHub webhook payload",
+) -> dict[str, object]:
+    try:
+        webhook_payload = json.loads(raw_payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError) as exc:
+        raise click.ClickException(f"{description} must be valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(webhook_payload, dict):
+        raise click.ClickException(f"{description} must decode to a JSON object.")
+    return webhook_payload
+
+
 def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
     deadline = time.monotonic() + timeout_seconds
     last_error: str = ""
@@ -1477,8 +1491,51 @@ def _github_webhook_capture_header_value(headers: dict[str, str], name: str) -> 
     return ""
 
 
+def _split_http_capture_text(http_capture_text: str) -> tuple[str, str]:
+    for delimiter in ("\r\n\r\n", "\n\n"):
+        if delimiter in http_capture_text:
+            header_text, body_text = http_capture_text.split(delimiter, 1)
+            return header_text, body_text
+    raise click.ClickException(
+        "GitHub webhook HTTP capture must contain headers, a blank line, and a JSON body."
+    )
+
+
+def _parse_github_webhook_http_capture(input_file: Path) -> tuple[dict[str, str], bytes]:
+    try:
+        http_capture_text = input_file.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise click.ClickException(f"GitHub webhook HTTP capture must be valid UTF-8 text: {exc}") from exc
+    header_text, body_text = _split_http_capture_text(http_capture_text)
+    header_lines = header_text.splitlines()
+    if not header_lines:
+        raise click.ClickException("GitHub webhook HTTP capture is missing the request line.")
+    request_line = header_lines[0].strip()
+    if not request_line.startswith("POST ") or "HTTP/" not in request_line:
+        raise click.ClickException(
+            "GitHub webhook HTTP capture must start with a POST request line such as 'POST /github-webhook HTTP/1.1'."
+        )
+    headers: dict[str, str] = {}
+    for header_line in header_lines[1:]:
+        if not header_line.strip():
+            continue
+        if ":" not in header_line:
+            raise click.ClickException(
+                "GitHub webhook HTTP capture headers must use the 'Name: value' format."
+            )
+        header_name, header_value = header_line.split(":", 1)
+        normalized_name = header_name.strip()
+        if not normalized_name:
+            raise click.ClickException("GitHub webhook HTTP capture contains a blank header name.")
+        headers[normalized_name] = header_value.strip()
+    if not headers:
+        raise click.ClickException("GitHub webhook HTTP capture must include at least one header.")
+    return headers, body_text.encode("utf-8")
+
+
 @harbor_previews.command("build-github-webhook-replay-envelope")
-@click.option("--payload-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--payload-file", type=click.Path(exists=True, path_type=Path))
+@click.option("--http-capture-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--headers-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--event-name", default="", help="Optional GitHub event name override.")
 @click.option("--signature-256", default="", help="Optional X-Hub-Signature-256 override.")
@@ -1490,7 +1547,8 @@ def _github_webhook_capture_header_value(headers: dict[str, str], name: str) -> 
 @click.option("--evidence-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--output-file", type=click.Path(path_type=Path))
 def harbor_previews_build_github_webhook_replay_envelope(
-    payload_file: Path,
+    payload_file: Path | None,
+    http_capture_file: Path | None,
     headers_file: Path | None,
     event_name: str,
     signature_256: str,
@@ -1502,16 +1560,32 @@ def harbor_previews_build_github_webhook_replay_envelope(
     evidence_file: Path | None,
     output_file: Path | None,
 ) -> None:
-    raw_payload_bytes, _ = _load_github_webhook_json_file(payload_file)
-    capture_headers = (
-        _load_github_webhook_capture_headers(headers_file) if headers_file is not None else {}
-    )
+    if (payload_file is None) == (http_capture_file is None):
+        raise click.ClickException(
+            "Provide exactly one of --payload-file or --http-capture-file when building a GitHub replay envelope."
+        )
+    if http_capture_file is not None and headers_file is not None:
+        raise click.ClickException(
+            "--headers-file cannot be combined with --http-capture-file because the HTTP capture already carries headers."
+        )
+
+    capture_headers: dict[str, str] = {}
+    if http_capture_file is not None:
+        capture_headers, raw_payload_bytes = _parse_github_webhook_http_capture(http_capture_file)
+        _load_github_webhook_json_bytes(raw_payload_bytes, description="GitHub webhook HTTP capture body")
+    else:
+        assert payload_file is not None
+        raw_payload_bytes, _ = _load_github_webhook_json_file(payload_file)
+        capture_headers = (
+            _load_github_webhook_capture_headers(headers_file) if headers_file is not None else {}
+        )
     capture_event_name = _github_webhook_capture_header_value(capture_headers, "X-GitHub-Event")
     evidence_payload = (
         _load_json_object_file(evidence_file, description="GitHub webhook evidence file")
         if evidence_file is not None
         else None
     )
+    raw_payload_text = raw_payload_bytes.decode("utf-8")
 
     capture_payload: dict[str, object] | None = None
     if capture_headers or recorded_at.strip() or capture_source.strip() or evidence_payload is not None:
@@ -1538,7 +1612,7 @@ def harbor_previews_build_github_webhook_replay_envelope(
             "allow_unsigned": allow_unsigned,
             "delivery_id": top_level_delivery_id,
             "delivery_source": delivery_source.strip(),
-            "payload_text": raw_payload_bytes.decode("utf-8"),
+            "payload_text": raw_payload_text,
             "capture": capture_payload,
         }
     )
@@ -1697,12 +1771,10 @@ def _ingest_harbor_github_webhook_payload(
 
 def _load_github_webhook_json_file(input_file: Path) -> tuple[bytes, dict[str, object]]:
     raw_payload_bytes = input_file.read_bytes()
-    try:
-        webhook_payload = json.loads(raw_payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, JSONDecodeError) as exc:
-        raise click.ClickException(f"GitHub webhook input file must be valid UTF-8 JSON: {exc}") from exc
-    if not isinstance(webhook_payload, dict):
-        raise click.ClickException("GitHub webhook input file must decode to a JSON object.")
+    webhook_payload = _load_github_webhook_json_bytes(
+        raw_payload_bytes,
+        description="GitHub webhook input file",
+    )
     return raw_payload_bytes, webhook_payload
 
 

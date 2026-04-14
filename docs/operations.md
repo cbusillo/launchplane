@@ -144,6 +144,12 @@ title: Operations
   same replay-envelope contract that `replay-github-webhook` already consumes,
   so capture-to-replay stays one format instead of splitting into a second
   local-only shape.
+- The builder also supports one `--http-capture-file` as an alternative to the
+  split payload/header inputs. Harbor currently expects a narrow UTF-8 HTTP
+  request transcript shape for that path: a `POST ... HTTP/...` request line,
+  header lines in `Name: value` form, one blank line, and the raw JSON body.
+  That single-file path still emits the same replay envelope rather than a new
+  local capture contract.
 - Replay envelopes now also accept an optional captured-delivery `capture`
   block with recorded-at/source metadata plus selected headers/evidence. When
   the top-level envelope omits `event_name`, `signature_256`, or `delivery_id`,
@@ -228,6 +234,9 @@ title: Operations
 - The builder currently packages the raw payload as `payload_text` so signed
   replays preserve the exact bytes Harbor verifies, even when the envelope also
   carries parsed capture metadata for operator traceability.
+- When `--http-capture-file` is used, Harbor parses headers from that capture
+  directly and rejects malformed request lines or header syntax before it emits
+  a replay envelope.
 - Harbor can now resolve the first allowlisted companion path when it has both
   a GitHub owner from the anchor PR URL and a usable `GITHUB_TOKEN` from the
   control-plane runtime context. If either input is missing, companion cases
