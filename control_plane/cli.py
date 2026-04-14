@@ -7,6 +7,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import click
+from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
@@ -16,6 +17,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
+from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
 from control_plane.contracts.preview_mutation_request import (
     HarborPullRequestMutationIntent,
     PreviewDestroyMutationRequest,
@@ -1425,37 +1427,51 @@ def harbor_previews_ingest_github_webhook(
     apply_intent: bool,
     deliver_feedback: bool,
 ) -> None:
-    raw_payload_bytes = input_file.read_bytes()
-    try:
-        webhook_payload = json.loads(raw_payload_bytes.decode("utf-8"))
-    except (UnicodeDecodeError, JSONDecodeError) as exc:
-        raise click.ClickException(f"GitHub webhook input file must be valid UTF-8 JSON: {exc}") from exc
-    if not isinstance(webhook_payload, dict):
-        raise click.ClickException("GitHub webhook input file must decode to a JSON object.")
-
-    control_plane_root = _control_plane_root()
-    signature_verification = _verify_harbor_github_webhook_signature(
-        control_plane_root=control_plane_root,
+    raw_payload_bytes, webhook_payload = _load_github_webhook_json_file(input_file)
+    payload = _ingest_harbor_github_webhook_payload(
+        state_dir=state_dir,
         event_name=event_name,
-        webhook_payload=webhook_payload,
         raw_payload_bytes=raw_payload_bytes,
+        webhook_payload=webhook_payload,
         signature_256=signature_256,
         allow_unsigned=allow_unsigned,
-    )
-    event = adapt_github_webhook_pull_request_event(
-        event_name=event_name,
-        webhook_payload=webhook_payload,
-    )
-    payload = _ingest_harbor_pr_event_payload(
-        state_dir=state_dir,
-        event=event,
         apply_intent=apply_intent,
         deliver_feedback=deliver_feedback,
     )
-    payload["webhook"] = {
-        "event_name": event_name,
-        "adapter": "github_pull_request",
-        "signature_verification": signature_verification,
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@harbor_previews.command("replay-github-webhook")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--apply", "apply_intent", is_flag=True)
+@click.option("--deliver-feedback", is_flag=True)
+def harbor_previews_replay_github_webhook(
+    state_dir: Path,
+    input_file: Path,
+    apply_intent: bool,
+    deliver_feedback: bool,
+) -> None:
+    try:
+        envelope = GitHubWebhookReplayEnvelope.model_validate(_load_json_file(input_file))
+    except ValidationError as exc:
+        raise click.ClickException(f"Invalid GitHub webhook replay envelope: {exc}") from exc
+    raw_payload_bytes, webhook_payload = _load_github_webhook_replay_envelope(envelope)
+    payload = _ingest_harbor_github_webhook_payload(
+        state_dir=state_dir,
+        event_name=envelope.event_name,
+        raw_payload_bytes=raw_payload_bytes,
+        webhook_payload=webhook_payload,
+        signature_256=envelope.signature_256,
+        allow_unsigned=envelope.allow_unsigned,
+        apply_intent=apply_intent,
+        deliver_feedback=deliver_feedback,
+    )
+    payload["webhook_replay"] = {
+        "adapter": envelope.adapter,
+        "event_name": envelope.event_name,
     }
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
@@ -1512,6 +1528,76 @@ def _ingest_harbor_pr_event_payload(
             feedback_payload=feedback_payload,
         )
     return payload
+
+
+def _ingest_harbor_github_webhook_payload(
+    *,
+    state_dir: Path,
+    event_name: str,
+    raw_payload_bytes: bytes,
+    webhook_payload: dict[str, object],
+    signature_256: str,
+    allow_unsigned: bool,
+    apply_intent: bool,
+    deliver_feedback: bool,
+) -> dict[str, object]:
+    control_plane_root = _control_plane_root()
+    signature_verification = _verify_harbor_github_webhook_signature(
+        control_plane_root=control_plane_root,
+        event_name=event_name,
+        webhook_payload=webhook_payload,
+        raw_payload_bytes=raw_payload_bytes,
+        signature_256=signature_256,
+        allow_unsigned=allow_unsigned,
+    )
+    event = adapt_github_webhook_pull_request_event(
+        event_name=event_name,
+        webhook_payload=webhook_payload,
+    )
+    payload = _ingest_harbor_pr_event_payload(
+        state_dir=state_dir,
+        event=event,
+        apply_intent=apply_intent,
+        deliver_feedback=deliver_feedback,
+    )
+    payload["webhook"] = {
+        "event_name": event_name,
+        "adapter": "github_pull_request",
+        "signature_verification": signature_verification,
+    }
+    return payload
+
+
+def _load_github_webhook_json_file(input_file: Path) -> tuple[bytes, dict[str, object]]:
+    raw_payload_bytes = input_file.read_bytes()
+    try:
+        webhook_payload = json.loads(raw_payload_bytes.decode("utf-8"))
+    except (UnicodeDecodeError, JSONDecodeError) as exc:
+        raise click.ClickException(f"GitHub webhook input file must be valid UTF-8 JSON: {exc}") from exc
+    if not isinstance(webhook_payload, dict):
+        raise click.ClickException("GitHub webhook input file must decode to a JSON object.")
+    return raw_payload_bytes, webhook_payload
+
+
+def _load_github_webhook_replay_envelope(
+    envelope: GitHubWebhookReplayEnvelope,
+) -> tuple[bytes, dict[str, object]]:
+    if envelope.payload_text.strip():
+        raw_payload_bytes = envelope.payload_text.encode("utf-8")
+        try:
+            webhook_payload = json.loads(envelope.payload_text)
+        except JSONDecodeError as exc:
+            raise click.ClickException(
+                f"GitHub webhook replay envelope payload_text must be valid JSON: {exc}"
+            ) from exc
+        if not isinstance(webhook_payload, dict):
+            raise click.ClickException(
+                "GitHub webhook replay envelope payload_text must decode to a JSON object."
+            )
+        return raw_payload_bytes, webhook_payload
+    if envelope.payload is None:
+        raise click.ClickException("GitHub webhook replay envelope is missing payload content.")
+    return json.dumps(envelope.payload).encode("utf-8"), envelope.payload
 
 
 def _verify_harbor_github_webhook_signature(
