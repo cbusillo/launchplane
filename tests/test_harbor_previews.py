@@ -2577,6 +2577,44 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
+    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_te(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
+            http_capture_file.write_text(
+                "\n".join(
+                    [
+                        "POST /github/webhook HTTP/1.1",
+                        "Host: harbor.example",
+                        "X-GitHub-Event: pull_request",
+                        "X-GitHub-Delivery: http-capture-123",
+                        "TE: trailers",
+                        "",
+                        json.dumps(_github_pull_request_webhook_payload()),
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "build-github-webhook-replay-envelope",
+                    "--http-capture-file",
+                    str(http_capture_file),
+                    "--allow-unsigned",
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn(
+                "TE declarations are unsupported",
+                result.output,
+            )
+
     def test_harbor_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_request_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
