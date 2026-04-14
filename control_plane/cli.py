@@ -1492,14 +1492,18 @@ def _github_webhook_capture_header_value(headers: dict[str, str], name: str) -> 
 
 
 def _github_webhook_capture_metadata_headers(headers: dict[str, str]) -> dict[str, str]:
-    redacted_header_names = {
+    exact_redacted_header_names = {
         "authorization",
         "cookie",
         "proxy-authorization",
     }
     metadata_headers: dict[str, str] = {}
     for header_name, header_value in headers.items():
-        if header_name.strip().lower() in redacted_header_names:
+        normalized_header_name = header_name.strip().lower()
+        if normalized_header_name in exact_redacted_header_names or normalized_header_name == "forwarded":
+            metadata_headers[header_name] = "[redacted]"
+            continue
+        if normalized_header_name.startswith("x-forwarded-"):
             metadata_headers[header_name] = "[redacted]"
             continue
         metadata_headers[header_name] = header_value
