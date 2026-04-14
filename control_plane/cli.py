@@ -1530,6 +1530,15 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
         headers[normalized_name] = header_value.strip()
     if not headers:
         raise click.ClickException("GitHub webhook HTTP capture must include at least one header.")
+    declared_content_type = _github_webhook_capture_header_value(headers, "Content-Type")
+    if declared_content_type:
+        normalized_media_type = declared_content_type.split(";", 1)[0].strip().lower()
+        if normalized_media_type not in {"application/json"} and not normalized_media_type.endswith(
+            "+json"
+        ):
+            raise click.ClickException(
+                "GitHub webhook HTTP capture Content-Type must be JSON when present."
+            )
     body_bytes = body_text.encode("utf-8")
     declared_content_length = _github_webhook_capture_header_value(headers, "Content-Length")
     if declared_content_length:
