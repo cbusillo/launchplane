@@ -1934,6 +1934,7 @@ def _render_harbor_preview_index_page_html(
         return ""
 
     def render_enablement_row(item: dict[str, object]) -> str:
+        anchor_repo = str(item.get("anchor_repo", "")).strip()
         anchor_pr_number = int(item.get("anchor_pr_number", 0) or 0)
         anchor_pr_url = escape(str(item.get("anchor_pr_url", "")).strip())
         state = escape(str(item.get("state", "candidate")).strip() or "candidate")
@@ -1950,7 +1951,12 @@ def _render_harbor_preview_index_page_html(
         canonical_url = escape(str(item.get("canonical_url", "")).strip())
         preview_id = escape(str(item.get("preview_id", "")).strip())
         action_payload = item.get("action") if isinstance(item.get("action"), dict) else None
+        detail_href = ""
+        if detail_href_builder is not None and anchor_repo and anchor_pr_number > 0:
+            detail_href = detail_href_builder(context_name, anchor_repo, anchor_pr_number)
         actions = [f'<a href="{anchor_pr_url}">PR</a>'] if anchor_pr_url else []
+        if detail_href:
+            actions.append(f'<a href="{escape(detail_href)}">Detail</a>')
         if canonical_url:
             actions.append(f'<a href="{canonical_url}">Preview</a>')
         if preview_id:
