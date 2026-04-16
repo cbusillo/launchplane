@@ -1201,6 +1201,48 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(record.request_metadata_baseline_channel, "")
             self.assertEqual(record.request_metadata_companions, ())
 
+    def test_harbor_previews_write_enablement_persists_typed_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            input_file = Path(temporary_directory_name) / "preview-enablement.json"
+            input_file.write_text(
+                json.dumps(
+                    _preview_enablement_record(
+                        anchor_pr_number=131,
+                        anchor_pr_url="https://github.com/every/tenant-opw/pull/131",
+                        anchor_head_sha="eeee5555",
+                        label_enabled=True,
+                        action="labeled",
+                        action_label="harbor-preview",
+                        request_metadata_status="valid",
+                        request_metadata_baseline_channel="testing",
+                    ).model_dump(mode="json")
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "write-enablement",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertIn("opw-tenant-opw-pr-131", result.output)
+            record = FilesystemRecordStore(state_dir=state_dir).read_preview_enablement_record(
+                "opw-tenant-opw-pr-131"
+            )
+            self.assertTrue(record.label_enabled)
+            self.assertEqual(record.request_metadata_status, "valid")
+            self.assertEqual(record.request_metadata_baseline_channel, "testing")
+
     def test_harbor_previews_ingest_pr_event_persists_valid_preview_metadata_snapshot(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
