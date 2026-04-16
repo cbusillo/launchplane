@@ -1,4 +1,5 @@
 from collections.abc import Callable
+from contextlib import contextmanager
 from html import escape
 import json
 import os
@@ -13,6 +14,7 @@ import click
 from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -85,6 +87,22 @@ from control_plane.workflows.ship import (
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
 ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
+
+
+@contextmanager
+def _harbor_release_tuples_file_override(release_tuples_file: Path | None):
+    if release_tuples_file is None:
+        yield
+        return
+    previous_value = os.environ.get(control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR)
+    os.environ[control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR] = str(release_tuples_file)
+    try:
+        yield
+    finally:
+        if previous_value is None:
+            os.environ.pop(control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR, None)
+        else:
+            os.environ[control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR] = previous_value
 
 
 def _store(state_dir: Path) -> FilesystemRecordStore:
@@ -1351,17 +1369,24 @@ def _build_harbor_tenant_payload(
     }
 
 
-def _write_harbor_site_bundle(*, state_dir: Path, output_dir: Path, context_name: str) -> None:
+def _write_harbor_site_bundle(
+    *,
+    state_dir: Path,
+    output_dir: Path,
+    context_name: str,
+    release_tuples_file: Path | None = None,
+) -> None:
     record_store = _store(state_dir)
-    inventory_payload = build_preview_inventory_payload(
-        record_store=record_store,
-        context_name=context_name,
-    )
-    tenant_payload = _build_harbor_tenant_payload(
-        control_plane_root=_control_plane_root(),
-        record_store=record_store,
-        context_name=context_name,
-    )
+    with _harbor_release_tuples_file_override(release_tuples_file):
+        inventory_payload = build_preview_inventory_payload(
+            record_store=record_store,
+            context_name=context_name,
+        )
+        tenant_payload = _build_harbor_tenant_payload(
+            control_plane_root=_control_plane_root(),
+            record_store=record_store,
+            context_name=context_name,
+        )
     preview_rows = inventory_payload.get("previews") if isinstance(inventory_payload.get("previews"), list) else []
     preview_items = [item for item in preview_rows if isinstance(item, dict)]
     tenant_environments = tenant_payload.get("environments") if isinstance(tenant_payload, dict) else None
@@ -7469,13 +7494,25 @@ def harbor_previews_list(state_dir: Path, context_name: str) -> None:
 )
 @click.option("--context", "context_name", default="")
 @click.option("--anchor-repo", default="")
-def harbor_previews_show_tenant(state_dir: Path, context_name: str, anchor_repo: str) -> None:
-    payload = _build_harbor_tenant_payload(
-        control_plane_root=_control_plane_root(),
-        record_store=_store(state_dir),
-        context_name=context_name,
-        anchor_repo=anchor_repo,
-    )
+@click.option(
+    "--release-tuples-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Use an explicit release tuple catalog while resolving tenant preview recipes.",
+)
+def harbor_previews_show_tenant(
+    state_dir: Path,
+    context_name: str,
+    anchor_repo: str,
+    release_tuples_file: Path | None,
+) -> None:
+    with _harbor_release_tuples_file_override(release_tuples_file):
+        payload = _build_harbor_tenant_payload(
+            control_plane_root=_control_plane_root(),
+            record_store=_store(state_dir),
+            context_name=context_name,
+            anchor_repo=anchor_repo,
+        )
     if payload is None:
         raise click.ClickException("No Harbor tenant environment evidence found for the requested scope.")
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -7487,21 +7524,29 @@ def harbor_previews_show_tenant(state_dir: Path, context_name: str, anchor_repo:
 )
 @click.option("--context", "context_name", default="")
 @click.option("--output-file", type=click.Path(path_type=Path))
+@click.option(
+    "--release-tuples-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Use an explicit release tuple catalog while resolving tenant preview recipes.",
+)
 def harbor_previews_render_index_page(
     state_dir: Path,
     context_name: str,
     output_file: Path | None,
+    release_tuples_file: Path | None,
 ) -> None:
     record_store = _store(state_dir)
     payload = build_preview_inventory_payload(
         record_store=record_store,
         context_name=context_name,
     )
-    tenant_payload = _build_harbor_tenant_payload(
-        control_plane_root=_control_plane_root(),
-        record_store=record_store,
-        context_name=context_name,
-    )
+    with _harbor_release_tuples_file_override(release_tuples_file):
+        tenant_payload = _build_harbor_tenant_payload(
+            control_plane_root=_control_plane_root(),
+            record_store=record_store,
+            context_name=context_name,
+        )
     html_output = _render_harbor_preview_index_page_html(payload, tenant_payload=tenant_payload)
     if output_file is not None:
         output_file.write_text(html_output, encoding="utf-8")
@@ -7537,15 +7582,23 @@ def harbor_previews_render_policy_page(
 )
 @click.option("--context", "context_name", default="")
 @click.option("--output-dir", type=click.Path(path_type=Path), required=True)
+@click.option(
+    "--release-tuples-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Use an explicit release tuple catalog while resolving tenant preview recipes.",
+)
 def harbor_previews_render_site(
     state_dir: Path,
     context_name: str,
     output_dir: Path,
+    release_tuples_file: Path | None,
 ) -> None:
     _write_harbor_site_bundle(
         state_dir=state_dir,
         output_dir=output_dir,
         context_name=context_name,
+        release_tuples_file=release_tuples_file,
     )
 
 

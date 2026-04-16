@@ -1290,6 +1290,64 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(enablement_by_pr[129]["request_metadata_status"], "valid")
             self.assertEqual(enablement_by_pr[129]["action"]["status"], "actionable")
 
+    def test_harbor_previews_render_site_release_tuples_file_resolves_enablement_recipe(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            state_dir = temporary_directory / "state"
+            output_dir = temporary_directory / "site"
+            release_tuples_file = temporary_directory / "release-tuples.toml"
+            release_tuples_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.channels.testing]
+tuple_id = "opw-testing-2026-04-13"
+
+[contexts.opw.channels.testing.repo_shas]
+tenant-opw = "1111111111111111111111111111111111111111"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=130,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/130",
+                    anchor_head_sha="dddd4444",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                    request_metadata_status="valid",
+                    request_metadata_baseline_channel="testing",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-site",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--release-tuples-file",
+                    str(release_tuples_file),
+                    "--output-dir",
+                    str(output_dir),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
+            self.assertIn("opw-testing-2026-04-13", index_html)
+            self.assertIn("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", index_html)
+            self.assertNotIn("&lt;resolved-baseline-tuple-id&gt;", index_html)
+            self.assertNotIn("&lt;resolved-manifest-fingerprint&gt;", index_html)
+
     def test_harbor_previews_render_index_page_leads_with_tenant_environment_when_scoped(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
