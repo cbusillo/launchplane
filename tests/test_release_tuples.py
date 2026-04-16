@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from control_plane import release_tuples as control_plane_release_tuples
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 
 
 class ReleaseTupleTests(unittest.TestCase):
@@ -161,6 +162,54 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 control_plane_release_tuples.load_release_tuple_catalog(
                     control_plane_root=control_plane_root,
                 )
+
+    def test_build_release_tuple_record_from_artifact_manifest_uses_split_repo_shas(self) -> None:
+        manifest = ArtifactIdentityManifest(
+            artifact_id="artifact-sha256-image456",
+            source_commit="abc1234",
+            enterprise_base_digest="sha256:enterprise123",
+            addon_sources=(
+                {
+                    "repository": "cbusillo/odoo-shared-addons",
+                    "ref": "def5678",
+                },
+            ),
+            image={
+                "repository": "ghcr.io/cbusillo/odoo-private",
+                "digest": "sha256:image456",
+            },
+        )
+
+        release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+            context_name="opw",
+            channel_name="testing",
+            artifact_manifest=manifest,
+            deployment_record_id="deployment-1",
+            minted_at="2026-04-10T18:24:00Z",
+        )
+
+        self.assertEqual(release_tuple.tuple_id, "opw-testing-artifact-sha256-image456")
+        self.assertEqual(release_tuple.repo_shas["tenant-opw"], "abc1234")
+        self.assertEqual(release_tuple.repo_shas["shared-addons"], "def5678")
+        self.assertEqual(release_tuple.provenance, "ship")
+
+    def test_build_release_tuple_record_rejects_branch_refs(self) -> None:
+        manifest = ArtifactIdentityManifest(
+            artifact_id="artifact-sha256-image456",
+            source_commit="abc1234",
+            enterprise_base_digest="sha256:enterprise123",
+            addon_sources=({"repository": "cbusillo/odoo-shared-addons", "ref": "main"},),
+            image={
+                "repository": "ghcr.io/cbusillo/odoo-private",
+                "digest": "sha256:image456",
+            },
+        )
+
+        with self.assertRaisesRegex(Exception, "must be a 7-40 character hexadecimal git sha"):
+            control_plane_release_tuples.repo_shas_from_artifact_manifest(
+                context_name="opw",
+                artifact_manifest=manifest,
+            )
 
 
 if __name__ == "__main__":

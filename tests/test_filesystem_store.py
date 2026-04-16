@@ -10,6 +10,7 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import DeploymentEvidence, PromotionRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 
@@ -34,6 +35,36 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertTrue(written_path.exists())
             self.assertEqual(loaded_manifest.artifact_id, manifest.artifact_id)
             self.assertEqual(loaded_manifest.image.digest, "sha256:image456")
+
+    def test_write_and_read_release_tuple_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = ReleaseTupleRecord(
+                tuple_id="opw-testing-artifact-sha256-image456",
+                context="opw",
+                channel="testing",
+                artifact_id="artifact-sha256-image456",
+                repo_shas={
+                    "tenant-opw": "abc1234",
+                    "shared-addons": "def5678",
+                },
+                image_repository="ghcr.io/cbusillo/odoo-private",
+                image_digest="sha256:image456",
+                deployment_record_id="deployment-1",
+                provenance="ship",
+                minted_at="2026-04-10T18:24:00Z",
+            )
+
+            written_path = store.write_release_tuple_record(record)
+            loaded_record = store.read_release_tuple_record(
+                context_name="opw",
+                channel_name="testing",
+            )
+
+            self.assertTrue(written_path.exists())
+            self.assertEqual(loaded_record.tuple_id, record.tuple_id)
+            self.assertEqual(loaded_record.repo_shas["shared-addons"], "def5678")
 
     def test_write_and_read_backup_gate_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

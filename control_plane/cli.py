@@ -47,6 +47,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRequest,
     ReleaseStatus,
 )
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
@@ -6085,6 +6086,7 @@ def _execute_ship(
     state_dir: Path,
     env_file: Path | None,
     request: ShipRequest,
+    mint_release_tuple: bool = True,
 ) -> tuple[Path | None, DeploymentRecord | ShipRequest]:
     record_store = _store(state_dir)
     resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
@@ -6097,6 +6099,13 @@ def _execute_ship(
         artifact_id=resolved_artifact_id,
         artifact_manifest=artifact_manifest,
     )
+    if mint_release_tuple and control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        resolved_request.instance
+    ):
+        control_plane_release_tuples.repo_shas_from_artifact_manifest(
+            context_name=resolved_request.context,
+            artifact_manifest=artifact_manifest,
+        )
 
     if resolved_request.dry_run:
         click.echo(json.dumps(resolved_request.model_dump(mode="json"), indent=2, sort_keys=True))
@@ -6205,6 +6214,12 @@ def _execute_ship(
     record_store.write_deployment_record(final_record)
     if final_record.wait_for_completion and final_record.deploy.status == "pass":
         _write_environment_inventory(record_store=record_store, deployment_record=final_record)
+        if mint_release_tuple:
+            _write_release_tuple_from_deployment(
+                record_store=record_store,
+                deployment_record=final_record,
+                artifact_manifest=artifact_manifest,
+            )
     return record_path, final_record
 
 
@@ -6365,6 +6380,70 @@ def _write_environment_inventory(
         promoted_from_instance=promoted_from_instance,
     )
     return record_store.write_environment_inventory(inventory_record)
+
+
+def _write_release_tuple_from_deployment(
+    *,
+    record_store: FilesystemRecordStore,
+    deployment_record: DeploymentRecord,
+    artifact_manifest: ArtifactIdentityManifest,
+) -> Path | None:
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(deployment_record.instance):
+        return None
+    release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+        context_name=deployment_record.context,
+        channel_name=deployment_record.instance,
+        artifact_manifest=artifact_manifest,
+        deployment_record_id=deployment_record.record_id,
+        minted_at=utc_now_timestamp(),
+    )
+    return record_store.write_release_tuple_record(release_tuple)
+
+
+def _read_source_release_tuple_for_promotion(
+    *,
+    record_store: FilesystemRecordStore,
+    request: PromotionRequest,
+) -> ReleaseTupleRecord | None:
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(request.from_instance):
+        return None
+    try:
+        source_tuple = record_store.read_release_tuple_record(
+            context_name=request.context,
+            channel_name=request.from_instance,
+        )
+    except FileNotFoundError:
+        raise click.ClickException(
+            "Promotion requires a current source release tuple before it can deploy. "
+            f"Ship artifact {request.artifact_id} into {request.context}/{request.from_instance} first."
+        ) from None
+    return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        source_tuple=source_tuple,
+        artifact_id=request.artifact_id,
+        context_name=request.context,
+        from_channel_name=request.from_instance,
+    )
+
+
+def _write_promoted_release_tuple(
+    *,
+    record_store: FilesystemRecordStore,
+    source_tuple: ReleaseTupleRecord | None,
+    deployment_record: DeploymentRecord,
+    promotion_record: PromotionRecord,
+) -> Path | None:
+    if source_tuple is None:
+        return None
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(promotion_record.to_instance):
+        return None
+    promoted_tuple = control_plane_release_tuples.build_promoted_release_tuple_record(
+        source_tuple=source_tuple,
+        to_channel_name=promotion_record.to_instance,
+        deployment_record_id=deployment_record.record_id,
+        promotion_record_id=promotion_record.record_id,
+        minted_at=utc_now_timestamp(),
+    )
+    return record_store.write_release_tuple_record(promoted_tuple)
 
 
 def _artifact_id_or_empty(artifact_identity: object) -> str:
@@ -8107,6 +8186,10 @@ def promote_execute(
         request=normalized_request,
         record_store=record_store,
     )
+    source_release_tuple = _read_source_release_tuple_for_promotion(
+        record_store=record_store,
+        request=resolved_request,
+    )
     record_id = generate_promotion_record_id(
         context_name=resolved_request.context,
         from_instance_name=resolved_request.from_instance,
@@ -8142,6 +8225,7 @@ def promote_execute(
             state_dir=state_dir,
             env_file=env_file,
             request=ship_request,
+            mint_release_tuple=False,
         )
         if not isinstance(deployment_record, DeploymentRecord):
             raise click.ClickException(
@@ -8170,6 +8254,12 @@ def promote_execute(
             deployment_record=deployment_record,
             promotion_record_id=final_record.record_id,
             promoted_from_instance=final_record.from_instance,
+        )
+        _write_promoted_release_tuple(
+            record_store=record_store,
+            source_tuple=source_release_tuple,
+            deployment_record=deployment_record,
+            promotion_record=final_record,
         )
     click.echo(record_path)
 

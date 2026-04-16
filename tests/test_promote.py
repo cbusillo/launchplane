@@ -23,6 +23,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.promotion_record import PromotionRequest
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.promote import build_promotion_record
@@ -33,7 +34,7 @@ def _write_artifact_manifest(
     state_dir: Path,
     *,
     artifact_id: str = "artifact-sha256-image456",
-    source_commit: str = "abc123",
+    source_commit: str = "abc1234",
 ) -> None:
     artifact_dir = state_dir / "artifacts"
     artifact_dir.mkdir(parents=True, exist_ok=True)
@@ -51,6 +52,33 @@ def _write_artifact_manifest(
             },
             indent=2,
         ),
+        encoding="utf-8",
+    )
+
+
+def _write_release_tuple_record(
+    state_dir: Path,
+    *,
+    context: str = "opw",
+    channel: str = "testing",
+    artifact_id: str = "artifact-sha256-image456",
+    tenant_sha: str = "abc1234",
+) -> None:
+    release_tuple_dir = state_dir / "release_tuples"
+    release_tuple_dir.mkdir(parents=True, exist_ok=True)
+    (release_tuple_dir / f"{context}-{channel}.json").write_text(
+        ReleaseTupleRecord(
+            tuple_id=f"{context}-{channel}-{artifact_id}",
+            context=context,
+            channel=channel,
+            artifact_id=artifact_id,
+            repo_shas={f"tenant-{context}": tenant_sha},
+            image_repository="ghcr.io/cbusillo/odoo-private",
+            image_digest="sha256:image456",
+            deployment_record_id="deployment-testing-1",
+            provenance="ship",
+            minted_at="2026-04-10T18:24:00Z",
+        ).model_dump_json(indent=2),
         encoding="utf-8",
     )
 
@@ -205,7 +233,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
-                "source_commit": "abc123",
+                "source_commit": "abc1234",
                 "enterprise_base_digest": "sha256:enterprise123",
                 "image": {
                     "repository": "ghcr.io/cbusillo/odoo-private",
@@ -277,7 +305,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "source_commit": "abc123",
+                        "source_commit": "abc1234",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -352,6 +380,7 @@ class PromoteCliTests(unittest.TestCase):
             state_dir = repo_root / "state"
             _write_artifact_manifest(state_dir)
             _write_backup_gate_record(state_dir)
+            _write_release_tuple_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
                 PromotionRequest(artifact_id="artifact-sha256-image456",
@@ -861,6 +890,7 @@ class PromoteCliTests(unittest.TestCase):
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
             _write_backup_gate_record(state_dir)
+            _write_release_tuple_record(state_dir)
             source_file = _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
@@ -881,7 +911,7 @@ domains = ["https://prod.example.com"]
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "source_commit": "abc123",
+                        "source_commit": "abc1234",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -1250,6 +1280,45 @@ domains = ["https://prod.example.com"]
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("does not match promotion destination", result.output)
 
+    def test_promote_execute_requires_current_source_release_tuple(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
+            _write_backup_gate_record(state_dir)
+            input_file = repo_root / "promotion-request.json"
+            input_file.write_text(
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
+                    backup_record_id="backup-opw-prod-20260410T182231Z",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    dry_run=True,
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "promote",
+                    "execute",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("requires a current source release tuple", result.output)
+
     def test_ship_execute_persists_environment_inventory_after_success(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -1307,6 +1376,11 @@ domains = ["https://prod.example.com"]
             self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
             self.assertIn('"deployment_record_id": "deployment-', persisted_payload)
             self.assertIn('native control-plane Dokploy schedule workflow', persisted_payload)
+            tuple_file = state_dir / "release_tuples" / "opw-prod.json"
+            self.assertTrue(tuple_file.exists())
+            tuple_payload = tuple_file.read_text(encoding="utf-8")
+            self.assertIn('"tuple_id": "opw-prod-artifact-sha256-image456"', tuple_payload)
+            self.assertIn('"tenant-opw": "abc1234"', tuple_payload)
 
     def test_promote_execute_persists_inventory_with_promotion_linkage(self) -> None:
         runner = CliRunner()
@@ -1315,6 +1389,7 @@ domains = ["https://prod.example.com"]
             state_dir = repo_root / "state"
             _write_artifact_manifest(state_dir)
             _write_backup_gate_record(state_dir)
+            _write_release_tuple_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
                 PromotionRequest(artifact_id="artifact-sha256-image456",
@@ -1393,6 +1468,11 @@ domains = ["https://prod.example.com"]
             self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
             self.assertIn('"promotion_record_id": "promotion-', persisted_payload)
             self.assertIn('"promoted_from_instance": "testing"', persisted_payload)
+            tuple_file = state_dir / "release_tuples" / "opw-prod.json"
+            self.assertTrue(tuple_file.exists())
+            tuple_payload = tuple_file.read_text(encoding="utf-8")
+            self.assertIn('"provenance": "promotion"', tuple_payload)
+            self.assertIn('"promoted_from_channel": "testing"', tuple_payload)
 
     def test_ship_plan_validates_request(self) -> None:
         runner = CliRunner()
@@ -1442,7 +1522,7 @@ domains = ["https://prod.example.com"]
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "source_commit": "abc123",
+                        "source_commit": "abc1234",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -1558,7 +1638,7 @@ target_id = "compose-123"
                 json.dumps(
                     {
                         "artifact_id": "artifact-sha256-image456",
-                        "source_commit": "abc123",
+                        "source_commit": "abc1234",
                         "enterprise_base_digest": "sha256:enterprise123",
                         "image": {
                             "repository": "ghcr.io/cbusillo/odoo-private",
@@ -2352,6 +2432,7 @@ domains = ["https://prod.example.com"]
             state_dir = repo_root / "state"
             _write_artifact_manifest(state_dir)
             _write_backup_gate_record(state_dir)
+            _write_release_tuple_record(state_dir)
             source_file = _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
@@ -2399,6 +2480,7 @@ domains = ["https://prod.example.com"]
             state_dir = repo_root / "state"
             _write_artifact_manifest(state_dir)
             _write_backup_gate_record(state_dir)
+            _write_release_tuple_record(state_dir)
             source_file = _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """

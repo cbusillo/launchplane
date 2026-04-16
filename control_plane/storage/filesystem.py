@@ -12,6 +12,7 @@ from control_plane.contracts.preview_enablement_record import PreviewEnablementR
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -66,6 +67,23 @@ class FilesystemRecordStore:
     def list_artifact_manifests(self) -> tuple[ArtifactIdentityManifest, ...]:
         records = list(self._list_models(ArtifactIdentityManifest, "artifacts"))
         records.sort(key=lambda record: record.artifact_id, reverse=True)
+        return tuple(records)
+
+    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> Path:
+        return self._write_model("release_tuples", f"{record.context}-{record.channel}", record)
+
+    def read_release_tuple_record(self, *, context_name: str, channel_name: str) -> ReleaseTupleRecord:
+        return ReleaseTupleRecord.model_validate(
+            self._read_model(
+                ReleaseTupleRecord,
+                "release_tuples",
+                f"{context_name}-{channel_name}",
+            ).model_dump(mode="json")
+        )
+
+    def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]:
+        records = list(self._list_models(ReleaseTupleRecord, "release_tuples"))
+        records.sort(key=lambda record: (record.context, record.channel))
         return tuple(records)
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:
