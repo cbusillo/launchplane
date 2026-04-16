@@ -1,0 +1,42 @@
+schema_version = 1
+
+# Current runtime baseline captured from the legacy odoo-ai remote deploy
+# branches on 2026-04-16. These entries preserve the active cockpit's exact
+# deployed-source branch heads until split-repo artifact promotion replaces the
+# legacy monorepo baseline.
+
+[contexts.cm.channels.dev]
+tuple_id = "cm-dev-odoo-ai-671a0cff"
+
+[contexts.cm.channels.dev.repo_shas]
+odoo-ai = "671a0cffe57a7f84bf5f487fa03a433185c2da15"
+
+[contexts.cm.channels.testing]
+tuple_id = "cm-testing-odoo-ai-671a0cff"
+
+[contexts.cm.channels.testing.repo_shas]
+odoo-ai = "671a0cffe57a7f84bf5f487fa03a433185c2da15"
+
+[contexts.cm.channels.prod]
+tuple_id = "cm-prod-odoo-ai-671a0cff"
+
+[contexts.cm.channels.prod.repo_shas]
+odoo-ai = "671a0cffe57a7f84bf5f487fa03a433185c2da15"
+
+[contexts.opw.channels.dev]
+tuple_id = "opw-dev-odoo-ai-95425c07"
+
+[contexts.opw.channels.dev.repo_shas]
+odoo-ai = "95425c073765f1807c97648244ab9b28a2c03035"
+
+[contexts.opw.channels.testing]
+tuple_id = "opw-testing-odoo-ai-a250ab79"
+
+[contexts.opw.channels.testing.repo_shas]
+odoo-ai = "a250ab7925c8daca17fd4ec3e9a00e8b27b9d359"
+
+[contexts.opw.channels.prod]
+tuple_id = "opw-prod-odoo-ai-a250ab79"
+
+[contexts.opw.channels.prod.repo_shas]
+odoo-ai = "a250ab7925c8daca17fd4ec3e9a00e8b27b9d359"

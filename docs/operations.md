@@ -80,6 +80,11 @@ The current command group supports:
 `--release-tuples-file` when a cockpit or local render needs an explicit tuple
 catalog without relying on process-wide environment setup.
 
+The tracked default catalog at `config/release-tuples.toml` records the current
+legacy `odoo-ai` deploy-branch heads for `dev`, `testing`, and `prod`. Treat it
+as active runtime baseline evidence until split-repo artifact tuples replace
+the legacy branch-head source map.
+
 Harbor treats tenant PRs as preview anchors in the current workspace:
 `tenant-opw -> opw` and `tenant-cm -> cm`. `shared-addons` is companion-only,
 and infra/tooling repos are not preview anchors.
