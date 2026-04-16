@@ -48,6 +48,10 @@ pull requests, labels, checks, PR comments, releases, and CI execution.
 - Harbor baseline release tuples belong here as explicit control-plane data.
   Tuple entries carry exact repo SHAs for preview-manifest resolution, not
   floating branch names.
+- The tracked `config/release-tuples.toml` currently preserves legacy
+  `odoo-ai` deploy-branch heads as the active runtime baseline. Replace those
+  entries with split-repo artifact tuple values once promotion no longer relies
+  on the legacy monorepo branches.
 - Live Dokploy `target_id` values load from operator-local
   `config/dokploy-targets.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` override for alternate local
