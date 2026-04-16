@@ -322,6 +322,31 @@ def build_pull_request_feedback_payload(
         resolved_manifest=resolved_manifest,
         key="baseline_release_tuple_id",
     )
+    artifact_id = _feedback_preview_status_value(
+        preview_status_payload=preview_status_payload,
+        section="trust_summary",
+        key="artifact_id",
+    )
+    overall_health_status = _feedback_preview_status_value(
+        preview_status_payload=preview_status_payload,
+        section="health_summary",
+        key="overall_health_status",
+    )
+    deploy_status = _feedback_preview_status_value(
+        preview_status_payload=preview_status_payload,
+        section="health_summary",
+        key="deploy_status",
+    )
+    verify_status = _feedback_preview_status_value(
+        preview_status_payload=preview_status_payload,
+        section="health_summary",
+        key="verify_status",
+    )
+    next_action = _feedback_preview_status_value(
+        preview_status_payload=preview_status_payload,
+        section="lifecycle_summary",
+        key="next_action",
+    )
     source_summary = _feedback_source_summary(
         preview_status_payload=preview_status_payload,
         event=event,
@@ -347,6 +372,11 @@ def build_pull_request_feedback_payload(
         "canonical_url": canonical_url,
         "manifest_fingerprint": manifest_fingerprint,
         "baseline_release_tuple_id": baseline_release_tuple_id,
+        "artifact_id": artifact_id,
+        "overall_health_status": overall_health_status,
+        "deploy_status": deploy_status,
+        "verify_status": verify_status,
+        "next_action": next_action,
         "source_summary": source_summary,
         "comment_markdown": _render_pull_request_feedback_markdown(
             headline=headline,
@@ -356,6 +386,11 @@ def build_pull_request_feedback_payload(
             preview_state=preview_state,
             manifest_fingerprint=manifest_fingerprint,
             baseline_release_tuple_id=baseline_release_tuple_id,
+            artifact_id=artifact_id,
+            overall_health_status=overall_health_status,
+            deploy_status=deploy_status,
+            verify_status=verify_status,
+            next_action=next_action,
             source_summary=source_summary,
             apply_state=apply_state,
             apply_reason=apply_reason,
@@ -495,6 +530,21 @@ def _feedback_manifest_value(
     return value if isinstance(value, str) else ""
 
 
+def _feedback_preview_status_value(
+    *,
+    preview_status_payload: dict[str, object] | None,
+    section: str,
+    key: str,
+) -> str:
+    if preview_status_payload is None:
+        return ""
+    payload_section = preview_status_payload.get(section)
+    if not isinstance(payload_section, dict):
+        return ""
+    value = payload_section.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
 def _feedback_source_summary(
     *,
     preview_status_payload: dict[str, object] | None,
@@ -614,6 +664,11 @@ def _render_pull_request_feedback_markdown(
     preview_state: str,
     manifest_fingerprint: str,
     baseline_release_tuple_id: str,
+    artifact_id: str,
+    overall_health_status: str,
+    deploy_status: str,
+    verify_status: str,
+    next_action: str,
     source_summary: dict[str, object],
     apply_state: str,
     apply_reason: str,
@@ -629,6 +684,17 @@ def _render_pull_request_feedback_markdown(
         lines.append(f"- Manifest fingerprint: `{manifest_fingerprint}`")
     if baseline_release_tuple_id:
         lines.append(f"- Baseline release tuple: `{baseline_release_tuple_id}`")
+    if artifact_id:
+        lines.append(f"- Artifact: `{artifact_id}`")
+    if overall_health_status or deploy_status or verify_status:
+        lines.append(
+            "- Health: "
+            f"overall `{overall_health_status or 'unknown'}`, "
+            f"deploy `{deploy_status or 'unknown'}`, "
+            f"verify `{verify_status or 'unknown'}`"
+        )
+    if next_action:
+        lines.append(f"- Next action: {next_action}")
 
     anchor = source_summary.get("anchor")
     if isinstance(anchor, dict):

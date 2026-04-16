@@ -3487,6 +3487,18 @@ ENV_OVERRIDE_DISABLE_CRON = true
             state_dir = control_plane_root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_01jabc_1",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-existing",
+                    artifact_id="artifact-existing",
+                    deploy_status="pass",
+                    verify_status="pass",
+                    overall_health_status="pass",
+                )
+            )
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -3532,6 +3544,16 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "github_pr_event_refresh_preview",
             )
             self.assertEqual(payload["preview"]["preview_id"], "hpr_01jabc")
+            self.assertEqual(payload["feedback"]["artifact_id"], "artifact-existing")
+            self.assertEqual(payload["feedback"]["overall_health_status"], "pass")
+            self.assertEqual(payload["feedback"]["deploy_status"], "pass")
+            self.assertEqual(payload["feedback"]["verify_status"], "pass")
+            self.assertIn("Artifact: `artifact-existing`", payload["feedback"]["comment_markdown"])
+            self.assertIn(
+                "Health: overall `pass`, deploy `pass`, verify `pass`",
+                payload["feedback"]["comment_markdown"],
+            )
+            self.assertIn("Next action:", payload["feedback"]["comment_markdown"])
 
     def test_harbor_previews_ingest_pr_event_keeps_companion_requests_unresolved(self) -> None:
         runner = CliRunner()

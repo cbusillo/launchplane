@@ -85,6 +85,11 @@ legacy `odoo-ai` deploy-branch heads for `dev`, `testing`, and `prod`. Treat it
 as active runtime baseline evidence until split-repo artifact tuples replace
 the legacy branch-head source map.
 
+GitHub PR feedback uses one Harbor-owned marker comment per PR. The comment is
+a review surface over durable Harbor records: preview URL/state, manifest and
+baseline tuple, source inputs, artifact identity when present, health status,
+next action, and apply outcome.
+
 Harbor treats tenant PRs as preview anchors in the current workspace:
 `tenant-opw -> opw` and `tenant-cm -> cm`. `shared-addons` is companion-only,
 and infra/tooling repos are not preview anchors.
