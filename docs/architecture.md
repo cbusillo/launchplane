@@ -22,6 +22,7 @@ title: Architecture
 - deploy orchestration
 - backup and restore control-plane workflows
 - control-plane-owned operator secrets for deploy/runtime orchestration
+- Harbor preview and generation records
 
 Code and local-DX repos own:
 
@@ -29,6 +30,9 @@ Code and local-DX repos own:
 - local developer workflows
 - Odoo-specific validation
 - explicit artifact and operator handoff surfaces only
+
+GitHub owns the engineering workflow around this system: issues, branches,
+pull requests, labels, checks, PR comments, releases, and CI execution.
 
 ## Current Contract
 
@@ -41,9 +45,9 @@ Code and local-DX repos own:
   `config/dokploy.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
   paths.
-- Harbor baseline release tuples also belong here as explicit control-plane
-  data rather than inferred runtime state. Those tuples should carry exact repo
-  SHAs for preview-manifest resolution, not floating branch names.
+- Harbor baseline release tuples belong here as explicit control-plane data.
+  Tuple entries carry exact repo SHAs for preview-manifest resolution, not
+  floating branch names.
 - Live Dokploy `target_id` values load from operator-local
   `config/dokploy-targets.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` override for alternate local
@@ -59,16 +63,11 @@ Code and local-DX repos own:
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
-- Native ship requests are artifact-backed from the start and no longer
-  carry branch-sync metadata through the handoff or execution path.
-- When the control plane cannot resolve a stored artifact manifest for ship
-  execution, it fails closed instead of falling back to branch-sync or
-  repo/tag image selection.
-- Any upstream handoff seam must fail closed when this repo cannot accept
-  control.
-- Any temporary compatibility bridge should stay explicit and removable; native
-  tenant/devkit convenience commands are fine when the ownership boundary stays
-  clear.
+- Native ship requests are artifact-backed and do not carry branch-mutation
+  metadata through the handoff or execution path.
+- When the control plane cannot resolve a stored artifact manifest, ship
+  execution fails closed.
+- Upstream handoffs fail closed when this repo cannot accept control.
 - Immutable promotion ownership includes validating a stored backup-gate
   record for the destination environment before ship execution begins.
 - Operator-facing status/history reads should also terminate here by composing
