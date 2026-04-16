@@ -27,6 +27,7 @@ title: Operations
 <repo> --pr-number <number>`
 - `uv run control-plane harbor-previews write-preview --input-file <path>`
 - `uv run control-plane harbor-previews write-generation --input-file <path>`
+- `uv run control-plane harbor-previews write-enablement --input-file <path>`
 - `uv run control-plane harbor-previews request-generation --preview-input-file
 <path> --generation-input-file <path>`
 - `uv run control-plane harbor-previews mark-generation-ready --input-file
@@ -159,6 +160,9 @@ title: Operations
 - Harbor preview record mutation also starts here through builder-backed
   `harbor-previews write-preview` and `harbor-previews write-generation`
   commands that accept typed JSON input files.
+- Harbor preview enablement snapshots can also be written directly through
+  `harbor-previews write-enablement`, so non-webhook flows can persist the same
+  candidate/request evidence that PR ingest records.
 - Harbor preview lifecycle transitions also have thin command wrappers:
   `request-generation`, `mark-generation-ready`, `mark-generation-failed`,
   and `destroy-preview`.
@@ -215,6 +219,8 @@ title: Operations
 - `harbor-previews write-generation` requires an existing preview record for
   the same anchor PR and assigns the next generation sequence automatically
   when the input file does not pin one explicitly.
+- `harbor-previews write-enablement` accepts the typed preview enablement record
+  shape and persists it under the same tenant/PR identity used by PR ingest.
 - `harbor-previews request-generation` applies Harbor's in-progress replacement
   semantics in one step: it persists the generation, advances `latest` and
   `active`, and preserves any older serving generation until cutover.

@@ -6713,6 +6713,17 @@ def harbor_previews_write_generation(state_dir: Path, input_file: Path) -> None:
     click.echo(record_path)
 
 
+@harbor_previews.command("write-enablement")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_write_enablement(state_dir: Path, input_file: Path) -> None:
+    record = PreviewEnablementRecord.model_validate(_load_json_file(input_file))
+    record_path = _store(state_dir).write_preview_enablement_record(record)
+    click.echo(record_path)
+
+
 @harbor_previews.command("request-generation")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
