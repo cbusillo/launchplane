@@ -9,13 +9,24 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
+from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
     PreviewSourceRecord,
 )
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    BackupGateEvidence,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+    PromotionRecord,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
     apply_generation_failed_transition,
@@ -140,6 +151,135 @@ def _generation_record(
         overall_health_status=overall_health_status,
         failure_stage=failure_stage,
         failure_summary=failure_summary,
+    )
+
+
+def _environment_inventory(
+    *,
+    context: str = "opw",
+    instance: str,
+    artifact_id: str,
+    source_git_ref: str,
+    updated_at: str,
+    deployment_record_id: str,
+    promoted_from_instance: str = "",
+) -> EnvironmentInventory:
+    return EnvironmentInventory(
+        context=context,
+        instance=instance,
+        artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+        source_git_ref=source_git_ref,
+        deploy=DeploymentEvidence(
+            target_name=f"{context}-{instance}",
+            target_type="compose",
+            deploy_mode="dokploy",
+            deployment_id=f"deploy-{instance}",
+            status="pass",
+            started_at="2026-04-14T11:00:00Z",
+            finished_at="2026-04-14T11:03:00Z",
+        ),
+        destination_health=HealthcheckEvidence(status="pass"),
+        updated_at=updated_at,
+        deployment_record_id=deployment_record_id,
+        promoted_from_instance=promoted_from_instance,
+    )
+
+
+def _preview_enablement_record(
+    *,
+    context: str = "opw",
+    anchor_repo: str = "tenant-opw",
+    anchor_pr_number: int = 123,
+    anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
+    anchor_head_sha: str = "aaaa1111",
+    action: str = "opened",
+    pr_state: str = "open",
+    updated_at: str = "2026-04-14T11:15:00Z",
+    label_enabled: bool = False,
+    action_label: str = "",
+    request_metadata_status: str = "missing",
+    request_metadata_error: str = "",
+    request_metadata_baseline_channel: str = "",
+    request_metadata_companions: tuple[dict[str, object], ...] = (),
+) -> PreviewEnablementRecord:
+    return PreviewEnablementRecord(
+        record_id=f"{context}-{anchor_repo}-pr-{anchor_pr_number}",
+        context=context,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=anchor_pr_url,
+        anchor_head_sha=anchor_head_sha,
+        action=action,
+        pr_state=pr_state,
+        updated_at=updated_at,
+        label_enabled=label_enabled,
+        action_label=action_label,
+        request_metadata_status=request_metadata_status,
+        request_metadata_error=request_metadata_error,
+        request_metadata_baseline_channel=request_metadata_baseline_channel,
+        request_metadata_companions=request_metadata_companions,
+    )
+
+
+def _backup_gate_record(
+    *,
+    record_id: str = "backup-opw-prod-20260414T111500Z",
+    context: str = "opw",
+    instance: str = "prod",
+    created_at: str = "2026-04-14T11:15:00Z",
+    source: str = "prod-gate",
+    required: bool = True,
+    status: str = "pass",
+    evidence: dict[str, str] | None = None,
+) -> BackupGateRecord:
+    resolved_evidence = evidence if evidence is not None else {"snapshot": "s3://harbor/opw/prod/2026-04-14"}
+    return BackupGateRecord(
+        record_id=record_id,
+        context=context,
+        instance=instance,
+        created_at=created_at,
+        source=source,
+        required=required,
+        status=status,
+        evidence=resolved_evidence,
+    )
+
+
+def _promotion_record(
+    *,
+    record_id: str = "promotion-2026-04-13T09:00:00Z-opw-testing-to-prod",
+    artifact_id: str = "artifact-prod",
+    backup_record_id: str = "backup-opw-prod-20260413T085500Z",
+    context: str = "opw",
+    from_instance: str = "testing",
+    to_instance: str = "prod",
+    deploy_status: str = "pass",
+    destination_health_status: str = "pass",
+) -> PromotionRecord:
+    return PromotionRecord(
+        record_id=record_id,
+        artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+        backup_record_id=backup_record_id,
+        context=context,
+        from_instance=from_instance,
+        to_instance=to_instance,
+        source_health=HealthcheckEvidence(status="pass"),
+        backup_gate=BackupGateEvidence(
+            required=True,
+            status="pass",
+            evidence={"backup_record_id": backup_record_id},
+        ),
+        deploy=DeploymentEvidence(
+            target_name=f"{context}-{to_instance}",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            deployment_id="deployment-prod-promotion",
+            status=deploy_status,
+            started_at="2026-04-13T08:56:00Z",
+            finished_at="2026-04-13T09:00:00Z",
+        ),
+        post_deploy_update=PostDeployUpdateEvidence(attempted=True, status="pass", detail="Updated"),
+        destination_health=HealthcheckEvidence(status=destination_health_status),
     )
 
 
@@ -836,17 +976,1191 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Harbor control plane", rendered_html)
+            self.assertIn("Preview identity", rendered_html)
+            self.assertIn("tenant-opw PR 123", rendered_html)
             self.assertIn("opw/tenant-opw/pr-123", rendered_html)
             self.assertIn("https://harbor.example/previews/opw/tenant-opw/pr-123", rendered_html)
             self.assertIn("artifact-opw-123", rendered_html)
             self.assertIn("harbor-manifest-001", rendered_html)
             self.assertIn("Serving the latest requested generation.", rendered_html)
+            self.assertIn("Write-side Harbor recipes", rendered_html)
+            self.assertIn("request-generation", rendered_html)
+            self.assertIn("destroy-preview", rendered_html)
+            self.assertIn('id="operator-actions"', rendered_html)
             self.assertIn(
                 "This preview is live at the stable Harbor route and serving the latest requested generation.",
                 rendered_html,
             )
-            self.assertIn("Raw page JSON", rendered_html)
+            self.assertIn("Raw payload JSON", rendered_html)
             self.assertIn("Open preview URL", rendered_html)
+            self.assertIn("serving / latest", rendered_html)
+
+    def test_harbor_previews_show_tenant_surfaces_environment_and_preview_lanes(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="prod",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@zzz999",
+                    updated_at="2026-04-13T09:00:00Z",
+                    deployment_record_id="deployment-prod",
+                    promoted_from_instance="testing",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_live",
+                    anchor_pr_number=123,
+                    preview_label="opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_live_1",
+                    serving_generation_id="hgen_live_1",
+                    latest_generation_id="hgen_live_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_live_1",
+                    preview_id="hpr_live",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-live",
+                    artifact_id="artifact-live",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_pending",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    preview_label="opw/tenant-opw/pr-124",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    state="pending",
+                    active_generation_id="",
+                    serving_generation_id="",
+                    latest_generation_id="",
+                    latest_manifest_fingerprint="",
+                )
+            )
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                )
+            )
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=125,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
+                    anchor_head_sha="bbbb2222",
+                    updated_at="2026-04-14T11:16:00Z",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_harbor",
+                    anchor_pr_number=126,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/126",
+                    preview_label="opw/tenant-opw/pr-126",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-126",
+                    active_generation_id="hgen_harbor_1",
+                    serving_generation_id="hgen_harbor_1",
+                    latest_generation_id="hgen_harbor_1",
+                    updated_at="2026-04-14T11:18:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_harbor_1",
+                    preview_id="hpr_harbor",
+                    anchor_pr_number=126,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/126",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-harbor",
+                    artifact_id="artifact-harbor",
+                ).model_copy(update={"requested_reason": "operator_requested_refresh"})
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "show-tenant",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["context"], "opw")
+            self.assertEqual(payload["anchor_repo"], "tenant-opw")
+            self.assertEqual(payload["preview_counts"]["live"], 2)
+            self.assertEqual(payload["preview_counts"]["in_flight"], 1)
+            self.assertEqual(len(payload["preview_candidates"]), 1)
+            self.assertEqual(payload["preview_enablement_counts"]["candidate"], 1)
+            self.assertEqual(payload["preview_enablement_counts"]["requested"], 1)
+            self.assertEqual(payload["preview_enablement_counts"]["running"], 2)
+            self.assertEqual(payload["environments"]["testing"]["live"]["artifact_id"], "artifact-testing")
+            self.assertEqual(payload["environments"]["prod"]["live"]["artifact_id"], "artifact-prod")
+            self.assertEqual(payload["promotion_summary"]["status"], "candidate")
+            self.assertEqual(payload["promotion_action"]["status"], "blocked")
+            self.assertEqual(payload["environment_actions"]["testing"]["status"], "actionable")
+            self.assertEqual(payload["environment_actions"]["prod"]["status"], "actionable")
+            self.assertIn("ship resolve", payload["environment_actions"]["testing"]["recipe"])
+            self.assertEqual(payload["promotion_action"]["candidate_artifact_id"], "artifact-testing")
+            self.assertEqual(payload["promotion_action"]["current_prod_artifact_id"], "artifact-prod")
+            self.assertEqual(payload["promotion_action"]["evidence_checks"][3]["label"], "Prod backup gate")
+            self.assertIn("no prod backup-gate evidence", payload["promotion_action"]["evidence_checks"][3]["detail"].lower())
+            self.assertIn("backup-gates write", payload["promotion_action"]["backup_gate_recipe"])
+            self.assertEqual(payload["promotion_action"]["resolve_recipe"], "")
+            self.assertEqual(payload["promotion_action"]["execute_recipe"], "")
+            self.assertEqual(payload["promotion_detail"]["status"], "blocked")
+            self.assertEqual(payload["promotion_detail"]["from_instance"], "testing")
+            self.assertEqual(payload["promotion_detail"]["to_instance"], "prod")
+            enablement_by_pr = {
+                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
+            }
+            self.assertEqual(enablement_by_pr[125]["state"], "candidate")
+            self.assertEqual(enablement_by_pr[125]["request_source"], "none")
+            self.assertEqual(enablement_by_pr[125]["action"]["status"], "actionable")
+            self.assertIn("request-generation", enablement_by_pr[125]["action"]["recipe"])
+            self.assertEqual(enablement_by_pr[124]["state"], "requested")
+            self.assertEqual(enablement_by_pr[124]["request_source"], "github_label")
+            self.assertEqual(enablement_by_pr[124]["action"]["status"], "existing_preview")
+            self.assertEqual(enablement_by_pr[126]["state"], "running")
+            self.assertEqual(enablement_by_pr[126]["request_source"], "harbor")
+            self.assertEqual(enablement_by_pr[126]["action"]["status"], "existing_preview")
+
+    def test_harbor_previews_ingest_pr_event_persists_preview_enablement_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            input_file = Path(temporary_directory_name) / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "opened",
+                        "repo": "tenant-opw",
+                        "pr_number": 125,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/125",
+                        "occurred_at": "2026-04-14T11:16:00Z",
+                        "pr_body": "Regular PR body without Harbor metadata.",
+                        "state": "open",
+                        "merged": False,
+                        "head_sha": "bbbb2222",
+                        "label_names": [],
+                        "action_label": "",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-pr-event",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertIsNotNone(payload["enablement_record"])
+            self.assertFalse(payload["enablement_record"]["label_enabled"])
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = store.read_preview_enablement_record("opw-tenant-opw-pr-125")
+            self.assertEqual(record.anchor_pr_number, 125)
+            self.assertEqual(record.pr_state, "open")
+            self.assertFalse(record.label_enabled)
+            self.assertEqual(record.request_metadata_baseline_channel, "")
+            self.assertEqual(record.request_metadata_companions, ())
+
+    def test_harbor_previews_ingest_pr_event_persists_valid_preview_metadata_snapshot(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            input_file = Path(temporary_directory_name) / "pr-event.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "action": "opened",
+                        "repo": "tenant-opw",
+                        "pr_number": 126,
+                        "pr_url": "https://github.com/every/tenant-opw/pull/126",
+                        "occurred_at": "2026-04-14T11:18:00Z",
+                        "pr_body": (
+                            "```harbor-preview\n"
+                            'baseline_channel = "testing"\n'
+                            "[[companions]]\n"
+                            'repo = "shared-addons"\n'
+                            "pr_number = 456\n"
+                            "```"
+                        ),
+                        "state": "open",
+                        "merged": False,
+                        "head_sha": "cccc3333",
+                        "label_names": ["harbor-preview"],
+                        "action_label": "harbor-preview",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "ingest-pr-event",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = store.read_preview_enablement_record("opw-tenant-opw-pr-126")
+            self.assertEqual(record.request_metadata_status, "valid")
+            self.assertEqual(record.request_metadata_baseline_channel, "testing")
+            self.assertEqual(record.request_metadata_companions[0].repo, "shared-addons")
+            self.assertEqual(record.request_metadata_companions[0].pr_number, 456)
+
+    def test_harbor_previews_show_tenant_uses_valid_metadata_snapshot_for_enablement_actions(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=129,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/129",
+                    anchor_head_sha="dddd4444",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                    request_metadata_status="valid",
+                    request_metadata_baseline_channel="testing",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "show-tenant",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            enablement_by_pr = {
+                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
+            }
+            self.assertEqual(enablement_by_pr[129]["request_metadata_status"], "valid")
+            self.assertEqual(enablement_by_pr[129]["action"]["status"], "actionable")
+
+    def test_harbor_previews_render_index_page_leads_with_tenant_environment_when_scoped(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="prod",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@zzz999",
+                    updated_at="2026-04-13T09:00:00Z",
+                    deployment_record_id="deployment-prod",
+                    promoted_from_instance="testing",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_live",
+                    anchor_pr_number=123,
+                    preview_label="opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_live_1",
+                    serving_generation_id="hgen_live_1",
+                    latest_generation_id="hgen_live_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_live_1",
+                    preview_id="hpr_live",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-live",
+                    artifact_id="artifact-live",
+                )
+            )
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                    updated_at="2026-04-14T11:16:00Z",
+                )
+            )
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=125,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
+                    anchor_head_sha="bbbb2222",
+                    updated_at="2026-04-14T11:17:00Z",
+                )
+            )
+            store.write_backup_gate_record(
+                _backup_gate_record(
+                    record_id="backup-opw-prod-20260414T111500Z",
+                    created_at="2026-04-14T11:15:00Z",
+                )
+            )
+            store.write_promotion_record(
+                _promotion_record(
+                    record_id="promotion-2026-04-13T09:00:00Z-opw-testing-to-prod",
+                    artifact_id="artifact-prod",
+                    backup_record_id="backup-opw-prod-20260413T085500Z",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-index-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Tenant environment", rendered_html)
+            self.assertIn("Testing lane", rendered_html)
+            self.assertIn("Prod lane", rendered_html)
+            self.assertIn("Main feeds testing.", rendered_html)
+            self.assertIn("Testing is carrying a newer artifact than prod and is the current promotion candidate.", rendered_html)
+            self.assertIn("Testing is ready to promote into prod.", rendered_html)
+            self.assertIn("Rebuild long-lived lanes", rendered_html)
+            self.assertIn("Re-ship current testing artifact", rendered_html)
+            self.assertIn("ship resolve -&gt; ship execute", rendered_html)
+            self.assertIn("Promotion candidate", rendered_html)
+            self.assertIn("Latest prod backup gate backup-opw-prod-20260414T111500Z passed and can authorize promotion.", rendered_html)
+            self.assertIn("promote resolve", rendered_html)
+            self.assertIn("promote execute", rendered_html)
+            self.assertNotIn("backup-gates write", rendered_html)
+            self.assertIn("Why each PR does or does not have a preview", rendered_html)
+            self.assertIn("Eligible tenant PR. No preview request is active yet.", rendered_html)
+            self.assertIn("GitHub label harbor-preview requested a preview, but Harbor has not created the preview record yet.", rendered_html)
+            self.assertIn("Request Harbor preview", rendered_html)
+            self.assertIn("Show Harbor request recipe", rendered_html)
+            self.assertIn("request-generation", rendered_html)
+            self.assertIn("artifact-testing", rendered_html)
+            self.assertIn("artifact-prod", rendered_html)
+            self.assertIn("Pull request previews", rendered_html)
+
+    def test_harbor_previews_render_index_page_surfaces_backup_gate_recipe_when_promotion_blocked(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="prod",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@zzz999",
+                    updated_at="2026-04-13T09:00:00Z",
+                    deployment_record_id="deployment-prod",
+                    promoted_from_instance="testing",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-index-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("A newer testing artifact exists, but Harbor cannot promote it yet.", rendered_html)
+            self.assertIn("backup-gates write", rendered_html)
+            self.assertNotIn("promote resolve", rendered_html)
+
+    def test_harbor_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=130,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/130",
+                    anchor_head_sha="eeee5555",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                    request_metadata_status="valid",
+                    request_metadata_baseline_channel="testing",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-index-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Preview enablement is the first meaningful control surface", rendered_html)
+            self.assertIn("Why each PR does or does not have a preview", rendered_html)
+            self.assertIn("Materialize requested Harbor preview", rendered_html)
+            self.assertNotIn("Rebuild long-lived lanes", rendered_html)
+            self.assertNotIn("Harbor cannot plan the next promotion yet.", rendered_html)
+
+    def test_harbor_previews_render_index_page_marks_missing_lane_action_evidence(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-index-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Prod has no actionable ship evidence yet.", rendered_html)
+
+    def test_harbor_previews_show_tenant_marks_in_sync_promotion_state(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="prod",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:10:00Z",
+                    deployment_record_id="deployment-prod",
+                    promoted_from_instance="testing",
+                )
+            )
+            store.write_backup_gate_record(
+                _backup_gate_record(
+                    record_id="backup-opw-prod-20260414T111500Z",
+                    created_at="2026-04-14T11:15:00Z",
+                )
+            )
+            store.write_promotion_record(
+                _promotion_record(
+                    record_id="promotion-2026-04-14T11:10:00Z-opw-testing-to-prod",
+                    artifact_id="artifact-prod",
+                    backup_record_id="backup-opw-prod-20260414T111500Z",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "show-tenant",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["promotion_summary"]["status"], "in_sync")
+            self.assertEqual(payload["promotion_action"]["status"], "in_sync")
+            self.assertEqual(
+                payload["promotion_action"]["headline"],
+                "Prod is already serving the current testing artifact.",
+            )
+            self.assertEqual(payload["promotion_detail"]["status"], "in_sync")
+            self.assertEqual(
+                payload["promotion_detail"]["latest_backup_gate"]["record_id"],
+                "backup-opw-prod-20260414T111500Z",
+            )
+
+    def test_harbor_previews_render_index_page_writes_preview_dashboard(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_live",
+                    anchor_pr_number=123,
+                    preview_label="opw/tenant-opw/pr-123",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_live_1",
+                    serving_generation_id="hgen_live_1",
+                    latest_generation_id="hgen_live_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_live_1",
+                    preview_id="hpr_live",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-live",
+                    artifact_id="artifact-live",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_fail",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    preview_label="opw/tenant-opw/pr-124",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    state="failed",
+                    active_generation_id="hgen_fail_2",
+                    serving_generation_id="hgen_fail_1",
+                    latest_generation_id="hgen_fail_2",
+                    latest_manifest_fingerprint="harbor-manifest-fail",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_fail_1",
+                    preview_id="hpr_fail",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-prev",
+                    artifact_id="artifact-prev",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_fail_2",
+                    preview_id="hpr_fail",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    sequence=2,
+                    state="failed",
+                    manifest_fingerprint="harbor-manifest-fail",
+                    artifact_id="artifact-fail",
+                    deploy_status="fail",
+                    verify_status="skipped",
+                    overall_health_status="fail",
+                    failure_stage="deploying",
+                    failure_summary="Replacement generation failed during deploy.",
+                    ready_at="",
+                    failed_at="2026-04-13T12:15:00Z",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_dead",
+                    anchor_pr_number=125,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
+                    preview_label="opw/tenant-opw/pr-125",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-125",
+                    state="destroyed",
+                    active_generation_id="",
+                    serving_generation_id="",
+                    latest_generation_id="hgen_dead_1",
+                    destroyed_at="2026-04-14T12:14:00Z",
+                    destroy_reason="merged_after_grace_window",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_dead_1",
+                    preview_id="hpr_dead",
+                    anchor_pr_number=125,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-dead",
+                    artifact_id="artifact-dead",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-index-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Harbor control plane", rendered_html)
+            self.assertIn("Pull request previews", rendered_html)
+            self.assertIn("Fleet focus", rendered_html)
+            self.assertIn("Reviewable now", rendered_html)
+            self.assertIn("Needs attention", rendered_html)
+            self.assertIn("Live review", rendered_html)
+            self.assertIn("Retained evidence", rendered_html)
+            self.assertIn("Policy snapshot", rendered_html)
+            self.assertIn('data-filter-control="attention"', rendered_html)
+            self.assertIn('data-preview-row', rendered_html)
+            self.assertIn("Serving older generation", rendered_html)
+            self.assertIn("Evidence only", rendered_html)
+            self.assertIn("opw/tenant-opw/pr-123", rendered_html)
+            self.assertIn("opw/tenant-opw/pr-124", rendered_html)
+            self.assertIn("opw/tenant-opw/pr-125", rendered_html)
+
+    def test_harbor_previews_render_index_page_surfaces_scope_controls_for_multi_context_inventory(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-index-all.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_opw",
+                    context="opw",
+                    anchor_repo="tenant-opw",
+                    anchor_pr_number=123,
+                    preview_label="opw/tenant-opw/pr-123",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_opw_1",
+                    serving_generation_id="hgen_opw_1",
+                    latest_generation_id="hgen_opw_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_opw_1",
+                    preview_id="hpr_opw",
+                    anchor_repo="tenant-opw",
+                    anchor_pr_number=123,
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-opw",
+                    artifact_id="artifact-opw",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_cm",
+                    context="cm",
+                    anchor_repo="tenant-cm",
+                    anchor_pr_number=88,
+                    preview_label="cm/tenant-cm/pr-88",
+                    canonical_url="https://harbor.example/previews/cm/tenant-cm/pr-88",
+                    active_generation_id="hgen_cm_1",
+                    serving_generation_id="hgen_cm_1",
+                    latest_generation_id="hgen_cm_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_cm_1",
+                    preview_id="hpr_cm",
+                    anchor_repo="tenant-cm",
+                    anchor_pr_number=88,
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-cm",
+                    artifact_id="artifact-cm",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-index-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("All scopes", rendered_html)
+            self.assertIn("Context cm", rendered_html)
+            self.assertIn('data-scope-control="context:cm"', rendered_html)
+            self.assertIn('data-scope-control="repo:tenant-cm"', rendered_html)
+            self.assertIn('data-scopes="all context:cm repo:tenant-cm"', rendered_html)
+
+    def test_harbor_previews_render_policy_page_writes_contract_summary(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-policy.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_live",
+                    preview_label="opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_live_1",
+                    serving_generation_id="hgen_live_1",
+                    latest_generation_id="hgen_live_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_live_1",
+                    preview_id="hpr_live",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-live",
+                    artifact_id="artifact-live",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-policy-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Harbor control plane", rendered_html)
+            self.assertIn("How Harbor decides what becomes a preview", rendered_html)
+            self.assertIn("harbor-preview", rendered_html)
+            self.assertIn("shared-addons", rendered_html)
+            self.assertIn("tenant-opw", rendered_html)
+            self.assertIn("tenant-cm", rendered_html)
+            self.assertIn("testing", rendered_html)
+
+    def test_harbor_previews_render_policy_page_shows_context_distribution_for_multi_context_inventory(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_file = Path(temporary_directory_name) / "harbor-policy-all.html"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_opw",
+                    context="opw",
+                    anchor_repo="tenant-opw",
+                    preview_label="opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_opw_1",
+                    serving_generation_id="hgen_opw_1",
+                    latest_generation_id="hgen_opw_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_opw_1",
+                    preview_id="hpr_opw",
+                    anchor_repo="tenant-opw",
+                    anchor_pr_number=123,
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-opw",
+                    artifact_id="artifact-opw",
+                )
+            )
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_cm",
+                    context="cm",
+                    anchor_repo="tenant-cm",
+                    preview_label="cm/tenant-cm/pr-88",
+                    state="destroyed",
+                    active_generation_id="",
+                    serving_generation_id="",
+                    latest_generation_id="hgen_cm_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_cm_1",
+                    preview_id="hpr_cm",
+                    anchor_repo="tenant-cm",
+                    anchor_pr_number=88,
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-cm",
+                    artifact_id="artifact-cm",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-policy-page",
+                    "--state-dir",
+                    str(state_dir),
+                    "--output-file",
+                    str(output_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            rendered_html = output_file.read_text(encoding="utf-8")
+            self.assertIn("Context distribution", rendered_html)
+            self.assertIn("all contexts", rendered_html)
+            self.assertIn('href="index.html#scope=context:cm"', rendered_html)
+            self.assertIn("<td>opw</td>", rendered_html)
+            self.assertIn(">cm</a></td>", rendered_html)
+
+    def test_harbor_previews_render_site_writes_linked_bundle(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_dir = Path(temporary_directory_name) / "site"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_live",
+                    preview_label="opw/tenant-opw/pr-123",
+                    active_generation_id="hgen_live_1",
+                    serving_generation_id="hgen_live_1",
+                    latest_generation_id="hgen_live_1",
+                )
+            )
+            store.write_preview_generation_record(
+                _generation_record(
+                    "hgen_live_1",
+                    preview_id="hpr_live",
+                    sequence=1,
+                    state="ready",
+                    manifest_fingerprint="harbor-manifest-live",
+                    artifact_id="artifact-live",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-site",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_file = output_dir / "index.html"
+            policy_file = output_dir / "policy.html"
+            detail_file = output_dir / "previews" / "opw" / "tenant-opw" / "pr-123.html"
+            self.assertTrue(index_file.exists())
+            self.assertTrue(policy_file.exists())
+            self.assertTrue(detail_file.exists())
+            index_html = index_file.read_text(encoding="utf-8")
+            policy_html = policy_file.read_text(encoding="utf-8")
+            detail_html = detail_file.read_text(encoding="utf-8")
+            self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', index_html)
+            self.assertIn('#operator-actions', index_html)
+            self.assertIn('href="policy.html"', index_html)
+            self.assertIn('href="../../../index.html"', detail_html)
+            self.assertIn('href="../../../policy.html"', detail_html)
+            self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', policy_html)
+
+    def test_harbor_previews_render_site_writes_environment_detail_pages_and_links_from_overview(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_dir = Path(temporary_directory_name) / "site"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="prod",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@zzz999",
+                    updated_at="2026-04-13T09:00:00Z",
+                    deployment_record_id="deployment-prod",
+                    promoted_from_instance="testing",
+                )
+            )
+            store.write_backup_gate_record(
+                _backup_gate_record(
+                    record_id="backup-opw-prod-20260414T111500Z",
+                    created_at="2026-04-14T11:15:00Z",
+                )
+            )
+            store.write_promotion_record(
+                _promotion_record(
+                    record_id="promotion-2026-04-14T11:10:00Z-opw-testing-to-prod",
+                    artifact_id="artifact-prod",
+                    backup_record_id="backup-opw-prod-20260414T111500Z",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-site",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_file = output_dir / "index.html"
+            testing_detail_file = output_dir / "environments" / "opw" / "testing.html"
+            prod_detail_file = output_dir / "environments" / "opw" / "prod.html"
+            self.assertTrue(testing_detail_file.exists())
+            self.assertTrue(prod_detail_file.exists())
+
+            index_html = index_file.read_text(encoding="utf-8")
+            testing_detail_html = testing_detail_file.read_text(encoding="utf-8")
+            prod_detail_html = prod_detail_file.read_text(encoding="utf-8")
+
+            self.assertIn('href="environments/opw/testing.html"', index_html)
+            self.assertIn('href="environments/opw/prod.html"', index_html)
+            self.assertIn("Open lane detail", index_html)
+            self.assertIn('href="../../index.html"', testing_detail_html)
+            self.assertIn('href="../../policy.html"', testing_detail_html)
+            self.assertIn("Live lane snapshot", testing_detail_html)
+            self.assertIn("Current environment evidence", testing_detail_html)
+            self.assertIn("Recent promotions into this lane", prod_detail_html)
+            self.assertIn("promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", prod_detail_html)
+
+    def test_harbor_previews_render_site_environment_detail_marks_partial_evidence_cleanly(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_dir = Path(temporary_directory_name) / "site"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-site",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            testing_detail_file = output_dir / "environments" / "opw" / "testing.html"
+            self.assertTrue(testing_detail_file.exists())
+
+            testing_detail_html = testing_detail_file.read_text(encoding="utf-8")
+            self.assertIn("No live promotion record is attached to this lane inventory.", testing_detail_html)
+            self.assertIn("No authorized backup gate is attached to this lane yet.", testing_detail_html)
+            self.assertIn("No deployment history recorded for this lane yet.", testing_detail_html)
+            self.assertIn("No promotion history recorded into this lane yet.", testing_detail_html)
+
+    def test_harbor_previews_render_site_writes_promotion_detail_page_and_link_from_overview(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_dir = Path(temporary_directory_name) / "site"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="testing",
+                    artifact_id="artifact-testing",
+                    source_git_ref="origin/main@abc123",
+                    updated_at="2026-04-14T11:05:00Z",
+                    deployment_record_id="deployment-testing",
+                )
+            )
+            store.write_environment_inventory(
+                _environment_inventory(
+                    instance="prod",
+                    artifact_id="artifact-prod",
+                    source_git_ref="origin/main@zzz999",
+                    updated_at="2026-04-13T09:00:00Z",
+                    deployment_record_id="deployment-prod",
+                    promoted_from_instance="testing",
+                )
+            )
+            store.write_backup_gate_record(
+                _backup_gate_record(
+                    record_id="backup-opw-prod-20260414T111500Z",
+                    created_at="2026-04-14T11:15:00Z",
+                )
+            )
+            store.write_promotion_record(
+                _promotion_record(
+                    record_id="promotion-2026-04-14T11:10:00Z-opw-testing-to-prod",
+                    artifact_id="artifact-prod",
+                    backup_record_id="backup-opw-prod-20260414T111500Z",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-site",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_file = output_dir / "index.html"
+            promotion_detail_file = output_dir / "promotions" / "opw" / "testing-to-prod.html"
+            self.assertTrue(promotion_detail_file.exists())
+
+            index_html = index_file.read_text(encoding="utf-8")
+            promotion_detail_html = promotion_detail_file.read_text(encoding="utf-8")
+
+            self.assertIn('href="promotions/opw/testing-to-prod.html"', index_html)
+            self.assertIn("Open promotion detail", index_html)
+            self.assertIn('href="../../index.html"', promotion_detail_html)
+            self.assertIn('href="../../policy.html"', promotion_detail_html)
+            self.assertIn("Recent promotions into prod", promotion_detail_html)
+            self.assertIn("Recent prod backup authorization", promotion_detail_html)
+            self.assertIn("promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", promotion_detail_html)
 
     def test_harbor_previews_render_status_page_calls_out_failed_latest_replacement(self) -> None:
         runner = CliRunner()
@@ -1159,6 +2473,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("deploying", rendered_html)
             self.assertIn("hgen_01jabc_1", rendered_html)
             self.assertIn("2026-04-13T12:10:00Z", rendered_html)
+            self.assertIn("latest / active", rendered_html)
+            self.assertIn("mark-generation-ready", rendered_html)
+            self.assertIn("mark-generation-failed", rendered_html)
             self.assertNotIn(
                 "Latest replacement failed. Harbor is still serving the older preview.",
                 rendered_html,

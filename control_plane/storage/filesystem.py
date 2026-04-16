@@ -8,6 +8,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -187,6 +188,36 @@ class FilesystemRecordStore:
             and (anchor_pr_number is None or record.anchor_pr_number == anchor_pr_number)
         ]
         records.sort(key=lambda record: (record.updated_at, record.preview_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_enablement_record(self, record: PreviewEnablementRecord) -> Path:
+        return self._write_model("harbor_preview_enablement", record.record_id, record)
+
+    def read_preview_enablement_record(self, record_id: str) -> PreviewEnablementRecord:
+        return PreviewEnablementRecord.model_validate(
+            self._read_model(PreviewEnablementRecord, "harbor_preview_enablement", record_id).model_dump(
+                mode="json"
+            )
+        )
+
+    def list_preview_enablement_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        pr_state: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewEnablementRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(PreviewEnablementRecord, "harbor_preview_enablement")
+            if (not context_name or record.context == context_name)
+            and (not anchor_repo or record.anchor_repo == anchor_repo)
+            and (not pr_state or record.pr_state == pr_state)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
