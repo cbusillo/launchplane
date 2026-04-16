@@ -4781,13 +4781,13 @@ def _render_harbor_preview_status_page_html(
     )
     callout_detail_html = f"<p class=\"callout-detail\">{callout_detail}</p>" if callout_detail else ""
     callout_html = f"""
-    <section class=\"callout tone-{callout_tone}\">
+    <article class=\"preview-condition-card detail-card tone-{callout_tone}\">
       <div class=\"section-label\">{callout_eyebrow}</div>
       <h2>{callout_title}</h2>
       <p>{callout_summary}</p>
       <dl>{callout_rows}</dl>
       {callout_detail_html}
-    </section>
+    </article>
     """
 
     source_map_rows = "".join(
@@ -4809,7 +4809,7 @@ def _render_harbor_preview_status_page_html(
     companions_section_html = ""
     if companion_items:
         companions_section_html = f"""
-    <section class=\"section\">
+    <section class=\"preview-detail-section\">
       <div class=\"section-label\">Linked pull requests</div>
       <h2>Companion refs</h2>
       <p>Companion intent stays explicit and secondary to the anchor preview narrative.</p>
@@ -5059,7 +5059,7 @@ def _render_harbor_preview_status_page_html(
     if not operator_actions_html:
         operator_actions_html = "<p class=\"action-empty\">No write-side recipe is exposed for this retained preview state.</p>"
     operator_actions_section_html = f"""
-    <section class=\"section\" id=\"operator-actions\">
+    <section class=\"preview-detail-section\" id=\"operator-actions\">
       <div class=\"section-label\">Operator actions</div>
       <h2>Write-side Harbor recipes</h2>
       <p>Harbor still renders as a static operator surface here, so each action is shown as the exact shell recipe for this preview identity.</p>
@@ -5068,24 +5068,35 @@ def _render_harbor_preview_status_page_html(
     """
 
     body_html = f"""
-    <header class=\"mast\">
-      <div class=\"section-label\">Preview identity</div>
-      <h1>{mast_title}</h1>
-      {identity_html}
-      <div class=\"banner tone-{banner_tone}\"><strong>{escape(banner_label)}</strong><span>{escape(banner_note)}</span></div>
-      <p class=\"summary\">{summary_text}</p>
-      <div class=\"actions\">
-        <a class=\"primary-action\" href=\"{primary_cta_href}\">{primary_cta_label}</a>
-        <a class=\"secondary-link\" href=\"{secondary_cta_href}\">{secondary_cta_label}</a>
+    <section class=\"preview-detail-mast\">
+      <div>
+        <div class=\"section-label\">Preview detail</div>
+        <h2>{mast_title}</h2>
+        {identity_html}
       </div>
-      <div class=\"route-line\">{route_line}</div>
-    </header>
+      <aside class=\"preview-detail-brief\">
+        <div class=\"banner tone-{banner_tone}\"><strong>{escape(banner_label)}</strong><span>{escape(banner_note)}</span></div>
+        <p>{summary_text}</p>
+        <div class=\"actions\">
+          <a class=\"primary-action\" href=\"{primary_cta_href}\">{primary_cta_label}</a>
+          <a class=\"secondary-link\" href=\"{secondary_cta_href}\">{secondary_cta_label}</a>
+        </div>
+      </aside>
+    </section>
 
-    {callout_html}
+    <section class=\"preview-detail-grid\">
+      <article class=\"detail-card detail-card-primary\">
+        <div class=\"section-label\">Current preview evidence</div>
+        <h3>Stable route and generation state</h3>
+        <dl class=\"detail-meta\">{metadata_rows}</dl>
+        <div class=\"route-line\">{route_line}</div>
+      </article>
+      {callout_html}
+    </section>
 
     {operator_actions_section_html}
 
-    <section class=\"section\">
+    <section class=\"preview-detail-section\">
       <div class=\"section-label\">Exact inputs</div>
       <h2>Serving manifest evidence</h2>
       <p>Harbor keeps the exact repo-to-SHA map visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
@@ -5097,7 +5108,7 @@ def _render_harbor_preview_status_page_html(
 
     {companions_section_html}
 
-    <section class=\"section\">
+    <section class=\"preview-detail-section\">
       <div class=\"section-label\">Recent activity</div>
       <h2>Generation ledger</h2>
       <p>Generation history stays visible as evidence, but the stable preview route remains the primary narrative.</p>
@@ -5107,10 +5118,9 @@ def _render_harbor_preview_status_page_html(
       </table>
     </section>
 
-    <section class=\"section\">
+    <section class=\"preview-detail-section\">
       <div class=\"section-label\">Lifecycle evidence</div>
       <h2>Control-plane record</h2>
-      <dl class=\"metadata-strip\">{metadata_rows}</dl>
       <details>
         <summary>Raw payload JSON</summary>
         <pre>{raw_payload_json}</pre>
@@ -5199,9 +5209,16 @@ def _render_harbor_preview_status_page_html(
     """
 
     extra_css = """
-    .mast { display: grid; gap: 14px; }
+    .preview-detail-mast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 20px;
+    }
     .identity-line {
-      margin: -4px 0 0;
+      margin: 10px 0 0;
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
@@ -5213,6 +5230,50 @@ def _render_harbor_preview_status_page_html(
     .identity-line code {
       font-size: 12px;
     }
+    .preview-detail-mast h2,
+    .detail-card h3,
+    .preview-detail-section h2,
+    .preview-condition-card h2,
+    .action-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .preview-detail-mast h2 {
+      font-size: 40px;
+    }
+    .preview-detail-mast p,
+    .preview-detail-brief p,
+    .detail-card p,
+    .preview-detail-section p,
+    .action-card p,
+    .action-empty {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .preview-detail-brief,
+    .detail-card,
+    .preview-detail-section,
+    .action-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 8px;
+      padding: 16px 18px 18px;
+    }
+    .preview-detail-brief {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+    .preview-detail-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      gap: 16px;
+      margin-top: 18px;
+      align-items: start;
+    }
+    .preview-detail-section { margin-top: 18px; }
     .route-line {
       display: grid;
       gap: 8px;
@@ -5229,14 +5290,6 @@ def _render_harbor_preview_status_page_html(
     details summary { color: inherit; }
     .route-line a,
     .secondary-link { text-underline-offset: 0.18em; }
-    .mast h1 {
-      margin: 0;
-      font-family: var(--serif);
-      font-size: 40px;
-      line-height: 0.96;
-      letter-spacing: -0.02em;
-    }
-    .summary { margin: 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
     .banner {
       display: flex;
       flex-wrap: wrap;
@@ -5268,20 +5321,19 @@ def _render_harbor_preview_status_page_html(
       font-size: 13px;
     }
     .secondary-link { font-family: var(--mono); font-size: 13px; }
-    .section,
-    .callout { border-top: 1px solid var(--line); padding-top: 24px; margin-top: 40px; }
     .action-stack {
       display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 18px;
       margin-top: 18px;
     }
-    .action-card {
-      border: 1px solid var(--line);
+    .action-card { display: grid; gap: 12px; }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
       background: var(--surface);
-      border-radius: 14px;
-      padding: 16px;
-      display: grid;
-      gap: 12px;
+      color: inherit;
     }
     .action-card.tone-good { border-left: 3px solid var(--good); }
     .action-card.tone-warn { border-left: 3px solid var(--warn); }
@@ -5302,17 +5354,7 @@ def _render_harbor_preview_status_page_html(
       color: var(--muted);
       margin-bottom: 8px;
     }
-    .action-card h3 {
-      margin: 0;
-      font-family: var(--serif);
-      font-size: 22px;
-      line-height: 1.08;
-    }
-    .action-card p {
-      margin: 8px 0 0;
-      color: var(--muted);
-      line-height: 1.55;
-    }
+    .action-card h3 { font-size: 22px; }
     .action-script-head {
       display: flex;
       justify-content: space-between;
@@ -5329,16 +5371,17 @@ def _render_harbor_preview_status_page_html(
       appearance: none;
       border: 1px solid var(--line);
       border-radius: 999px;
-      background: rgba(251, 250, 246, 0.12);
+      background: #f2ede3;
       padding: 7px 10px;
-      color: #f7f2e8;
+      color: var(--text);
       cursor: pointer;
       font: inherit;
       letter-spacing: 0.08em;
       text-transform: uppercase;
+      white-space: nowrap;
     }
     .copy-button:hover {
-      background: rgba(251, 250, 246, 0.2);
+      background: #e7dfd0;
     }
     .action-details {
       border-top: 1px solid var(--line);
@@ -5366,10 +5409,6 @@ def _render_harbor_preview_status_page_html(
       font-size: 12px;
       line-height: 1.55;
     }
-    .action-empty {
-      margin: 18px 0 0;
-      color: var(--muted);
-    }
     .section-label {
       font-family: var(--mono);
       font-size: 11px;
@@ -5378,37 +5417,42 @@ def _render_harbor_preview_status_page_html(
       color: var(--muted);
       margin-bottom: 12px;
     }
-    .callout { padding-left: 16px; border-left: 3px solid var(--neutral); }
-    .callout.tone-good { border-left-color: var(--good); background: none; color: inherit; }
-    .callout.tone-warn { border-left-color: var(--warn); background: none; color: inherit; }
-    .callout.tone-bad { border-left-color: var(--bad); background: none; color: inherit; }
-    .callout.tone-neutral { border-left-color: var(--neutral); background: none; color: inherit; }
-    .callout h2,
-    .section h2 {
-      margin: 0;
-      font-family: var(--serif);
-      font-size: 26px;
-      line-height: 1.08;
+    .preview-condition-card { border-left: 3px solid var(--neutral); }
+    .preview-condition-card.tone-good,
+    .preview-condition-card.tone-warn,
+    .preview-condition-card.tone-bad,
+    .preview-condition-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
     }
-    .callout p,
-    .section p { margin: 10px 0 0; color: var(--muted); line-height: 1.65; }
-    .callout dl,
-    .metadata-strip {
+    .preview-condition-card.tone-good { border-left-color: var(--good); }
+    .preview-condition-card.tone-warn { border-left-color: var(--warn); }
+    .preview-condition-card.tone-bad { border-left-color: var(--bad); }
+    .preview-condition-card.tone-neutral { border-left-color: var(--neutral); }
+    .preview-condition-card h2,
+    .preview-detail-section h2 { font-size: 26px; }
+    .detail-card h3 { font-size: 24px; }
+    .preview-condition-card dl,
+    .detail-meta {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 16px;
       margin: 18px 0 0;
     }
-    .callout dt,
-    .metadata-strip dt {
+    .detail-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .preview-condition-card dt,
+    .detail-meta dt {
       color: var(--muted);
       font-family: var(--mono);
       font-size: 11px;
       letter-spacing: 0.08em;
       text-transform: uppercase;
     }
-    .callout dd,
-    .metadata-strip dd { margin: 8px 0 0; overflow-wrap: anywhere; }
+    .preview-condition-card dd,
+    .detail-meta dd { margin: 8px 0 0; overflow-wrap: anywhere; }
     .callout-detail { color: var(--text); }
     table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 14px; background: transparent; }
     th, td { text-align: left; padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
@@ -5423,9 +5467,15 @@ def _render_harbor_preview_status_page_html(
     details { margin-top: 18px; }
     summary { cursor: pointer; color: var(--muted); font-family: var(--mono); }
     pre { overflow: auto; padding: 18px; background: #13110f; color: #e7e0d4; border-radius: 4px; font-size: 12px; }
-    @media (max-width: 760px) {
-      .mast { gap: 12px; }
-      .mast h1 { font-size: 30px; }
+    @media (max-width: 900px) {
+      .preview-detail-mast,
+      .preview-detail-grid,
+      .action-stack,
+      .preview-condition-card dl,
+      .detail-meta {
+        grid-template-columns: 1fr;
+      }
+      .preview-detail-mast h2 { font-size: 32px; }
       .identity-line {
         gap: 6px;
         font-size: 12px;
@@ -5435,8 +5485,7 @@ def _render_harbor_preview_status_page_html(
         padding-top: 12px;
         font-size: 13px;
       }
-      .callout dl,
-      .metadata-strip { grid-template-columns: 1fr; }
+      .action-card-head { flex-direction: column; }
     }
     """
 
