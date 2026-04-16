@@ -968,6 +968,7 @@ def resolve_pull_request_event_manifest(
     resolved_context: str,
     preview: PreviewRecord | None,
     request_metadata: HarborPreviewRequestParseResult,
+    companion_summaries_snapshot: tuple[PreviewPullRequestSummary, ...] = (),
 ) -> HarborResolvedPreviewManifest | None:
     effective_context = preview.context if preview is not None else resolved_context
     if not effective_context:
@@ -988,6 +989,7 @@ def resolve_pull_request_event_manifest(
         context_name=effective_context,
         anchor_pr_url=event.pr_url,
         metadata=metadata,
+        companion_summaries_snapshot=companion_summaries_snapshot,
     )
     if metadata.companions and companion_sources is None:
         return None
@@ -1054,9 +1056,34 @@ def _resolve_companion_sources(
     context_name: str,
     anchor_pr_url: str,
     metadata: HarborPreviewRequestMetadata,
+    companion_summaries_snapshot: tuple[PreviewPullRequestSummary, ...] = (),
 ) -> tuple[tuple[PreviewSourceRecord, ...] | None, tuple[PreviewPullRequestSummary, ...] | None]:
     if not metadata.companions:
         return (), ()
+    snapshot_by_key = {
+        (summary.repo.strip(), summary.pr_number): summary
+        for summary in companion_summaries_snapshot
+    }
+    requested_keys = tuple(
+        (companion.repo.strip(), companion.pr_number) for companion in metadata.companions
+    )
+    if snapshot_by_key and set(snapshot_by_key) == set(requested_keys):
+        sources: list[PreviewSourceRecord] = []
+        summaries: list[PreviewPullRequestSummary] = []
+        for companion in metadata.companions:
+            summary = snapshot_by_key.get((companion.repo.strip(), companion.pr_number))
+            if summary is None:
+                return None, None
+            sources.append(
+                PreviewSourceRecord(
+                    repo=summary.repo,
+                    git_sha=summary.head_sha,
+                    selection="companion",
+                )
+            )
+            summaries.append(summary)
+        return tuple(sources), tuple(summaries)
+
     github_owner = github_pr_owner(pr_url=anchor_pr_url)
     github_token = resolve_harbor_github_token(
         control_plane_root=control_plane_root,

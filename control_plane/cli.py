@@ -24,6 +24,7 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
+from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
 from control_plane.contracts.preview_mutation_request import (
     HarborPullRequestMutationIntent,
     PreviewDestroyMutationRequest,
@@ -512,6 +513,7 @@ def _build_harbor_preview_enablement_action_payload(
     request_metadata_status: str,
     request_metadata_baseline_channel: str,
     request_metadata_companions: tuple[HarborCompanionPullRequestReference, ...],
+    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
     preview_row: dict[str, object] | None,
 ) -> dict[str, object]:
     def actionable_payload(
@@ -592,6 +594,38 @@ def _build_harbor_preview_enablement_action_payload(
             "recipe_id": f"enablement-{action_slug}-request-generation",
         }
 
+    def companion_snapshot_source_map_payload() -> list[dict[str, object]]:
+        return [
+            {
+                "repo": anchor_repo,
+                "git_sha": anchor_head_sha,
+                "selection": "anchor",
+            },
+            *[
+                {
+                    "repo": summary.repo,
+                    "git_sha": summary.head_sha,
+                    "selection": "companion",
+                }
+                for summary in request_metadata_companion_summaries
+            ],
+        ]
+
+    def companion_summaries_payload() -> list[dict[str, object]]:
+        return [
+            summary.model_dump(mode="json")
+            for summary in request_metadata_companion_summaries
+        ]
+
+    def unresolved_companion_payload(*, detail: str) -> dict[str, object]:
+        return {
+            "status": "blocked",
+            "tone": "bad",
+            "headline": "Companion PR snapshots are required before Harbor can request this preview.",
+            "summary": detail,
+            "recipe": "",
+        }
+
     if preview_row is not None:
         return {
             "status": "existing_preview",
@@ -626,12 +660,22 @@ def _build_harbor_preview_enablement_action_payload(
             ),
         )
     if control_plane_root is None:
+        if request_metadata_companions and not request_metadata_companion_summaries:
+            return unresolved_companion_payload(
+                detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+            )
         return actionable_payload(
             summary=(
                 "Harbor cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
+            source_map=(
+                companion_snapshot_source_map_payload()
+                if request_metadata_companion_summaries
+                else None
+            ),
+            companion_summaries=companion_summaries_payload(),
         )
     if not anchor_pr_url or not anchor_head_sha:
         return {
@@ -662,8 +706,16 @@ def _build_harbor_preview_enablement_action_payload(
             resolved_context=context_name,
             preview=None,
             request_metadata=request_metadata,
+            companion_summaries_snapshot=request_metadata_companion_summaries,
         )
     except click.ClickException as exc:
+        if request_metadata_companions and not request_metadata_companion_summaries:
+            return unresolved_companion_payload(
+                detail=(
+                    "The saved PR metadata asks Harbor to include companion pull requests, but Harbor could not prove their exact head SHAs from stored evidence. "
+                    f"Resolve the companion snapshots before running the request recipe: {exc}"
+                ),
+            )
         return actionable_payload(
             summary=(
                 "Harbor could not resolve the default preview manifest automatically for this PR yet. "
@@ -671,8 +723,18 @@ def _build_harbor_preview_enablement_action_payload(
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
+            source_map=(
+                companion_snapshot_source_map_payload()
+                if request_metadata_companion_summaries
+                else None
+            ),
+            companion_summaries=companion_summaries_payload(),
         )
     if resolved_manifest is None:
+        if request_metadata_companions and not request_metadata_companion_summaries:
+            return unresolved_companion_payload(
+                detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+            )
         return actionable_payload(
             summary=(
                 "Harbor could not resolve the default preview manifest automatically for this PR yet. "
@@ -680,6 +742,12 @@ def _build_harbor_preview_enablement_action_payload(
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
+            source_map=(
+                companion_snapshot_source_map_payload()
+                if request_metadata_companion_summaries
+                else None
+            ),
+            companion_summaries=companion_summaries_payload(),
         )
 
     return actionable_payload(
@@ -972,6 +1040,7 @@ def _build_harbor_preview_enablement_record(
     context_name: str,
     event: GitHubPullRequestEvent,
     request_metadata: HarborPreviewRequestParseResult,
+    resolved_manifest: HarborResolvedPreviewManifest | None = None,
 ) -> PreviewEnablementRecord | None:
     resolved_context = context_name.strip()
     if not resolved_context:
@@ -1001,7 +1070,37 @@ def _build_harbor_preview_enablement_record(
         request_metadata_companions=(
             request_metadata.metadata.companions if request_metadata.metadata is not None else ()
         ),
+        request_metadata_companion_summaries=_enablement_companion_summaries_snapshot(
+            request_metadata=request_metadata,
+            resolved_manifest=resolved_manifest,
+        ),
     )
+
+
+def _enablement_companion_summaries_snapshot(
+    *,
+    request_metadata: HarborPreviewRequestParseResult,
+    resolved_manifest: HarborResolvedPreviewManifest | None,
+) -> tuple[PreviewPullRequestSummary, ...]:
+    if request_metadata.metadata is None or resolved_manifest is None:
+        return ()
+    requested_keys = tuple(
+        (companion.repo.strip(), companion.pr_number)
+        for companion in request_metadata.metadata.companions
+    )
+    if not requested_keys:
+        return ()
+    summary_by_key = {
+        (summary.repo.strip(), summary.pr_number): summary
+        for summary in resolved_manifest.companion_summaries
+    }
+    summaries: list[PreviewPullRequestSummary] = []
+    for requested_key in requested_keys:
+        summary = summary_by_key.get(requested_key)
+        if summary is None:
+            return ()
+        summaries.append(summary)
+    return tuple(summaries)
 
 
 def _build_harbor_preview_enablement_items(
@@ -1154,6 +1253,11 @@ def _build_harbor_preview_enablement_items(
             if enablement_record is not None
             else ()
         )
+        request_metadata_companion_summaries = (
+            enablement_record.request_metadata_companion_summaries
+            if enablement_record is not None
+            else ()
+        )
 
         timestamps = [
             str(preview_row.get("updated_at", "")).strip() if preview_row is not None else "",
@@ -1182,6 +1286,7 @@ def _build_harbor_preview_enablement_items(
             request_metadata_status=request_metadata_status,
             request_metadata_baseline_channel=request_metadata_baseline_channel,
             request_metadata_companions=request_metadata_companions,
+            request_metadata_companion_summaries=request_metadata_companion_summaries,
             preview_row=preview_row,
         )
         items.append(
@@ -1209,6 +1314,10 @@ def _build_harbor_preview_enablement_items(
                 "label_enabled": label_enabled,
                 "request_metadata_status": request_metadata_status,
                 "request_metadata_baseline_channel": request_metadata_baseline_channel,
+                "request_metadata_companion_summaries": [
+                    item.model_dump(mode="json")
+                    for item in request_metadata_companion_summaries
+                ],
                 "preview_state": str(preview_row.get("state", "")).strip() if preview_row is not None else "",
                 "action": action_payload,
             }
@@ -7308,10 +7417,17 @@ def _ingest_harbor_pr_event_payload(
         if isinstance(request_metadata_payload, dict)
         else HarborPreviewRequestParseResult(status="missing")
     )
+    resolved_manifest_payload = payload.get("manifest")
+    resolved_manifest = (
+        HarborResolvedPreviewManifest.model_validate(resolved_manifest_payload)
+        if isinstance(resolved_manifest_payload, dict)
+        else None
+    )
     enablement_record = _build_harbor_preview_enablement_record(
         context_name=resolved_context,
         event=event,
         request_metadata=request_metadata,
+        resolved_manifest=resolved_manifest,
     )
     if enablement_record is not None:
         record_store.write_preview_enablement_record(enablement_record)
