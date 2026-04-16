@@ -16,6 +16,8 @@ top-level groups are:
 - `inventory`: inspect current environment inventory.
 - `promote`: record, resolve, and execute artifact-backed promotions.
 - `promotions`: write and inspect promotion records.
+- `release-tuples`: inspect state-backed tuple records and explicitly export a
+  TOML catalog from minted state.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 
 ## Core Rules
@@ -91,6 +93,10 @@ as active runtime baseline evidence until split-repo artifact tuple records are
 materialized into the baseline catalog. Runtime `ship` and `promote` flows write
 current tuple records under the selected state directory rather than silently
 rewriting this tracked file.
+
+Use `release-tuples export-catalog --state-dir <state>` to render those minted
+state records as catalog TOML when an operator is ready to review and
+materialize them.
 
 GitHub PR feedback uses one Harbor-owned marker comment per PR. The comment is
 a review surface over durable Harbor records: preview URL/state, manifest and
