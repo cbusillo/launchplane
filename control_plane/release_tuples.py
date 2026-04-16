@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 import tomllib
@@ -36,6 +37,21 @@ class ReleaseTupleCatalog:
 
 def should_mint_release_tuple_for_channel(channel_name: str) -> bool:
     return channel_name.strip() in LONG_LIVED_RELEASE_TUPLE_CHANNELS
+
+
+def render_release_tuple_catalog_toml(records: tuple[ReleaseTupleRecord, ...]) -> str:
+    lines = ["schema_version = 1", ""]
+    for record in sorted(records, key=lambda item: (item.context, item.channel)):
+        lines.append(f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(record.channel)}]")
+        lines.append(f"tuple_id = {_toml_string(record.tuple_id)}")
+        lines.append("")
+        lines.append(
+            f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(record.channel)}.repo_shas]"
+        )
+        for repo_name, git_sha in sorted(record.repo_shas.items()):
+            lines.append(f"{_toml_bare_key(repo_name)} = {_toml_string(git_sha)}")
+        lines.append("")
+    return "\n".join(lines).rstrip() + "\n"
 
 
 def build_release_tuple_record_from_artifact_manifest(
@@ -167,6 +183,17 @@ def _require_tuple_git_sha(value: str, *, label: str) -> str:
             f"{label} must be a 7-40 character hexadecimal git sha before it can mint a release tuple."
         )
     return normalized_value
+
+
+def _toml_bare_key(value: str) -> str:
+    normalized_value = value.strip()
+    if re.match(r"^[A-Za-z0-9_-]+$", normalized_value):
+        return normalized_value
+    return _toml_string(normalized_value)
+
+
+def _toml_string(value: str) -> str:
+    return json.dumps(value)
 
 
 def resolve_release_tuples_file(control_plane_root: Path) -> Path:

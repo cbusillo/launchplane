@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 
 class ReleaseTupleTests(unittest.TestCase):
@@ -210,6 +211,36 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 context_name="opw",
                 artifact_manifest=manifest,
             )
+
+    def test_render_release_tuple_catalog_toml_round_trips_to_catalog(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            tuples_file = control_plane_root / "config" / "release-tuples.toml"
+            tuples_file.parent.mkdir(parents=True, exist_ok=True)
+            tuples_file.write_text(
+                control_plane_release_tuples.render_release_tuple_catalog_toml(
+                    (
+                        ReleaseTupleRecord(
+                            tuple_id="opw-testing-artifact-sha256-image456",
+                            context="opw",
+                            channel="testing",
+                            artifact_id="artifact-sha256-image456",
+                            repo_shas={"tenant-opw": "abc1234", "shared-addons": "def5678"},
+                            provenance="ship",
+                            minted_at="2026-04-10T18:24:00Z",
+                        ),
+                    )
+                ),
+                encoding="utf-8",
+            )
+
+            catalog = control_plane_release_tuples.load_release_tuple_catalog(
+                control_plane_root=control_plane_root,
+            )
+
+        release_tuple = catalog.contexts["opw"].channels["testing"]
+        self.assertEqual(release_tuple.tuple_id, "opw-testing-artifact-sha256-image456")
+        self.assertEqual(release_tuple.repo_shas["tenant-opw"], "abc1234")
 
 
 if __name__ == "__main__":

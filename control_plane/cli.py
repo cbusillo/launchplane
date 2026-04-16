@@ -6673,6 +6673,54 @@ def artifacts_ingest(state_dir: Path, input_file: Path) -> None:
     click.echo(record_path)
 
 
+@main.group("release-tuples")
+def release_tuples() -> None:
+    """Release tuple state commands."""
+
+
+@release_tuples.command("list")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+def release_tuples_list(state_dir: Path) -> None:
+    records = _store(state_dir).list_release_tuple_records()
+    click.echo(
+        json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True)
+    )
+
+
+@release_tuples.command("show")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--channel", "channel_name", required=True)
+def release_tuples_show(state_dir: Path, context_name: str, channel_name: str) -> None:
+    record = _store(state_dir).read_release_tuple_record(
+        context_name=context_name,
+        channel_name=channel_name,
+    )
+    click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@release_tuples.command("export-catalog")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--output-file", type=click.Path(path_type=Path), default=None)
+def release_tuples_export_catalog(state_dir: Path, output_file: Path | None) -> None:
+    records = _store(state_dir).list_release_tuple_records()
+    if not records:
+        raise click.ClickException("No release tuple records found to export.")
+    rendered_catalog = control_plane_release_tuples.render_release_tuple_catalog_toml(records)
+    if output_file is None:
+        click.echo(rendered_catalog, nl=False)
+        return
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+    output_file.write_text(rendered_catalog, encoding="utf-8")
+    click.echo(output_file)
+
+
 @main.group("backup-gates")
 def backup_gates() -> None:
     """Backup gate record commands."""
