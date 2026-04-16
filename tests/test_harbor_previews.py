@@ -201,6 +201,7 @@ def _preview_enablement_record(
     request_metadata_error: str = "",
     request_metadata_baseline_channel: str = "",
     request_metadata_companions: tuple[dict[str, object], ...] = (),
+    request_metadata_companion_summaries: tuple[dict[str, object], ...] = (),
 ) -> PreviewEnablementRecord:
     return PreviewEnablementRecord(
         record_id=f"{context}-{anchor_repo}-pr-{anchor_pr_number}",
@@ -218,6 +219,7 @@ def _preview_enablement_record(
         request_metadata_error=request_metadata_error,
         request_metadata_baseline_channel=request_metadata_baseline_channel,
         request_metadata_companions=request_metadata_companions,
+        request_metadata_companion_summaries=request_metadata_companion_summaries,
     )
 
 
@@ -3648,6 +3650,139 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 payload["mutation"]["generation_request"]["companion_summaries"][0]["repo"],
                 "shared-addons",
             )
+            self.assertEqual(
+                payload["enablement_record"]["request_metadata_companion_summaries"][0][
+                    "head_sha"
+                ],
+                "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+            )
+            record = FilesystemRecordStore(state_dir=state_dir).read_preview_enablement_record(
+                "opw-tenant-opw-pr-123"
+            )
+            self.assertEqual(
+                record.request_metadata_companion_summaries[0].head_sha,
+                "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+            )
+
+    def test_harbor_previews_show_tenant_uses_companion_sha_snapshot_for_enablement_recipe(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=129,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/129",
+                    anchor_head_sha="dddd4444",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                    request_metadata_status="valid",
+                    request_metadata_baseline_channel="testing",
+                    request_metadata_companions=(
+                        {"repo": "shared-addons", "pr_number": 456},
+                    ),
+                    request_metadata_companion_summaries=(
+                        {
+                            "repo": "shared-addons",
+                            "pr_number": 456,
+                            "head_sha": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+                            "pr_url": "https://github.com/every/shared-addons/pull/456",
+                        },
+                    ),
+                )
+            )
+
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch(
+                    "control_plane.workflows.harbor.fetch_github_pull_request_head",
+                    side_effect=AssertionError("unexpected live companion lookup"),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "show-tenant",
+                        "--state-dir",
+                        str(state_dir),
+                        "--context",
+                        "opw",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            enablement_by_pr = {
+                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
+            }
+            action = enablement_by_pr[129]["action"]
+            self.assertEqual(action["status"], "actionable")
+            self.assertIn("bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222", action["recipe"])
+            self.assertIn("companion_summaries", action["recipe"])
+            self.assertEqual(
+                enablement_by_pr[129]["request_metadata_companion_summaries"][0]["repo"],
+                "shared-addons",
+            )
+
+    def test_harbor_previews_show_tenant_blocks_unresolved_companion_enablement_recipe(
+        self,
+    ) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            _write_release_tuples_file(control_plane_root)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=130,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/130",
+                    anchor_head_sha="eeee5555",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                    request_metadata_status="valid",
+                    request_metadata_baseline_channel="testing",
+                    request_metadata_companions=(
+                        {"repo": "shared-addons", "pr_number": 456},
+                    ),
+                )
+            )
+
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch(
+                    "control_plane.workflows.harbor.fetch_github_pull_request_head",
+                    side_effect=AssertionError("unexpected live companion lookup"),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "show-tenant",
+                        "--state-dir",
+                        str(state_dir),
+                        "--context",
+                        "opw",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            enablement_by_pr = {
+                item["anchor_pr_number"]: item for item in payload["preview_enablement"]
+            }
+            action = enablement_by_pr[130]["action"]
+            self.assertEqual(action["status"], "blocked")
+            self.assertEqual(action["recipe"], "")
+            self.assertIn("Companion PR snapshots", action["headline"])
 
     def test_harbor_previews_ingest_pr_event_apply_writes_preview_and_generation(self) -> None:
         runner = CliRunner()

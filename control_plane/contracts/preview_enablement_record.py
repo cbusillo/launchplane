@@ -3,6 +3,7 @@ from __future__ import annotations
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.github_pull_request_event import PullRequestAction, PullRequestState
+from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
 from control_plane.contracts.preview_request_metadata import (
     HarborCompanionPullRequestReference,
     HarborPreviewRequestParseStatus,
@@ -28,6 +29,7 @@ class PreviewEnablementRecord(BaseModel):
     request_metadata_error: str = ""
     request_metadata_baseline_channel: str = ""
     request_metadata_companions: tuple[HarborCompanionPullRequestReference, ...] = ()
+    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...] = ()
 
     @model_validator(mode="after")
     def _validate_record(self) -> "PreviewEnablementRecord":
@@ -63,4 +65,21 @@ class PreviewEnablementRecord(BaseModel):
             raise ValueError(
                 "preview enablement record can only include request_metadata_companions when status is valid"
             )
+        if self.request_metadata_status != "valid" and self.request_metadata_companion_summaries:
+            raise ValueError(
+                "preview enablement record can only include request_metadata_companion_summaries when status is valid"
+            )
+        if self.request_metadata_companion_summaries:
+            companion_keys = tuple(
+                (companion.repo.strip(), companion.pr_number)
+                for companion in self.request_metadata_companions
+            )
+            summary_keys = tuple(
+                (summary.repo.strip(), summary.pr_number)
+                for summary in self.request_metadata_companion_summaries
+            )
+            if summary_keys != companion_keys:
+                raise ValueError(
+                    "preview enablement companion summaries must match request_metadata_companions"
+                )
         return self
