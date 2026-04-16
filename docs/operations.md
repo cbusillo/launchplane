@@ -240,6 +240,10 @@ title: Operations
   manifest from the anchor PR head SHA plus a control-plane-owned baseline
   release tuple of exact repo SHAs and emits a full generation mutation request
   directly from event ingest.
+- `harbor-previews show-tenant`, `render-index-page`, and `render-site` accept
+  `--release-tuples-file` so local or generated cockpit renders can point at an
+  explicit release tuple catalog and print exact preview enablement recipes
+  without relying on process-wide environment setup.
 - `harbor-previews ingest-pr-event --apply` reuses Harbor's existing preview
   mutation helpers to write preview/generation records or destroy a preview
   when the event intent is fully resolved. Unresolved companion cases stay
