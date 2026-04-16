@@ -23,8 +23,8 @@ Treat this file as the launch checklist for every Codex session in
 - Prefer fail-closed behavior over silent fallback.
 - Do not reintroduce long-term release ownership back into code or local-DX
   repos.
-- Keep any true compatibility bridge explicit and removable; do not treat
-  native tenant/devkit convenience commands as migration-only wrappers.
+- Keep cross-repo boundaries explicit; do not move release ownership back into
+  tenant, shared-addon, or local-DX repos.
 - Never commit secrets or operator-local overrides.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
@@ -45,16 +45,19 @@ Treat this file as the launch checklist for every Codex session in
 
 - `odoo-control-plane` owns:
   - artifact manifests
+  - release tuple catalogs
+  - backup-gate records
   - promotion records
+  - deployment records
   - environment inventory
+  - Harbor preview and generation records
   - promotion and deploy orchestration
   - backup and restore control-plane workflows
 - Tenant/shared/devkit repos own:
   - addon code
   - local DX
   - Odoo-specific test and validation workflows
-  - tenant-root convenience commands and any still-explicit compatibility
-    bridges that have not been deleted yet
+  - tenant-root convenience commands that preserve the ownership boundary
 
 ## Reference Handles
 

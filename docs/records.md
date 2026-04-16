@@ -20,6 +20,8 @@ state/
     <record-id>.json
   harbor_preview_generations/
     <generation-id>.json
+  harbor_preview_enablements/
+    <enablement-id>.json
   harbor_previews/
     <preview-id>.json
   promotions/
@@ -75,19 +77,18 @@ state/
   control plane owns the exact runtime target identity used for the deploy.
 - The recorded executor reflects control-plane-owned Dokploy execution,
   including the compose post-deploy update schedule workflow when it applies.
-- Deploy execution should also drive the Dokploy image selection from stored
-  artifact manifests when possible by syncing an exact
+- Deploy execution drives the Dokploy image selection from stored artifact
+  manifests when possible by syncing an exact
   `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` override before the deploy starts.
-- Native ship/deploy records should not persist branch-sync evidence because
-  branch movement is no longer part of artifact-backed execution.
+- Native ship/deploy records do not persist branch-mutation evidence because
+  branch movement is not part of artifact-backed execution.
 - When no stored artifact manifest is available for a direct ship, deploy
-  execution should fail closed instead of falling back to the ordinary repo/tag
-  image contract.
-- Deployment records should make that native follow-up step explicit by
+  execution fails closed.
+- Deployment records make the native follow-up step explicit by
   recording whether the Odoo-specific compose post-deploy update was skipped,
   pending, passed, or failed.
-- Direct `ship` and `promote` execution should fail closed if the referenced
-  artifact id does not already have a stored manifest in control-plane state.
+- Direct `ship` and `promote` execution fail closed if the referenced artifact
+  id does not already have a stored manifest in control-plane state.
 
 ## Harbor Preview Record
 
@@ -122,6 +123,14 @@ state/
 - Higher-level transition commands such as generation request/ready/failed
   reuse the same stored generation records while updating preview linkage
   semantics through the Harbor transition helpers.
+
+## Harbor Preview Enablement Record
+
+- One file per tenant PR enablement snapshot.
+- Record the anchor PR identity, enablement state, normalized preview-request
+  metadata, candidate/request evidence, and timestamps.
+- PR ingest and `harbor-previews write-enablement` write the same typed record
+  shape so webhook and non-webhook flows preserve comparable evidence.
 
 ## Inventory
 
