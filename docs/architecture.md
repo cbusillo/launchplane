@@ -48,6 +48,12 @@ pull requests, labels, checks, PR comments, releases, and CI execution.
 - Harbor baseline release tuples belong here as explicit control-plane data.
   Tuple entries carry exact repo SHAs for preview-manifest resolution, not
   floating branch names.
+- Successful waited `ship` executions for long-lived lanes mint current release
+  tuple records from stored artifact manifests when the manifest carries exact
+  split-repo SHAs.
+- Promotion execution requires the source lane's current release tuple to match
+  the requested artifact, then writes the destination tuple from that same
+  source tuple after the deploy passes.
 - The tracked `config/release-tuples.toml` currently preserves legacy
   `odoo-ai` deploy-branch heads as the active runtime baseline. Replace those
   entries with split-repo artifact tuple values once promotion no longer relies

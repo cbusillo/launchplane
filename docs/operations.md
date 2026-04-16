@@ -33,6 +33,11 @@ top-level groups are:
   manifest is available.
 - Direct `ship` and `promote` execution fail closed when the referenced
   artifact manifest is missing.
+- Successful waited `ship` executions for `dev`, `testing`, and `prod` mint
+  current release tuple records from stored artifact manifests.
+- `promote execute` requires the source lane's current release tuple to match
+  the requested artifact, then promotes that exact tuple to the destination
+  lane after the deploy passes.
 - Current environment inventory is refreshed from successful waited `ship` and
   `promote` executions.
 - Operator read models compose inventory, deployment, promotion, and
@@ -82,8 +87,10 @@ catalog without relying on process-wide environment setup.
 
 The tracked default catalog at `config/release-tuples.toml` records the current
 legacy `odoo-ai` deploy-branch heads for `dev`, `testing`, and `prod`. Treat it
-as active runtime baseline evidence until split-repo artifact tuples replace
-the legacy branch-head source map.
+as active runtime baseline evidence until split-repo artifact tuple records are
+materialized into the baseline catalog. Runtime `ship` and `promote` flows write
+current tuple records under the selected state directory rather than silently
+rewriting this tracked file.
 
 GitHub PR feedback uses one Harbor-owned marker comment per PR. The comment is
 a review surface over durable Harbor records: preview URL/state, manifest and

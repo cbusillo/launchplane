@@ -28,6 +28,8 @@ state/
     <record-id>.json
   inventory/
     <context>-<instance>.json
+  release_tuples/
+    <context>-<channel>.json
 ```
 
 ## Artifact Manifest
@@ -53,6 +55,8 @@ state/
 - Promotion execution also resolves the deployable ship request natively in
   `odoo-control-plane` from this repo's Dokploy source-of-truth, instead of
   shelling out for a pre-rendered JSON request.
+- Promotion execution requires the source lane to have a current release tuple
+  record for the requested artifact before it can deploy to the destination.
 
 ## Backup Gate Record
 
@@ -89,6 +93,21 @@ state/
   pending, passed, or failed.
 - Direct `ship` and `promote` execution fail closed if the referenced artifact
   id does not already have a stored manifest in control-plane state.
+
+## Release Tuple Record
+
+- Release tuple records are keyed by long-lived environment channel.
+- Successful waited `ship` executions for `dev`, `testing`, and `prod` mint the
+  current channel tuple from the stored artifact manifest after deploy evidence
+  passes.
+- Tuple minting requires artifact manifest source refs to be exact git SHAs;
+  branch names such as `main` or `origin/testing` are rejected instead of being
+  written as release truth.
+- Promotion execution copies the source channel tuple to the destination
+  channel after the destination deploy passes, retaining the promotion and
+  deployment record ids that established the promoted state.
+- Runtime tuple records live under `state/` and do not rewrite the tracked
+  default TOML catalog implicitly.
 
 ## Harbor Preview Record
 
