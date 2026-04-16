@@ -1979,6 +1979,57 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn('href="../../../policy.html"', detail_html)
             self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', policy_html)
 
+    def test_harbor_previews_render_site_enablement_row_links_to_existing_preview_detail(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            output_dir = Path(temporary_directory_name) / "site"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="hpr_pending",
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    preview_label="opw/tenant-opw/pr-124",
+                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    state="pending",
+                    active_generation_id="",
+                    serving_generation_id="",
+                    latest_generation_id="",
+                    latest_manifest_fingerprint="",
+                )
+            )
+            store.write_preview_enablement_record(
+                _preview_enablement_record(
+                    anchor_pr_number=124,
+                    anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
+                    label_enabled=True,
+                    action="labeled",
+                    action_label="harbor-preview",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "render-site",
+                    "--state-dir",
+                    str(state_dir),
+                    "--context",
+                    "opw",
+                    "--output-dir",
+                    str(output_dir),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            index_html = (output_dir / "index.html").read_text(encoding="utf-8")
+            self.assertIn(
+                'href="https://github.com/every/tenant-opw/pull/124">PR</a><a href="previews/opw/tenant-opw/pr-124.html">Detail</a>',
+                index_html,
+            )
+
     def test_harbor_previews_render_site_writes_environment_detail_pages_and_links_from_overview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
