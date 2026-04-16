@@ -84,6 +84,11 @@ Harbor treats tenant PRs as preview anchors in the current workspace:
 `tenant-opw -> opw` and `tenant-cm -> cm`. `shared-addons` is companion-only,
 and infra/tooling repos are not preview anchors.
 
+Preview enablement records retain the anchor PR head SHA plus any resolved
+companion PR head SHA snapshots from ingest. Tenant renders use those stored
+snapshots for preview request recipes and keep unresolved companion requests
+blocked instead of guessing source inputs.
+
 ## GitHub Boundary
 
 GitHub is the engineering workflow surface: issues, branches, pull requests,
