@@ -1,5 +1,7 @@
+from collections.abc import Callable
 from html import escape
 import json
+import os
 import subprocess
 import time
 from json import JSONDecodeError
@@ -19,6 +21,7 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
+from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_mutation_request import (
     HarborPullRequestMutationIntent,
     PreviewDestroyMutationRequest,
@@ -26,7 +29,13 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewMutationRequest,
 )
 from control_plane.contracts.preview_manifest import HarborResolvedPreviewManifest
-from control_plane.contracts.preview_request_metadata import HarborPreviewRequestParseResult
+from control_plane.contracts.preview_request_metadata import (
+    HarborCompanionPullRequestReference,
+    HarborPreviewRequestMetadata,
+    HARBOR_ALLOWED_COMPANION_REPOS,
+    HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING,
+    HarborPreviewRequestParseResult,
+)
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
@@ -53,6 +62,11 @@ from control_plane.workflows.harbor import (
     deliver_pull_request_feedback,
     find_preview_record,
     harbor_anchor_repo_context,
+    harbor_preview_label_enabled,
+    DEFAULT_HARBOR_BASELINE_CHANNEL,
+    HARBOR_PREVIEW_ENABLE_LABEL,
+    HARBOR_TENANT_ANCHOR_CONTEXTS,
+    resolve_pull_request_event_manifest,
     resolve_harbor_github_webhook_secret,
     verify_github_webhook_signature,
 )
@@ -121,7 +135,4406 @@ def _generation_in_progress(value: str) -> bool:
     return value.strip().lower() in {"resolving", "building", "deploying", "verifying"}
 
 
-def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
+def _harbor_action_slug(value: str) -> str:
+    compact = "".join(character.lower() if character.isalnum() else "-" for character in value.strip())
+    normalized = "-".join(part for part in compact.split("-") if part)
+    return normalized or "harbor-preview"
+
+
+def _render_harbor_action_recipe(
+    *,
+    title: str,
+    summary: str,
+    tone: str,
+    script: str,
+    command_label: str,
+    recipe_id: str,
+    footer_html: str = "",
+) -> str:
+    return f"""
+    <article class=\"action-card tone-{tone}\">
+      <div class=\"action-card-head\">
+        <div>
+          <div class=\"action-command\">{escape(command_label)}</div>
+          <h3>{escape(title)}</h3>
+          <p>{escape(summary)}</p>
+        </div>
+        <button class=\"copy-button\" type=\"button\" data-copy-target=\"{escape(recipe_id)}\">Copy recipe</button>
+      </div>
+      <details class=\"action-details\">
+        <summary>Show shell recipe</summary>
+        <pre id=\"{escape(recipe_id)}\" class=\"action-pre\">{escape(script)}</pre>
+      </details>
+      {footer_html}
+    </article>
+    """
+
+
+def _build_harbor_action_script(
+    *,
+    command_name: str,
+    file_payloads: tuple[tuple[str, str, dict[str, object]], ...],
+    command_args: tuple[str, ...],
+) -> str:
+    lines = ['STATE_DIR="/path/to/state"']
+    for variable_name, file_path, payload in file_payloads:
+        lines.append(f'{variable_name}="{file_path}"')
+        lines.append(f'cat >"${variable_name}" <<\'JSON\'')
+        lines.append(json.dumps(payload, indent=2, sort_keys=True))
+        lines.append("JSON")
+    command_parts = ["uv", "run", "control-plane", "harbor-previews", command_name, "--state-dir", '"$STATE_DIR"']
+    command_parts.extend(command_args)
+    lines.append(" ".join(command_parts))
+    return "\n".join(lines)
+
+
+def _render_harbor_shell_document(
+    *,
+    page_title: str,
+    context_name: str,
+    active_nav: str,
+    body_class: str,
+    body_html: str,
+    extra_css: str,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    nav_items = (
+        ("overview", "Tenant overview"),
+        ("detail", "Detail"),
+        ("policy", "Policy"),
+    )
+    nav_html = "".join(
+        _render_harbor_shell_nav_item(
+            key=key,
+            label=label,
+            active_nav=active_nav,
+            href=(nav_links or {}).get(key, ""),
+        )
+        for key, label in nav_items
+    )
+    context_html = escape(context_name) if context_name else "all contexts"
+    return f"""<!DOCTYPE html>
+<html lang=\"en\">
+<head>
+  <meta charset=\"utf-8\" />
+  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
+  <title>{escape(page_title)}</title>
+  <style>
+    :root {{
+      --bg: #f6f3ec;
+      --surface: #fbfaf6;
+      --text: #171512;
+      --muted: #665f55;
+      --line: rgba(23, 21, 18, 0.16);
+      --line-strong: rgba(23, 21, 18, 0.28);
+      --good: #1c5d3d;
+      --warn: #8a6208;
+      --bad: #8a312c;
+      --neutral: #505050;
+      --sans: "Avenir Next", "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+      --serif: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
+      --mono: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
+    }}
+    * {{ box-sizing: border-box; }}
+    body {{
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background: var(--bg);
+    }}
+    a {{ color: inherit; }}
+    .app-shell {{ max-width: 1180px; margin: 0 auto; padding: 24px 20px 72px; }}
+    .shell-topbar {{
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: end;
+      padding-bottom: 18px;
+      border-bottom: 1px solid var(--line-strong);
+    }}
+    .shell-brand {{ display: grid; gap: 8px; }}
+    .shell-brand-mark {{
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }}
+    .shell-brand h1 {{
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 28px;
+      line-height: 0.98;
+      letter-spacing: -0.02em;
+    }}
+    .shell-brand p {{ margin: 0; color: var(--muted); font-size: 14px; line-height: 1.5; max-width: 62ch; }}
+    .shell-nav {{ display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }}
+    .shell-nav-item {{
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 8px 12px;
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--muted);
+    }}
+    .shell-nav-item.active {{ color: var(--text); border-color: var(--line-strong); background: var(--surface); }}
+    main.page-body {{ margin-top: 28px; }}
+    main.page-body.detail-layout {{ max-width: 760px; }}
+    main.page-body.index-layout {{ max-width: 1120px; }}
+    {extra_css}
+    @media (max-width: 760px) {{
+      .app-shell {{ padding: 18px 16px 48px; }}
+      .shell-brand h1 {{ font-size: 24px; }}
+      .shell-topbar {{ align-items: start; }}
+    }}
+  </style>
+</head>
+<body>
+  <div class=\"app-shell\">
+    <header class=\"shell-topbar\">
+      <div class=\"shell-brand\">
+        <div class=\"shell-brand-mark\">Harbor control plane</div>
+        <h1>Tenant environments and PR previews</h1>
+        <p>Harbor links testing, prod, and PR preview lanes for {context_html}. GitHub remains the review source; Harbor carries environment state, routing, and promotion evidence.</p>
+      </div>
+      <nav class=\"shell-nav\" aria-label=\"Harbor sections\">{nav_html}</nav>
+    </header>
+    <main class=\"page-body {body_class}\">{body_html}</main>
+  </div>
+</body>
+</html>
+"""
+
+
+def _render_harbor_shell_nav_item(*, key: str, label: str, active_nav: str, href: str) -> str:
+    class_name = "shell-nav-item active" if key == active_nav else "shell-nav-item"
+    if href:
+        return f'<a class="{class_name}" href="{escape(href)}">{escape(label)}</a>'
+    return f'<span class="{class_name}">{escape(label)}</span>'
+
+
+def _harbor_preview_bundle_relative_path(
+    *,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+) -> Path:
+    return Path("previews") / context_name / anchor_repo / f"pr-{anchor_pr_number}.html"
+
+
+def _harbor_environment_bundle_relative_path(*, context_name: str, instance_name: str) -> Path:
+    return Path("environments") / context_name / f"{instance_name}.html"
+
+
+def _harbor_promotion_bundle_relative_path(*, context_name: str) -> Path:
+    return Path("promotions") / context_name / "testing-to-prod.html"
+
+
+def _relative_href(*, from_file: Path, to_file: Path) -> str:
+    return os.path.relpath(to_file, start=from_file.parent)
+
+
+def _harbor_context_anchor_repo(*, context_name: str) -> str:
+    normalized_context = context_name.strip()
+    if not normalized_context:
+        return ""
+    for repo_name, repo_context in sorted(HARBOR_TENANT_ANCHOR_CONTEXTS.items()):
+        if repo_context == normalized_context:
+            return repo_name
+    return ""
+
+
+def _harbor_inventory_bucket(row: dict[str, object]) -> str:
+    state = str(row.get("state", "")).strip().lower()
+    health = str(row.get("overall_health_status", "")).strip().lower()
+    latest_id = str(row.get("latest_generation_id", "")).strip()
+    serving_id = str(row.get("serving_generation_id", "")).strip()
+    if state == "destroyed":
+        return "retained"
+    if state in {"failed", "paused", "teardown_pending"}:
+        return "attention"
+    if latest_id and not serving_id:
+        return "attention"
+    if health in {"fail", "failed", "unavailable"}:
+        return "attention"
+    if state == "pending":
+        return "in_flight"
+    if latest_id and latest_id != serving_id:
+        return "in_flight"
+    return "live"
+
+
+def _harbor_preview_enablement_record_id(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:
+    return f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
+
+
+def _build_harbor_promotion_resolve_recipe_script(
+    *,
+    context_name: str,
+    artifact_id: str,
+    backup_record_id: str,
+) -> str:
+    resolved_backup_record_id = backup_record_id.strip() or "backup-prod-pass-record-id"
+    return "\n".join(
+        (
+            'PROMOTION_REQUEST_FILE="/tmp/harbor-promotion-request.json"',
+            f'uv run control-plane promote resolve --context "{context_name}" --from-instance testing --to-instance prod --artifact-id "{artifact_id}" --backup-record-id "{resolved_backup_record_id}" >"$PROMOTION_REQUEST_FILE"',
+            'cat "$PROMOTION_REQUEST_FILE"',
+        )
+    )
+
+
+def _build_harbor_backup_gate_write_recipe_script(
+    *,
+    context_name: str,
+    source: str,
+    evidence: dict[str, str],
+) -> str:
+    payload = {
+        "schema_version": 1,
+        "record_id": f"backup-{context_name}-prod-<utc-timestamp>",
+        "context": context_name,
+        "instance": "prod",
+        "created_at": "<utc-timestamp>",
+        "source": source.strip() or "prod-gate",
+        "required": True,
+        "status": "pass",
+        "evidence": evidence or {"snapshot": "s3://path/to/prod-backup"},
+    }
+    lines = [
+        'STATE_DIR="/path/to/state"',
+        'BACKUP_GATE_FILE="/tmp/harbor-backup-gate.json"',
+        'cat >"$BACKUP_GATE_FILE" <<\'JSON\'',
+        json.dumps(payload, indent=2, sort_keys=True),
+        'JSON',
+        'uv run control-plane backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
+    ]
+    return "\n".join(lines)
+
+
+def _build_harbor_promotion_execute_recipe_script(*, state_dir: str) -> str:
+    return "\n".join(
+        (
+            f'STATE_DIR="{state_dir or "/path/to/state"}"',
+            'PROMOTION_REQUEST_FILE="/tmp/harbor-promotion-request.json"',
+            'uv run control-plane promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
+        )
+    )
+
+
+def _build_harbor_environment_ship_recipe_script(
+    *,
+    context_name: str,
+    instance_name: str,
+    artifact_id: str,
+    source_git_ref: str,
+) -> str:
+    request_file = f"/tmp/harbor-{context_name}-{instance_name}-ship-request.json"
+    return "\n".join(
+        (
+            'STATE_DIR="/path/to/state"',
+            f'SHIP_REQUEST_FILE="{request_file}"',
+            f'uv run control-plane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
+            'cat "$SHIP_REQUEST_FILE"',
+            'uv run control-plane ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
+        )
+    )
+
+
+def _build_harbor_environment_action_payload(
+    *,
+    context_name: str,
+    instance_name: str,
+    environment_payload: dict[str, object] | None,
+) -> dict[str, object]:
+    live_payload = environment_payload.get("live") if isinstance(environment_payload, dict) else None
+    artifact_id = str(live_payload.get("artifact_id", "")).strip() if isinstance(live_payload, dict) else ""
+    source_git_ref = str(live_payload.get("source_git_ref", "")).strip() if isinstance(live_payload, dict) else ""
+    deploy_status = str(live_payload.get("deploy_status", "")).strip().lower() if isinstance(live_payload, dict) else ""
+    if not artifact_id or not source_git_ref:
+        return {
+            "instance": instance_name,
+            "status": "missing_evidence",
+            "tone": "neutral",
+            "headline": f"{instance_name.capitalize()} has no actionable ship evidence yet.",
+            "summary": "Harbor needs a live artifact id and source ref before it can emit a typed ship recipe for this lane.",
+            "recipe": "",
+        }
+    tone = "good" if deploy_status == "pass" else "warn"
+    return {
+        "instance": instance_name,
+        "status": "actionable",
+        "tone": tone,
+        "headline": f"Re-ship current {instance_name} artifact",
+        "summary": (
+            f"Resolve and execute Harbor's typed ship flow for the current {instance_name} artifact without re-deriving inputs by hand."
+        ),
+        "artifact_id": artifact_id,
+        "source_git_ref": source_git_ref,
+        "recipe": _build_harbor_environment_ship_recipe_script(
+            context_name=context_name,
+            instance_name=instance_name,
+            artifact_id=artifact_id,
+            source_git_ref=source_git_ref,
+        ),
+    }
+
+
+def _build_harbor_preview_enablement_action_payload(
+    *,
+    control_plane_root: Path | None,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+    anchor_pr_url: str,
+    anchor_head_sha: str,
+    state: str,
+    label_enabled: bool,
+    request_metadata_status: str,
+    request_metadata_baseline_channel: str,
+    request_metadata_companions: tuple[HarborCompanionPullRequestReference, ...],
+    preview_row: dict[str, object] | None,
+) -> dict[str, object]:
+    def actionable_payload(
+        *,
+        summary: str,
+        baseline_release_tuple_id: str,
+        resolved_manifest_fingerprint: str,
+        source_map: list[dict[str, object]] | None = None,
+        companion_summaries: list[dict[str, object]] | None = None,
+    ) -> dict[str, object]:
+        preview_request_payload = {
+            "schema_version": 1,
+            "context": context_name,
+            "anchor_repo": anchor_repo,
+            "anchor_pr_number": anchor_pr_number,
+            "anchor_pr_url": anchor_pr_url,
+            "state": "pending",
+            "created_at": "<utc-timestamp>",
+            "updated_at": "<utc-timestamp>",
+            "eligible_at": "<utc-timestamp>",
+        }
+        generation_request_payload = {
+            "schema_version": 1,
+            "context": context_name,
+            "anchor_repo": anchor_repo,
+            "anchor_pr_number": anchor_pr_number,
+            "anchor_pr_url": anchor_pr_url,
+            "anchor_head_sha": anchor_head_sha,
+            "state": "resolving",
+            "requested_reason": "operator_requested_enablement",
+            "requested_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": resolved_manifest_fingerprint,
+            "baseline_release_tuple_id": baseline_release_tuple_id,
+            "source_map": source_map
+            if source_map is not None
+            else [
+                {
+                    "repo": anchor_repo,
+                    "git_sha": anchor_head_sha,
+                    "selection": "anchor",
+                }
+            ],
+            "companion_summaries": companion_summaries or [],
+            "deploy_status": "pending",
+            "verify_status": "pending",
+            "overall_health_status": "pending",
+        }
+        action_slug = _harbor_action_slug(f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}")
+        recipe = _build_harbor_action_script(
+            command_name="request-generation",
+            file_payloads=(
+                ("PREVIEW_FILE", f"/tmp/harbor-{action_slug}-preview.json", preview_request_payload),
+                (
+                    "GENERATION_FILE",
+                    f"/tmp/harbor-{action_slug}-generation.json",
+                    generation_request_payload,
+                ),
+            ),
+            command_args=(
+                "--preview-input-file",
+                '"$PREVIEW_FILE"',
+                "--generation-input-file",
+                '"$GENERATION_FILE"',
+            ),
+        )
+        if state == "requested":
+            headline = "Materialize requested Harbor preview"
+        elif label_enabled:
+            headline = "Request Harbor preview from saved label state"
+        else:
+            headline = "Request Harbor preview"
+        return {
+            "status": "actionable",
+            "tone": "warn",
+            "headline": headline,
+            "summary": summary,
+            "recipe": recipe,
+            "recipe_id": f"enablement-{action_slug}-request-generation",
+        }
+
+    if preview_row is not None:
+        return {
+            "status": "existing_preview",
+            "tone": "neutral",
+            "headline": "Preview detail already exists.",
+            "summary": "Use the preview detail page or live route instead of requesting a second initial preview action from the tenant page.",
+            "recipe": "",
+        }
+    if state not in {"candidate", "requested"}:
+        return {
+            "status": "none",
+            "tone": "neutral",
+            "headline": "No preview action available.",
+            "summary": "This preview row does not need an initial Harbor request recipe right now.",
+            "recipe": "",
+        }
+    if request_metadata_status == "invalid":
+        return {
+            "status": "blocked",
+            "tone": "bad",
+            "headline": "Preview metadata must be fixed before Harbor can request this preview.",
+            "summary": "The saved PR snapshot says the Harbor preview metadata is invalid, so Harbor avoids printing a request recipe that would drift from the PR contract.",
+            "recipe": "",
+        }
+    request_metadata = HarborPreviewRequestParseResult(status="missing")
+    if request_metadata_status == "valid":
+        request_metadata = HarborPreviewRequestParseResult(
+            status="valid",
+            metadata=HarborPreviewRequestMetadata(
+                baseline_channel=request_metadata_baseline_channel,
+                companions=request_metadata_companions,
+            ),
+        )
+    if control_plane_root is None:
+        return actionable_payload(
+            summary=(
+                "Harbor cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
+            ),
+            baseline_release_tuple_id="<resolved-baseline-tuple-id>",
+            resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
+        )
+    if not anchor_pr_url or not anchor_head_sha:
+        return {
+            "status": "missing_evidence",
+            "tone": "neutral",
+            "headline": "Harbor needs the latest PR URL and head SHA before it can request this preview.",
+            "summary": "The current tenant snapshot is missing the exact anchor PR evidence needed for a typed request-generation recipe.",
+            "recipe": "",
+        }
+
+    synthetic_event = GitHubPullRequestEvent(
+        action="opened",
+        repo=anchor_repo,
+        pr_number=anchor_pr_number,
+        pr_url=anchor_pr_url,
+        occurred_at="<utc-timestamp>",
+        pr_body="",
+        state="open",
+        merged=False,
+        head_sha=anchor_head_sha,
+        label_names=(HARBOR_PREVIEW_ENABLE_LABEL,) if label_enabled else (),
+        action_label=HARBOR_PREVIEW_ENABLE_LABEL if label_enabled else "",
+    )
+    try:
+        resolved_manifest = resolve_pull_request_event_manifest(
+            control_plane_root=control_plane_root,
+            event=synthetic_event,
+            resolved_context=context_name,
+            preview=None,
+            request_metadata=request_metadata,
+        )
+    except click.ClickException as exc:
+        return actionable_payload(
+            summary=(
+                "Harbor could not resolve the default preview manifest automatically for this PR yet. "
+                f"Use the typed request recipe below after replacing the baseline placeholders: {exc}"
+            ),
+            baseline_release_tuple_id="<resolved-baseline-tuple-id>",
+            resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
+        )
+    if resolved_manifest is None:
+        return actionable_payload(
+            summary=(
+                "Harbor could not resolve the default preview manifest automatically for this PR yet. "
+                "Use the typed request recipe below after replacing the baseline tuple id and manifest fingerprint placeholders."
+            ),
+            baseline_release_tuple_id="<resolved-baseline-tuple-id>",
+            resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
+        )
+
+    return actionable_payload(
+        summary=(
+            "This tenant PR is preview-eligible but still inactive. Run Harbor's typed request-generation flow to create the initial preview route from the default testing baseline."
+            if state != "requested" and not label_enabled
+            else "GitHub already marked this PR for preview. Run Harbor's typed request-generation flow to turn that saved label state into a live preview route."
+            if label_enabled and state != "requested"
+            else "A preview request exists, but Harbor has not produced a serving route yet. Run the typed request-generation flow to materialize the preview from the saved PR snapshot."
+        ),
+        baseline_release_tuple_id=resolved_manifest.baseline_release_tuple_id,
+        resolved_manifest_fingerprint=resolved_manifest.resolved_manifest_fingerprint,
+        source_map=[item.model_dump(mode="json") for item in resolved_manifest.source_map],
+        companion_summaries=[
+            item.model_dump(mode="json") for item in resolved_manifest.companion_summaries
+        ],
+    )
+
+
+def _build_harbor_promotion_action_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    testing_environment: dict[str, object] | None,
+    prod_environment: dict[str, object] | None,
+) -> dict[str, object]:
+    testing_live = testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    prod_live = prod_environment.get("live") if isinstance(prod_environment, dict) else None
+    testing_artifact_id = str(testing_live.get("artifact_id", "")).strip() if isinstance(testing_live, dict) else ""
+    prod_artifact_id = str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
+    testing_source_git_ref = (
+        str(testing_live.get("source_git_ref", "")).strip() if isinstance(testing_live, dict) else ""
+    )
+    testing_deploy_status = (
+        str(testing_live.get("deploy_status", "")).strip().lower() if isinstance(testing_live, dict) else ""
+    )
+    testing_health_status = (
+        str(testing_live.get("destination_health_status", "")).strip().lower()
+        if isinstance(testing_live, dict)
+        else ""
+    )
+    latest_promotion = (
+        prod_environment.get("latest_promotion") if isinstance(prod_environment, dict) else None
+    )
+    recent_backup_gates = record_store.list_backup_gate_records(
+        context_name=context_name,
+        instance_name="prod",
+        limit=3,
+    )
+    latest_backup_gate = recent_backup_gates[0] if recent_backup_gates else None
+
+    def check_status(value: str, *, allow_skipped: bool = False) -> str:
+        normalized_value = value.strip().lower()
+        if normalized_value == "pass":
+            return "pass"
+        if allow_skipped and normalized_value == "skipped":
+            return "pass"
+        if normalized_value in {"pending", ""}:
+            return "pending"
+        return "fail"
+
+    evidence_checks: list[dict[str, str]] = []
+    candidate_status = "pending"
+    candidate_detail = "Harbor is waiting for testing/prod inventory evidence before it can name a promotion candidate."
+    if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
+        candidate_status = "pass"
+        candidate_detail = f"Testing and prod are already aligned on {testing_artifact_id}."
+    elif testing_artifact_id:
+        candidate_status = "pass"
+        candidate_detail = (
+            f"Testing is carrying {testing_artifact_id or 'an artifact'} while prod is carrying {prod_artifact_id or 'nothing recorded yet'}."
+        )
+    elif prod_artifact_id:
+        candidate_status = "fail"
+        candidate_detail = "Prod has an artifact, but Harbor has no current testing artifact to promote from."
+    evidence_checks.append(
+        {
+            "label": "Promotion candidate",
+            "status": candidate_status,
+            "detail": candidate_detail,
+        }
+    )
+
+    deploy_check_status = check_status(testing_deploy_status)
+    evidence_checks.append(
+        {
+            "label": "Testing deploy",
+            "status": deploy_check_status,
+            "detail": (
+                f"Latest testing deployment status is {testing_deploy_status or 'unavailable'}."
+                if testing_live is not None
+                else "Harbor has not recorded a live testing deployment yet."
+            ),
+        }
+    )
+
+    health_check_status = check_status(testing_health_status, allow_skipped=True)
+    evidence_checks.append(
+        {
+            "label": "Testing health",
+            "status": health_check_status,
+            "detail": (
+                f"Latest testing health status is {testing_health_status or 'unavailable'}."
+                if testing_live is not None
+                else "Harbor has not recorded testing health evidence yet."
+            ),
+        }
+    )
+
+    backup_check_status = "pending"
+    backup_detail = "Harbor has no prod backup-gate evidence yet. Promotion stays blocked until one is recorded."
+    backup_record_id = ""
+    backup_gate_source = "prod-gate"
+    backup_gate_evidence: dict[str, str] = {"snapshot": "s3://path/to/prod-backup"}
+    if latest_backup_gate is not None:
+        backup_record_id = latest_backup_gate.record_id
+        backup_gate_source = latest_backup_gate.source
+        backup_gate_evidence = dict(latest_backup_gate.evidence)
+        if latest_backup_gate.required and latest_backup_gate.status == "pass":
+            backup_check_status = "pass"
+            backup_detail = f"Latest prod backup gate {latest_backup_gate.record_id} passed and can authorize promotion."
+        elif latest_backup_gate.status == "fail":
+            backup_check_status = "fail"
+            backup_detail = f"Latest prod backup gate {latest_backup_gate.record_id} failed. Promotion is blocked until a passing gate is recorded."
+        else:
+            backup_check_status = "pending"
+            backup_detail = f"Latest prod backup gate {latest_backup_gate.record_id} is {latest_backup_gate.status} and does not yet authorize promotion."
+    evidence_checks.append(
+        {
+            "label": "Prod backup gate",
+            "status": backup_check_status,
+            "detail": backup_detail,
+        }
+    )
+
+    promotion_status = "unknown"
+    headline = "Harbor cannot plan the next promotion yet."
+    summary = "Testing and prod need clearer environment evidence before Harbor can describe the next action."
+    next_action = "Wait for Harbor to record current tenant environment evidence."
+    tone = "neutral"
+    backup_gate_recipe = ""
+    resolve_recipe = ""
+    execute_recipe = ""
+    if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
+        promotion_status = "in_sync"
+        headline = "Prod is already serving the current testing artifact."
+        summary = "No promotion is pending because the tenant's long-lived lanes are already aligned."
+        next_action = "Keep shipping new artifacts into testing until a new promotion candidate appears."
+        tone = "good"
+    elif testing_artifact_id:
+        all_checks_pass = (
+            deploy_check_status == "pass"
+            and health_check_status == "pass"
+            and backup_check_status == "pass"
+        )
+        if all_checks_pass:
+            promotion_status = "promotable"
+            headline = "Testing is ready to promote into prod."
+            summary = "Harbor has the artifact, testing evidence, and backup authorization needed to plan the next promotion request."
+            next_action = "Resolve the typed promotion request, review it, then execute it against prod."
+            tone = "good"
+            resolve_recipe = _build_harbor_promotion_resolve_recipe_script(
+                context_name=context_name,
+                artifact_id=testing_artifact_id,
+                backup_record_id=backup_record_id,
+            )
+            execute_recipe = _build_harbor_promotion_execute_recipe_script(state_dir="/path/to/state")
+        else:
+            promotion_status = "blocked"
+            headline = "A newer testing artifact exists, but Harbor cannot promote it yet."
+            summary = "The tenant has a promotion candidate, but one or more required evidence checks are still missing or failing."
+            next_action = "Clear the failing evidence checks before using Harbor's promotion flow."
+            tone = "warn"
+            if backup_check_status != "pass":
+                backup_gate_recipe = _build_harbor_backup_gate_write_recipe_script(
+                    context_name=context_name,
+                    source=backup_gate_source,
+                    evidence=backup_gate_evidence,
+                )
+    elif prod_artifact_id:
+        promotion_status = "prod_only"
+        headline = "Prod has live evidence, but Harbor has no current testing candidate."
+        summary = "Harbor cannot promote until testing is carrying the next exact artifact for this tenant."
+        next_action = "Ship a new artifact into testing first, then return here to plan promotion."
+        tone = "neutral"
+
+    retained_evidence = (
+        "Harbor will append a promotion record, keep backup-gate evidence, and refresh prod inventory when a waited promotion completes successfully."
+    )
+    return {
+        "status": promotion_status,
+        "tone": tone,
+        "headline": headline,
+        "summary": summary,
+        "next_action": next_action,
+        "candidate_artifact_id": testing_artifact_id,
+        "current_prod_artifact_id": prod_artifact_id,
+        "source_git_ref": testing_source_git_ref,
+        "latest_backup_gate": _summarize_backup_gate_record(latest_backup_gate) if latest_backup_gate is not None else None,
+        "latest_promotion": latest_promotion if isinstance(latest_promotion, dict) else None,
+        "evidence_checks": evidence_checks,
+        "retained_evidence": retained_evidence,
+        "backup_gate_recipe": backup_gate_recipe,
+        "resolve_recipe": resolve_recipe,
+        "execute_recipe": execute_recipe,
+    }
+
+
+def _build_harbor_promotion_detail_payload(
+    *,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    testing_environment: dict[str, object] | None,
+    prod_environment: dict[str, object] | None,
+    promotion_action: dict[str, object],
+) -> dict[str, object] | None:
+    recent_backup_gates = record_store.list_backup_gate_records(
+        context_name=context_name,
+        instance_name="prod",
+        limit=ENVIRONMENT_STATUS_HISTORY_LIMIT,
+    )
+    recent_promotions_payload = (
+        prod_environment.get("recent_promotions") if isinstance(prod_environment, dict) else None
+    )
+    recent_promotions = (
+        list(recent_promotions_payload)
+        if isinstance(recent_promotions_payload, (list, tuple))
+        else []
+    )
+    testing_live = testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    prod_live = prod_environment.get("live") if isinstance(prod_environment, dict) else None
+    latest_backup_gate = (
+        promotion_action.get("latest_backup_gate")
+        if isinstance(promotion_action.get("latest_backup_gate"), dict)
+        else None
+    )
+    latest_promotion = (
+        promotion_action.get("latest_promotion")
+        if isinstance(promotion_action.get("latest_promotion"), dict)
+        else None
+    )
+    evidence_checks = (
+        promotion_action.get("evidence_checks")
+        if isinstance(promotion_action.get("evidence_checks"), list)
+        else []
+    )
+    if (
+        testing_live is None
+        and prod_live is None
+        and not recent_promotions
+        and not recent_backup_gates
+        and not any(str(promotion_action.get(key, "")).strip() for key in ("candidate_artifact_id", "current_prod_artifact_id"))
+    ):
+        return None
+    return {
+        "context": context_name,
+        "path_label": f"{context_name}/testing-to-prod",
+        "from_instance": "testing",
+        "to_instance": "prod",
+        "status": str(promotion_action.get("status", "unknown")).strip() or "unknown",
+        "tone": str(promotion_action.get("tone", "neutral")).strip() or "neutral",
+        "headline": str(
+            promotion_action.get("headline", "Harbor cannot describe the promotion path yet.")
+        ),
+        "summary": str(promotion_action.get("summary", "No promotion summary recorded.")),
+        "next_action": str(promotion_action.get("next_action", "No next action recorded.")),
+        "candidate_artifact_id": str(promotion_action.get("candidate_artifact_id", "")).strip(),
+        "current_prod_artifact_id": str(promotion_action.get("current_prod_artifact_id", "")).strip(),
+        "source_git_ref": str(promotion_action.get("source_git_ref", "")).strip(),
+        "retained_evidence": str(promotion_action.get("retained_evidence", "")).strip(),
+        "evidence_checks": [item for item in evidence_checks if isinstance(item, dict)],
+        "latest_backup_gate": latest_backup_gate,
+        "latest_promotion": latest_promotion,
+        "recent_backup_gates": tuple(
+            _summarize_backup_gate_record(record) for record in recent_backup_gates
+        ),
+        "recent_promotions": tuple(
+            item for item in recent_promotions if isinstance(item, dict)
+        ),
+        "testing_live": testing_live if isinstance(testing_live, dict) else None,
+        "prod_live": prod_live if isinstance(prod_live, dict) else None,
+        "backup_gate_recipe": str(promotion_action.get("backup_gate_recipe", "")).strip(),
+        "resolve_recipe": str(promotion_action.get("resolve_recipe", "")).strip(),
+        "execute_recipe": str(promotion_action.get("execute_recipe", "")).strip(),
+    }
+
+
+def _build_harbor_preview_enablement_record(
+    *,
+    context_name: str,
+    event: GitHubPullRequestEvent,
+    request_metadata: HarborPreviewRequestParseResult,
+) -> PreviewEnablementRecord | None:
+    resolved_context = context_name.strip()
+    if not resolved_context:
+        return None
+    updated_at = event.occurred_at.strip() or utc_now_timestamp()
+    return PreviewEnablementRecord(
+        record_id=_harbor_preview_enablement_record_id(
+            context_name=resolved_context,
+            anchor_repo=event.repo,
+            anchor_pr_number=event.pr_number,
+        ),
+        context=resolved_context,
+        anchor_repo=event.repo,
+        anchor_pr_number=event.pr_number,
+        anchor_pr_url=event.pr_url,
+        anchor_head_sha=event.head_sha,
+        action=event.action,
+        pr_state=event.state,
+        updated_at=updated_at,
+        label_enabled=harbor_preview_label_enabled(label_names=event.label_names),
+        action_label=event.action_label,
+        request_metadata_status=request_metadata.status,
+        request_metadata_error=request_metadata.error,
+        request_metadata_baseline_channel=(
+            request_metadata.metadata.baseline_channel if request_metadata.metadata is not None else ""
+        ),
+        request_metadata_companions=(
+            request_metadata.metadata.companions if request_metadata.metadata is not None else ()
+        ),
+    )
+
+
+def _build_harbor_preview_enablement_items(
+    *,
+    control_plane_root: Path | None,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    anchor_repo: str,
+    previews: list[dict[str, object]],
+) -> tuple[list[dict[str, object]], dict[str, int]]:
+    enablement_records = list(
+        record_store.list_preview_enablement_records(
+            context_name=context_name,
+            anchor_repo=anchor_repo,
+        )
+    )
+    enablement_by_key: dict[tuple[str, int], PreviewEnablementRecord] = {}
+    for record in enablement_records:
+        key = (record.anchor_repo, record.anchor_pr_number)
+        enablement_by_key.setdefault(key, record)
+
+    preview_by_key: dict[tuple[str, int], dict[str, object]] = {}
+    for row in previews:
+        row_anchor_repo = str(row.get("anchor_repo", "")).strip()
+        row_pr_number = int(row.get("anchor_pr_number", 0) or 0)
+        if not row_anchor_repo or row_pr_number <= 0:
+            continue
+        preview_by_key.setdefault((row_anchor_repo, row_pr_number), row)
+
+    def item_tone(state: str) -> str:
+        if state == "running":
+            return "good"
+        if state in {"requested", "paused"}:
+            return "warn"
+        return "neutral"
+
+    def item_source(
+        *,
+        label_enabled: bool,
+        preview_row: dict[str, object] | None,
+        latest_requested_reason: str,
+    ) -> str:
+        if label_enabled:
+            return "github_label"
+        if latest_requested_reason.startswith("operator_requested"):
+            return "harbor"
+        if preview_row is not None and not label_enabled:
+            return "history"
+        return "none"
+
+    def item_state(*, preview_row: dict[str, object] | None, label_enabled: bool, pr_state: str) -> str:
+        preview_state = str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
+        serving_generation_id = (
+            str(preview_row.get("serving_generation_id", "")).strip() if preview_row is not None else ""
+        )
+        if preview_state == "destroyed":
+            return "retained"
+        if preview_state == "paused":
+            return "paused"
+        if preview_row is not None and serving_generation_id:
+            return "running"
+        if preview_row is not None or label_enabled:
+            return "requested"
+        if pr_state == "open":
+            return "candidate"
+        return ""
+
+    def item_request_summary(
+        *,
+        state: str,
+        source: str,
+        label_enabled: bool,
+        request_metadata_status: str,
+        request_metadata_error: str,
+        preview_row: dict[str, object] | None,
+    ) -> str:
+        if state == "candidate":
+            return "Eligible tenant PR. No preview request is active yet."
+        if state == "retained":
+            return "Harbor is keeping this PR's preview history as retained evidence."
+        if source == "github_label":
+            if request_metadata_status == "invalid":
+                return (
+                    "GitHub label harbor-preview requested a preview, but Harbor preview metadata is invalid: "
+                    f"{request_metadata_error}"
+                )
+            if preview_row is None:
+                return (
+                    "GitHub label harbor-preview requested a preview, but Harbor has not created the preview record yet."
+                )
+            return "GitHub label harbor-preview is the current preview request source."
+        if source == "harbor":
+            return "Harbor explicitly requested this preview without relying on the GitHub label."
+        if state == "paused":
+            return "Harbor is intentionally holding this preview in place until operators resume it."
+        return "Harbor still has preview evidence from an earlier request even though no current GitHub label is present."
+
+    def item_status_summary(*, state: str, preview_row: dict[str, object] | None) -> str:
+        if preview_row is not None:
+            status_summary = str(preview_row.get("status_summary", "")).strip()
+            if status_summary:
+                return status_summary
+        if state == "candidate":
+            return "Ready for opt-in preview enablement."
+        if state == "requested":
+            return "Preview request recorded; Harbor has not materialized a serving route yet."
+        return "No additional preview lifecycle evidence recorded yet."
+
+    keys = set(enablement_by_key) | set(preview_by_key)
+    items: list[dict[str, object]] = []
+    for item_anchor_repo, item_pr_number in keys:
+        preview_row = preview_by_key.get((item_anchor_repo, item_pr_number))
+        enablement_record = enablement_by_key.get((item_anchor_repo, item_pr_number))
+        pr_state = enablement_record.pr_state if enablement_record is not None else "open"
+        state = item_state(
+            preview_row=preview_row,
+            label_enabled=enablement_record.label_enabled if enablement_record is not None else False,
+            pr_state=pr_state,
+        )
+        if not state:
+            continue
+
+        preview_id = str(preview_row.get("preview_id", "")).strip() if preview_row is not None else ""
+        latest_requested_reason = ""
+        if preview_id:
+            latest_generations = record_store.list_preview_generation_records(preview_id=preview_id, limit=1)
+            if latest_generations:
+                latest_requested_reason = latest_generations[0].requested_reason
+
+        label_enabled = enablement_record.label_enabled if enablement_record is not None else False
+        source = item_source(
+            label_enabled=label_enabled,
+            preview_row=preview_row,
+            latest_requested_reason=latest_requested_reason,
+        )
+        request_metadata_status = (
+            enablement_record.request_metadata_status if enablement_record is not None else "missing"
+        )
+        request_metadata_error = (
+            enablement_record.request_metadata_error if enablement_record is not None else ""
+        )
+        anchor_head_sha = enablement_record.anchor_head_sha if enablement_record is not None else ""
+        request_metadata_baseline_channel = (
+            enablement_record.request_metadata_baseline_channel
+            if enablement_record is not None
+            else ""
+        )
+        request_metadata_companions = (
+            enablement_record.request_metadata_companions
+            if enablement_record is not None
+            else ()
+        )
+
+        timestamps = [
+            str(preview_row.get("updated_at", "")).strip() if preview_row is not None else "",
+            enablement_record.updated_at if enablement_record is not None else "",
+        ]
+        updated_at = max((value for value in timestamps if value), default="")
+        anchor_pr_url = (
+            str(preview_row.get("anchor_pr_url", "")).strip()
+            if preview_row is not None
+            else enablement_record.anchor_pr_url if enablement_record is not None else ""
+        )
+        preview_label = (
+            str(preview_row.get("preview_label", "")).strip()
+            if preview_row is not None
+            else f"{context_name}/{item_anchor_repo}/pr-{item_pr_number}"
+        )
+        action_payload = _build_harbor_preview_enablement_action_payload(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            anchor_repo=item_anchor_repo,
+            anchor_pr_number=item_pr_number,
+            anchor_pr_url=anchor_pr_url,
+            anchor_head_sha=anchor_head_sha,
+            state=state,
+            label_enabled=label_enabled,
+            request_metadata_status=request_metadata_status,
+            request_metadata_baseline_channel=request_metadata_baseline_channel,
+            request_metadata_companions=request_metadata_companions,
+            preview_row=preview_row,
+        )
+        items.append(
+            {
+                "anchor_repo": item_anchor_repo,
+                "anchor_pr_number": item_pr_number,
+                "anchor_pr_url": anchor_pr_url,
+                "anchor_head_sha": anchor_head_sha,
+                "preview_id": preview_id,
+                "preview_label": preview_label,
+                "canonical_url": str(preview_row.get("canonical_url", "")).strip() if preview_row is not None else "",
+                "state": state,
+                "tone": item_tone(state),
+                "request_source": source,
+                "request_summary": item_request_summary(
+                    state=state,
+                    source=source,
+                    label_enabled=label_enabled,
+                    request_metadata_status=request_metadata_status,
+                    request_metadata_error=request_metadata_error,
+                    preview_row=preview_row,
+                ),
+                "status_summary": item_status_summary(state=state, preview_row=preview_row),
+                "updated_at": updated_at,
+                "label_enabled": label_enabled,
+                "request_metadata_status": request_metadata_status,
+                "request_metadata_baseline_channel": request_metadata_baseline_channel,
+                "preview_state": str(preview_row.get("state", "")).strip() if preview_row is not None else "",
+                "action": action_payload,
+            }
+        )
+
+    priority = {"candidate": 0, "requested": 1, "paused": 2, "running": 3, "retained": 4}
+    items.sort(key=lambda item: int(item.get("anchor_pr_number", 0) or 0), reverse=True)
+    items.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
+    items.sort(key=lambda item: priority.get(str(item.get("state", "")).strip(), 9))
+
+    counts = {"candidate": 0, "requested": 0, "running": 0, "paused": 0, "retained": 0}
+    for item in items:
+        item_state_value = str(item.get("state", "")).strip()
+        if item_state_value in counts:
+            counts[item_state_value] += 1
+    return items, counts
+
+
+def _build_harbor_tenant_payload(
+    *,
+    control_plane_root: Path | None = None,
+    record_store: FilesystemRecordStore,
+    context_name: str,
+    anchor_repo: str = "",
+) -> dict[str, object] | None:
+    resolved_context = context_name.strip()
+    resolved_anchor_repo = anchor_repo.strip()
+    if resolved_context and not resolved_anchor_repo:
+        resolved_anchor_repo = _harbor_context_anchor_repo(context_name=resolved_context)
+    if resolved_anchor_repo and not resolved_context:
+        resolved_context = harbor_anchor_repo_context(repo=resolved_anchor_repo)
+
+    if not resolved_context and not resolved_anchor_repo:
+        return None
+
+    preview_inventory = build_preview_inventory_payload(
+        record_store=record_store,
+        context_name=resolved_context,
+    )
+    preview_rows = preview_inventory.get("previews") if isinstance(preview_inventory.get("previews"), list) else []
+    previews = [item for item in preview_rows if isinstance(item, dict)]
+    if resolved_anchor_repo:
+        previews = [
+            item for item in previews if str(item.get("anchor_repo", "")).strip() == resolved_anchor_repo
+        ]
+
+    environments: dict[str, dict[str, object] | None] = {}
+    if resolved_context:
+        for instance_name in ("testing", "prod"):
+            try:
+                environments[instance_name] = _build_environment_status_payload(
+                    record_store=record_store,
+                    context_name=resolved_context,
+                    instance_name=instance_name,
+                )
+            except FileNotFoundError:
+                environments[instance_name] = None
+    else:
+        environments = {"testing": None, "prod": None}
+
+    preview_enablement, preview_enablement_counts = _build_harbor_preview_enablement_items(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        context_name=resolved_context,
+        anchor_repo=resolved_anchor_repo,
+        previews=previews,
+    )
+
+    if not previews and not preview_enablement and not any(environments.values()):
+        return None
+
+    preview_counts = {
+        "all": len(previews),
+        "attention": sum(1 for row in previews if _harbor_inventory_bucket(row) == "attention"),
+        "in_flight": sum(1 for row in previews if _harbor_inventory_bucket(row) == "in_flight"),
+        "live": sum(1 for row in previews if _harbor_inventory_bucket(row) == "live"),
+        "retained": sum(1 for row in previews if _harbor_inventory_bucket(row) == "retained"),
+        "reviewable": sum(
+            1
+            for row in previews
+            if _harbor_inventory_bucket(row) == "live"
+            and str(row.get("canonical_url", "")).strip()
+            and str(row.get("serving_generation_id", "")).strip()
+        ),
+    }
+    preview_candidates = [item for item in preview_enablement if str(item.get("state", "")).strip() == "candidate"]
+
+    testing_environment = environments.get("testing")
+    prod_environment = environments.get("prod")
+    testing_live = testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    prod_live = prod_environment.get("live") if isinstance(prod_environment, dict) else None
+
+    testing_artifact_id = (
+        str(testing_live.get("artifact_id", "")).strip() if isinstance(testing_live, dict) else ""
+    )
+    prod_artifact_id = str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
+    promotion_summary = {
+        "status": "unknown",
+        "summary": "Harbor has not recorded enough tenant environment evidence to describe promotion state yet.",
+    }
+    if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
+        promotion_summary = {
+            "status": "in_sync",
+            "summary": "Prod is already serving the current testing artifact.",
+            "artifact_id": testing_artifact_id,
+        }
+    elif testing_artifact_id:
+        promotion_summary = {
+            "status": "candidate",
+            "summary": "Testing is carrying a newer artifact than prod and is the current promotion candidate.",
+            "artifact_id": testing_artifact_id,
+            "source_git_ref": str(testing_live.get("source_git_ref", "")).strip()
+            if isinstance(testing_live, dict)
+            else "",
+        }
+    elif prod_artifact_id:
+        promotion_summary = {
+            "status": "prod_only",
+            "summary": "Prod has live deployment evidence, but Harbor does not yet have current testing evidence for comparison.",
+            "artifact_id": prod_artifact_id,
+        }
+    promotion_action = _build_harbor_promotion_action_payload(
+        record_store=record_store,
+        context_name=resolved_context,
+        testing_environment=testing_environment if isinstance(testing_environment, dict) else None,
+        prod_environment=prod_environment if isinstance(prod_environment, dict) else None,
+    )
+    promotion_detail = _build_harbor_promotion_detail_payload(
+        record_store=record_store,
+        context_name=resolved_context,
+        testing_environment=testing_environment if isinstance(testing_environment, dict) else None,
+        prod_environment=prod_environment if isinstance(prod_environment, dict) else None,
+        promotion_action=promotion_action,
+    )
+    environment_actions = {
+        instance_name: _build_harbor_environment_action_payload(
+            context_name=resolved_context,
+            instance_name=instance_name,
+            environment_payload=environments.get(instance_name) if isinstance(environments, dict) else None,
+        )
+        for instance_name in ("testing", "prod")
+    }
+
+    return {
+        "context": resolved_context,
+        "anchor_repo": resolved_anchor_repo,
+        "tenant_label": "/".join(part for part in (resolved_context, resolved_anchor_repo) if part),
+        "preview_counts": preview_counts,
+        "preview_enablement_counts": preview_enablement_counts,
+        "preview_enablement": preview_enablement,
+        "preview_candidates": preview_candidates,
+        "previews": previews,
+        "environments": environments,
+        "environment_actions": environment_actions,
+        "promotion_summary": promotion_summary,
+        "promotion_action": promotion_action,
+        "promotion_detail": promotion_detail,
+    }
+
+
+def _write_harbor_site_bundle(*, state_dir: Path, output_dir: Path, context_name: str) -> None:
+    record_store = _store(state_dir)
+    inventory_payload = build_preview_inventory_payload(
+        record_store=record_store,
+        context_name=context_name,
+    )
+    tenant_payload = _build_harbor_tenant_payload(
+        control_plane_root=_control_plane_root(),
+        record_store=record_store,
+        context_name=context_name,
+    )
+    preview_rows = inventory_payload.get("previews") if isinstance(inventory_payload.get("previews"), list) else []
+    preview_items = [item for item in preview_rows if isinstance(item, dict)]
+    tenant_environments = tenant_payload.get("environments") if isinstance(tenant_payload, dict) else None
+    tenant_environment_actions = (
+        tenant_payload.get("environment_actions") if isinstance(tenant_payload, dict) else None
+    )
+    tenant_promotion_detail = (
+        tenant_payload.get("promotion_detail") if isinstance(tenant_payload, dict) else None
+    )
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    index_file = output_dir / "index.html"
+    policy_file = output_dir / "policy.html"
+
+    promotion_output_map: dict[str, Path] = {}
+    if isinstance(tenant_promotion_detail, dict):
+        item_context = str(tenant_promotion_detail.get("context", "")).strip() or context_name
+        if item_context:
+            promotion_output_map[item_context] = output_dir / _harbor_promotion_bundle_relative_path(
+                context_name=item_context,
+            )
+
+    environment_output_map: dict[tuple[str, str], Path] = {}
+    if isinstance(tenant_environments, dict):
+        for instance_name in ("testing", "prod"):
+            environment_payload = tenant_environments.get(instance_name)
+            if not isinstance(environment_payload, dict):
+                continue
+            item_context = str(environment_payload.get("context", "")).strip() or context_name
+            relative_path = _harbor_environment_bundle_relative_path(
+                context_name=item_context,
+                instance_name=instance_name,
+            )
+            environment_output_map[(item_context, instance_name)] = output_dir / relative_path
+
+    preview_output_map: dict[tuple[str, str, int], Path] = {}
+    for item in preview_items:
+        item_context = str(item.get("context", ""))
+        anchor_repo = str(item.get("anchor_repo", ""))
+        anchor_pr_number = int(item.get("anchor_pr_number", 0) or 0)
+        relative_path = _harbor_preview_bundle_relative_path(
+            context_name=item_context,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+        )
+        preview_output_map[(item_context, anchor_repo, anchor_pr_number)] = output_dir / relative_path
+
+    def detail_href_builder(item_context: str, anchor_repo: str, anchor_pr_number: int) -> str:
+        preview_file = preview_output_map.get((item_context, anchor_repo, anchor_pr_number))
+        if preview_file is None:
+            return ""
+        return _relative_href(from_file=index_file, to_file=preview_file)
+
+    def environment_detail_href_builder(item_context: str, instance_name: str) -> str:
+        environment_file = environment_output_map.get((item_context, instance_name))
+        if environment_file is None:
+            return ""
+        return _relative_href(from_file=index_file, to_file=environment_file)
+
+    def promotion_detail_href_builder(item_context: str) -> str:
+        promotion_file = promotion_output_map.get(item_context)
+        if promotion_file is None:
+            return ""
+        return _relative_href(from_file=index_file, to_file=promotion_file)
+
+    index_nav_links = {"overview": "index.html", "policy": "policy.html"}
+    first_detail_file = next(iter(environment_output_map.values()), None)
+    if first_detail_file is None:
+        first_detail_file = next(iter(promotion_output_map.values()), None)
+    if first_detail_file is None:
+        first_detail_file = next(iter(preview_output_map.values()), None)
+    if first_detail_file is not None:
+        index_nav_links["detail"] = _relative_href(from_file=index_file, to_file=first_detail_file)
+
+    index_html = _render_harbor_preview_index_page_html(
+        inventory_payload,
+        tenant_payload=tenant_payload,
+        detail_href_builder=detail_href_builder,
+        environment_detail_href_builder=environment_detail_href_builder,
+        promotion_detail_href_builder=promotion_detail_href_builder,
+        nav_links=index_nav_links,
+    )
+    index_file.write_text(index_html, encoding="utf-8")
+
+    policy_nav_links = {"overview": _relative_href(from_file=policy_file, to_file=index_file), "policy": "policy.html"}
+    if first_detail_file is not None:
+        policy_nav_links["detail"] = _relative_href(from_file=policy_file, to_file=first_detail_file)
+    policy_html = _render_harbor_preview_policy_page_html(
+        inventory_payload,
+        nav_links=policy_nav_links,
+    )
+    policy_file.write_text(policy_html, encoding="utf-8")
+
+    if isinstance(tenant_promotion_detail, dict):
+        for item_context, detail_file in promotion_output_map.items():
+            detail_file.parent.mkdir(parents=True, exist_ok=True)
+            detail_nav_links = {
+                "overview": _relative_href(from_file=detail_file, to_file=index_file),
+                "policy": _relative_href(from_file=detail_file, to_file=policy_file),
+                "detail": detail_file.name,
+            }
+            detail_html = _render_harbor_promotion_status_page_html(
+                tenant_promotion_detail,
+                nav_links=detail_nav_links,
+            )
+            detail_file.write_text(detail_html, encoding="utf-8")
+
+    if isinstance(tenant_environments, dict):
+        for item_context, instance_name in environment_output_map:
+            environment_payload = tenant_environments.get(instance_name)
+            if not isinstance(environment_payload, dict):
+                continue
+            action_payload = None
+            if isinstance(tenant_environment_actions, dict):
+                candidate_action_payload = tenant_environment_actions.get(instance_name)
+                if isinstance(candidate_action_payload, dict):
+                    action_payload = candidate_action_payload
+            detail_file = environment_output_map[(item_context, instance_name)]
+            detail_file.parent.mkdir(parents=True, exist_ok=True)
+            detail_nav_links = {
+                "overview": _relative_href(from_file=detail_file, to_file=index_file),
+                "policy": _relative_href(from_file=detail_file, to_file=policy_file),
+                "detail": detail_file.name,
+            }
+            detail_html = _render_harbor_environment_status_page_html(
+                environment_payload,
+                action_payload=action_payload,
+                nav_links=detail_nav_links,
+            )
+            detail_file.write_text(detail_html, encoding="utf-8")
+
+    for item_context, anchor_repo, anchor_pr_number in preview_output_map:
+        status_payload = _require_harbor_preview_status_payload(
+            state_dir=state_dir,
+            context_name=item_context,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+        )
+        detail_file = preview_output_map[(item_context, anchor_repo, anchor_pr_number)]
+        detail_file.parent.mkdir(parents=True, exist_ok=True)
+        detail_nav_links = {
+            "overview": _relative_href(from_file=detail_file, to_file=index_file),
+            "policy": _relative_href(from_file=detail_file, to_file=policy_file),
+            "detail": detail_file.name,
+        }
+        detail_html = _render_harbor_preview_status_page_html(
+            status_payload,
+            nav_links=detail_nav_links,
+        )
+        detail_file.write_text(detail_html, encoding="utf-8")
+
+
+def _render_harbor_preview_index_page_html(
+    payload: dict[str, object],
+    *,
+    tenant_payload: dict[str, object] | None = None,
+    detail_href_builder: Callable[[str, str, int], str] | None = None,
+    environment_detail_href_builder: Callable[[str, str], str] | None = None,
+    promotion_detail_href_builder: Callable[[str], str] | None = None,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", ""))
+    previews = payload.get("previews") if isinstance(payload.get("previews"), list) else []
+    preview_rows = [item for item in previews if isinstance(item, dict)]
+
+    def preview_matches_filter(row: dict[str, object], filter_key: str) -> bool:
+        bucket = _harbor_inventory_bucket(row)
+        canonical_url = str(row.get("canonical_url", "")).strip()
+        serving_id = str(row.get("serving_generation_id", "")).strip()
+        if filter_key == "all":
+            return True
+        if filter_key == "reviewable":
+            return bucket == "live" and bool(canonical_url and serving_id)
+        return bucket == filter_key
+
+    def row_priority(row: dict[str, object]) -> int:
+        state = str(row.get("state", "")).strip().lower()
+        health = str(row.get("overall_health_status", "")).strip().lower()
+        latest_id = str(row.get("latest_generation_id", "")).strip()
+        serving_id = str(row.get("serving_generation_id", "")).strip()
+        canonical_url = str(row.get("canonical_url", "")).strip()
+        if state in {"failed", "teardown_pending"} or health in {"fail", "failed", "unavailable"}:
+            return 0
+        if latest_id and not serving_id:
+            return 0
+        if state == "paused":
+            return 1
+        if state == "pending" or (latest_id and latest_id != serving_id):
+            return 2
+        if not canonical_url:
+            return 3
+        if state == "destroyed":
+            return 5
+        return 4
+
+    def row_filter_keys(row: dict[str, object]) -> list[str]:
+        keys = ["all", _harbor_inventory_bucket(row)]
+        if preview_matches_filter(row, "reviewable"):
+            keys.append("reviewable")
+        return keys
+
+    def row_scope_keys(row: dict[str, object]) -> list[str]:
+        keys = ["all"]
+        context_value = str(row.get("context", "")).strip()
+        anchor_repo_value = str(row.get("anchor_repo", "")).strip()
+        if context_value:
+            keys.append(f"context:{context_value}")
+        if anchor_repo_value:
+            keys.append(f"repo:{anchor_repo_value}")
+        return keys
+
+    def signal_badges(row: dict[str, object]) -> list[tuple[str, str]]:
+        state = str(row.get("state", "")).strip().lower()
+        latest_id = str(row.get("latest_generation_id", "")).strip()
+        serving_id = str(row.get("serving_generation_id", "")).strip()
+        canonical_url = str(row.get("canonical_url", "")).strip()
+        destroy_after = str(row.get("destroy_after", "")).strip()
+        destroyed_at = str(row.get("destroyed_at", "")).strip()
+        destroy_reason = str(row.get("destroy_reason", "")).strip().replace("_", " ")
+        badges: list[tuple[str, str]] = []
+        if state == "destroyed":
+            badges.append(("Evidence only", "neutral"))
+            if destroy_reason:
+                badges.append((f"Cause {destroy_reason}", "neutral"))
+            elif destroyed_at:
+                badges.append((f"Destroyed {destroyed_at}", "neutral"))
+            return badges[:2]
+        if latest_id and not serving_id:
+            badges.append(("Route gap", "bad"))
+        elif latest_id and latest_id != serving_id:
+            badges.append(("Serving older generation", "warn"))
+        elif canonical_url and serving_id:
+            badges.append(("Route live", "good"))
+        elif canonical_url:
+            badges.append(("Route reserved", "neutral"))
+        if state == "pending":
+            badges.append(("Build forming", "warn"))
+        elif state == "paused":
+            badges.append(("Operator hold", "warn"))
+        elif state == "teardown_pending":
+            badges.append(("Cleanup queued", "warn"))
+        elif state == "failed":
+            badges.append(("Needs intervention", "bad"))
+        if destroy_after:
+            badges.append((f"Cleanup {destroy_after}", "neutral"))
+        return badges[:3]
+
+    bucket_specs = (
+        ("attention", "Needs attention", "Previews that are blocked, degraded, or no longer serving cleanly."),
+        ("in_flight", "In flight", "Preview generations that are still forming or replacing existing review environments."),
+        ("live", "Live review", "Serving previews that are currently usable for review work."),
+        ("retained", "Retained evidence", "Destroyed previews that still matter as historical evidence."),
+    )
+    filter_specs = (
+        ("all", "All fleet", "Scan the full Harbor queue without losing lane structure."),
+        ("attention", "Needs attention", "Surface broken, blocked, or non-serving previews first."),
+        ("in_flight", "In flight", "Track previews that are building or rotating toward a new generation."),
+        ("reviewable", "Reviewable now", "Show only previews that are currently serving a stable review route."),
+        ("retained", "Retained", "Limit the queue to historical evidence kept after cleanup."),
+    )
+    scope_specs: list[tuple[str, str, str]] = [("all", "All scopes", "Across every Harbor context and anchor repo.")]
+    contexts = sorted(
+        {str(row.get("context", "")).strip() for row in preview_rows if str(row.get("context", "")).strip()}
+    )
+    repos = sorted(
+        {
+            str(row.get("anchor_repo", "")).strip()
+            for row in preview_rows
+            if str(row.get("anchor_repo", "")).strip()
+        }
+    )
+    if len(contexts) > 1:
+        scope_specs.extend(
+            (
+                f"context:{context_value}",
+                f"Context {context_value}",
+                f"Limit the queue to Harbor context {context_value}.",
+            )
+            for context_value in contexts
+        )
+    if len(repos) > 1:
+        scope_specs.extend(
+            (
+                f"repo:{repo_value}",
+                f"Repo {repo_value}",
+                f"Limit the queue to anchor repo {repo_value}.",
+            )
+            for repo_value in repos
+        )
+    grouped_rows = {key: [] for key, _, _ in bucket_specs}
+    for row in preview_rows:
+        grouped_rows[_harbor_inventory_bucket(row)].append(row)
+    for rows in grouped_rows.values():
+        rows.sort(key=lambda row: escape(str(row.get("preview_label", ""))))
+        rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
+        rows.sort(key=row_priority)
+
+    summary_counts = {
+        "attention": len(grouped_rows["attention"]),
+        "in_flight": len(grouped_rows["in_flight"]),
+        "live": len(grouped_rows["live"]),
+        "retained": len(grouped_rows["retained"]),
+    }
+    filter_counts = {
+        key: sum(1 for row in preview_rows if preview_matches_filter(row, key)) for key, _, _ in filter_specs
+    }
+    filter_notes = {key: note for key, _, note in filter_specs}
+    scope_counts = {
+        key: sum(1 for row in preview_rows if key == "all" or key in row_scope_keys(row))
+        for key, _, _ in scope_specs
+    }
+    scope_notes = {key: note for key, _, note in scope_specs}
+    show_scope_controls = len(scope_specs) > 1
+
+    def render_preview_row(row: dict[str, object]) -> str:
+        preview_label = escape(str(row.get("preview_label", "Harbor preview")))
+        detail_href = ""
+        if detail_href_builder is not None:
+            detail_href = str(
+                detail_href_builder(
+                    str(row.get("context", "")),
+                    str(row.get("anchor_repo", "")),
+                    int(row.get("anchor_pr_number", 0) or 0),
+                )
+            )
+        canonical_url = escape(str(row.get("canonical_url", "")))
+        anchor_pr_url = escape(str(row.get("anchor_pr_url", "")))
+        state = str(row.get("state", ""))
+        health = str(row.get("overall_health_status", ""))
+        artifact_id = escape(str(row.get("artifact_id", "")))
+        manifest = escape(str(row.get("manifest_fingerprint", "")))
+        updated_at = escape(str(row.get("updated_at", "")))
+        next_action = escape(str(row.get("next_action", "")))
+        anchor_repo = escape(str(row.get("anchor_repo", "")))
+        anchor_pr_number = escape(str(row.get("anchor_pr_number", "")))
+        status_summary = escape(str(row.get("status_summary", "")))
+        state_tone = _status_tone(state)
+        health_tone = _status_tone(health)
+        bucket = _harbor_inventory_bucket(row)
+        filters = " ".join(row_filter_keys(row))
+        scopes = " ".join(row_scope_keys(row))
+        signal_html = "".join(
+            f'<span class="signal-chip signal-{tone}">{escape(label)}</span>'
+            for label, tone in signal_badges(row)
+        )
+        route_html = (
+            f'<a href="{canonical_url}">{canonical_url}</a>' if canonical_url else "No preview route recorded."
+        )
+        title_html = (
+            f'<a class="preview-row-title" href="{escape(detail_href)}">{preview_label}</a>'
+            if detail_href
+            else preview_label
+        )
+        action_links: list[str] = []
+        if detail_href:
+            action_links.append(f'<a href="{escape(detail_href)}">Detail</a>')
+            action_links.append(f'<a href="{escape(detail_href)}#operator-actions">Actions</a>')
+        if canonical_url:
+            action_links.append(f'<a href="{canonical_url}">Preview</a>')
+        if anchor_pr_url:
+            action_links.append(f'<a href="{anchor_pr_url}">PR</a>')
+        actions_html = "".join(action_links)
+        return f"""
+        <article class=\"preview-row\" data-preview-row data-bucket=\"{escape(bucket)}\" data-filters=\"{escape(filters)}\" data-scopes=\"{escape(scopes)}\">
+          <div class=\"preview-row-head\">
+            <div>
+              <h3>{title_html}</h3>
+              <p>{route_html}</p>
+            </div>
+            <div class=\"preview-row-tones\">
+              <span class=\"tone-pill tone-{state_tone}\">Preview {escape(_status_label(state))}</span>
+              <span class=\"tone-pill tone-{health_tone}\">Health {escape(_status_label(health))}</span>
+            </div>
+          </div>
+          <div class=\"preview-row-signals\">{signal_html}</div>
+          <p class=\"preview-row-summary\">{next_action or status_summary or 'No next action recorded.'}</p>
+          <div class=\"preview-row-actions\">{actions_html}</div>
+          <dl class=\"preview-row-meta\">
+            <div><dt>Anchor</dt><dd>{anchor_repo or 'Unknown'} PR {anchor_pr_number or 'Unknown'}</dd></div>
+            <div><dt>Artifact</dt><dd><code>{artifact_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Manifest</dt><dd><code>{manifest or 'Unavailable'}</code></dd></div>
+            <div><dt>Updated</dt><dd>{updated_at or 'Unavailable'}</dd></div>
+          </dl>
+        </article>
+        """
+
+    lane_html = ""
+    for key, label, description in bucket_specs:
+        rows = grouped_rows[key]
+        rows_html = "".join(render_preview_row(row) for row in rows) or "<p class=\"lane-empty\">No previews in this lane.</p>"
+        lane_html += f"""
+        <section class=\"lane-section\" data-lane-section data-bucket=\"{escape(key)}\">
+          <div class=\"lane-section-head\">
+            <div>
+              <div class=\"section-label\">{label}</div>
+              <h2>{label}</h2>
+              <p>{description}</p>
+            </div>
+            <div class=\"lane-count\" data-lane-count>{len(rows)} visible</div>
+          </div>
+          <div class=\"lane-stack\">{rows_html}</div>
+        </section>
+        """
+
+    focus_controls_html = "".join(
+        (
+            f'<button class="focus-chip{" is-active" if key == "all" else ""}" '
+            f'type="button" data-filter-control="{escape(key)}" '
+            f'aria-pressed="{"true" if key == "all" else "false"}">'
+            f'<span>{escape(label)}</span><strong>{filter_counts[key]}</strong></button>'
+        )
+        for key, label, _ in filter_specs
+    )
+    scope_controls_html = "".join(
+        (
+            f'<button class="scope-chip{" is-active" if key == "all" else ""}" '
+            f'type="button" data-scope-control="{escape(key)}" '
+            f'aria-pressed="{"true" if key == "all" else "false"}">'
+            f'<span>{escape(label)}</span><strong>{scope_counts[key]}</strong></button>'
+        )
+        for key, label, _ in scope_specs
+    )
+    scope_panel_html = ""
+    if show_scope_controls:
+        scope_panel_html = f"""
+            <div class=\"scope-panel\">
+              <div class=\"section-label\">Scope</div>
+              <div class=\"scope-chip-row\" role=\"toolbar\" aria-label=\"Fleet scope filters\">{scope_controls_html}</div>
+            </div>
+        """
+    focus_status_class = "focus-status" if not show_scope_controls else "focus-status focus-status-hidden"
+    summary_strip_html = f"""
+        <dl class=\"summary-strip\">
+          <div><dt>Needs attention</dt><dd>{summary_counts['attention']}</dd></div>
+          <div><dt>In flight</dt><dd>{summary_counts['in_flight']}</dd></div>
+          <div><dt>Live review</dt><dd>{summary_counts['live']}</dd></div>
+          <div><dt>Retained evidence</dt><dd>{summary_counts['retained']}</dd></div>
+        </dl>
+    """
+    if show_scope_controls:
+        summary_strip_html = ""
+
+    def environment_tone(environment_payload: dict[str, object] | None) -> str:
+        if not isinstance(environment_payload, dict):
+            return "neutral"
+        live_payload = environment_payload.get("live")
+        if not isinstance(live_payload, dict):
+            return "neutral"
+        deploy_status = str(live_payload.get("deploy_status", "")).strip().lower()
+        destination_health = str(live_payload.get("destination_health_status", "")).strip().lower()
+        if deploy_status == "fail" or destination_health == "fail":
+            return "bad"
+        if deploy_status == "pass" and destination_health in {"pass", "skipped"}:
+            return "good"
+        if deploy_status or destination_health:
+            return "warn"
+        return "neutral"
+
+    def render_environment_lane(instance_name: str, environment_payload: dict[str, object] | None) -> str:
+        lane_label = "Testing lane" if instance_name == "testing" else "Prod lane"
+        if not isinstance(environment_payload, dict):
+            return f"""
+            <section class=\"environment-lane environment-lane-empty\">
+              <div class=\"environment-lane-head\">
+                <div>
+                  <div class=\"section-label\">{lane_label}</div>
+                  <h3>{escape(instance_name)}</h3>
+                </div>
+                <span class=\"tone-pill tone-neutral\">No evidence</span>
+              </div>
+              <p class=\"environment-summary\">Harbor has not recorded a live {escape(instance_name)} deployment for this tenant yet.</p>
+            </section>
+            """
+        detail_href = ""
+        item_context = str(environment_payload.get("context", "")).strip()
+        if environment_detail_href_builder is not None and item_context:
+            detail_href = environment_detail_href_builder(item_context, instance_name)
+        live_payload = environment_payload.get("live") if isinstance(environment_payload.get("live"), dict) else {}
+        latest_promotion = (
+            environment_payload.get("latest_promotion")
+            if isinstance(environment_payload.get("latest_promotion"), dict)
+            else None
+        )
+        tone = environment_tone(environment_payload)
+        deploy_status = escape(str(live_payload.get("deploy_status", "pending") or "pending"))
+        destination_health = escape(
+            str(live_payload.get("destination_health_status", "pending") or "pending")
+        )
+        artifact_id = escape(str(live_payload.get("artifact_id", "")))
+        source_git_ref = escape(str(live_payload.get("source_git_ref", "")))
+        updated_at = escape(str(live_payload.get("updated_at", "")))
+        promoted_from = escape(str(live_payload.get("promoted_from_instance", "")))
+        lane_summary = (
+            "Testing carries the current integration artifact for this tenant."
+            if instance_name == "testing"
+            else "Prod is the currently promoted artifact for this tenant."
+        )
+        promotion_meta = ""
+        if latest_promotion is not None and instance_name == "prod":
+            promotion_meta = (
+                "<p class=\"environment-note\">"
+                f"Latest promotion moved <code>{escape(str(latest_promotion.get('artifact_id', '')) or 'Unavailable')}</code> "
+                f"from {escape(str(latest_promotion.get('from_instance', 'testing')) or 'testing')} into prod."
+                "</p>"
+            )
+        elif promoted_from:
+            promotion_meta = f'<p class="environment-note">This lane was last promoted from {promoted_from}.</p>'
+        detail_link_html = ""
+        if detail_href:
+            detail_link_html = (
+                '<div class="environment-links">'
+                f'<a class="lane-detail-link" href="{escape(detail_href)}">Open lane detail</a>'
+                "</div>"
+            )
+        return f"""
+        <section class=\"environment-lane\">
+          <div class=\"environment-lane-head\">
+            <div>
+              <div class=\"section-label\">{lane_label}</div>
+              <h3>{escape(instance_name)}</h3>
+            </div>
+            <div class=\"environment-tones\">
+              <span class=\"tone-pill tone-{tone}\">Deploy {deploy_status}</span>
+              <span class=\"tone-pill tone-{_status_tone(destination_health)}\">Health {destination_health}</span>
+            </div>
+          </div>
+          <p class=\"environment-summary\">{lane_summary}</p>
+          {promotion_meta}
+          <dl class=\"environment-meta\">
+            <div><dt>Artifact</dt><dd><code>{artifact_id or 'Unavailable'}</code></dd></div>
+            <div><dt>Source ref</dt><dd><code>{source_git_ref or 'Unavailable'}</code></dd></div>
+            <div><dt>Updated</dt><dd>{updated_at or 'Unavailable'}</dd></div>
+            <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get('deployment_record_id', '')) or 'Unavailable')}</code></dd></div>
+          </dl>
+          {detail_link_html}
+        </section>
+        """
+
+    def render_enablement_action(action_payload: dict[str, object]) -> str:
+        action_status = str(action_payload.get("status", "none")).strip()
+        action_tone = escape(str(action_payload.get("tone", "neutral")).strip() or "neutral")
+        headline = escape(str(action_payload.get("headline", "No preview action available.")))
+        summary = escape(str(action_payload.get("summary", "")))
+        if action_status == "actionable":
+            recipe = str(action_payload.get("recipe", "")).strip()
+            recipe_id = escape(str(action_payload.get("recipe_id", "preview-enable-request") or "preview-enable-request"))
+            return f"""
+            <div class=\"enablement-inline-action tone-{action_tone}\">
+              <div class=\"enablement-inline-action-head\">
+                <div>
+                  <div class=\"action-command\">request-generation</div>
+                  <h4>{headline}</h4>
+                  <p>{summary}</p>
+                </div>
+                <button class=\"copy-button\" type=\"button\" data-copy-target=\"{recipe_id}\">Copy recipe</button>
+              </div>
+              <details class=\"action-details\">
+                <summary>Show Harbor request recipe</summary>
+                <pre id=\"{recipe_id}\" class=\"action-pre\">{escape(recipe)}</pre>
+              </details>
+            </div>
+            """
+        if action_status in {"blocked", "manual_review_required", "missing_context", "missing_evidence"}:
+            return f"""
+            <div class=\"enablement-inline-note tone-{action_tone}\">
+              <h4>{headline}</h4>
+              <p>{summary}</p>
+            </div>
+            """
+        return ""
+
+    def render_enablement_row(item: dict[str, object]) -> str:
+        anchor_pr_number = int(item.get("anchor_pr_number", 0) or 0)
+        anchor_pr_url = escape(str(item.get("anchor_pr_url", "")).strip())
+        state = escape(str(item.get("state", "candidate")).strip() or "candidate")
+        tone = escape(str(item.get("tone", "neutral")).strip() or "neutral")
+        request_source = str(item.get("request_source", "none")).strip()
+        source_label = {
+            "github_label": "GitHub label",
+            "harbor": "Harbor request",
+            "history": "Earlier request",
+            "none": "Not requested",
+        }.get(request_source, "Harbor")
+        request_summary = escape(str(item.get("request_summary", "")).strip())
+        status_summary = escape(str(item.get("status_summary", "")).strip())
+        canonical_url = escape(str(item.get("canonical_url", "")).strip())
+        preview_id = escape(str(item.get("preview_id", "")).strip())
+        action_payload = item.get("action") if isinstance(item.get("action"), dict) else None
+        actions = [f'<a href="{anchor_pr_url}">PR</a>'] if anchor_pr_url else []
+        if canonical_url:
+            actions.append(f'<a href="{canonical_url}">Preview</a>')
+        if preview_id:
+            actions.append(f'<span class="enablement-meta"><code>{preview_id}</code></span>')
+        actions_html = "".join(actions)
+        action_html = render_enablement_action(action_payload) if action_payload is not None else ""
+        return f"""
+        <article class=\"enablement-row\">
+          <div class=\"enablement-row-main\">
+            <div class=\"enablement-row-head\">
+              <h3>PR #{anchor_pr_number}</h3>
+              <div class=\"enablement-row-tones\">
+                <span class=\"tone-pill tone-{tone}\">{state}</span>
+                <span class=\"signal-chip\">{escape(source_label)}</span>
+              </div>
+            </div>
+            <p>{request_summary}</p>
+            <p class=\"enablement-status\">{status_summary}</p>
+          </div>
+          <div class=\"enablement-row-actions\">{actions_html}</div>
+          {action_html}
+        </article>
+        """
+
+    def render_promotion_evidence_check(check: dict[str, object]) -> str:
+        status = str(check.get("status", "pending")).strip().lower() or "pending"
+        tone = "good" if status == "pass" else "bad" if status == "fail" else "warn"
+        return f"""
+        <article class=\"promotion-check promotion-check-{tone}\">
+          <div class=\"promotion-check-head\">
+            <h4>{escape(str(check.get('label', 'Evidence')))}</h4>
+            <span class=\"signal-chip signal-{tone}\">{escape(_status_label(status))}</span>
+          </div>
+          <p>{escape(str(check.get('detail', 'No evidence detail recorded.')))}</p>
+        </article>
+        """
+
+    def render_promotion_action_panel(
+        promotion_action: dict[str, object],
+        *,
+        context_name: str,
+    ) -> str:
+        tone = str(promotion_action.get("tone", "neutral")).strip() or "neutral"
+        evidence_checks = (
+            promotion_action.get("evidence_checks")
+            if isinstance(promotion_action.get("evidence_checks"), list)
+            else []
+        )
+        evidence_html = "".join(
+            render_promotion_evidence_check(check)
+            for check in evidence_checks
+            if isinstance(check, dict)
+        )
+        recipe_cards: list[str] = []
+        backup_gate_recipe = str(promotion_action.get("backup_gate_recipe", "")).strip()
+        if backup_gate_recipe:
+            recipe_cards.append(
+                _render_harbor_action_recipe(
+                    title="Record prod backup gate",
+                    summary="Persist the exact backup authorization Harbor expects before trying to promote into prod.",
+                    tone="warn",
+                    script=backup_gate_recipe,
+                    command_label="backup-gates write",
+                    recipe_id=f"promotion-{escape(context_name)}-backup-gate",
+                )
+            )
+        resolve_recipe = str(promotion_action.get("resolve_recipe", "")).strip()
+        if resolve_recipe:
+            recipe_cards.append(
+                _render_harbor_action_recipe(
+                    title="Plan promotion request",
+                    summary="Resolve Harbor's typed promotion request from the current tenant evidence before execution.",
+                    tone=tone,
+                    script=resolve_recipe,
+                    command_label="promote resolve",
+                    recipe_id=f"promotion-{escape(context_name)}-resolve",
+                )
+            )
+        execute_recipe = str(promotion_action.get("execute_recipe", "")).strip()
+        if execute_recipe:
+            recipe_cards.append(
+                _render_harbor_action_recipe(
+                    title="Execute promotion",
+                    summary="Run the resolved promotion request once the typed payload looks correct.",
+                    tone=tone,
+                    script=execute_recipe,
+                    command_label="promote execute",
+                    recipe_id=f"promotion-{escape(context_name)}-execute",
+                )
+            )
+        detail_href = ""
+        if promotion_detail_href_builder is not None:
+            detail_href = promotion_detail_href_builder(context_name)
+        detail_link_html = ""
+        if detail_href:
+            detail_link_html = (
+                '<p class="promotion-detail-link">'
+                f'<a class="lane-detail-link" href="{escape(detail_href)}">Open promotion detail</a>'
+                "</p>"
+            )
+        latest_backup_gate = (
+            promotion_action.get("latest_backup_gate")
+            if isinstance(promotion_action.get("latest_backup_gate"), dict)
+            else None
+        )
+        latest_promotion = (
+            promotion_action.get("latest_promotion")
+            if isinstance(promotion_action.get("latest_promotion"), dict)
+            else None
+        )
+        latest_backup_gate_html = "Unavailable"
+        if latest_backup_gate is not None:
+            latest_backup_gate_html = (
+                f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
+            )
+        latest_promotion_html = "Unavailable"
+        if latest_promotion is not None:
+            latest_promotion_html = (
+                f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
+            )
+        recipe_html = "".join(recipe_cards) or (
+            '<p class="action-empty">Harbor is not exposing a promotion recipe for the current tenant state yet.</p>'
+        )
+        return f"""
+        <section class=\"promotion-stage\">
+          <div class=\"promotion-stage-head\">
+            <div>
+              <div class=\"section-label\">Next promotion</div>
+              <h3>{escape(str(promotion_action.get('headline', 'Harbor cannot describe the next promotion yet.')))}</h3>
+              <p class=\"promotion-stage-copy\">{escape(str(promotion_action.get('summary', 'No promotion summary recorded.')))}</p>
+            </div>
+            <span class=\"tone-pill tone-{escape(tone)}\">{escape(str(promotion_action.get('status', 'unknown')).replace('_', ' '))}</span>
+          </div>
+          <div class=\"promotion-stage-grid\">
+            <div class=\"promotion-primary\">
+              <dl class=\"promotion-meta\">
+                <div><dt>Candidate artifact</dt><dd><code>{escape(str(promotion_action.get('candidate_artifact_id', '')) or 'Unavailable')}</code></dd></div>
+                <div><dt>Current prod</dt><dd><code>{escape(str(promotion_action.get('current_prod_artifact_id', '')) or 'Unavailable')}</code></dd></div>
+                <div><dt>Testing source ref</dt><dd><code>{escape(str(promotion_action.get('source_git_ref', '')) or 'Unavailable')}</code></dd></div>
+                <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
+                <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
+                <div><dt>Harbor retains</dt><dd>{escape(str(promotion_action.get('retained_evidence', 'Unavailable')))}</dd></div>
+              </dl>
+              <p class=\"promotion-next-action\">{escape(str(promotion_action.get('next_action', 'No next action recorded.')))}</p>
+            </div>
+            <div class=\"promotion-evidence\">{evidence_html}</div>
+          </div>
+          <div class=\"promotion-recipes\">{recipe_html}</div>
+          {detail_link_html}
+        </section>
+        """
+
+    def render_environment_action_panel(
+        environment_actions: dict[str, object],
+        *,
+        context_name: str,
+    ) -> str:
+        action_cards: list[str] = []
+        for instance_name in ("testing", "prod"):
+            action_payload = environment_actions.get(instance_name)
+            if not isinstance(action_payload, dict):
+                continue
+            if str(action_payload.get("status", "")).strip() == "actionable":
+                recipe = str(action_payload.get("recipe", "")).strip()
+                if recipe:
+                    detail_href = ""
+                    if environment_detail_href_builder is not None:
+                        detail_href = environment_detail_href_builder(context_name, instance_name)
+                    footer_html = ""
+                    if detail_href:
+                        footer_html = (
+                            '<p class="action-footer">'
+                            f'<a class="lane-detail-link" href="{escape(detail_href)}">Open {escape(instance_name)} lane detail</a>'
+                            "</p>"
+                        )
+                    action_cards.append(
+                        _render_harbor_action_recipe(
+                            title=str(action_payload.get("headline", f"Re-ship current {instance_name} artifact")),
+                            summary=str(action_payload.get("summary", "")),
+                            tone=str(action_payload.get("tone", "neutral")),
+                            script=recipe,
+                            command_label="ship resolve -> ship execute",
+                            recipe_id=f"environment-{escape(context_name)}-{escape(instance_name)}-ship",
+                            footer_html=footer_html,
+                        )
+                    )
+                continue
+            detail_href = ""
+            if environment_detail_href_builder is not None:
+                detail_href = environment_detail_href_builder(context_name, instance_name)
+            detail_link_html = ""
+            if detail_href:
+                detail_link_html = (
+                    '<p class="lane-action-links">'
+                    f'<a class="lane-detail-link" href="{escape(detail_href)}">Open {escape(instance_name)} lane detail</a>'
+                    "</p>"
+                )
+            action_cards.append(
+                f"""
+                <article class=\"lane-action-note\">
+                  <div class=\"section-label\">{escape(instance_name)} lane</div>
+                  <h3>{escape(str(action_payload.get('headline', 'No lane action available.')))}</h3>
+                  <p>{escape(str(action_payload.get('summary', 'Harbor does not have enough evidence for a typed lane action yet.')))}</p>
+                  {detail_link_html}
+                </article>
+                """
+            )
+        if not action_cards:
+            return ""
+        return f"""
+        <section class=\"lane-actions\">
+          <div class=\"lane-actions-head\">
+            <div>
+              <div class=\"section-label\">Lane actions</div>
+              <h3>Rebuild long-lived lanes</h3>
+            </div>
+            <p class=\"lane-actions-copy\">Use current environment evidence to re-ship the live artifact without reconstructing the request by hand.</p>
+          </div>
+          <div class=\"lane-actions-grid\">{''.join(action_cards)}</div>
+        </section>
+        """
+
+    tenant_stage_html = ""
+    roster_label = "Preview queue"
+    roster_title = "Harbor-native review lanes"
+    roster_summary = (
+        "GitHub remains the PR and event source. Harbor owns the preview inventory, lifecycle, routing, and operator triage surface."
+    )
+    if isinstance(tenant_payload, dict):
+        tenant_label = escape(str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant")
+        preview_counts = tenant_payload.get("preview_counts") if isinstance(tenant_payload.get("preview_counts"), dict) else {}
+        preview_candidates = (
+            tenant_payload.get("preview_candidates")
+            if isinstance(tenant_payload.get("preview_candidates"), list)
+            else []
+        )
+        preview_enablement = (
+            tenant_payload.get("preview_enablement")
+            if isinstance(tenant_payload.get("preview_enablement"), list)
+            else []
+        )
+        preview_enablement_counts = (
+            tenant_payload.get("preview_enablement_counts")
+            if isinstance(tenant_payload.get("preview_enablement_counts"), dict)
+            else {}
+        )
+        environments = tenant_payload.get("environments") if isinstance(tenant_payload.get("environments"), dict) else {}
+        promotion_summary = (
+            tenant_payload.get("promotion_summary")
+            if isinstance(tenant_payload.get("promotion_summary"), dict)
+            else {}
+        )
+        promotion_action = (
+            tenant_payload.get("promotion_action")
+            if isinstance(tenant_payload.get("promotion_action"), dict)
+            else {}
+        )
+        environment_actions = (
+            tenant_payload.get("environment_actions")
+            if isinstance(tenant_payload.get("environment_actions"), dict)
+            else {}
+        )
+        preview_enablement_rows = [item for item in preview_enablement if isinstance(item, dict)]
+        preview_enablement_html = ""
+        if preview_enablement_rows:
+            visible_enablement_rows = preview_enablement_rows[:4]
+            remaining_enablement_count = len(preview_enablement_rows) - len(visible_enablement_rows)
+            overflow_note = (
+                f"<p class=\"enablement-overflow\">{remaining_enablement_count} more PRs stay visible in the queue below.</p>"
+                if remaining_enablement_count > 0
+                else ""
+            )
+            preview_enablement_html = f"""
+            <section class=\"tenant-enablement\">
+              <div class=\"tenant-enablement-head\">
+                <div>
+                  <div class=\"section-label\">Preview enablement</div>
+                  <h3>Why each PR does or does not have a preview</h3>
+                </div>
+                <p class=\"tenant-enablement-copy\">Candidates, label-driven requests, Harbor-driven requests, and retained history now stay visible before the deeper queue.</p>
+              </div>
+              <div class=\"enablement-list\">{''.join(render_enablement_row(item) for item in visible_enablement_rows)}</div>
+              {overflow_note}
+            </section>
+            """
+        has_environment_evidence = any(
+            isinstance(environments.get(instance_name), dict) for instance_name in ("testing", "prod")
+        )
+        promotion_status = str(promotion_action.get("status", "")).strip().lower() if promotion_action else ""
+        show_promotion_stage = bool(has_environment_evidence or promotion_status not in {"", "unknown"})
+        lane_actions_html = render_environment_action_panel(environment_actions, context_name=context_name)
+        promotion_stage_html = render_promotion_action_panel(promotion_action, context_name=context_name)
+        sparse_preview_html = ""
+        if not has_environment_evidence:
+            sparse_preview_html = f"""
+            {preview_enablement_html}
+            <dl class=\"tenant-preview-strip\">
+              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get('candidate', len(preview_candidates))}</dd></div>
+              <div><dt>Requested</dt><dd>{preview_enablement_counts.get('requested', 0)}</dd></div>
+              <div><dt>Running</dt><dd>{preview_enablement_counts.get('running', preview_counts.get('live', 0))}</dd></div>
+              <div><dt>Paused</dt><dd>{preview_enablement_counts.get('paused', 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_enablement_counts.get('retained', preview_counts.get('retained', 0))}</dd></div>
+            </dl>
+            """
+        dense_environment_html = ""
+        if has_environment_evidence:
+            dense_environment_html = f"""
+            <div class=\"environment-board\">
+              {render_environment_lane('testing', environments.get('testing') if isinstance(environments, dict) else None)}
+              {render_environment_lane('prod', environments.get('prod') if isinstance(environments, dict) else None)}
+            </div>
+            {lane_actions_html}
+            {promotion_stage_html if show_promotion_stage else ''}
+            <dl class=\"tenant-preview-strip\">
+              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get('candidate', len(preview_candidates))}</dd></div>
+              <div><dt>Requested</dt><dd>{preview_enablement_counts.get('requested', 0)}</dd></div>
+              <div><dt>Running</dt><dd>{preview_enablement_counts.get('running', preview_counts.get('live', 0))}</dd></div>
+              <div><dt>Paused</dt><dd>{preview_enablement_counts.get('paused', 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_enablement_counts.get('retained', preview_counts.get('retained', 0))}</dd></div>
+            </dl>
+            {preview_enablement_html}
+            """
+        tenant_stage_copy = (
+            "Main feeds testing. Tested artifacts promote into prod. Pull requests become opt-in preview environments instead of shared dev branches."
+            if has_environment_evidence
+            else "Harbor has preview request evidence for this tenant, but it has not recorded current testing or prod lane evidence yet. Preview enablement is the first meaningful control surface until long-lived lane evidence arrives."
+        )
+        tenant_brief_label = "Promotion path" if has_environment_evidence else "Current Harbor focus"
+        tenant_brief_copy = (
+            escape(str(promotion_summary.get("summary", "No promotion evidence recorded yet.")))
+            if has_environment_evidence
+            else "Preview request state is available even before Harbor has current long-lived lane evidence for this tenant."
+        )
+        tenant_stage_html = f"""
+        <section class=\"tenant-stage\">
+          <div class=\"tenant-stage-grid\">
+            <div>
+              <div class=\"section-label\">Tenant environment</div>
+              <h2>{tenant_label}</h2>
+              <p class=\"tenant-stage-copy\">{tenant_stage_copy}</p>
+            </div>
+            <aside class=\"tenant-brief\">
+              <div class=\"section-label\">{tenant_brief_label}</div>
+              <p class=\"tenant-brief-copy\">{tenant_brief_copy}</p>
+            </aside>
+          </div>
+          {dense_environment_html}
+          {sparse_preview_html}
+        </section>
+        """
+        roster_label = "Preview roster"
+        roster_title = "Pull request previews"
+        roster_summary = (
+            "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Harbor shows deeper preview detail."
+        )
+
+    body_html = f"""
+    <div data-harbor-overview>
+      {tenant_stage_html}
+      <section class=\"index-mast\">
+        <div class=\"index-mast-grid\">
+          <div>
+            <div class=\"section-label\">{roster_label}</div>
+            <h2>{roster_title}</h2>
+            <p data-overview-summary>{roster_summary}</p>
+          </div>
+          <aside class=\"focus-panel\">
+            <div class=\"section-label\">Fleet focus</div>
+            <p class=\"focus-kicker\">Filter the queue before opening detail pages.</p>
+            <div class=\"focus-chip-row\" role=\"toolbar\" aria-label=\"Fleet focus filters\">{focus_controls_html}</div>
+            {scope_panel_html}
+            <p class=\"{focus_status_class}\" data-focus-status>{escape(filter_notes['all'])} Showing {len(preview_rows)} of {len(preview_rows)} previews.</p>
+          </aside>
+        </div>
+        {summary_strip_html}
+      </section>
+
+      <div class=\"lane-grid\">{lane_html}</div>
+
+      <section class=\"policy-strip\">
+        <div class=\"section-label\">Policy snapshot</div>
+        <h2>Preview control stance</h2>
+        <ul>
+          <li>Stable lanes such as local, testing, and prod stay separate from preview traffic.</li>
+          <li>One Harbor preview identity maps to one anchor PR and rotates generations behind a stable route.</li>
+          <li>Cleanup, retention, and companion-policy evidence should be visible here before Harbor grows write-side UI.</li>
+        </ul>
+      </section>
+    </div>
+    <script>
+    (() => {{
+      const root = document.querySelector('[data-harbor-overview]');
+      if (!root) {{
+        return;
+      }}
+      const filterNotes = {json.dumps(filter_notes)};
+      const scopeNotes = {json.dumps(scope_notes)};
+      const controls = Array.from(root.querySelectorAll('[data-filter-control]'));
+      const scopeControls = Array.from(root.querySelectorAll('[data-scope-control]'));
+      const rows = Array.from(root.querySelectorAll('[data-preview-row]'));
+      const sections = Array.from(root.querySelectorAll('[data-lane-section]'));
+      const status = root.querySelector('[data-focus-status]');
+      const overviewSummary = root.querySelector('[data-overview-summary]');
+      const defaultOverviewSummary = overviewSummary ? overviewSummary.textContent || '' : '';
+      const validFocusKeys = new Set(controls.map((control) => control.dataset.filterControl || 'all'));
+      const validScopeKeys = new Set(scopeControls.map((control) => control.dataset.scopeControl || 'all'));
+      let activeFocus = 'all';
+      let activeScope = 'all';
+      const initialParams = new URLSearchParams(window.location.hash.replace(/^#/, ''));
+      const initialFocus = initialParams.get('focus') || '';
+      const initialScope = initialParams.get('scope') || '';
+      if (validFocusKeys.has(initialFocus)) {{
+        activeFocus = initialFocus;
+      }}
+      if (validScopeKeys.has(initialScope)) {{
+        activeScope = initialScope;
+      }}
+
+      const matchesFilter = (row, filterKey) => {{
+        const filters = (row.dataset.filters || '').split(' ').filter(Boolean);
+        return filterKey === 'all' || filters.includes(filterKey);
+      }};
+
+      const matchesScope = (row, scopeKey) => {{
+        const scopes = (row.dataset.scopes || '').split(' ').filter(Boolean);
+        return scopeKey === 'all' || scopes.includes(scopeKey);
+      }};
+
+      const applyFilters = () => {{
+        let visibleRows = 0;
+        controls.forEach((control) => {{
+          const isActive = control.dataset.filterControl === activeFocus;
+          control.classList.toggle('is-active', isActive);
+          control.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        }});
+        scopeControls.forEach((control) => {{
+          const isActive = control.dataset.scopeControl === activeScope;
+          control.classList.toggle('is-active', isActive);
+          control.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+        }});
+        rows.forEach((row) => {{
+          const visible = matchesFilter(row, activeFocus) && matchesScope(row, activeScope);
+          row.classList.toggle('is-hidden', !visible);
+          if (visible) {{
+            visibleRows += 1;
+          }}
+        }});
+        sections.forEach((section) => {{
+          const laneRows = Array.from(section.querySelectorAll('[data-preview-row]'));
+          const visibleLaneRows = laneRows.filter((row) => !row.classList.contains('is-hidden'));
+          section.classList.toggle('is-hidden', visibleLaneRows.length === 0);
+          const count = section.querySelector('[data-lane-count]');
+          if (count) {{
+            count.textContent = `${{visibleLaneRows.length}} visible`;
+          }}
+        }});
+        if (status) {{
+          const focusNote = filterNotes[activeFocus] || filterNotes.all || '';
+          const scopeNote = scopeNotes[activeScope] || scopeNotes.all || '';
+          status.textContent = `${{focusNote}} ${{scopeNote}} Showing ${{visibleRows}} of ${{rows.length}} previews.`.trim();
+        }}
+        if (overviewSummary) {{
+          if (activeFocus === 'all' && activeScope === 'all') {{
+            overviewSummary.textContent = defaultOverviewSummary;
+          }} else {{
+            const fragments = [];
+            if (activeScope !== 'all') {{
+              fragments.push(scopeNotes[activeScope] || '');
+            }}
+            if (activeFocus !== 'all') {{
+              fragments.push(filterNotes[activeFocus] || '');
+            }}
+            overviewSummary.textContent = `Showing ${{visibleRows}} of ${{rows.length}} previews. ${{fragments.filter(Boolean).join(' ')}}`.trim();
+          }}
+        }}
+        const nextParams = new URLSearchParams();
+        if (activeFocus !== 'all') {{
+          nextParams.set('focus', activeFocus);
+        }}
+        if (activeScope !== 'all') {{
+          nextParams.set('scope', activeScope);
+        }}
+        const nextHash = nextParams.toString();
+        const nextUrl = `${{window.location.pathname}}${{window.location.search}}${{nextHash ? `#${{nextHash}}` : ''}}`;
+        if (`${{window.location.pathname}}${{window.location.search}}${{window.location.hash}}` !== nextUrl) {{
+          window.history.replaceState(null, '', nextUrl);
+        }}
+      }};
+
+      controls.forEach((control) => {{
+        control.addEventListener('click', () => {{
+          activeFocus = control.dataset.filterControl || 'all';
+          applyFilters();
+        }});
+      }});
+      scopeControls.forEach((control) => {{
+        control.addEventListener('click', () => {{
+          activeScope = control.dataset.scopeControl || 'all';
+          applyFilters();
+        }});
+      }});
+      applyFilters();
+    }})();
+    </script>
+    """
+
+    extra_css = """
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .tenant-stage {
+      display: grid;
+      gap: 18px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+      margin-bottom: 18px;
+    }
+    .tenant-stage-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(300px, 0.75fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .tenant-stage h2,
+    .environment-lane h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.02;
+    }
+    .tenant-stage h2 {
+      font-size: 42px;
+    }
+    .tenant-stage-copy,
+    .tenant-brief-copy,
+    .environment-summary,
+    .environment-note {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .tenant-brief {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 10px;
+    }
+    .tenant-brief-copy {
+      color: var(--text);
+    }
+    .promotion-stage {
+      display: grid;
+      gap: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .lane-actions {
+      display: grid;
+      gap: 14px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .lane-actions-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+    }
+    .lane-actions h3,
+    .lane-action-note h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .lane-actions h3 {
+      font-size: 28px;
+    }
+    .lane-actions-copy,
+    .lane-action-note p {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .lane-actions-grid {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .lane-action-note {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 8px;
+    }
+    .lane-action-note h3 {
+      font-size: 22px;
+    }
+    .promotion-stage-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+    }
+    .promotion-stage h3,
+    .promotion-check h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .promotion-stage h3 {
+      font-size: 30px;
+    }
+    .promotion-stage-copy,
+    .promotion-next-action,
+    .promotion-check p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .promotion-stage-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      gap: 16px;
+      align-items: start;
+    }
+    .promotion-primary {
+      display: grid;
+      gap: 12px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 14px 16px 16px;
+    }
+    .promotion-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 0;
+    }
+    .promotion-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .promotion-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .promotion-meta code {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .promotion-next-action {
+      color: var(--text);
+    }
+    .promotion-evidence {
+      display: grid;
+      gap: 12px;
+    }
+    .promotion-check {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px;
+      display: grid;
+      gap: 8px;
+    }
+    .promotion-check-good { border-left: 3px solid var(--good); }
+    .promotion-check-warn { border-left: 3px solid var(--warn); }
+    .promotion-check-bad { border-left: 3px solid var(--bad); }
+    .promotion-check-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .promotion-check h4 {
+      font-size: 22px;
+    }
+    .promotion-recipes {
+      display: grid;
+      gap: 12px;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .action-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .action-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 22px;
+      line-height: 1.08;
+    }
+    .action-card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .action-footer,
+    .lane-action-links,
+    .environment-links {
+      margin: 0;
+    }
+    .lane-detail-link {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      text-underline-offset: 0.18em;
+    }
+    .lane-detail-link:hover {
+      text-decoration: underline;
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover {
+      background: #e7dfd0;
+    }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .action-empty {
+      margin: 0;
+      color: var(--muted);
+    }
+    .tenant-preview-strip {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
+      gap: 12px;
+      margin: 0;
+    }
+    .tenant-preview-strip > div,
+    .environment-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .tenant-preview-strip dd,
+    .environment-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .tenant-preview-strip dd {
+      font-family: var(--serif);
+      font-size: 22px;
+    }
+    .tenant-enablement {
+      display: grid;
+      gap: 12px;
+      border-top: 1px solid var(--line);
+      padding-top: 16px;
+    }
+    .tenant-enablement-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: end;
+    }
+    .tenant-enablement h3,
+    .enablement-row h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.02;
+    }
+    .tenant-enablement h3 {
+      font-size: 28px;
+    }
+    .tenant-enablement-copy,
+    .enablement-overflow,
+    .enablement-row p,
+    .enablement-meta {
+      margin: 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .enablement-list {
+      display: grid;
+      gap: 12px;
+    }
+    .enablement-row {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 14px;
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 14px 16px;
+      align-items: center;
+    }
+    .enablement-inline-action,
+    .enablement-inline-note {
+      grid-column: 1 / -1;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      padding: 12px 14px 14px;
+      margin-top: 2px;
+    }
+    .enablement-inline-action {
+      display: grid;
+      gap: 10px;
+    }
+    .enablement-inline-action.tone-good,
+    .enablement-inline-action.tone-warn,
+    .enablement-inline-action.tone-bad,
+    .enablement-inline-action.tone-neutral,
+    .enablement-inline-note.tone-good,
+    .enablement-inline-note.tone-warn,
+    .enablement-inline-note.tone-bad,
+    .enablement-inline-note.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .enablement-inline-action.tone-good,
+    .enablement-inline-note.tone-good { border-left: 3px solid var(--good); }
+    .enablement-inline-action.tone-warn,
+    .enablement-inline-note.tone-warn { border-left: 3px solid var(--warn); }
+    .enablement-inline-action.tone-bad,
+    .enablement-inline-note.tone-bad { border-left: 3px solid var(--bad); }
+    .enablement-inline-action.tone-neutral,
+    .enablement-inline-note.tone-neutral { border-left: 3px solid var(--neutral); }
+    .enablement-inline-action-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .enablement-inline-action h4,
+    .enablement-inline-note h4 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 20px;
+      line-height: 1.08;
+    }
+    .enablement-inline-action p,
+    .enablement-inline-note p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .enablement-inline-note.tone-bad h4 {
+      color: var(--bad);
+    }
+    .enablement-row-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .enablement-row-head h3 {
+      font-size: 24px;
+    }
+    .enablement-row-tones {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: end;
+    }
+    .enablement-status {
+      margin-top: 6px;
+      color: var(--text);
+    }
+    .enablement-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: end;
+      gap: 12px;
+      align-items: center;
+    }
+    .enablement-row-actions a,
+    .enablement-meta {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      text-underline-offset: 0.18em;
+    }
+    .enablement-row-actions a:hover {
+      text-decoration: underline;
+    }
+    .environment-board {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 18px;
+    }
+    .environment-lane {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 16px 18px 18px;
+      display: grid;
+      gap: 12px;
+    }
+    .environment-lane-empty {
+      background: rgba(251, 250, 246, 0.7);
+    }
+    .environment-lane-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .environment-lane h3 {
+      font-size: 28px;
+      text-transform: capitalize;
+    }
+    .environment-tones {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: end;
+    }
+    .environment-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 0;
+    }
+    .environment-meta code {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .index-mast {
+      display: grid;
+      gap: 12px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 18px;
+    }
+    .index-mast-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(320px, 0.8fr);
+      gap: 18px;
+      align-items: start;
+    }
+    .index-mast h2,
+    .policy-strip h2,
+    .lane-section h2 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 34px;
+      line-height: 1.02;
+    }
+    .index-mast p,
+    .policy-strip p,
+    .lane-section p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+      max-width: 58ch;
+    }
+    .focus-panel {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 12px 14px 14px;
+      display: grid;
+      gap: 8px;
+    }
+    .focus-panel p {
+      margin: 0;
+      max-width: none;
+    }
+    .focus-kicker {
+      color: var(--text);
+      font-size: 15px;
+      line-height: 1.45;
+    }
+    .focus-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .focus-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      border: 1px solid var(--line);
+      background: transparent;
+      border-radius: 999px;
+      padding: 8px 12px;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+    }
+    .focus-chip strong {
+      font-family: var(--mono);
+      font-size: 12px;
+      color: var(--text);
+    }
+    .focus-chip.is-active {
+      background: var(--text);
+      border-color: var(--text);
+      color: #f8f4ed;
+    }
+    .focus-chip.is-active strong { color: inherit; }
+    .focus-status {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .focus-status-hidden {
+      display: none;
+    }
+    .scope-panel {
+      display: grid;
+      gap: 8px;
+    }
+    .scope-panel .section-label {
+      margin-bottom: 0;
+    }
+    .scope-chip-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .scope-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--line);
+      background: #f2ede3;
+      border-radius: 999px;
+      padding: 7px 10px;
+      color: var(--muted);
+      cursor: pointer;
+      font: inherit;
+    }
+    .scope-chip strong {
+      font-family: var(--mono);
+      font-size: 11px;
+      color: var(--text);
+    }
+    .scope-chip.is-active {
+      border-color: var(--line-strong);
+      background: #e7dfd0;
+      color: var(--text);
+    }
+    .scope-chip.is-active strong { color: inherit; }
+    .summary-strip {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 14px;
+      margin: 4px 0 0;
+    }
+    .summary-strip > div {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 12px;
+      padding: 12px 14px;
+    }
+    .summary-strip dt,
+    .preview-row-meta dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .summary-strip dd {
+      margin: 8px 0 0;
+      font-family: var(--serif);
+      font-size: 22px;
+    }
+    .policy-strip,
+    .lane-section {
+      border-top: 1px solid var(--line);
+      padding-top: 18px;
+      margin-top: 24px;
+    }
+    .policy-strip ul {
+      margin: 14px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 10px;
+      line-height: 1.6;
+    }
+    .lane-section-head {
+      display: flex;
+      gap: 14px;
+      justify-content: space-between;
+      align-items: end;
+    }
+    .lane-count {
+      flex: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      padding: 7px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .lane-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 24px;
+      margin-top: 20px;
+    }
+    .lane-stack {
+      display: grid;
+      gap: 16px;
+      margin-top: 16px;
+    }
+    .preview-row {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      padding: 18px;
+      border-radius: 14px;
+    }
+    .preview-row.is-hidden,
+    .lane-section.is-hidden {
+      display: none;
+    }
+    .preview-row-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .preview-row-head h3 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 26px;
+      line-height: 1.04;
+    }
+    .preview-row-title { text-decoration: none; }
+    .preview-row-title:hover { text-decoration: underline; text-underline-offset: 0.18em; }
+    .preview-row-head p,
+    .preview-row-head a {
+      margin: 8px 0 0;
+      color: var(--muted);
+      overflow-wrap: anywhere;
+      text-underline-offset: 0.18em;
+    }
+    .preview-row-tones {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    .tone-pill {
+      border-radius: 999px;
+      padding: 8px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #f5f2ec;
+    }
+    .tone-good { background: var(--good); }
+    .tone-warn { background: var(--warn); }
+    .tone-bad { background: var(--bad); }
+    .tone-neutral { background: var(--neutral); }
+    .preview-row-signals {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      margin-top: 12px;
+    }
+    .signal-chip {
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      border: 1px solid var(--line);
+      background: #f2ede3;
+      color: var(--muted);
+    }
+    .signal-good {
+      background: rgba(28, 93, 61, 0.1);
+      border-color: rgba(28, 93, 61, 0.22);
+      color: var(--good);
+    }
+    .signal-warn {
+      background: rgba(138, 98, 8, 0.1);
+      border-color: rgba(138, 98, 8, 0.22);
+      color: var(--warn);
+    }
+    .signal-bad {
+      background: rgba(138, 49, 44, 0.1);
+      border-color: rgba(138, 49, 44, 0.24);
+      color: var(--bad);
+    }
+    .preview-row-summary {
+      margin: 14px 0 0;
+      color: var(--text);
+      line-height: 1.6;
+    }
+    .preview-row-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 14px;
+    }
+    .preview-row-actions a {
+      font-family: var(--mono);
+      font-size: 12px;
+      text-decoration: none;
+      text-underline-offset: 0.18em;
+    }
+    .preview-row-actions a:hover { text-decoration: underline; }
+    .preview-row-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 0;
+    }
+    .preview-row-meta dd { margin: 8px 0 0; overflow-wrap: anywhere; }
+    .preview-row-meta code { font-family: var(--mono); font-size: 12px; }
+    .lane-empty { margin: 16px 0 0; color: var(--muted); }
+    @media (max-width: 900px) {
+      .tenant-stage-grid,
+      .environment-board,
+      .lane-actions-grid,
+      .promotion-stage-grid,
+      .promotion-recipes,
+      .index-mast-grid,
+      .tenant-preview-strip,
+      .lane-grid,
+      .preview-row-meta,
+      .summary-strip { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .tenant-stage-grid,
+      .index-mast-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+    @media (max-width: 640px) {
+      .section-label {
+        margin-bottom: 6px;
+      }
+      .tenant-preview-strip,
+      .lane-actions-grid,
+      .promotion-stage-grid,
+      .promotion-recipes,
+      .enablement-row,
+      .environment-board,
+      .summary-strip,
+      .lane-grid,
+      .preview-row-meta,
+      .environment-meta,
+      .promotion-meta { grid-template-columns: 1fr; }
+      .shell-brand h1,
+      .tenant-stage h2,
+      .index-mast h2,
+      .policy-strip h2,
+      .lane-section h2 {
+        font-size: 24px;
+      }
+      .tenant-stage {
+        gap: 12px;
+        padding-bottom: 14px;
+        margin-bottom: 12px;
+      }
+      .shell-brand p,
+      .tenant-stage-copy,
+      .tenant-brief-copy,
+      .environment-summary,
+      .environment-note,
+      .index-mast p,
+      .policy-strip p,
+      .lane-section p,
+      .focus-kicker,
+      .focus-status {
+        font-size: 14px;
+        line-height: 1.45;
+      }
+      .shell-nav {
+        gap: 8px;
+      }
+      .shell-nav-item {
+        padding: 7px 10px;
+        font-size: 11px;
+      }
+      .index-mast {
+        gap: 8px;
+        padding-bottom: 10px;
+      }
+      .focus-panel {
+        gap: 6px;
+        padding: 10px 12px 12px;
+      }
+      .tenant-brief,
+      .environment-lane,
+      .promotion-primary,
+      .promotion-check {
+        padding: 12px 14px 14px;
+      }
+      .tenant-enablement-head,
+      .lane-actions-head,
+      .promotion-stage-head,
+      .promotion-check-head,
+      .enablement-inline-action-head,
+      .enablement-row-head,
+      .enablement-row-actions {
+        display: grid;
+        gap: 10px;
+      }
+      .environment-lane h3 {
+        font-size: 22px;
+      }
+      .promotion-stage h3,
+      .lane-actions h3,
+      .promotion-check h4 {
+        font-size: 22px;
+      }
+      .focus-status,
+      .summary-strip {
+        display: none;
+      }
+      .focus-chip-row {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+        padding-bottom: 2px;
+        margin-right: -2px;
+      }
+      .focus-chip-row::-webkit-scrollbar {
+        display: none;
+      }
+      .scope-chip-row {
+        flex-wrap: nowrap;
+        overflow-x: auto;
+        overscroll-behavior-x: contain;
+        scrollbar-width: none;
+        padding-bottom: 2px;
+      }
+      .scope-chip-row::-webkit-scrollbar {
+        display: none;
+      }
+      .focus-chip {
+        flex: 0 0 auto;
+        padding: 7px 10px;
+        gap: 8px;
+      }
+      .scope-chip {
+        flex: 0 0 auto;
+      }
+      .focus-chip strong,
+      .focus-chip span,
+      .scope-chip strong,
+      .scope-chip span {
+        white-space: nowrap;
+      }
+      .lane-section-head,
+      .preview-row-head {
+        align-items: start;
+      }
+      .lane-section-head p {
+        display: none;
+      }
+      .lane-count {
+        padding: 6px 8px;
+        font-size: 10px;
+      }
+      .policy-strip,
+      .lane-section {
+        padding-top: 12px;
+        margin-top: 14px;
+      }
+      .preview-row {
+        padding: 16px;
+      }
+    }
+    """
+
+    return _render_harbor_shell_document(
+        page_title=f"Harbor preview index{' · ' + context_name if context_name else ''}",
+        context_name=context_name,
+        active_nav="overview",
+        body_class="index-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
+
+
+def _render_harbor_preview_policy_page_html(
+    payload: dict[str, object],
+    *,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", ""))
+    previews = payload.get("previews") if isinstance(payload.get("previews"), list) else []
+    preview_rows = [item for item in previews if isinstance(item, dict)]
+    active_preview_count = sum(1 for row in preview_rows if str(row.get("state", "")).strip().lower() != "destroyed")
+    retained_preview_count = sum(1 for row in preview_rows if str(row.get("state", "")).strip().lower() == "destroyed")
+    overview_href = escape((nav_links or {}).get("overview", "index.html") or "index.html")
+    context_distribution_rows = []
+    for context_value in sorted(
+        {str(row.get("context", "")).strip() for row in preview_rows if str(row.get("context", "")).strip()}
+    ):
+        matching_rows = [row for row in preview_rows if str(row.get("context", "")).strip() == context_value]
+        active_count = sum(1 for row in matching_rows if str(row.get("state", "")).strip().lower() != "destroyed")
+        retained_count = sum(1 for row in matching_rows if str(row.get("state", "")).strip().lower() == "destroyed")
+        context_link = f"{overview_href}#scope=context:{escape(context_value)}"
+        context_distribution_rows.append(
+            "<tr>"
+            f"<td><a href=\"{context_link}\">{escape(context_value)}</a></td>"
+            f"<td>{len(matching_rows)}</td>"
+            f"<td>{active_count}</td>"
+            f"<td>{retained_count}</td>"
+            "</tr>"
+        )
+    context_distribution_html = ""
+    if len(context_distribution_rows) > 1:
+        context_distribution_html = f"""
+    <section class=\"policy-section\">
+      <div class=\"section-label\">Fleet footprint</div>
+      <h2>Context distribution</h2>
+      <p>When Harbor is showing more than one tenant context, this page should still reveal how the current preview fleet is distributed across those contexts.</p>
+      <table>
+        <thead><tr><th>Context</th><th>Total</th><th>Active</th><th>Retained</th></tr></thead>
+        <tbody>{''.join(context_distribution_rows)}</tbody>
+      </table>
+    </section>
+    """
+    eligible_context_rows = "".join(
+        f"<tr><td>{escape(repo)}</td><td>{escape(context)}</td></tr>"
+        for repo, context in sorted(HARBOR_TENANT_ANCHOR_CONTEXTS.items())
+    )
+    companion_items = "".join(
+        f"<li><code>{escape(repo)}</code></li>" for repo in HARBOR_ALLOWED_COMPANION_REPOS
+    )
+    preview_label_example = escape("<context>/<anchor-repo>/pr-<number>")
+    preview_route_example = escape("/previews/<context>/<anchor-repo>/pr-<number>")
+
+    body_html = f"""
+    <section class=\"policy-mast\">
+      <div class=\"section-label\">Read-only policy</div>
+      <h2>How Harbor decides what becomes a preview</h2>
+      <p>This page exposes the current preview contract as operator evidence. GitHub supplies PR events and identity; Harbor decides eligibility, route shape, baseline input defaults, and preview retention behavior.</p>
+    </section>
+
+    <section class=\"policy-grid\">
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Current queue</div>
+        <h3>Observed state</h3>
+        <dl class=\"policy-stats\">
+          <div><dt>Context</dt><dd>{escape(context_name) or 'all contexts'}</dd></div>
+          <div><dt>Active previews</dt><dd>{active_preview_count}</dd></div>
+          <div><dt>Retained evidence</dt><dd>{retained_preview_count}</dd></div>
+          <div><dt>Total records</dt><dd>{len(preview_rows)}</dd></div>
+        </dl>
+      </article>
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Enablement</div>
+        <h3>Preview request gate</h3>
+        <p>Harbor can enable a PR preview from the anchor PR label <code>{escape(HARBOR_PREVIEW_ENABLE_LABEL)}</code> or from an explicit Harbor-side request. Once requested, manifest-changing PR events can refresh the same preview identity.</p>
+      </article>
+    </section>
+
+    {context_distribution_html}
+
+    <section class=\"policy-section\">
+      <div class=\"section-label\">Anchor policy</div>
+      <h2>Eligible anchor repositories</h2>
+      <p>Harbor only anchors preview identities from tenant repositories that resolve to a known control-plane context.</p>
+      <table>
+        <thead><tr><th>Anchor repo</th><th>Context</th></tr></thead>
+        <tbody>{eligible_context_rows}</tbody>
+      </table>
+    </section>
+
+    <section class=\"policy-grid\">
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Preview metadata</div>
+        <h3>PR body contract</h3>
+        <p>Harbor reads one fenced metadata block from the anchor PR body using info string <code>{escape(HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING)}</code>. The default baseline channel is <code>{escape(DEFAULT_HARBOR_BASELINE_CHANNEL)}</code>.</p>
+      </article>
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Companions</div>
+        <h3>Allowlisted companion repos</h3>
+        <p>Companion refs are explicit, PR-based, and allowlisted. Harbor does not accept raw branch-name or SHA overrides here.</p>
+        <ul class=\"policy-list\">{companion_items or '<li>None</li>'}</ul>
+      </article>
+    </section>
+
+    <section class=\"policy-grid\">
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Identity</div>
+        <h3>Preview naming</h3>
+        <p>Human-readable preview labels follow <code>{preview_label_example}</code>. Harbor keeps one stable preview identity per anchor PR and rotates generations behind it.</p>
+      </article>
+      <article class=\"policy-card\">
+        <div class=\"section-label\">Routing</div>
+        <h3>Stable review route</h3>
+        <p>Preview URLs are expected to follow a routed path shape such as <code>{preview_route_example}</code> rather than creating a new permanent environment lane.</p>
+      </article>
+    </section>
+
+    <section class=\"policy-section\">
+      <div class=\"section-label\">Lifecycle stance</div>
+      <h2>Retention and cleanup</h2>
+      <ul class=\"policy-list\">
+        <li>Stable long-lived lanes such as local, testing, and prod remain distinct from preview traffic.</li>
+        <li>Destroyed previews remain visible as retained evidence instead of disappearing from the operator surface.</li>
+        <li>Harbor treats preview records and generation records as canonical control-plane evidence, not transient UI state.</li>
+      </ul>
+    </section>
+    """
+
+    extra_css = """
+    .policy-mast,
+    .policy-section {
+      border-top: 1px solid var(--line);
+      padding-top: 22px;
+    }
+    .policy-mast { border-top: 0; padding-top: 0; }
+    .policy-mast h2,
+    .policy-section h2,
+    .policy-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.06;
+    }
+    .policy-mast h2,
+    .policy-section h2 { font-size: 34px; }
+    .policy-card h3 { font-size: 24px; }
+    .policy-mast p,
+    .policy-section p,
+    .policy-card p {
+      margin: 12px 0 0;
+      color: var(--muted);
+      line-height: 1.65;
+      max-width: 64ch;
+    }
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .policy-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 20px;
+      margin-top: 30px;
+    }
+    .policy-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 18px;
+    }
+    .policy-stats {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin: 16px 0 0;
+    }
+    .policy-stats dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .policy-stats dd {
+      margin: 8px 0 0;
+      font-family: var(--serif);
+      font-size: 28px;
+      overflow-wrap: anywhere;
+    }
+    .policy-list {
+      margin: 16px 0 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 10px;
+      line-height: 1.6;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 18px;
+      font-size: 14px;
+      background: transparent;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    code { font-family: var(--mono); font-size: 12px; }
+    @media (max-width: 900px) {
+      .policy-grid,
+      .policy-stats { grid-template-columns: 1fr; }
+    }
+    """
+
+    return _render_harbor_shell_document(
+        page_title=f"Harbor preview policy{' · ' + context_name if context_name else ''}",
+        context_name=context_name,
+        active_nav="policy",
+        body_class="index-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
+
+
+def _render_harbor_promotion_status_page_html(
+    payload: dict[str, object],
+    *,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", "")).strip()
+    path_label = str(payload.get("path_label", "")).strip() or f"{context_name}/testing-to-prod"
+    tone = str(payload.get("tone", "neutral")).strip() or "neutral"
+    headline = escape(str(payload.get("headline", "Harbor cannot describe the promotion path yet.")))
+    summary = escape(str(payload.get("summary", "No promotion summary recorded.")))
+    next_action = escape(str(payload.get("next_action", "No next action recorded.")))
+    retained_evidence = escape(str(payload.get("retained_evidence", "No retained evidence summary recorded.")))
+    candidate_artifact_id = escape(str(payload.get("candidate_artifact_id", "")) or "Unavailable")
+    current_prod_artifact_id = escape(str(payload.get("current_prod_artifact_id", "")) or "Unavailable")
+    source_git_ref = escape(str(payload.get("source_git_ref", "")) or "Unavailable")
+    status_label = escape(str(payload.get("status", "unknown")).replace("_", " "))
+    evidence_checks = payload.get("evidence_checks") if isinstance(payload.get("evidence_checks"), list) else []
+    latest_backup_gate = payload.get("latest_backup_gate") if isinstance(payload.get("latest_backup_gate"), dict) else None
+    latest_promotion = payload.get("latest_promotion") if isinstance(payload.get("latest_promotion"), dict) else None
+    recent_backup_gates_payload = payload.get("recent_backup_gates")
+    recent_backup_gates = (
+        list(recent_backup_gates_payload)
+        if isinstance(recent_backup_gates_payload, (list, tuple))
+        else []
+    )
+    recent_promotions_payload = payload.get("recent_promotions")
+    recent_promotions = (
+        list(recent_promotions_payload)
+        if isinstance(recent_promotions_payload, (list, tuple))
+        else []
+    )
+    testing_live = payload.get("testing_live") if isinstance(payload.get("testing_live"), dict) else None
+    prod_live = payload.get("prod_live") if isinstance(payload.get("prod_live"), dict) else None
+
+    evidence_html = "".join(
+        f"""
+        <article class=\"promotion-detail-check promotion-detail-check-{('good' if str(check.get('status', '')).strip().lower() == 'pass' else 'bad' if str(check.get('status', '')).strip().lower() == 'fail' else 'warn')}\">
+          <div class=\"promotion-detail-check-head\">
+            <h4>{escape(str(check.get('label', 'Evidence')))}</h4>
+            <span class=\"signal-chip signal-{('good' if str(check.get('status', '')).strip().lower() == 'pass' else 'bad' if str(check.get('status', '')).strip().lower() == 'fail' else 'warn')}\">{escape(_status_label(str(check.get('status', 'pending'))))}</span>
+          </div>
+          <p>{escape(str(check.get('detail', 'No evidence detail recorded.')))}</p>
+        </article>
+        """
+        for check in evidence_checks
+        if isinstance(check, dict)
+    ) or '<p class="table-empty">No promotion evidence checks recorded yet.</p>'
+
+    recipe_cards: list[str] = []
+    backup_gate_recipe = str(payload.get("backup_gate_recipe", "")).strip()
+    if backup_gate_recipe:
+        recipe_cards.append(
+            _render_harbor_action_recipe(
+                title="Record prod backup gate",
+                summary="Persist the exact backup authorization Harbor expects before trying to promote into prod.",
+                tone="warn",
+                script=backup_gate_recipe,
+                command_label="backup-gates write",
+                recipe_id=f"promotion-detail-{escape(context_name)}-backup-gate",
+            )
+        )
+    resolve_recipe = str(payload.get("resolve_recipe", "")).strip()
+    if resolve_recipe:
+        recipe_cards.append(
+            _render_harbor_action_recipe(
+                title="Plan promotion request",
+                summary="Resolve Harbor's typed promotion request from the current tenant evidence before execution.",
+                tone=tone,
+                script=resolve_recipe,
+                command_label="promote resolve",
+                recipe_id=f"promotion-detail-{escape(context_name)}-resolve",
+            )
+        )
+    execute_recipe = str(payload.get("execute_recipe", "")).strip()
+    if execute_recipe:
+        recipe_cards.append(
+            _render_harbor_action_recipe(
+                title="Execute promotion",
+                summary="Run the resolved promotion request once the typed payload looks correct.",
+                tone=tone,
+                script=execute_recipe,
+                command_label="promote execute",
+                recipe_id=f"promotion-detail-{escape(context_name)}-execute",
+            )
+        )
+    recipe_html = "".join(recipe_cards) or (
+        '<p class="table-empty">Harbor is not exposing a promotion recipe for the current tenant state yet.</p>'
+    )
+
+    def render_live_lane_card(title: str, lane_payload: dict[str, object] | None) -> str:
+        if lane_payload is None:
+            return f"""
+            <article class=\"promotion-lane-card promotion-lane-card-empty\">
+              <div class=\"section-label\">{escape(title)}</div>
+              <h3>No lane evidence</h3>
+              <p>Harbor has not recorded current live inventory for this lane yet.</p>
+            </article>
+            """
+        return f"""
+        <article class=\"promotion-lane-card\">
+          <div class=\"section-label\">{escape(title)}</div>
+          <h3><code>{escape(str(lane_payload.get('artifact_id', '')) or 'Unavailable')}</code></h3>
+          <p>{escape(str(lane_payload.get('source_git_ref', '')) or 'No source ref recorded.')}</p>
+          <dl class=\"promotion-lane-meta\">
+            <div><dt>Updated</dt><dd>{escape(str(lane_payload.get('updated_at', '')) or 'Unavailable')}</dd></div>
+            <div><dt>Deploy</dt><dd>{escape(str(lane_payload.get('deploy_status', '')) or 'Unavailable')}</dd></div>
+            <div><dt>Health</dt><dd>{escape(str(lane_payload.get('destination_health_status', '')) or 'Unavailable')}</dd></div>
+            <div><dt>Record</dt><dd><code>{escape(str(lane_payload.get('deployment_record_id', '')) or 'Unavailable')}</code></dd></div>
+          </dl>
+        </article>
+        """
+
+    recent_promotions_html = "<p class=\"table-empty\">No promotion history recorded yet.</p>"
+    if recent_promotions:
+        recent_promotions_html = (
+            "<table><thead><tr><th>Promotion record</th><th>From lane</th><th>Artifact</th><th>Backup</th><th>Health</th><th>Finished</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('from_instance', '')) or 'Unavailable')}</td>"
+                f"<td><code>{escape(str(row.get('artifact_id', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('backup_status', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('destination_health_status', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('finished_at', '')) or 'Unavailable')}</td>"
+                "</tr>"
+                for row in recent_promotions
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+        )
+
+    recent_backup_gates_html = "<p class=\"table-empty\">No prod backup-gate history recorded yet.</p>"
+    if recent_backup_gates:
+        recent_backup_gates_html = (
+            "<table><thead><tr><th>Backup gate</th><th>Status</th><th>Source</th><th>Created</th></tr></thead><tbody>"
+            + "".join(
+                "<tr>"
+                f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('status', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('source', '')) or 'Unavailable')}</td>"
+                f"<td>{escape(str(row.get('created_at', '')) or 'Unavailable')}</td>"
+                "</tr>"
+                for row in recent_backup_gates
+                if isinstance(row, dict)
+            )
+            + "</tbody></table>"
+        )
+
+    latest_backup_gate_html = (
+        f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
+        if latest_backup_gate is not None
+        else "Unavailable"
+    )
+    latest_promotion_html = (
+        f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
+        if latest_promotion is not None
+        else "Unavailable"
+    )
+
+    body_html = f"""
+    <section class=\"promotion-detail-mast\">
+      <div>
+        <div class=\"section-label\">Promotion detail</div>
+        <h2>{escape(path_label)}</h2>
+        <p>{summary}</p>
+      </div>
+      <aside class=\"promotion-detail-brief\">
+        <span class=\"tone-pill tone-{escape(tone)}\">{status_label}</span>
+        <p>{next_action}</p>
+      </aside>
+    </section>
+
+    <section class=\"promotion-detail-grid\">
+      <article class=\"promotion-summary-card\">
+        <div class=\"section-label\">Current path</div>
+        <h3>{headline}</h3>
+        <dl class=\"promotion-summary-meta\">
+          <div><dt>Candidate artifact</dt><dd><code>{candidate_artifact_id}</code></dd></div>
+          <div><dt>Current prod</dt><dd><code>{current_prod_artifact_id}</code></dd></div>
+          <div><dt>Testing source ref</dt><dd><code>{source_git_ref}</code></dd></div>
+          <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
+          <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
+          <div><dt>Harbor retains</dt><dd>{retained_evidence}</dd></div>
+        </dl>
+      </article>
+      <div class=\"promotion-lane-grid\">
+        {render_live_lane_card('Testing lane', testing_live)}
+        {render_live_lane_card('Prod lane', prod_live)}
+      </div>
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Evidence checks</div>
+      <h3>What Harbor is using to gate promotion</h3>
+      <div class=\"promotion-detail-check-grid\">{evidence_html}</div>
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Typed actions</div>
+      <h3>What Harbor can do next</h3>
+      <div class=\"promotion-detail-recipes\">{recipe_html}</div>
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Promotion history</div>
+      <h3>Recent promotions into prod</h3>
+      {recent_promotions_html}
+    </section>
+
+    <section class=\"promotion-detail-section\">
+      <div class=\"section-label\">Backup-gate history</div>
+      <h3>Recent prod backup authorization</h3>
+      {recent_backup_gates_html}
+    </section>
+    """
+
+    extra_css = """
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .promotion-detail-mast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 20px;
+    }
+    .promotion-detail-mast h2,
+    .promotion-summary-card h3,
+    .promotion-lane-card h3,
+    .promotion-detail-section h3,
+    .promotion-detail-check h4 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .promotion-detail-mast h2 { font-size: 40px; }
+    .promotion-detail-mast p,
+    .promotion-detail-brief p,
+    .promotion-summary-card p,
+    .promotion-lane-card p,
+    .promotion-detail-check p,
+    .table-empty {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .promotion-detail-brief,
+    .promotion-summary-card,
+    .promotion-lane-card,
+    .promotion-detail-check,
+    .promotion-detail-section {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 16px 18px 18px;
+    }
+    .promotion-detail-brief {
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .promotion-detail-grid,
+    .promotion-lane-grid,
+    .promotion-detail-check-grid,
+    .promotion-detail-recipes {
+      display: grid;
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .promotion-detail-grid {
+      grid-template-columns: minmax(0, 1fr);
+    }
+    .promotion-lane-grid,
+    .promotion-detail-recipes {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .promotion-detail-check-grid {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+    .promotion-summary-meta,
+    .promotion-lane-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 16px 0 0;
+    }
+    .promotion-summary-meta > div,
+    .promotion-lane-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .promotion-summary-meta dt,
+    .promotion-lane-meta dt,
+    th {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .promotion-summary-meta dd,
+    .promotion-lane-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .promotion-summary-meta code,
+    .promotion-lane-card code,
+    table code,
+    .action-pre {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .promotion-detail-check-good { border-left: 3px solid var(--good); }
+    .promotion-detail-check-warn { border-left: 3px solid var(--warn); }
+    .promotion-detail-check-bad { border-left: 3px solid var(--bad); }
+    .promotion-detail-check-head,
+    .action-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-card {
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover { background: #e7dfd0; }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker { display: none; }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      line-height: 1.55;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 12px;
+      font-size: 14px;
+      background: transparent;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    .promotion-detail-section { margin-top: 18px; }
+    @media (max-width: 900px) {
+      .promotion-detail-mast,
+      .promotion-lane-grid,
+      .promotion-detail-check-grid,
+      .promotion-detail-recipes,
+      .promotion-summary-meta,
+      .promotion-lane-meta {
+        grid-template-columns: 1fr;
+      }
+      .promotion-detail-mast h2 { font-size: 32px; }
+      .promotion-detail-check-head,
+      .action-card-head { flex-direction: column; }
+    }
+    """
+
+    return _render_harbor_shell_document(
+        page_title=f"Harbor promotion detail · {path_label}",
+        context_name=context_name,
+        active_nav="detail",
+        body_class="detail-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
+
+
+def _render_harbor_environment_status_page_html(
+    payload: dict[str, object],
+    *,
+    action_payload: dict[str, object] | None = None,
+    nav_links: dict[str, str] | None = None,
+) -> str:
+    context_name = str(payload.get("context", "")).strip()
+    instance_name = str(payload.get("instance", "")).strip() or "environment"
+    live_payload = payload.get("live") if isinstance(payload.get("live"), dict) else {}
+    live_promotion = payload.get("live_promotion") if isinstance(payload.get("live_promotion"), dict) else None
+    authorized_backup_gate = (
+        payload.get("authorized_backup_gate")
+        if isinstance(payload.get("authorized_backup_gate"), dict)
+        else None
+    )
+    latest_promotion = payload.get("latest_promotion") if isinstance(payload.get("latest_promotion"), dict) else None
+    latest_deployment = payload.get("latest_deployment") if isinstance(payload.get("latest_deployment"), dict) else None
+    recent_promotions_payload = payload.get("recent_promotions")
+    recent_promotions = (
+        list(recent_promotions_payload)
+        if isinstance(recent_promotions_payload, (list, tuple))
+        else []
+    )
+    recent_deployments_payload = payload.get("recent_deployments")
+    recent_deployments = (
+        list(recent_deployments_payload)
+        if isinstance(recent_deployments_payload, (list, tuple))
+        else []
+    )
+
+    lane_title = f"{context_name}/{instance_name}" if context_name else instance_name
+    role_summary = (
+        "Testing carries the integration artifact Harbor would promote next."
+        if instance_name == "testing"
+        else "Prod is the customer-facing lane Harbor protects and promotes into deliberately."
+    )
+    live_tone = _status_tone(str(live_payload.get("destination_health_status", "pending") or "pending"))
+    deploy_status = str(live_payload.get("deploy_status", "pending") or "pending")
+    health_status = str(live_payload.get("destination_health_status", "pending") or "pending")
+    action_status = str(action_payload.get("status", "")) if isinstance(action_payload, dict) else ""
+
+    live_promotion_html = ""
+    if live_promotion is not None:
+        live_promotion_html = f"""
+        <article class=\"detail-note\">
+          <div class=\"section-label\">Attached promotion</div>
+          <h3>Current lane inventory is backed by a promotion record.</h3>
+          <dl class=\"detail-meta\">
+            <div><dt>Promotion record</dt><dd><code>{escape(str(live_promotion.get('record_id', '')) or 'Unavailable')}</code></dd></div>
+            <div><dt>Artifact</dt><dd><code>{escape(str(live_promotion.get('artifact_id', '')) or 'Unavailable')}</code></dd></div>
+            <div><dt>Backup gate</dt><dd><code>{escape(str(live_promotion.get('backup_record_id', '')) or 'Unavailable')}</code></dd></div>
+            <div><dt>Finished</dt><dd>{escape(str(live_promotion.get('finished_at', '')) or 'Unavailable')}</dd></div>
+          </dl>
+        </article>
+        """
+    else:
+        live_promotion_html = """
+        <article class=\"detail-note detail-note-muted\">
+          <div class=\"section-label\">Attached promotion</div>
+          <h3>No live promotion record is attached to this lane inventory.</h3>
+          <p>Harbor can still show recent promotion history below, but the current environment inventory does not point at one canonical promotion record yet.</p>
+        </article>
+        """
+
+    backup_gate_html = ""
+    if authorized_backup_gate is not None:
+        evidence_entries = "".join(
+            f"<li><code>{escape(str(key))}</code> {escape(str(value))}</li>"
+            for key, value in sorted(
+                (authorized_backup_gate.get("evidence") if isinstance(authorized_backup_gate.get("evidence"), dict) else {}).items()
+            )
+        )
+        backup_gate_html = f"""
+        <article class=\"detail-note\">
+          <div class=\"section-label\">Authorized backup gate</div>
+          <h3>Harbor has a recorded backup gate for this lane.</h3>
+          <dl class=\"detail-meta\">
+            <div><dt>Record</dt><dd><code>{escape(str(authorized_backup_gate.get('record_id', '')) or 'Unavailable')}</code></dd></div>
+            <div><dt>Status</dt><dd>{escape(str(authorized_backup_gate.get('status', 'unknown')) or 'unknown')}</dd></div>
+            <div><dt>Source</dt><dd>{escape(str(authorized_backup_gate.get('source', '')) or 'Unavailable')}</dd></div>
+            <div><dt>Created</dt><dd>{escape(str(authorized_backup_gate.get('created_at', '')) or 'Unavailable')}</dd></div>
+          </dl>
+          <ul class=\"detail-list\">{evidence_entries or '<li>No backup evidence fields recorded.</li>'}</ul>
+        </article>
+        """
+    else:
+        backup_gate_html = """
+        <article class=\"detail-note detail-note-muted\">
+          <div class=\"section-label\">Authorized backup gate</div>
+          <h3>No authorized backup gate is attached to this lane yet.</h3>
+          <p>This is normal for `testing` and is still a useful warning for `prod` when Harbor cannot prove the current lane from attached backup evidence alone.</p>
+        </article>
+        """
+
+    action_html = """
+    <article class=\"detail-note detail-note-muted\">
+      <div class=\"section-label\">Lane action</div>
+      <h3>No typed lane action is available.</h3>
+      <p>Harbor does not have enough environment evidence to build a re-ship recipe for this lane yet.</p>
+    </article>
+    """
+    if isinstance(action_payload, dict):
+        if action_status == "actionable":
+            action_html = _render_harbor_action_recipe(
+                title=str(action_payload.get("headline", f"Re-ship current {instance_name} artifact")),
+                summary=str(action_payload.get("summary", "")),
+                tone=str(action_payload.get("tone", "neutral")),
+                script=str(action_payload.get("recipe", "")),
+                command_label="ship resolve -> ship execute",
+                recipe_id=f"environment-detail-{_harbor_action_slug(lane_title)}-ship",
+            )
+        else:
+            action_html = f"""
+            <article class=\"detail-note detail-note-muted\">
+              <div class=\"section-label\">Lane action</div>
+              <h3>{escape(str(action_payload.get('headline', 'No typed lane action is available.')))}</h3>
+              <p>{escape(str(action_payload.get('summary', 'Harbor does not have enough environment evidence to build a re-ship recipe for this lane yet.')))}</p>
+            </article>
+            """
+
+    def render_activity_table(rows: list[dict[str, object]], *, table_kind: str) -> str:
+        if table_kind == "deployments":
+            if not rows:
+                return "<p class=\"table-empty\">No deployment history recorded for this lane yet.</p>"
+            table_rows = "".join(
+                "<tr>"
+                f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+                f"<td><code>{escape(str(row.get('artifact_id', '')) or 'Unavailable')}</code></td>"
+                f"<td><code>{escape(str(row.get('source_git_ref', '')) or 'Unavailable')}</code></td>"
+                f"<td>{escape(str(row.get('deploy_status', 'unknown')) or 'unknown')}</td>"
+                f"<td>{escape(str(row.get('destination_health_status', 'unknown')) or 'unknown')}</td>"
+                f"<td>{escape(str(row.get('finished_at', '')) or 'Unavailable')}</td>"
+                "</tr>"
+                for row in rows
+                if isinstance(row, dict)
+            )
+            return (
+                "<table><thead><tr><th>Deployment record</th><th>Artifact</th><th>Source ref</th><th>Deploy</th><th>Health</th><th>Finished</th></tr></thead>"
+                f"<tbody>{table_rows}</tbody></table>"
+            )
+        if not rows:
+            return "<p class=\"table-empty\">No promotion history recorded into this lane yet.</p>"
+        table_rows = "".join(
+            "<tr>"
+            f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
+            f"<td>{escape(str(row.get('from_instance', '')) or 'Unavailable')}</td>"
+            f"<td><code>{escape(str(row.get('artifact_id', '')) or 'Unavailable')}</code></td>"
+            f"<td>{escape(str(row.get('backup_status', 'unknown')) or 'unknown')}</td>"
+            f"<td>{escape(str(row.get('destination_health_status', 'unknown')) or 'unknown')}</td>"
+            f"<td>{escape(str(row.get('finished_at', '')) or 'Unavailable')}</td>"
+            "</tr>"
+            for row in rows
+            if isinstance(row, dict)
+        )
+        return (
+            "<table><thead><tr><th>Promotion record</th><th>From lane</th><th>Artifact</th><th>Backup</th><th>Health</th><th>Finished</th></tr></thead>"
+            f"<tbody>{table_rows}</tbody></table>"
+        )
+
+    latest_deployment_summary = "No deployment record is attached to this lane yet."
+    if latest_deployment is not None:
+        latest_deployment_summary = (
+            f"Latest deployment finished {escape(str(latest_deployment.get('finished_at', '')) or 'recently')} "
+            f"with deploy {escape(str(latest_deployment.get('deploy_status', 'unknown')) or 'unknown')} and health "
+            f"{escape(str(latest_deployment.get('destination_health_status', 'unknown')) or 'unknown')}."
+        )
+    latest_promotion_summary = "Harbor has not recorded a recent promotion into this lane yet."
+    if latest_promotion is not None:
+        latest_promotion_summary = (
+            f"Latest promotion moved <code>{escape(str(latest_promotion.get('artifact_id', '')) or 'Unavailable')}</code> "
+            f"from {escape(str(latest_promotion.get('from_instance', '')) or 'another lane')} into {escape(instance_name)}."
+        )
+
+    body_html = f"""
+    <section class=\"environment-detail-mast\">
+      <div>
+        <div class=\"section-label\">Environment detail</div>
+        <h2>{escape(lane_title)}</h2>
+        <p>{role_summary}</p>
+      </div>
+      <aside class=\"environment-detail-brief\">
+        <span class=\"tone-pill tone-{live_tone}\">Deploy {_status_label(deploy_status)}</span>
+        <span class=\"tone-pill tone-{_status_tone(health_status)}\">Health {_status_label(health_status)}</span>
+        <p>{latest_deployment_summary}</p>
+      </aside>
+    </section>
+
+    <section class=\"environment-detail-grid\">
+      <article class=\"detail-card detail-card-primary\">
+        <div class=\"section-label\">Live lane snapshot</div>
+        <h3>Current environment evidence</h3>
+        <dl class=\"detail-meta\">
+          <div><dt>Artifact</dt><dd><code>{escape(str(live_payload.get('artifact_id', '')) or 'Unavailable')}</code></dd></div>
+          <div><dt>Source ref</dt><dd><code>{escape(str(live_payload.get('source_git_ref', '')) or 'Unavailable')}</code></dd></div>
+          <div><dt>Updated</dt><dd>{escape(str(live_payload.get('updated_at', '')) or 'Unavailable')}</dd></div>
+          <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get('deployment_record_id', '')) or 'Unavailable')}</code></dd></div>
+          <div><dt>Deploy status</dt><dd>{escape(_status_label(deploy_status))}</dd></div>
+          <div><dt>Health status</dt><dd>{escape(_status_label(health_status))}</dd></div>
+          <div><dt>Promoted from</dt><dd>{escape(str(live_payload.get('promoted_from_instance', '')) or 'Unavailable')}</dd></div>
+          <div><dt>Promotion record</dt><dd><code>{escape(str(live_payload.get('promotion_record_id', '')) or 'Unavailable')}</code></dd></div>
+        </dl>
+      </article>
+      <article class=\"detail-card\">
+        <div class=\"section-label\">Recent changes</div>
+        <h3>What Harbor saw last</h3>
+        <p>{latest_promotion_summary}</p>
+        <p class=\"detail-secondary\">{latest_deployment_summary}</p>
+      </article>
+    </section>
+
+    <section class=\"environment-detail-ops\">
+      {action_html}
+      {live_promotion_html}
+      {backup_gate_html}
+    </section>
+
+    <section class=\"environment-history\">
+      <div class=\"section-label\">Deployment history</div>
+      <h3>Recent deployments</h3>
+      {render_activity_table([row for row in recent_deployments if isinstance(row, dict)], table_kind='deployments')}
+    </section>
+
+    <section class=\"environment-history\">
+      <div class=\"section-label\">Promotion history</div>
+      <h3>Recent promotions into this lane</h3>
+      {render_activity_table([row for row in recent_promotions if isinstance(row, dict)], table_kind='promotions')}
+    </section>
+    """
+
+    extra_css = """
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 10px;
+    }
+    .environment-detail-mast {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(280px, 0.9fr);
+      gap: 18px;
+      align-items: start;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 20px;
+    }
+    .environment-detail-mast h2,
+    .detail-card h3,
+    .detail-note h3,
+    .environment-history h3 {
+      margin: 0;
+      font-family: var(--serif);
+      line-height: 1.04;
+    }
+    .environment-detail-mast h2 {
+      font-size: 40px;
+    }
+    .environment-detail-mast p,
+    .environment-detail-brief p,
+    .detail-card p,
+    .detail-note p,
+    .table-empty {
+      margin: 10px 0 0;
+      color: var(--muted);
+      line-height: 1.6;
+    }
+    .environment-detail-brief {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 14px 16px 16px;
+      display: grid;
+      gap: 10px;
+      align-content: start;
+    }
+    .environment-detail-grid,
+    .environment-detail-ops {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .environment-detail-ops {
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 0.9fr);
+      align-items: start;
+    }
+    .detail-card,
+    .detail-note,
+    .action-card,
+    .environment-history {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 16px;
+      padding: 16px 18px 18px;
+    }
+    .detail-card,
+    .detail-note,
+    .environment-history {
+      display: grid;
+      gap: 12px;
+    }
+    .detail-note-muted {
+      background: rgba(251, 250, 246, 0.72);
+    }
+    .detail-secondary {
+      color: var(--text);
+    }
+    .detail-meta {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px 16px;
+      margin: 0;
+    }
+    .detail-meta > div {
+      border-top: 1px solid var(--line);
+      padding-top: 10px;
+    }
+    .detail-meta dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .detail-meta dd {
+      margin: 7px 0 0;
+      overflow-wrap: anywhere;
+    }
+    .detail-meta code,
+    table code,
+    .action-pre {
+      font-family: var(--mono);
+      font-size: 12px;
+    }
+    .detail-list {
+      margin: 0;
+      padding-left: 18px;
+      color: var(--muted);
+      display: grid;
+      gap: 8px;
+      line-height: 1.55;
+    }
+    .environment-history {
+      margin-top: 18px;
+    }
+    .action-card {
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good,
+    .action-card.tone-warn,
+    .action-card.tone-bad,
+    .action-card.tone-neutral {
+      background: var(--surface);
+      color: inherit;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .action-card h3 {
+      font-size: 24px;
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: #f2ede3;
+      padding: 7px 10px;
+      color: var(--text);
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .copy-button:hover {
+      background: #e7dfd0;
+    }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      line-height: 1.55;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 14px;
+      background: transparent;
+    }
+    th, td {
+      text-align: left;
+      padding: 11px 0;
+      border-bottom: 1px solid var(--line);
+      vertical-align: top;
+    }
+    th {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    @media (max-width: 900px) {
+      .environment-detail-mast,
+      .environment-detail-grid,
+      .environment-detail-ops,
+      .detail-meta {
+        grid-template-columns: 1fr;
+      }
+      .environment-detail-mast h2 {
+        font-size: 32px;
+      }
+      .action-card-head {
+        flex-direction: column;
+      }
+    }
+    """
+
+    return _render_harbor_shell_document(
+        page_title=f"Harbor environment detail · {lane_title}",
+        context_name=context_name,
+        active_nav="detail",
+        body_class="detail-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
+
+
+def _render_harbor_preview_status_page_html(
+    payload: dict[str, object],
+    *,
+    nav_links: dict[str, str] | None = None,
+) -> str:
     preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
     trust_summary = payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
     health_summary = payload.get("health_summary") if isinstance(payload.get("health_summary"), dict) else {}
@@ -143,6 +4556,9 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     )
 
     preview_label = escape(str(preview.get("preview_label", "Harbor preview")))
+    context_name = escape(str(preview.get("context", "")))
+    anchor_repo_name = escape(str(preview.get("anchor_repo", "")))
+    anchor_pr_number = escape(str(preview.get("anchor_pr_number", "")))
     canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
     anchor_pr_url = escape(str(links.get("anchor_pr_url", "")))
     preview_state = str(preview.get("state", "unknown"))
@@ -151,6 +4567,9 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     artifact_id = escape(str(trust_summary.get("artifact_id", "")))
     manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
     destroy_after = escape(str(lifecycle_summary.get("destroy_after", "")))
+    active_generation_id = escape(
+        str(trust_summary.get("active_generation_id", preview.get("active_generation_id", "")))
+    )
     paused_at = escape(str(preview.get("paused_at", "")))
     destroyed_at = escape(str(lifecycle_summary.get("destroyed_at", preview.get("destroyed_at", ""))))
     destroy_reason = escape(str(lifecycle_summary.get("destroy_reason", preview.get("destroy_reason", ""))))
@@ -165,6 +4584,7 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
     serving_generation_id = escape(str(serving_generation.get("generation_id", "")))
     no_serving_preview = bool(latest_generation) and not serving_generation
     display_health_status = "unavailable" if no_serving_preview else overall_health_status
+    summary_text = next_action or status_summary or "No next action recorded."
     healthy_live_preview = (
         preview_state.strip().lower() == "active"
         and serving_matches_latest
@@ -199,135 +4619,170 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         primary_cta_href = anchor_pr_url
         secondary_cta_label = "Retained preview URL"
         secondary_cta_href = canonical_url
-    replacement_callout_html = ""
-    in_progress_callout_html = ""
-    no_serving_callout_html = ""
-    startup_callout_html = ""
-    healthy_callout_html = ""
-    paused_callout_html = ""
-    teardown_callout_html = ""
-    destroyed_callout_html = ""
-    if healthy_live_preview:
-        healthy_callout_html = f"""
-        <div class=\"callout callout-good\">
-          <div class=\"eyebrow\">Review is live</div>
-          <h2>This preview is live at the stable Harbor route and serving the latest requested generation.</h2>
-          <p>{next_action or status_summary}</p>
-          <dl>
-            <div><dt>Serving generation</dt><dd><code>{serving_generation_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Artifact</dt><dd><code>{artifact_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Destroy after</dt><dd>{destroy_after or 'Unavailable'}</dd></div>
-          </dl>
-        </div>
-        """
-    if not latest_generation:
-        startup_callout_html = f"""
-        <div class=\"callout callout-neutral\">
-          <div class=\"eyebrow\">Startup pending</div>
-          <h2>Harbor has created this preview record, but the first generation has not been requested yet.</h2>
-          <p>{next_action or status_summary}</p>
-          <dl>
-            <div><dt>Preview route</dt><dd>{canonical_url or 'Unavailable'}</dd></div>
-            <div><dt>Generation status</dt><dd>Not created yet</dd></div>
-            <div><dt>What happens next</dt><dd>Harbor needs the first generation request before this preview becomes live.</dd></div>
-          </dl>
-        </div>
-        """
-    if _generation_in_progress(latest_generation_state):
-        progress_title = (
-            "A replacement generation is in progress. Harbor is still serving the current preview."
-            if serving_generation_id
-            else "The first preview generation is in progress. Harbor is preparing this preview now."
-        )
-        progress_summary = (
-            next_action
-            if next_action
-            else "Harbor is advancing the latest generation toward a reviewable preview."
-        )
-        progress_serving_value = serving_generation_id or "No serving preview yet"
-        in_progress_callout_html = f"""
-        <div class=\"callout callout-warn\">
-          <div class=\"eyebrow\">Replacement in flight</div>
-          <h2>{progress_title}</h2>
-          <p>{progress_summary}</p>
-          <dl>
-            <div><dt>Current stage</dt><dd>{escape(_status_label(latest_generation_state)) or 'Unavailable'}</dd></div>
-            <div><dt>Serving now</dt><dd><code>{progress_serving_value}</code></dd></div>
-            <div><dt>Requested at</dt><dd>{latest_requested_at or 'Unavailable'}</dd></div>
-          </dl>
-        </div>
-        """
-    if no_serving_preview and not _generation_in_progress(latest_generation_state):
-        no_serving_callout_html = f"""
-        <div class=\"callout callout-warn\">
-          <div class=\"eyebrow\">Availability gap</div>
-          <h2>Harbor has generation evidence for this preview, but nothing is serving yet.</h2>
-          <p>{next_action or status_summary}</p>
-          <dl>
-            <div><dt>Latest generation</dt><dd><code>{latest_generation_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Current state</dt><dd>{escape(_status_label(latest_generation_state)) or 'Unavailable'}</dd></div>
-            <div><dt>Requested at</dt><dd>{latest_requested_at or 'Unavailable'}</dd></div>
-          </dl>
-        </div>
-        """
-    if preview_state.strip().lower() == "teardown_pending":
-        teardown_callout_html = f"""
-        <div class=\"callout callout-warn\">
-          <div class=\"eyebrow\">Scheduled cleanup</div>
-          <h2>This preview is queued for teardown. Harbor is keeping the current runtime available until cleanup completes.</h2>
-          <p>{next_action or status_summary}</p>
-          <dl>
-            <div><dt>Destroy after</dt><dd>{destroy_after or 'Unavailable'}</dd></div>
-            <div><dt>Serving now</dt><dd><code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Evidence retained</dt><dd>Anchor PR and generation history remain after runtime cleanup.</dd></div>
-          </dl>
-        </div>
-        """
-    if preview_state.strip().lower() == "paused":
-        paused_callout_html = f"""
-        <div class=\"callout callout-warn\">
-          <div class=\"eyebrow\">Paused state</div>
-          <h2>This preview is intentionally paused. Harbor is holding the current review evidence in place.</h2>
-          <p>{status_summary}</p>
-          <dl>
-            <div><dt>Paused at</dt><dd>{paused_at or 'Unavailable'}</dd></div>
-            <div><dt>Serving now</dt><dd><code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Resume behavior</dt><dd>Blocked until Harbor resumes the preview.</dd></div>
-          </dl>
-        </div>
-        """
-    if preview_state.strip().lower() == "destroyed":
-        destroyed_callout_html = f"""
-        <div class=\"callout callout-neutral\">
-          <div class=\"eyebrow\">Historical evidence</div>
-          <h2>This preview has already been destroyed. Harbor is retaining the record as evidence.</h2>
-          <p>{status_summary}</p>
-          <dl>
-            <div><dt>Destroyed at</dt><dd>{destroyed_at or 'Unavailable'}</dd></div>
-            <div><dt>Destroy reason</dt><dd>{destroy_reason or 'Unavailable'}</dd></div>
-            <div><dt>Retained generation</dt><dd><code>{latest_generation_id or 'Unavailable'}</code></dd></div>
-          </dl>
-        </div>
-        """
-    if (
+    replacement_failed = (
         preview_state.strip().lower() != "destroyed"
         and not serving_matches_latest
         and latest_generation
         and latest_generation_state.strip().lower() == "failed"
-    ):
-        replacement_callout_html = f"""
-        <div class=\"callout callout-warn\">
-          <div class=\"eyebrow\">Replacement status</div>
-          <h2>Latest replacement failed. Harbor is still serving the older preview.</h2>
-          <p>{status_summary}</p>
-          <dl>
-            <div><dt>Serving now</dt><dd><code>{serving_generation_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Failed replacement</dt><dd><code>{latest_generation_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Failure stage</dt><dd>{latest_failure_stage or 'Unavailable'}</dd></div>
-          </dl>
-          <p>{latest_failure_summary or 'Harbor recorded a failed replacement without an additional summary.'}</p>
-        </div>
-        """
+    )
+
+    banner_label = f"{_status_label(preview_state).upper()}"
+    banner_note = f"Health {_status_label(display_health_status)}"
+    banner_tone = _status_tone(display_health_status)
+    if preview_state.strip().lower() == "destroyed":
+        banner_label = "DESTROYED"
+        banner_note = "Preview evidence retained"
+        banner_tone = "neutral"
+    elif preview_state.strip().lower() == "paused":
+        banner_label = "PAUSED"
+        banner_note = "Preview intentionally held"
+        banner_tone = "warn"
+    elif preview_state.strip().lower() == "teardown_pending":
+        banner_label = "TEARDOWN PENDING"
+        banner_note = "Preview teardown pending"
+        banner_tone = "warn"
+    elif not latest_generation:
+        banner_label = "STARTUP PENDING"
+        banner_note = "Preview record created; no generation requested"
+        banner_tone = "neutral"
+    elif _generation_in_progress(latest_generation_state):
+        banner_label = "REPLACEMENT IN FLIGHT" if serving_generation_id else "FIRST GENERATION IN FLIGHT"
+        banner_note = "Current preview still serving" if serving_generation_id else "Harbor is preparing the first preview"
+        banner_tone = "warn"
+    elif no_serving_preview:
+        banner_label = "AVAILABILITY GAP"
+        banner_note = "Health unavailable"
+        banner_tone = "bad"
+    elif replacement_failed:
+        banner_label = "FAILED REPLACEMENT"
+        banner_note = "Older preview still serving"
+        banner_tone = "bad"
+    elif healthy_live_preview:
+        banner_label = "LIVE PASS"
+        banner_note = "Serving the latest requested generation."
+        banner_tone = "good"
+
+    callout_tone = banner_tone
+    callout_eyebrow = "Current condition"
+    callout_title = status_summary
+    callout_summary = summary_text
+    callout_items: list[tuple[str, str]] = []
+    callout_detail = ""
+
+    if preview_state.strip().lower() == "destroyed":
+        callout_eyebrow = "Historical evidence"
+        callout_title = "This preview has already been destroyed. Harbor is retaining the record as evidence."
+        callout_summary = status_summary
+        callout_items = [
+            ("Destroyed at", destroyed_at or "Unavailable"),
+            ("Destroy reason", destroy_reason or "Unavailable"),
+            ("Retained generation", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
+        ]
+        callout_tone = "neutral"
+    elif preview_state.strip().lower() == "paused":
+        callout_eyebrow = "Paused state"
+        callout_title = "This preview is intentionally paused. Harbor is holding the current review evidence in place."
+        callout_summary = status_summary
+        callout_items = [
+            ("Paused at", paused_at or "Unavailable"),
+            (
+                "Serving now",
+                f"<code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code>",
+            ),
+            ("Resume behavior", "Blocked until Harbor resumes the preview."),
+        ]
+        callout_tone = "warn"
+    elif preview_state.strip().lower() == "teardown_pending":
+        callout_eyebrow = "Scheduled cleanup"
+        callout_title = "This preview is queued for teardown. Harbor is keeping the current runtime available until cleanup completes."
+        callout_summary = summary_text
+        callout_items = [
+            ("Destroy after", destroy_after or "Unavailable"),
+            (
+                "Serving now",
+                f"<code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code>",
+            ),
+            ("Evidence retained", "Anchor PR and generation history remain after runtime cleanup."),
+        ]
+        callout_tone = "warn"
+    elif not latest_generation:
+        callout_eyebrow = "Startup pending"
+        callout_title = "Harbor has created this preview record, but the first generation has not been requested yet."
+        callout_summary = summary_text
+        callout_items = [
+            ("Preview route", canonical_url or "Unavailable"),
+            ("Generation status", "Not created yet"),
+            (
+                "What happens next",
+                "Harbor needs the first generation request before this preview becomes live.",
+            ),
+        ]
+        callout_tone = "neutral"
+    elif _generation_in_progress(latest_generation_state):
+        callout_eyebrow = "Replacement in flight"
+        callout_title = (
+            "A replacement generation is in progress. Harbor is still serving the current preview."
+            if serving_generation_id
+            else "The first preview generation is in progress. Harbor is preparing this preview now."
+        )
+        callout_summary = summary_text or "Harbor is advancing the latest generation toward a reviewable preview."
+        callout_items = [
+            ("Current stage", escape(_status_label(latest_generation_state)) or "Unavailable"),
+            (
+                "Serving now",
+                f"<code>{serving_generation_id or 'No serving preview yet'}</code>",
+            ),
+            ("Requested at", latest_requested_at or "Unavailable"),
+        ]
+        callout_tone = "warn"
+    elif no_serving_preview:
+        callout_eyebrow = "Availability gap"
+        callout_title = "Harbor has generation evidence for this preview, but nothing is serving yet."
+        callout_summary = summary_text
+        callout_items = [
+            ("Latest generation", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
+            ("Current state", escape(_status_label(latest_generation_state)) or "Unavailable"),
+            ("Requested at", latest_requested_at or "Unavailable"),
+        ]
+        callout_tone = "bad"
+    elif replacement_failed:
+        callout_eyebrow = "Replacement status"
+        callout_title = "Latest replacement failed. Harbor is still serving the older preview."
+        callout_summary = status_summary
+        callout_items = [
+            ("Serving now", f"<code>{serving_generation_id or 'Unavailable'}</code>"),
+            ("Failed replacement", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
+            ("Failure stage", latest_failure_stage or "Unavailable"),
+        ]
+        callout_detail = (
+            latest_failure_summary
+            or "Harbor recorded a failed replacement without an additional summary."
+        )
+        callout_tone = "bad"
+    elif healthy_live_preview:
+        callout_eyebrow = "Review is live"
+        callout_title = "This preview is live at the stable Harbor route and serving the latest requested generation."
+        callout_summary = summary_text
+        callout_items = [
+            ("Serving generation", f"<code>{serving_generation_id or 'Unavailable'}</code>"),
+            ("Artifact", f"<code>{artifact_id or 'Unavailable'}</code>"),
+            ("Destroy after", destroy_after or "Unavailable"),
+        ]
+        callout_tone = "good"
+
+    callout_rows = "".join(
+        f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in callout_items
+    )
+    callout_detail_html = f"<p class=\"callout-detail\">{callout_detail}</p>" if callout_detail else ""
+    callout_html = f"""
+    <section class=\"callout tone-{callout_tone}\">
+      <div class=\"section-label\">{callout_eyebrow}</div>
+      <h2>{callout_title}</h2>
+      <p>{callout_summary}</p>
+      <dl>{callout_rows}</dl>
+      {callout_detail_html}
+    </section>
+    """
 
     source_map_rows = "".join(
         (
@@ -341,201 +4796,653 @@ def _render_harbor_preview_status_page_html(payload: dict[str, object]) -> str:
         if isinstance(item, dict)
     )
     companion_items = "".join(
-        f"<li><span>{escape(str(item.get('repo', '')))}</span><code>PR {escape(str(item.get('pr_number', '')))}</code></li>"
+        f"<li><span>{escape(str(item.get('repo', '')))}</span><span><code>PR {escape(str(item.get('pr_number', '')))}</code></span></li>"
         for item in companions
         if isinstance(item, dict)
     )
-    recent_generation_items = "".join(
-        (
-            "<li>"
-            f"<strong>{escape(str(item.get('generation_id', '')))}</strong>"
-            f"<span>{escape(str(item.get('state', '')))}</span>"
-            f"<code>{escape(str(item.get('artifact_id', '')))}</code>"
-            "</li>"
+    companions_section_html = ""
+    if companion_items:
+        companions_section_html = f"""
+    <section class=\"section\">
+      <div class=\"section-label\">Linked pull requests</div>
+      <h2>Companion refs</h2>
+      <p>Companion intent stays explicit and secondary to the anchor preview narrative.</p>
+      <ul class=\"simple-list\">{companion_items}</ul>
+    </section>
+    """
+
+    generation_rows = []
+    for item in recent_generations:
+        if not isinstance(item, dict):
+            continue
+        generation_id_value = escape(str(item.get("generation_id", "")))
+        generation_state_value = str(item.get("state", ""))
+        state_label = escape(_status_label(generation_state_value)) or "Unavailable"
+        requested_at_value = escape(str(item.get("requested_at", ""))) or "Unavailable"
+        role_parts: list[str] = []
+        if generation_id_value and generation_id_value == serving_generation_id:
+            role_parts.append("serving")
+        if generation_id_value and generation_id_value == latest_generation_id:
+            role_parts.append("latest")
+        if generation_id_value and generation_id_value == active_generation_id:
+            role_parts.append("active")
+        role_label = escape(" / ".join(role_parts) if role_parts else "historical")
+        serving_marker = "&bull; " if generation_id_value and generation_id_value == serving_generation_id else ""
+        state_class = f"state-{_status_tone(generation_state_value)}"
+        generation_rows.append(
+            "<tr>"
+            f"<td><code title=\"{generation_id_value}\">{serving_marker}{generation_id_value or 'Unavailable'}</code></td>"
+            f"<td>{role_label}</td>"
+            f"<td class=\"{state_class}\">{state_label}</td>"
+            f"<td>{requested_at_value}</td>"
+            "</tr>"
         )
-        for item in recent_generations
-        if isinstance(item, dict)
+        failure_stage_value = escape(str(item.get("failure_stage", "")))
+        if generation_state_value.strip().lower() == "failed" and failure_stage_value:
+            generation_rows.append(
+                "<tr class=\"row-note\">"
+                "<td></td>"
+                f"<td colspan=\"3\">Failure stage {failure_stage_value}.</td>"
+                "</tr>"
+            )
+    recent_generation_rows = "".join(generation_rows)
+
+    metadata_items = [
+        ("Artifact", f"<code>{artifact_id or 'Unavailable'}</code>"),
+        ("Manifest", f"<code>{manifest_fingerprint or 'Unavailable'}</code>"),
+        (generation_label, f"<code>{generation_value}</code>"),
+        ("Destroy after", destroy_after or "Unavailable"),
+    ]
+    metadata_rows = "".join(
+        f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in metadata_items
     )
 
-    return f"""<!DOCTYPE html>
-<html lang=\"en\">
-<head>
-  <meta charset=\"utf-8\" />
-  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\" />
-  <title>{preview_label} · Harbor status</title>
-  <style>
-    :root {{
-      --bg: #f3efe7;
-      --panel: rgba(255, 252, 247, 0.88);
-      --panel-strong: #fffdfa;
-      --text: #1d1a17;
-      --muted: #6b6257;
-      --line: rgba(37, 28, 20, 0.14);
-      --accent: #1d5c4d;
-      --good: #1f6a3a;
-      --warn: #9a6a11;
-      --bad: #9b2f2a;
-      --shadow: 0 18px 50px rgba(43, 33, 23, 0.08);
-    }}
-    * {{ box-sizing: border-box; }}
-    body {{
-      margin: 0;
-      font-family: "Iowan Old Style", "Palatino Linotype", "Book Antiqua", Georgia, serif;
-      color: var(--text);
-      background:
-        radial-gradient(circle at top left, rgba(29, 92, 77, 0.08), transparent 24%),
-        linear-gradient(180deg, #f7f2ea 0%, var(--bg) 100%);
-    }}
-    main {{ max-width: 1200px; margin: 0 auto; padding: 40px 24px 64px; }}
-    .hero {{
-      display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(280px, 0.8fr);
-      gap: 22px;
-      align-items: start;
-    }}
-    .headline, .sidebar, .section {{
-      background: var(--panel);
-      backdrop-filter: blur(12px);
-      border: 1px solid var(--line);
-      box-shadow: var(--shadow);
-    }}
-    .headline {{ padding: 30px; border-radius: 28px; }}
-    .sidebar {{ padding: 22px; border-radius: 24px; }}
-    .eyebrow {{
-      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-      font-size: 12px;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted);
-    }}
-    h1 {{ font-size: clamp(32px, 5vw, 56px); line-height: 0.95; margin: 12px 0 14px; }}
-    .lede {{ color: var(--muted); font-size: 17px; line-height: 1.6; max-width: 58ch; margin: 0; }}
-    .cta-row {{ display: flex; flex-wrap: wrap; gap: 12px; margin-top: 22px; }}
-    .cta, .subtle {{
-      display: inline-flex; align-items: center; gap: 8px; text-decoration: none;
-      border-radius: 999px; padding: 12px 16px; border: 1px solid var(--line);
-      font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 13px;
-    }}
-    .cta {{ background: var(--accent); color: #f9f6f0; border-color: transparent; }}
-    .subtle {{ color: var(--text); background: rgba(255,255,255,0.55); }}
-    .status-chip {{
-      display: inline-flex; align-items: center; gap: 8px; border-radius: 999px;
-      padding: 8px 12px; font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace;
-      font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
-    }}
-    .tone-good {{ background: rgba(31, 106, 58, 0.1); color: var(--good); }}
-    .tone-warn {{ background: rgba(154, 106, 17, 0.12); color: var(--warn); }}
-    .tone-bad {{ background: rgba(155, 47, 42, 0.12); color: var(--bad); }}
-    .tone-neutral {{ background: rgba(79, 68, 56, 0.1); color: #4f4438; }}
-    .metric-grid {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 18px; margin-top: 24px; }}
-    .metric {{ padding-top: 16px; border-top: 1px solid var(--line); }}
-    .metric label {{ display: block; color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
-    .metric strong, .metric code {{ display: block; margin-top: 8px; font-size: 15px; overflow-wrap: anywhere; }}
-    .stack {{ display: grid; gap: 18px; margin-top: 24px; }}
-    .callout {{ margin-top: 20px; padding: 18px 20px; border-radius: 22px; border: 1px solid var(--line); }}
-    .callout h2 {{ margin: 8px 0; font-size: 24px; line-height: 1.1; }}
-    .callout p {{ margin: 8px 0 0; color: var(--text); line-height: 1.5; }}
-    .callout dl {{ display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 16px 0 0; }}
-    .callout dt {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
-    .callout dd {{ margin: 6px 0 0; overflow-wrap: anywhere; }}
-    .callout-warn {{ background: rgba(154, 106, 17, 0.08); border-color: rgba(154, 106, 17, 0.18); }}
-    .callout-good {{ background: rgba(31, 106, 58, 0.08); border-color: rgba(31, 106, 58, 0.16); }}
-    .callout-neutral {{ background: rgba(79, 68, 56, 0.06); border-color: rgba(79, 68, 56, 0.16); }}
-    .section {{ border-radius: 24px; padding: 24px; }}
-    .section h2 {{ margin: 0 0 10px; font-size: 24px; }}
-    .section p {{ margin: 0; color: var(--muted); line-height: 1.6; }}
-    .columns {{ display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(300px, 0.9fr); gap: 18px; margin-top: 18px; }}
-    table {{ width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 14px; }}
-    th, td {{ text-align: left; padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }}
-    th {{ color: var(--muted); font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; }}
-    ul {{ list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 10px; }}
-    li {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }}
-    code {{ font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; font-size: 12px; }}
-    details {{ margin-top: 18px; }}
-    summary {{ cursor: pointer; color: var(--muted); font-family: ui-monospace, "SFMono-Regular", Menlo, Consolas, monospace; }}
-    pre {{ overflow: auto; padding: 18px; background: #1e1a16; color: #f4ede3; border-radius: 18px; font-size: 12px; }}
-    @media (max-width: 760px) {{
-      .hero, .columns, .metric-grid {{ grid-template-columns: 1fr; }}
-      .callout dl {{ grid-template-columns: 1fr; }}
-      main {{ padding: 20px 16px 40px; }}
-      .headline, .sidebar, .section {{ border-radius: 22px; }}
-    }}
-  </style>
-</head>
-<body>
-  <main>
-    <section class=\"hero\">
-      <article class=\"headline\">
-        <div class=\"eyebrow\">Harbor preview status</div>
-        <h1>{preview_label}</h1>
-        <p class=\"lede\">{status_summary}</p>
-        {healthy_callout_html}
-        {startup_callout_html}
-        {in_progress_callout_html}
-        {no_serving_callout_html}
-        {teardown_callout_html}
-        {paused_callout_html}
-        {destroyed_callout_html}
-        {replacement_callout_html}
-        <div class=\"cta-row\">
-          <a class=\"cta\" href=\"{primary_cta_href}\">{primary_cta_label}</a>
-          <a class=\"subtle\" href=\"{secondary_cta_href}\">{secondary_cta_label}</a>
-        </div>
-        <div class=\"metric-grid\">
-          <div class=\"metric\"><label>Artifact</label><code>{artifact_id or 'Unavailable'}</code></div>
-          <div class=\"metric\"><label>Manifest</label><code>{manifest_fingerprint or 'Unavailable'}</code></div>
-          <div class=\"metric\"><label>{generation_label}</label><code>{generation_value}</code></div>
-        </div>
-      </article>
-      <aside class=\"sidebar\">
-        <div class=\"status-chip tone-{_status_tone(preview_state)}\">Preview {escape(_status_label(preview_state))}</div>
-        <div style=\"height:12px\"></div>
-        <div class=\"status-chip tone-{_status_tone(display_health_status)}\">Health {escape(_status_label(display_health_status))}</div>
-        <div class=\"stack\">
-          <div>
-            <div class=\"eyebrow\">Next action</div>
-            <p>{next_action or 'No next action recorded.'}</p>
-          </div>
-          <div>
-            <div class=\"eyebrow\">Destroy after</div>
-            <p>{destroy_after or 'No destroy-after deadline recorded.'}</p>
-          </div>
-        </div>
-      </aside>
+    route_line_items = []
+    if canonical_url:
+        route_line_items.append(
+            f"<div class=\"route-item\"><span>Stable route</span><a href=\"{canonical_url}\">{canonical_url}</a></div>"
+        )
+    if anchor_pr_url:
+        route_line_items.append(
+            f"<div class=\"route-item\"><span>Anchor PR</span><a href=\"{anchor_pr_url}\">{anchor_pr_url}</a></div>"
+        )
+    route_line = "".join(route_line_items) or "<div class=\"route-item\">No preview route recorded.</div>"
+    mast_title = preview_label
+    if anchor_repo_name and anchor_pr_number:
+        mast_title = f"{anchor_repo_name} PR {anchor_pr_number}"
+    identity_bits = []
+    if context_name:
+        identity_bits.append(f"Context {context_name}")
+    if preview_label and mast_title != preview_label:
+        identity_bits.append(f"<code>{preview_label}</code>")
+    identity_html = ""
+    if identity_bits:
+        identity_html = f'<p class="identity-line">{"<span>&bull;</span>".join(identity_bits)}</p>'
+
+    action_slug = _harbor_action_slug(preview_label)
+    anchor_head_sha = escape(str(input_summary.get("anchor", {}).get("head_sha", ""))) if isinstance(input_summary.get("anchor"), dict) else ""
+    raw_anchor_head_sha = str(input_summary.get("anchor", {}).get("head_sha", "")).strip() if isinstance(input_summary.get("anchor"), dict) else ""
+    raw_baseline_release_tuple_id = str(input_summary.get("baseline_release_tuple_id", "")).strip()
+    raw_source_map = [item for item in source_map if isinstance(item, dict)]
+    raw_companions = [item for item in companions if isinstance(item, dict)]
+    raw_context_name = str(preview.get("context", "")).strip()
+    raw_anchor_repo = str(preview.get("anchor_repo", "")).strip()
+    raw_anchor_pr_url = str(preview.get("anchor_pr_url", links.get("anchor_pr_url", ""))).strip()
+    raw_latest_generation_id = str(latest_generation.get("generation_id", "")).strip()
+    raw_latest_requested_reason = str(latest_generation.get("requested_reason", "")).strip()
+    raw_latest_requested_at = str(latest_generation.get("requested_at", "")).strip()
+    raw_latest_artifact_id = str(latest_generation.get("artifact_id", "")).strip()
+    raw_latest_manifest_fingerprint = str(latest_generation.get("resolved_manifest_fingerprint", "")).strip()
+    operator_actions: list[str] = []
+    if preview_state.strip().lower() != "destroyed":
+        destroy_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "destroyed_at": "<utc-timestamp>",
+            "destroy_reason": "operator_requested",
+        }
+        destroy_script = _build_harbor_action_script(
+            command_name="destroy-preview",
+            file_payloads=(("ACTION_FILE", f"/tmp/harbor-{action_slug}-destroy-preview.json", destroy_payload),),
+            command_args=("--input-file", '"$ACTION_FILE"'),
+        )
+        operator_actions.append(
+            _render_harbor_action_recipe(
+                title="Destroy preview",
+                summary="Tear down this preview explicitly while retaining Harbor evidence for the record.",
+                tone="bad",
+                script=destroy_script,
+                command_label="destroy-preview",
+                recipe_id=f"action-{action_slug}-destroy",
+            )
+        )
+        request_generation_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_url": raw_anchor_pr_url,
+            "state": preview_state.strip().lower() or "pending",
+            "updated_at": "<utc-timestamp>",
+        }
+        generation_request_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_url": raw_anchor_pr_url,
+            "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
+            "state": "resolving",
+            "requested_reason": "operator_requested_refresh",
+            "requested_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint or "<manifest-fingerprint>",
+            "artifact_id": raw_latest_artifact_id,
+            "baseline_release_tuple_id": raw_baseline_release_tuple_id,
+            "source_map": raw_source_map,
+            "companion_summaries": raw_companions,
+            "deploy_status": "pending",
+            "verify_status": "pending",
+            "overall_health_status": "pending",
+        }
+        request_script = _build_harbor_action_script(
+            command_name="request-generation",
+            file_payloads=(
+                ("PREVIEW_FILE", f"/tmp/harbor-{action_slug}-preview.json", request_generation_payload),
+                ("GENERATION_FILE", f"/tmp/harbor-{action_slug}-generation.json", generation_request_payload),
+            ),
+            command_args=(
+                "--preview-input-file",
+                '"$PREVIEW_FILE"',
+                "--generation-input-file",
+                '"$GENERATION_FILE"',
+            ),
+        )
+        operator_actions.insert(
+            0,
+            _render_harbor_action_recipe(
+                title="Request replacement generation",
+                summary="Queue a fresh Harbor generation for this preview using the current record as the starting template.",
+                tone="warn",
+                script=request_script,
+                command_label="request-generation",
+                recipe_id=f"action-{action_slug}-request-generation",
+            ),
+        )
+    if raw_latest_generation_id and _generation_in_progress(latest_generation_state):
+        ready_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_url": raw_anchor_pr_url,
+            "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
+            "generation_id": raw_latest_generation_id,
+            "state": "ready",
+            "requested_reason": raw_latest_requested_reason or "operator_requested_refresh",
+            "requested_at": raw_latest_requested_at or "<requested-at>",
+            "ready_at": "<utc-timestamp>",
+            "finished_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint or "<manifest-fingerprint>",
+            "artifact_id": raw_latest_artifact_id or "<artifact-id>",
+            "baseline_release_tuple_id": raw_baseline_release_tuple_id,
+            "source_map": raw_source_map,
+            "companion_summaries": raw_companions,
+            "deploy_status": "pass",
+            "verify_status": "pass",
+            "overall_health_status": "pass",
+        }
+        ready_script = _build_harbor_action_script(
+            command_name="mark-generation-ready",
+            file_payloads=(("ACTION_FILE", f"/tmp/harbor-{action_slug}-mark-ready.json", ready_payload),),
+            command_args=("--input-file", '"$ACTION_FILE"'),
+        )
+        failed_payload = {
+            "schema_version": 1,
+            "context": raw_context_name,
+            "anchor_repo": raw_anchor_repo,
+            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_url": raw_anchor_pr_url,
+            "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
+            "generation_id": raw_latest_generation_id,
+            "state": "failed",
+            "requested_reason": raw_latest_requested_reason or "operator_requested_refresh",
+            "requested_at": raw_latest_requested_at or "<requested-at>",
+            "failed_at": "<utc-timestamp>",
+            "finished_at": "<utc-timestamp>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint or "<manifest-fingerprint>",
+            "artifact_id": raw_latest_artifact_id,
+            "baseline_release_tuple_id": raw_baseline_release_tuple_id,
+            "source_map": raw_source_map,
+            "companion_summaries": raw_companions,
+            "deploy_status": "fail",
+            "verify_status": "pending",
+            "overall_health_status": "fail",
+            "failure_stage": latest_failure_stage or "<failure-stage>",
+            "failure_summary": latest_failure_summary or "<failure-summary>",
+        }
+        failed_script = _build_harbor_action_script(
+            command_name="mark-generation-failed",
+            file_payloads=(("ACTION_FILE", f"/tmp/harbor-{action_slug}-mark-failed.json", failed_payload),),
+            command_args=("--input-file", '"$ACTION_FILE"'),
+        )
+        operator_actions.insert(
+            0,
+            _render_harbor_action_recipe(
+                title="Mark latest generation failed",
+                summary="Record a failed in-flight generation while preserving any still-serving preview evidence.",
+                tone="bad",
+                script=failed_script,
+                command_label="mark-generation-failed",
+                recipe_id=f"action-{action_slug}-mark-failed",
+            ),
+        )
+        operator_actions.insert(
+            0,
+            _render_harbor_action_recipe(
+                title="Mark latest generation ready",
+                summary="Advance the current in-flight generation into Harbor's ready/serving path once deploy and verify evidence are complete.",
+                tone="good",
+                script=ready_script,
+                command_label="mark-generation-ready",
+                recipe_id=f"action-{action_slug}-mark-ready",
+            ),
+        )
+    operator_actions_html = "".join(operator_actions)
+    if not operator_actions_html:
+        operator_actions_html = "<p class=\"action-empty\">No write-side recipe is exposed for this retained preview state.</p>"
+    operator_actions_section_html = f"""
+    <section class=\"section\" id=\"operator-actions\">
+      <div class=\"section-label\">Operator actions</div>
+      <h2>Write-side Harbor recipes</h2>
+      <p>Harbor still renders as a static operator surface here, so each action is shown as the exact shell recipe for this preview identity.</p>
+      <div class=\"action-stack\">{operator_actions_html}</div>
+    </section>
+    """
+
+    body_html = f"""
+    <header class=\"mast\">
+      <div class=\"section-label\">Preview identity</div>
+      <h1>{mast_title}</h1>
+      {identity_html}
+      <div class=\"banner tone-{banner_tone}\"><strong>{escape(banner_label)}</strong><span>{escape(banner_note)}</span></div>
+      <p class=\"summary\">{summary_text}</p>
+      <div class=\"actions\">
+        <a class=\"primary-action\" href=\"{primary_cta_href}\">{primary_cta_label}</a>
+        <a class=\"secondary-link\" href=\"{secondary_cta_href}\">{secondary_cta_label}</a>
+      </div>
+      <div class=\"route-line\">{route_line}</div>
+    </header>
+
+    {callout_html}
+
+    {operator_actions_section_html}
+
+    <section class=\"section\">
+      <div class=\"section-label\">Exact inputs</div>
+      <h2>Serving manifest evidence</h2>
+      <p>Harbor keeps the exact repo-to-SHA map visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
+      <table>
+        <thead><tr><th>Repo</th><th>SHA</th><th>Selection</th></tr></thead>
+        <tbody>{source_map_rows or '<tr><td colspan="3">No source map recorded.</td></tr>'}</tbody>
+      </table>
     </section>
 
-    <section class=\"columns\">
-      <article class=\"section\">
-        <div class=\"eyebrow\">Exact inputs</div>
-        <h2>Serving manifest evidence</h2>
-        <p>Harbor keeps the exact repo-to-SHA map and companion intent visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
-        <table>
-          <thead><tr><th>Repo</th><th>SHA</th><th>Selection</th></tr></thead>
-          <tbody>{source_map_rows or '<tr><td colspan="3">No source map recorded.</td></tr>'}</tbody>
-        </table>
-      </article>
-      <article class=\"section\">
-        <div class=\"eyebrow\">Companions</div>
-        <h2>Linked pull requests</h2>
-        <p>Companion refs stay explicit and secondary to the anchor preview narrative.</p>
-        <ul>{companion_items or '<li><span>No companions recorded.</span></li>'}</ul>
-      </article>
+    {companions_section_html}
+
+    <section class=\"section\">
+      <div class=\"section-label\">Recent activity</div>
+      <h2>Generation ledger</h2>
+      <p>Generation history stays visible as evidence, but the stable preview route remains the primary narrative.</p>
+      <table>
+        <thead><tr><th>Generation</th><th>Role</th><th>State</th><th>Requested at</th></tr></thead>
+        <tbody>{recent_generation_rows or '<tr><td colspan="4">No recent generations recorded.</td></tr>'}</tbody>
+      </table>
     </section>
 
-    <section class=\"section\" style=\"margin-top:18px;\">
-      <div class=\"eyebrow\">Recent activity</div>
-      <h2>Generation trail</h2>
-      <p>Generation history stays visible as evidence, but the stable preview URL remains the primary narrative.</p>
-      <ul>{recent_generation_items or '<li><span>No recent generations recorded.</span></li>'}</ul>
+    <section class=\"section\">
+      <div class=\"section-label\">Lifecycle evidence</div>
+      <h2>Control-plane record</h2>
+      <dl class=\"metadata-strip\">{metadata_rows}</dl>
       <details>
-        <summary>Raw page JSON</summary>
+        <summary>Raw payload JSON</summary>
         <pre>{raw_payload_json}</pre>
       </details>
     </section>
-  </main>
-</body>
-</html>
-"""
+    <script>
+    (() => {{
+      const buttons = Array.from(document.querySelectorAll('[data-copy-target]'));
+      if (!buttons.length) {{
+        return;
+      }}
+      const fallbackCopy = (text) => {{
+        const textarea = document.createElement('textarea');
+        textarea.value = text;
+        textarea.setAttribute('readonly', 'true');
+        textarea.style.position = 'absolute';
+        textarea.style.left = '-9999px';
+        document.body.appendChild(textarea);
+        textarea.select();
+        const copied = document.execCommand('copy');
+        document.body.removeChild(textarea);
+        return copied;
+      }};
+      const selectRecipe = (target) => {{
+        const details = target.closest('details');
+        if (details) {{
+          details.open = true;
+        }}
+        const selection = window.getSelection();
+        if (!selection) {{
+          return false;
+        }}
+        const range = document.createRange();
+        range.selectNodeContents(target);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        target.scrollIntoView({{block: 'nearest'}});
+        return true;
+      }};
+      buttons.forEach((button) => {{
+        button.addEventListener('click', async () => {{
+          const targetId = button.getAttribute('data-copy-target');
+          if (!targetId) {{
+            return;
+          }}
+          const target = document.getElementById(targetId);
+          if (!target) {{
+            return;
+          }}
+          try {{
+            const text = target.textContent || '';
+            if (navigator.clipboard && window.isSecureContext) {{
+              await navigator.clipboard.writeText(text);
+            }} else if (!fallbackCopy(text)) {{
+              throw new Error('fallback-copy-failed');
+            }}
+            const original = button.textContent || 'Copy';
+            button.textContent = 'Copied';
+            window.setTimeout(() => {{
+              button.textContent = original;
+            }}, 1200);
+          }} catch (_error) {{
+            const text = target.textContent || '';
+            if (fallbackCopy(text)) {{
+              const original = button.textContent || 'Copy';
+              button.textContent = 'Copied';
+              window.setTimeout(() => {{
+                button.textContent = original;
+              }}, 1200);
+            }} else {{
+              const original = button.textContent || 'Copy';
+              if (selectRecipe(target)) {{
+                button.textContent = 'Selected';
+                window.setTimeout(() => {{
+                  button.textContent = original;
+                }}, 1400);
+              }} else {{
+                button.textContent = 'Copy failed';
+              }}
+            }}
+          }}
+        }});
+      }});
+    }})();
+    </script>
+    """
+
+    extra_css = """
+    .mast { display: grid; gap: 14px; }
+    .identity-line {
+      margin: -4px 0 0;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .identity-line code {
+      font-size: 12px;
+    }
+    .route-line {
+      display: grid;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 14px;
+      line-height: 1.5;
+      padding-top: 14px;
+      border-top: 1px solid var(--line);
+    }
+    .route-item { display: flex; flex-wrap: wrap; gap: 8px; }
+    .route-item span { font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .route-line a,
+    .secondary-link,
+    details summary { color: inherit; }
+    .route-line a,
+    .secondary-link { text-underline-offset: 0.18em; }
+    .mast h1 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 40px;
+      line-height: 0.96;
+      letter-spacing: -0.02em;
+    }
+    .summary { margin: 0; color: var(--muted); font-size: 16px; line-height: 1.65; }
+    .banner {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      padding: 14px 16px;
+      border-radius: 4px;
+      color: #f5f2ec;
+      font-family: var(--mono);
+    }
+    .banner strong { font-size: 13px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .banner span { font-size: 12px; opacity: 0.92; }
+    .tone-good { background: var(--good); }
+    .tone-warn { background: var(--warn); }
+    .tone-bad { background: var(--bad); }
+    .tone-neutral { background: var(--neutral); }
+    .actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; }
+    .primary-action {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      padding: 12px 16px;
+      border-radius: 4px;
+      background: var(--text);
+      color: #f6f3ec;
+      text-decoration: none;
+      font-family: var(--mono);
+      font-size: 13px;
+    }
+    .secondary-link { font-family: var(--mono); font-size: 13px; }
+    .section,
+    .callout { border-top: 1px solid var(--line); padding-top: 24px; margin-top: 40px; }
+    .action-stack {
+      display: grid;
+      gap: 18px;
+      margin-top: 18px;
+    }
+    .action-card {
+      border: 1px solid var(--line);
+      background: var(--surface);
+      border-radius: 14px;
+      padding: 16px;
+      display: grid;
+      gap: 12px;
+    }
+    .action-card.tone-good { border-left: 3px solid var(--good); }
+    .action-card.tone-warn { border-left: 3px solid var(--warn); }
+    .action-card.tone-bad { border-left: 3px solid var(--bad); }
+    .action-card.tone-neutral { border-left: 3px solid var(--neutral); }
+    .action-card-head {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+    .action-command {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 8px;
+    }
+    .action-card h3 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 22px;
+      line-height: 1.08;
+    }
+    .action-card p {
+      margin: 8px 0 0;
+      color: var(--muted);
+      line-height: 1.55;
+    }
+    .action-script-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+    .copy-button {
+      -webkit-appearance: none;
+      appearance: none;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: rgba(251, 250, 246, 0.12);
+      padding: 7px 10px;
+      color: #f7f2e8;
+      cursor: pointer;
+      font: inherit;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .copy-button:hover {
+      background: rgba(251, 250, 246, 0.2);
+    }
+    .action-details {
+      border-top: 1px solid var(--line);
+      padding-top: 12px;
+    }
+    .action-details summary {
+      cursor: pointer;
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      list-style: none;
+    }
+    .action-details summary::-webkit-details-marker {
+      display: none;
+    }
+    .action-pre {
+      margin: 12px 0 0;
+      overflow: auto;
+      padding: 16px;
+      background: #13110f;
+      color: #e7e0d4;
+      border-radius: 8px;
+      font-size: 12px;
+      line-height: 1.55;
+    }
+    .action-empty {
+      margin: 18px 0 0;
+      color: var(--muted);
+    }
+    .section-label {
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--muted);
+      margin-bottom: 12px;
+    }
+    .callout { padding-left: 16px; border-left: 3px solid var(--neutral); }
+    .callout.tone-good { border-left-color: var(--good); background: none; color: inherit; }
+    .callout.tone-warn { border-left-color: var(--warn); background: none; color: inherit; }
+    .callout.tone-bad { border-left-color: var(--bad); background: none; color: inherit; }
+    .callout.tone-neutral { border-left-color: var(--neutral); background: none; color: inherit; }
+    .callout h2,
+    .section h2 {
+      margin: 0;
+      font-family: var(--serif);
+      font-size: 26px;
+      line-height: 1.08;
+    }
+    .callout p,
+    .section p { margin: 10px 0 0; color: var(--muted); line-height: 1.65; }
+    .callout dl,
+    .metadata-strip {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+      margin: 18px 0 0;
+    }
+    .callout dt,
+    .metadata-strip dt {
+      color: var(--muted);
+      font-family: var(--mono);
+      font-size: 11px;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .callout dd,
+    .metadata-strip dd { margin: 8px 0 0; overflow-wrap: anywhere; }
+    .callout-detail { color: var(--text); }
+    table { width: 100%; border-collapse: collapse; margin-top: 18px; font-size: 14px; background: transparent; }
+    th, td { text-align: left; padding: 11px 0; border-bottom: 1px solid var(--line); vertical-align: top; }
+    th { color: var(--muted); font-family: var(--mono); font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; }
+    .simple-list { list-style: none; margin: 18px 0 0; padding: 0; display: grid; gap: 10px; }
+    .simple-list li { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 12px; padding-bottom: 10px; border-bottom: 1px solid var(--line); }
+    code { font-family: var(--mono); font-size: 12px; }
+    .state-good { color: var(--good); }
+    .state-warn { color: var(--warn); }
+    .state-bad { color: var(--bad); }
+    .row-note td { color: var(--muted); font-size: 13px; padding-top: 0; }
+    details { margin-top: 18px; }
+    summary { cursor: pointer; color: var(--muted); font-family: var(--mono); }
+    pre { overflow: auto; padding: 18px; background: #13110f; color: #e7e0d4; border-radius: 4px; font-size: 12px; }
+    @media (max-width: 760px) {
+      .mast { gap: 12px; }
+      .mast h1 { font-size: 30px; }
+      .identity-line {
+        gap: 6px;
+        font-size: 12px;
+      }
+      .route-line {
+        gap: 6px;
+        padding-top: 12px;
+        font-size: 13px;
+      }
+      .callout dl,
+      .metadata-strip { grid-template-columns: 1fr; }
+    }
+    """
+
+    return _render_harbor_shell_document(
+        page_title=f"{preview_label} · Harbor status",
+        context_name=str(preview.get("context", "")),
+        active_nav="detail",
+        body_class="detail-layout",
+        body_html=body_html,
+        extra_css=extra_css,
+        nav_links=nav_links,
+    )
 
 
 def _load_json_file(input_file: Path) -> dict[str, object]:
@@ -2297,13 +7204,35 @@ def _ingest_harbor_pr_event_payload(
         record_store=record_store,
         event=event,
     )
+    decision_payload = payload.get("decision")
+    resolved_context = (
+        str(decision_payload.get("resolved_context", "")).strip() if isinstance(decision_payload, dict) else ""
+    )
+    preview_payload = payload.get("preview")
+    if not resolved_context and isinstance(preview_payload, dict):
+        resolved_context = str(preview_payload.get("context", "")).strip()
+    request_metadata_payload = payload.get("request_metadata")
+    request_metadata = (
+        HarborPreviewRequestParseResult.model_validate(request_metadata_payload)
+        if isinstance(request_metadata_payload, dict)
+        else HarborPreviewRequestParseResult(status="missing")
+    )
+    enablement_record = _build_harbor_preview_enablement_record(
+        context_name=resolved_context,
+        event=event,
+        request_metadata=request_metadata,
+    )
+    if enablement_record is not None:
+        record_store.write_preview_enablement_record(enablement_record)
+    payload["enablement_record"] = (
+        enablement_record.model_dump(mode="json") if enablement_record is not None else None
+    )
     if apply_intent:
         payload["apply"] = _apply_harbor_pr_event_intent(
             control_plane_root=control_plane_root,
             record_store=record_store,
             payload=payload,
         )
-        decision_payload = payload.get("decision")
         request_metadata_payload = payload.get("request_metadata")
         action = decision_payload.get("action", "") if isinstance(decision_payload, dict) else ""
         payload["feedback"] = build_pull_request_feedback_payload(
@@ -2320,7 +7249,6 @@ def _ingest_harbor_pr_event_payload(
             apply_result=payload["apply"],
         )
     if deliver_feedback:
-        decision_payload = payload.get("decision")
         resolved_context = (
             decision_payload.get("resolved_context", "") if isinstance(decision_payload, dict) else ""
         )
@@ -2478,6 +7406,92 @@ def harbor_previews_list(state_dir: Path, context_name: str) -> None:
         context_name=context_name,
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@harbor_previews.command("show-tenant")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--anchor-repo", default="")
+def harbor_previews_show_tenant(state_dir: Path, context_name: str, anchor_repo: str) -> None:
+    payload = _build_harbor_tenant_payload(
+        control_plane_root=_control_plane_root(),
+        record_store=_store(state_dir),
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+    )
+    if payload is None:
+        raise click.ClickException("No Harbor tenant environment evidence found for the requested scope.")
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@harbor_previews.command("render-index-page")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--output-file", type=click.Path(path_type=Path))
+def harbor_previews_render_index_page(
+    state_dir: Path,
+    context_name: str,
+    output_file: Path | None,
+) -> None:
+    record_store = _store(state_dir)
+    payload = build_preview_inventory_payload(
+        record_store=record_store,
+        context_name=context_name,
+    )
+    tenant_payload = _build_harbor_tenant_payload(
+        control_plane_root=_control_plane_root(),
+        record_store=record_store,
+        context_name=context_name,
+    )
+    html_output = _render_harbor_preview_index_page_html(payload, tenant_payload=tenant_payload)
+    if output_file is not None:
+        output_file.write_text(html_output, encoding="utf-8")
+        return
+    click.echo(html_output)
+
+
+@harbor_previews.command("render-policy-page")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--output-file", type=click.Path(path_type=Path))
+def harbor_previews_render_policy_page(
+    state_dir: Path,
+    context_name: str,
+    output_file: Path | None,
+) -> None:
+    payload = build_preview_inventory_payload(
+        record_store=_store(state_dir),
+        context_name=context_name,
+    )
+    html_output = _render_harbor_preview_policy_page_html(payload)
+    if output_file is not None:
+        output_file.write_text(html_output, encoding="utf-8")
+        return
+    click.echo(html_output)
+
+
+@harbor_previews.command("render-site")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--context", "context_name", default="")
+@click.option("--output-dir", type=click.Path(path_type=Path), required=True)
+def harbor_previews_render_site(
+    state_dir: Path,
+    context_name: str,
+    output_dir: Path,
+) -> None:
+    _write_harbor_site_bundle(
+        state_dir=state_dir,
+        output_dir=output_dir,
+        context_name=context_name,
+    )
 
 
 @harbor_previews.command("show")

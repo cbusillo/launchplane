@@ -1656,6 +1656,7 @@ def build_preview_inventory_payload(
                 "context": preview.context,
                 "anchor_repo": preview.anchor_repo,
                 "anchor_pr_number": preview.anchor_pr_number,
+                "anchor_pr_url": preview.anchor_pr_url,
                 "preview_label": preview.preview_label,
                 "canonical_url": preview.canonical_url,
                 "state": preview.state,
