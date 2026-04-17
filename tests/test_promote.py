@@ -266,6 +266,79 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             str(captured_update["env_text"]),
         )
 
+    def test_sync_artifact_image_reference_rejects_legacy_monorepo_target_source(self) -> None:
+        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-testing")
+        artifact_manifest = ArtifactIdentityManifest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "source_commit": "abc1234",
+                "enterprise_base_digest": "sha256:enterprise123",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-private",
+                    "digest": "sha256:image456",
+                    "tags": ["sha-abc123"],
+                },
+            }
+        )
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={
+                "sourceType": "git",
+                "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
+                "customGitBranch": "opw-testing",
+                "env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest",
+            },
+        ):
+            with self.assertRaises(click.ClickException) as error_context:
+                _sync_artifact_image_reference_for_target(
+                    artifact_manifest=artifact_manifest,
+                    resolved_target=resolved_target,
+                )
+
+        self.assertIn("legacy monorepo Dokploy source", str(error_context.exception))
+        self.assertIn("odoo-ai", str(error_context.exception))
+
+    def test_sync_artifact_image_reference_rejects_mutable_addon_refs(self) -> None:
+        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-testing")
+        artifact_manifest = ArtifactIdentityManifest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "source_commit": "abc1234",
+                "enterprise_base_digest": "sha256:enterprise123",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-private",
+                    "digest": "sha256:image456",
+                    "tags": ["sha-abc123"],
+                },
+            }
+        )
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={
+                "env": (
+                    "DOCKER_IMAGE=odoo-runtime\n"
+                    "DOCKER_IMAGE_TAG=latest\n"
+                    "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
+                )
+            },
+        ):
+            with self.assertRaises(click.ClickException) as error_context:
+                _sync_artifact_image_reference_for_target(
+                    artifact_manifest=artifact_manifest,
+                    resolved_target=resolved_target,
+                )
+
+        self.assertIn("exact git SHAs", str(error_context.exception))
+        self.assertIn("disable_odoo_online@main", str(error_context.exception))
+
     def test_sync_artifact_image_reference_clears_stale_override_without_manifest(self) -> None:
         resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod")
         captured_update: dict[str, object] = {}
