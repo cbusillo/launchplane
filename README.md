@@ -5,12 +5,17 @@ Harbor preview state, and promotion orchestration.
 
 ## Purpose
 
+- Act as the Odoo-first Harbor proving ground for durable deployment truth.
 - Own artifact, backup-gate, deployment, promotion, and inventory records
   outside the code and local-DX repos.
 - Own ship and promotion orchestration behind explicit control-plane
   contracts.
 - Keep code and local DX in `odoo-devkit`, tenant repos, and shared-addons,
   with only explicit artifact and operator handoffs into this repo.
+
+This repo's docs describe the implemented Odoo-first contracts that exist
+today. Broader Harbor product-direction guidance stays in saved plans until
+matching code and operator surfaces exist here.
 
 ## Bootstrap Scope
 
@@ -31,6 +36,9 @@ uv run python -m unittest
 
 The tracked Dokploy route catalog lives in `config/dokploy.toml`, with
 operator-local target IDs supplied through `config/dokploy-targets.toml`.
+The stable remote lane catalog is now `testing` plus `prod`; pull requests use
+Harbor-managed preview identities and ephemeral preview stacks instead of a
+durable shared `dev` lane.
 
 ## Docs
 
