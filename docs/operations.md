@@ -28,6 +28,10 @@ top-level groups are:
   state directory outside git.
 - Artifact manifests handed off from build/export steps are persisted here
   before later workflows depend on them.
+- The normal split-repo build/export handoff comes from `odoo-devkit`
+  `platform runtime publish`, which writes a control-plane-compatible artifact
+  manifest JSON file after it stages tenant/shared addon sources, pushes the
+  image, and resolves the pushed digest.
 - Promotion execution validates a stored passing backup-gate record for the
   destination environment before ship execution begins.
 - Deploy execution prefers immutable artifact image references by syncing
@@ -75,6 +79,20 @@ top-level groups are:
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,
   and `ODOO_DATA_WORKFLOW_LOCK_FILE`.
+
+Artifact handoff example:
+
+```bash
+uv --directory ../odoo-devkit run platform runtime publish \
+  --manifest ./workspace.toml \
+  --instance testing \
+  --image-repository ghcr.io/example/odoo-opw \
+  --image-tag opw-20260416-deadbeef \
+  --output-file /tmp/opw-artifact.json
+uv run control-plane artifacts write \
+  --state-dir ./state \
+  --input-file /tmp/opw-artifact.json
+```
 
 ## Harbor Preview Operations
 
