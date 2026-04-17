@@ -12,6 +12,12 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 
 class ReleaseTupleTests(unittest.TestCase):
+    def test_should_mint_release_tuple_only_for_stable_remote_channels(self) -> None:
+        self.assertTrue(control_plane_release_tuples.should_mint_release_tuple_for_channel("testing"))
+        self.assertTrue(control_plane_release_tuples.should_mint_release_tuple_for_channel("prod"))
+        self.assertFalse(control_plane_release_tuples.should_mint_release_tuple_for_channel("dev"))
+        self.assertFalse(control_plane_release_tuples.should_mint_release_tuple_for_channel("preview"))
+
     def test_resolve_release_tuple_reads_context_channel_repo_refs(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -164,6 +170,31 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     control_plane_root=control_plane_root,
                 )
 
+    def test_load_release_tuple_catalog_rejects_non_stable_remote_channels(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            tuples_file = control_plane_root / "config" / "release-tuples.toml"
+            tuples_file.parent.mkdir(parents=True, exist_ok=True)
+            tuples_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.channels.dev]
+tuple_id = "opw-dev-2026-04-13"
+
+[contexts.opw.channels.dev.repo_shas]
+tenant-opw = "1111111111111111111111111111111111111111"
+shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(Exception, "stable remote channels"):
+                control_plane_release_tuples.load_release_tuple_catalog(
+                    control_plane_root=control_plane_root,
+                )
+
     def test_build_release_tuple_record_from_artifact_manifest_uses_split_repo_shas(self) -> None:
         manifest = ArtifactIdentityManifest(
             artifact_id="artifact-sha256-image456",
@@ -212,6 +243,32 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 artifact_manifest=manifest,
             )
 
+    def test_build_release_tuple_record_rejects_dev_channel(self) -> None:
+        manifest = ArtifactIdentityManifest(
+            artifact_id="artifact-sha256-image456",
+            source_commit="abc1234",
+            enterprise_base_digest="sha256:enterprise123",
+            addon_sources=(
+                {
+                    "repository": "cbusillo/odoo-shared-addons",
+                    "ref": "def5678",
+                },
+            ),
+            image={
+                "repository": "ghcr.io/cbusillo/odoo-private",
+                "digest": "sha256:image456",
+            },
+        )
+
+        with self.assertRaisesRegex(Exception, "stable remote channels"):
+            control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+                context_name="opw",
+                channel_name="dev",
+                artifact_manifest=manifest,
+                deployment_record_id="deployment-1",
+                minted_at="2026-04-10T18:24:00Z",
+            )
+
     def test_render_release_tuple_catalog_toml_round_trips_to_catalog(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -241,6 +298,42 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         release_tuple = catalog.contexts["opw"].channels["testing"]
         self.assertEqual(release_tuple.tuple_id, "opw-testing-artifact-sha256-image456")
         self.assertEqual(release_tuple.repo_shas["tenant-opw"], "abc1234")
+
+    def test_render_release_tuple_catalog_toml_rejects_preview_channel(self) -> None:
+        with self.assertRaisesRegex(Exception, "stable remote channels"):
+            control_plane_release_tuples.render_release_tuple_catalog_toml(
+                (
+                    ReleaseTupleRecord(
+                        tuple_id="opw-preview-artifact-sha256-image456",
+                        context="opw",
+                        channel="preview",
+                        artifact_id="artifact-sha256-image456",
+                        repo_shas={"tenant-opw": "abc1234", "shared-addons": "def5678"},
+                        provenance="ship",
+                        minted_at="2026-04-10T18:24:00Z",
+                    ),
+                )
+            )
+
+    def test_build_promoted_release_tuple_record_rejects_preview_channel(self) -> None:
+        source_tuple = ReleaseTupleRecord(
+            tuple_id="opw-testing-artifact-sha256-image456",
+            context="opw",
+            channel="testing",
+            artifact_id="artifact-sha256-image456",
+            repo_shas={"tenant-opw": "abc1234", "shared-addons": "def5678"},
+            provenance="ship",
+            minted_at="2026-04-10T18:24:00Z",
+        )
+
+        with self.assertRaisesRegex(Exception, "stable remote channels"):
+            control_plane_release_tuples.build_promoted_release_tuple_record(
+                source_tuple=source_tuple,
+                to_channel_name="preview",
+                deployment_record_id="deployment-2",
+                promotion_record_id="promotion-1",
+                minted_at="2026-04-10T18:25:00Z",
+            )
 
 
 if __name__ == "__main__":

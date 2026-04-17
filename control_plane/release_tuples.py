@@ -15,7 +15,7 @@ from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 RELEASE_TUPLES_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_RELEASE_TUPLES_FILE"
 DEFAULT_RELEASE_TUPLES_FILE = "config/release-tuples.toml"
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
-LONG_LIVED_RELEASE_TUPLE_CHANNELS = {"dev", "testing", "prod"}
+LONG_LIVED_RELEASE_TUPLE_CHANNELS = {"testing", "prod"}
 
 
 @dataclass(frozen=True)
@@ -39,14 +39,29 @@ def should_mint_release_tuple_for_channel(channel_name: str) -> bool:
     return channel_name.strip() in LONG_LIVED_RELEASE_TUPLE_CHANNELS
 
 
+def _require_stable_release_tuple_channel(channel_name: str, *, scope: str) -> str:
+    normalized_channel_name = channel_name.strip()
+    if normalized_channel_name not in LONG_LIVED_RELEASE_TUPLE_CHANNELS:
+        supported_channels = ", ".join(sorted(LONG_LIVED_RELEASE_TUPLE_CHANNELS))
+        raise click.ClickException(
+            f"{scope} only supports stable remote channels {supported_channels}; got {normalized_channel_name!r}. "
+            "Use Harbor preview records for preview/dev runtime instead of minting or tracking release tuples there."
+        )
+    return normalized_channel_name
+
+
 def render_release_tuple_catalog_toml(records: tuple[ReleaseTupleRecord, ...]) -> str:
     lines = ["schema_version = 1", ""]
     for record in sorted(records, key=lambda item: (item.context, item.channel)):
-        lines.append(f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(record.channel)}]")
+        channel_name = _require_stable_release_tuple_channel(
+            record.channel,
+            scope=f"Release tuple record {record.tuple_id}",
+        )
+        lines.append(f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(channel_name)}]")
         lines.append(f"tuple_id = {_toml_string(record.tuple_id)}")
         lines.append("")
         lines.append(
-            f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(record.channel)}.repo_shas]"
+            f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(channel_name)}.repo_shas]"
         )
         for repo_name, git_sha in sorted(record.repo_shas.items()):
             lines.append(f"{_toml_bare_key(repo_name)} = {_toml_string(git_sha)}")
@@ -62,6 +77,10 @@ def build_release_tuple_record_from_artifact_manifest(
     deployment_record_id: str,
     minted_at: str,
 ) -> ReleaseTupleRecord:
+    normalized_channel_name = _require_stable_release_tuple_channel(
+        channel_name,
+        scope="Release tuple minting",
+    )
     repo_shas = repo_shas_from_artifact_manifest(
         context_name=context_name,
         artifact_manifest=artifact_manifest,
@@ -69,11 +88,11 @@ def build_release_tuple_record_from_artifact_manifest(
     return ReleaseTupleRecord(
         tuple_id=_artifact_release_tuple_id(
             context_name=context_name,
-            channel_name=channel_name,
+            channel_name=normalized_channel_name,
             artifact_id=artifact_manifest.artifact_id,
         ),
         context=context_name,
-        channel=channel_name,
+        channel=normalized_channel_name,
         artifact_id=artifact_manifest.artifact_id,
         repo_shas=repo_shas,
         image_repository=artifact_manifest.image.repository,
@@ -92,14 +111,18 @@ def build_promoted_release_tuple_record(
     promotion_record_id: str,
     minted_at: str,
 ) -> ReleaseTupleRecord:
+    normalized_channel_name = _require_stable_release_tuple_channel(
+        to_channel_name,
+        scope="Release tuple promotion",
+    )
     return ReleaseTupleRecord(
         tuple_id=_artifact_release_tuple_id(
             context_name=source_tuple.context,
-            channel_name=to_channel_name,
+            channel_name=normalized_channel_name,
             artifact_id=source_tuple.artifact_id,
         ),
         context=source_tuple.context,
-        channel=to_channel_name,
+        channel=normalized_channel_name,
         artifact_id=source_tuple.artifact_id,
         repo_shas=dict(source_tuple.repo_shas),
         image_repository=source_tuple.image_repository,
@@ -266,14 +289,18 @@ def _parse_release_tuple_catalog(
                 raise click.ClickException(
                     f"Expected release_tuples.contexts.{context_name}.channels keys to be non-empty strings."
                 )
+            normalized_channel_name = _require_stable_release_tuple_channel(
+                channel_name,
+                scope=f"release_tuples.contexts.{context_name}.channels",
+            )
             channel_table = _ensure_table(
                 raw_channel,
-                scope=f"release_tuples.contexts.{context_name}.channels.{channel_name}",
+                scope=f"release_tuples.contexts.{context_name}.channels.{normalized_channel_name}",
             )
             tuple_id = _read_required_non_empty_string(
                 channel_table,
                 "tuple_id",
-                scope=f"release_tuples.contexts.{context_name}.channels.{channel_name}",
+                scope=f"release_tuples.contexts.{context_name}.channels.{normalized_channel_name}",
             )
             if tuple_id in seen_tuple_ids:
                 raise click.ClickException(
@@ -283,9 +310,9 @@ def _parse_release_tuple_catalog(
             repo_shas = _read_required_git_sha_map(
                 channel_table,
                 "repo_shas",
-                scope=f"release_tuples.contexts.{context_name}.channels.{channel_name}",
+                scope=f"release_tuples.contexts.{context_name}.channels.{normalized_channel_name}",
             )
-            channels[channel_name] = ReleaseTupleDefinition(tuple_id=tuple_id, repo_shas=repo_shas)
+            channels[normalized_channel_name] = ReleaseTupleDefinition(tuple_id=tuple_id, repo_shas=repo_shas)
         contexts[context_name] = ReleaseTupleContextDefinition(channels=channels)
     return ReleaseTupleCatalog(schema_version=schema_version, contexts=contexts)
 
