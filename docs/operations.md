@@ -65,6 +65,9 @@ top-level groups are:
 
 - `environments resolve` reads the control-plane-owned runtime environment
   contract for a context and instance.
+- `environments show-live-target` reads the live Dokploy target payload for a
+  tracked route and reports whether the target is ready for artifact-backed
+  split-repo execution.
 - `ship execute` and `promote execute` can take an explicit `--env-file` overlay
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,

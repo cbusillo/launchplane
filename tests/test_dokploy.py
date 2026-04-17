@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from pathlib import Path
@@ -5,11 +6,77 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 import click
+from click.testing import CliRunner
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.cli import main
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_environments_show_live_target_reports_legacy_runtime_contract_blockers(self) -> None:
+        runner = CliRunner()
+        source_of_truth = control_plane_dokploy.DokploySourceOfTruth.model_validate(
+            {
+                "schema_version": 2,
+                "targets": [
+                    {
+                        "context": "opw",
+                        "instance": "testing",
+                        "target_id": "compose-123",
+                        "target_type": "compose",
+                        "target_name": "opw-testing",
+                    }
+                ],
+            }
+        )
+
+        with patch(
+            "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+            return_value=source_of_truth,
+        ), patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={
+                "name": "opw-testing",
+                "appName": "compose-opw-testing",
+                "sourceType": "git",
+                "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
+                "customGitBranch": "opw-testing",
+                "composePath": "./docker-compose.yml",
+                "env": (
+                    "ODOO_BASE_RUNTIME_IMAGE=ghcr.io/cbusillo/odoo-enterprise-docker:19.0-runtime\n"
+                    "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
+                ),
+            },
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "environments",
+                    "show-live-target",
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["tracked_target"]["target_id"], "compose-123")
+        self.assertEqual(payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-ai.git")
+        self.assertFalse(payload["artifact_runtime_contract"]["artifact_ready"])
+        self.assertIn(
+            "git@github.com:cbusillo/odoo-ai.git",
+            payload["artifact_runtime_contract"]["legacy_monorepo_sources"],
+        )
+        self.assertIn(
+            "cbusillo/disable_odoo_online@main",
+            payload["artifact_runtime_contract"]["mutable_addon_refs"],
+        )
+
     def test_read_control_plane_dokploy_source_of_truth_merges_operator_local_target_ids(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
