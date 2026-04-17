@@ -1,10 +1,10 @@
 schema_version = 1
 
-# Current runtime baseline captured from the legacy odoo-ai remote deploy
-# branches on 2026-04-16. These entries preserve the active cockpit's exact
-# shared testing and prod branch heads until split-repo artifact promotion
-# replaces the legacy monorepo baseline. Pull requests now use Harbor previews
-# instead of a long-lived shared dev lane.
+# Current runtime baseline captured from stable-lane control-plane evidence.
+# CM still preserves the legacy odoo-ai remote deploy branch heads captured on
+# 2026-04-16. OPW stable lanes were replaced with split-repo artifact tuples on
+# 2026-04-17 after testing ship and prod promotion completed successfully.
+# Pull requests now use Harbor previews instead of a long-lived shared dev lane.
 
 [contexts.cm.channels.testing]
 tuple_id = "cm-testing-odoo-ai-671a0cff"
@@ -19,13 +19,19 @@ tuple_id = "cm-prod-odoo-ai-671a0cff"
 odoo-ai = "671a0cffe57a7f84bf5f487fa03a433185c2da15"
 
 [contexts.opw.channels.testing]
-tuple_id = "opw-testing-odoo-ai-a250ab79"
+tuple_id = "opw-testing-artifact-opw-847c71c1db61785c"
 
 [contexts.opw.channels.testing.repo_shas]
-odoo-ai = "a250ab7925c8daca17fd4ec3e9a00e8b27b9d359"
+OpenUpgrade = "89e649728027a8ab656b3aa4be18f4bd364db417"
+disable_odoo_online = "411f6b8e85cac72dc7aa2e2dc5540001043c327d"
+shared-addons = "0a8937f056d70595f718ae138bd747c4ef251b31"
+tenant-opw = "9e09b858e1f93aa4a1f4b887b528ba7e5a999ee6"
 
 [contexts.opw.channels.prod]
-tuple_id = "opw-prod-odoo-ai-a250ab79"
+tuple_id = "opw-prod-artifact-opw-847c71c1db61785c"
 
 [contexts.opw.channels.prod.repo_shas]
-odoo-ai = "a250ab7925c8daca17fd4ec3e9a00e8b27b9d359"
+OpenUpgrade = "89e649728027a8ab656b3aa4be18f4bd364db417"
+disable_odoo_online = "411f6b8e85cac72dc7aa2e2dc5540001043c327d"
+shared-addons = "0a8937f056d70595f718ae138bd747c4ef251b31"
+tenant-opw = "9e09b858e1f93aa4a1f4b887b528ba7e5a999ee6"
