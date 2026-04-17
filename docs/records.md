@@ -8,6 +8,10 @@ title: Records
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
+These records are the durable Odoo-first Harbor truth for this repo today.
+Stable lane records (`testing`, `prod`) and preview records are separate on
+purpose: previews are not another long-lived environment lane.
+
 ## Layout
 
 ```text
@@ -40,6 +44,8 @@ state/
 - Preserve build-affecting addon, OpenUpgrade, and flag inputs alongside the
   image identity so the control plane owns the full manifest instead of a thin
   image pointer.
+- Use generic artifact vocabulary at the record level, but keep Odoo-specific
+  source inputs explicit in the stored evidence.
 
 ## Promotion Record
 
@@ -97,15 +103,16 @@ state/
 ## Release Tuple Record
 
 - Release tuple records are keyed by long-lived environment channel.
-- Successful waited `ship` executions for `dev`, `testing`, and `prod` mint the
-  current channel tuple from the stored artifact manifest after deploy evidence
-  passes.
+- Successful waited `ship` executions for `testing` and `prod` mint the current
+  channel tuple from the stored artifact manifest after deploy evidence passes.
 - Tuple minting requires artifact manifest source refs to be exact git SHAs;
   branch names such as `main` or `origin/testing` are rejected instead of being
   written as release truth.
 - Promotion execution copies the source channel tuple to the destination
   channel after the destination deploy passes, retaining the promotion and
   deployment record ids that established the promoted state.
+- Harbor previews are not long-lived release-tuple channels; they derive their
+  baseline from stored tuple evidence plus preview generation records.
 - Runtime tuple records live under `state/` and do not rewrite the tracked
   default TOML catalog implicitly.
 
@@ -115,6 +122,8 @@ state/
 - Record the anchor PR identity, deterministic preview label, canonical preview
   URL, lifecycle timestamps, current preview state, and the active/serving/
   latest generation links.
+- Preview records model the durable Harbor identity for PR review, while the
+  underlying preview runtime remains ephemeral and replaceable.
 - Destroyed previews should remain readable durable evidence instead of being
   removed from state.
 - Preview records should preserve one stable identity per anchor PR even when

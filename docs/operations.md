@@ -7,6 +7,10 @@ title: Operations
 Use `uv run control-plane --help` for the complete CLI surface. The current
 top-level groups are:
 
+Today this CLI is the Odoo-first Harbor operator surface. It owns stable-lane
+deploy and promotion workflows for `testing` and `prod`, plus Harbor preview
+records and read models for PR review flows.
+
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
 - `deployments`: inspect deployment records.
@@ -42,19 +46,24 @@ top-level groups are:
 - Direct artifact-backed execution also fails closed when the Dokploy target
   still points at a legacy monorepo source or carries mutable addon repository
   refs instead of exact git SHAs.
-- Successful waited `ship` executions for `dev`, `testing`, and `prod` mint
-  current release tuple records from stored artifact manifests.
+- Successful waited `ship` executions for `testing` and `prod` mint current
+  release tuple records from stored artifact manifests.
 - `promote execute` requires the source lane's current release tuple to match
   the requested artifact, then promotes that exact tuple to the destination
   lane after the deploy passes.
 - Current environment inventory is refreshed from successful waited `ship` and
   `promote` executions.
+- The tracked Dokploy route catalog is only for stable remote lanes. If a pull
+  request needs runtime state, Harbor models that through preview records and
+  preview generations instead of adding another long-lived route.
 - Operator read models compose inventory, deployment, promotion, and
   backup-gate records instead of requiring operators to inspect raw JSON first.
 
 ## Dokploy Contracts
 
 - Tracked Dokploy route definitions live in `config/dokploy.toml` by default.
+- Tracked route definitions are expected to be stable remote lanes only:
+  `testing` and `prod`.
 - Live Dokploy `target_id` values come from untracked
   `config/dokploy-targets.toml` by default.
 - Set `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` to use an alternate route
@@ -115,11 +124,12 @@ The current command group supports:
 catalog without relying on process-wide environment setup.
 
 The tracked default catalog at `config/release-tuples.toml` records the current
-legacy `odoo-ai` deploy-branch heads for `dev`, `testing`, and `prod`. Treat it
-as active runtime baseline evidence until split-repo artifact tuple records are
-materialized into the baseline catalog. Runtime `ship` and `promote` flows write
-current tuple records under the selected state directory rather than silently
-rewriting this tracked file.
+legacy `odoo-ai` deploy-branch heads for `testing` and `prod`. Treat it as
+active runtime baseline evidence until split-repo artifact tuple records are
+materialized into the baseline catalog. Pull requests now flow through Harbor
+preview records instead of a tracked long-lived `dev` tuple lane. Runtime
+`ship` and `promote` flows write current tuple records under the selected state
+directory rather than silently rewriting this tracked file.
 
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an operator is ready to review and
@@ -139,9 +149,12 @@ companion PR head SHA snapshots from ingest. Tenant renders use those stored
 snapshots for preview request recipes and keep unresolved companion requests
 blocked instead of guessing source inputs.
 
-## GitHub Boundary
+## Harbor Boundary
 
-GitHub is the engineering workflow surface: issues, branches, pull requests,
-labels, checks, PR comments, releases, and CI execution. `odoo-control-plane`
-owns the durable operational truth behind those workflows: release tuples,
-artifacts, previews, deployments, promotions, backup gates, and inventory.
+- GitHub remains the engineering workflow surface: issues, branches, pull
+  requests, labels, checks, PR comments, releases, and CI execution.
+- `odoo-control-plane` owns the durable operational truth behind those
+  workflows: artifacts, release tuples, previews, deployments, promotions,
+  backup gates, and inventory.
+- Broader reusable Harbor product direction is intentionally held in saved
+  plans until those boundaries become implemented repo contracts here.

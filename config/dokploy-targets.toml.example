@@ -1,9 +1,8 @@
 schema_version = 1
 
-[[targets]]
-context = "cm"
-instance = "dev"
-target_id = "cm-dev-compose-id"
+# Stable target ids map only the shared testing and prod lanes.
+# PR previews stay outside this catalog because Harbor manages them as
+# ephemeral per-PR stacks.
 
 [[targets]]
 context = "cm"
@@ -14,11 +13,6 @@ target_id = "cm-testing-compose-id"
 context = "cm"
 instance = "prod"
 target_id = "cm-prod-compose-id"
-
-[[targets]]
-context = "opw"
-instance = "dev"
-target_id = "opw-dev-compose-id"
 
 [[targets]]
 context = "opw"
