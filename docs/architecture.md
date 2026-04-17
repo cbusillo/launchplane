@@ -8,10 +8,11 @@ title: Architecture
 - Make artifact identity and promotion records first-class control-plane data.
 - Own promotion and deploy orchestration behind explicit contracts.
 
-This repo is the Odoo-first Harbor proving ground. The contracts documented
-here are the implemented Odoo control-plane boundaries that exist today.
-Reusable Harbor product direction lives in saved plans until the same concepts
-are expressed through code and operator surface here.
+This repo is the current Odoo implementation of the Harbor operator surface.
+The contracts documented here are the implemented Odoo control-plane
+boundaries that exist today. Reusable Harbor product direction lives in saved
+plans until the same concepts are expressed through generic code and operator
+surfaces.
 
 ## Repo Boundary
 
@@ -39,9 +40,15 @@ Code and local-DX repos own:
 GitHub owns the engineering workflow around this system: issues, branches,
 pull requests, labels, checks, PR comments, releases, and CI execution.
 
+This repository is not the generic Harbor product boundary today. It is the
+Odoo-specific control plane that currently contains Harbor preview and
+promotion behavior.
+
 ## Harbor Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
+- Harbor currently lives inside `odoo-control-plane`; there is no separate
+  extracted Harbor repo or package contract yet.
 - PR previews are Harbor-managed preview identities backed by separate preview
   generations and ephemeral preview runtime state, not extra long-lived Dokploy
   lanes.

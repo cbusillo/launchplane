@@ -1,11 +1,11 @@
 # odoo-control-plane
 
-Private control-plane repo for Odoo release records, environment operations,
+Private Odoo control-plane repo for release records, environment operations,
 Harbor preview state, and promotion orchestration.
 
 ## Purpose
 
-- Act as the Odoo-first Harbor proving ground for durable deployment truth.
+- Own the current Odoo Harbor operator surface for durable deployment truth.
 - Own artifact, backup-gate, deployment, promotion, and inventory records
   outside the code and local-DX repos.
 - Own ship and promotion orchestration behind explicit control-plane
@@ -13,9 +13,11 @@ Harbor preview state, and promotion orchestration.
 - Keep code and local DX in `odoo-devkit`, tenant repos, and shared-addons,
   with only explicit artifact and operator handoffs into this repo.
 
-This repo's docs describe the implemented Odoo-first contracts that exist
-today. Broader Harbor product-direction guidance stays in saved plans until
-matching code and operator surfaces exist here.
+This repo's docs describe the implemented Odoo control-plane contracts that
+exist today. Harbor is the operator surface name used inside this repo today;
+this repository is still the Odoo-specific implementation, not a standalone
+general Harbor repo. Broader Harbor product direction stays in saved plans
+until matching generic code and operator surfaces exist.
 
 ## Bootstrap Scope
 
