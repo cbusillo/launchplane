@@ -8,6 +8,11 @@ title: Architecture
 - Make artifact identity and promotion records first-class control-plane data.
 - Own promotion and deploy orchestration behind explicit contracts.
 
+This repo is the Odoo-first Harbor proving ground. The contracts documented
+here are the implemented Odoo control-plane boundaries that exist today.
+Reusable Harbor product direction lives in saved plans until the same concepts
+are expressed through code and operator surface here.
+
 ## Repo Boundary
 
 `odoo-control-plane` owns:
@@ -34,6 +39,18 @@ Code and local-DX repos own:
 GitHub owns the engineering workflow around this system: issues, branches,
 pull requests, labels, checks, PR comments, releases, and CI execution.
 
+## Harbor Shape Today
+
+- Stable remote environment lanes are `testing` and `prod` only.
+- PR previews are Harbor-managed preview identities backed by separate preview
+  generations and ephemeral preview runtime state, not extra long-lived Dokploy
+  lanes.
+- The tracked Dokploy route catalog is therefore limited to stable tenant lanes
+  rather than acting as a registry for every preview or ad hoc environment.
+- Durable control-plane records use generic deployment nouns when the concept
+  is reusable across products, but Odoo-specific runtime behavior remains
+  explicit in the Odoo workflow code and deploy evidence.
+
 ## Current Contract
 
 - `promote` accepts the native artifact-backed promotion contract and uses this
@@ -45,6 +62,9 @@ pull requests, labels, checks, PR comments, releases, and CI execution.
   `config/dokploy.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
   paths.
+- The tracked Dokploy route catalog is limited to stable remote lanes
+  (`testing`, `prod`). Pull-request previews flow through Harbor preview
+  records instead of tracked Dokploy lane entries.
 - Harbor baseline release tuples belong here as explicit control-plane data.
   Tuple entries carry exact repo SHAs for preview-manifest resolution, not
   floating branch names.

@@ -22,6 +22,7 @@ CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_F
 CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE"
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
+DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
 DOKPLOY_RUNNING_DEPLOYMENT_STATUSES = {"pending", "queued", "running", "in_progress", "starting"}
@@ -105,6 +106,13 @@ class DokploySourceOfTruth(BaseModel):
                     f"Duplicate Dokploy target definition for {context_name}/{instance_name} in source-of-truth"
                 )
             seen_targets.add(target_route)
+            if target_definition.instance not in DEFAULT_STABLE_REMOTE_INSTANCES:
+                supported_instances = ", ".join(sorted(DEFAULT_STABLE_REMOTE_INSTANCES))
+                raise ValueError(
+                    "Tracked Dokploy source-of-truth only supports stable remote instances "
+                    f"{supported_instances}; found {target_definition.context}/{target_definition.instance}. "
+                    "Use Harbor preview records for PR previews instead of adding another tracked Dokploy lane."
+                )
         return self
 
 
