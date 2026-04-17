@@ -73,6 +73,10 @@ pull requests, labels, checks, PR comments, releases, and CI execution.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
+- `odoo-devkit` is the expected build/publish handoff for those manifests: it
+  stages the tenant and shared-addon sources into a real downstream image
+  build context, pushes the image, resolves the pushed digest, and emits JSON
+  for `artifacts write` / `artifacts ingest` here.
 - Artifact-backed execution also rejects Dokploy targets that still depend on
   the legacy `odoo-ai` monorepo source or mutable addon repository refs.
 - Native ship requests are artifact-backed and do not carry branch-mutation
