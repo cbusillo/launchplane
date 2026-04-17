@@ -81,10 +81,10 @@ promotion behavior.
 - Promotion execution requires the source lane's current release tuple to match
   the requested artifact, then writes the destination tuple from that same
   source tuple after the deploy passes.
-- The tracked `config/release-tuples.toml` currently preserves legacy
-  `odoo-ai` deploy-branch heads as the active runtime baseline. Replace those
-  entries with split-repo artifact tuple values once promotion no longer relies
-  on the legacy monorepo branches.
+- The tracked `config/release-tuples.toml` now records the active split-repo
+  artifact-backed baseline for CM and OPW stable lanes. Future tracked
+  baseline changes should come from reviewed state-backed tuple evidence rather
+  than legacy monorepo branch heads.
 - Live Dokploy `target_id` values load from operator-local
   `config/dokploy-targets.toml` by default, with an explicit
   `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` override for alternate local

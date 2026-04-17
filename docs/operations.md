@@ -126,17 +126,16 @@ The current command group supports:
 `--release-tuples-file` when a cockpit or local render needs an explicit tuple
 catalog without relying on process-wide environment setup.
 
-The tracked default catalog at `config/release-tuples.toml` records the current
-legacy `odoo-ai` deploy-branch heads for `testing` and `prod`. Treat it as
-active runtime baseline evidence until split-repo artifact tuple records are
-materialized into the baseline catalog. Pull requests now flow through Harbor
-preview records instead of a tracked long-lived `dev` tuple lane. Runtime
-`ship` and `promote` flows write current tuple records under the selected state
-directory rather than silently rewriting this tracked file.
+The tracked default catalog at `config/release-tuples.toml` now records the
+current split-repo artifact-backed baseline for CM and OPW stable lanes. Pull
+requests flow through Harbor preview records instead of a tracked long-lived
+`dev` tuple lane. Runtime `ship` and `promote` flows continue to write current
+tuple records under the selected state directory rather than silently rewriting
+this tracked file.
 
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an operator is ready to review and
-materialize them.
+materialize a new tracked baseline.
 
 GitHub PR feedback uses one Harbor-owned marker comment per PR. The comment is
 a review surface over durable Harbor records: preview URL/state, manifest and
