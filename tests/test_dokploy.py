@@ -77,6 +77,114 @@ class DokployConfigTests(unittest.TestCase):
             payload["artifact_runtime_contract"]["mutable_addon_refs"],
         )
 
+    def test_environments_sync_live_target_applies_tracked_source_and_env_contract(self) -> None:
+        runner = CliRunner()
+        source_of_truth = control_plane_dokploy.DokploySourceOfTruth.model_validate(
+            {
+                "schema_version": 2,
+                "targets": [
+                    {
+                        "context": "opw",
+                        "instance": "testing",
+                        "target_id": "compose-123",
+                        "target_type": "compose",
+                        "target_name": "opw-testing",
+                        "source_type": "git",
+                        "custom_git_url": "git@github.com:cbusillo/odoo-devkit.git",
+                        "custom_git_branch": "main",
+                        "compose_path": "./docker-compose.yml",
+                        "env": {
+                            "ODOO_ADDON_REPOSITORIES": "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d"
+                        },
+                    }
+                ],
+            }
+        )
+        fetch_payloads = [
+            {
+                "name": "opw-testing",
+                "appName": "compose-opw-testing",
+                "sourceType": "git",
+                "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
+                "customGitBranch": "opw-testing",
+                "customGitSSHKeyId": "ssh-key-123",
+                "composePath": "./docker-compose.yml",
+                "environmentId": "env-123",
+                "triggerType": "push",
+                "enableSubmodules": False,
+                "watchPaths": [],
+                "env": "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main\n",
+            },
+            {
+                "name": "opw-testing",
+                "appName": "compose-opw-testing",
+                "sourceType": "git",
+                "customGitUrl": "git@github.com:cbusillo/odoo-devkit.git",
+                "customGitBranch": "main",
+                "customGitSSHKeyId": "ssh-key-123",
+                "composePath": "./docker-compose.yml",
+                "environmentId": "env-123",
+                "triggerType": "push",
+                "enableSubmodules": False,
+                "watchPaths": [],
+                "env": "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main\n",
+            },
+            {
+                "name": "opw-testing",
+                "appName": "compose-opw-testing",
+                "sourceType": "git",
+                "customGitUrl": "git@github.com:cbusillo/odoo-devkit.git",
+                "customGitBranch": "main",
+                "customGitSSHKeyId": "ssh-key-123",
+                "composePath": "./docker-compose.yml",
+                "environmentId": "env-123",
+                "triggerType": "push",
+                "enableSubmodules": False,
+                "watchPaths": [],
+                "env": "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d\n",
+            },
+        ]
+        captured_source_updates: list[dict[str, object]] = []
+        captured_env_updates: list[dict[str, object]] = []
+
+        with patch(
+            "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+            return_value=source_of_truth,
+        ), patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            side_effect=fetch_payloads,
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_source",
+            side_effect=lambda **kwargs: captured_source_updates.append(kwargs),
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+            side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "environments",
+                    "sync-live-target",
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--apply",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(len(captured_source_updates), 1)
+        self.assertEqual(len(captured_env_updates), 1)
+        self.assertIn("411f6b8e85cac72dc7aa2e2dc5540001043c327d", str(captured_env_updates[0]["env_text"]))
+        payload = json.loads(result.output)
+        self.assertTrue(payload["artifact_runtime_contract"]["artifact_ready"])
+        self.assertEqual(payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-devkit.git")
+        self.assertEqual(payload["sync_preview"]["source_changes"]["custom_git_url"]["tracked"], "git@github.com:cbusillo/odoo-devkit.git")
+
     def test_read_control_plane_dokploy_source_of_truth_merges_operator_local_target_ids(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)

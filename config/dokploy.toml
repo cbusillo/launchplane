@@ -3,6 +3,10 @@ schema_version = 2
 [defaults]
 target_type = "compose"
 source_git_ref = "origin/main"
+source_type = "git"
+custom_git_url = "git@github.com:cbusillo/odoo-devkit.git"
+custom_git_branch = "main"
+compose_path = "./docker-compose.yml"
 
 [projects.primary]
 project_name = "primary-runtime"
@@ -15,6 +19,7 @@ healthcheck_path = "/web/health"
 [profiles.odoo.env]
 ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL_FREEZE = "True"
 ODOO_WEB_COMMAND = "python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
+ODOO_ADDON_REPOSITORIES = "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d"
 
 [profiles.cm]
 extends = "odoo"
@@ -26,6 +31,7 @@ healthcheck_timeout_seconds = 600
 
 [profiles.opw.env]
 OPENUPGRADE_ENABLED = "True"
+ODOO_ADDON_REPOSITORIES = "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
 OPENUPGRADE_ADDON_REPOSITORY = "OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
 OPENUPGRADELIB_INSTALL_SPEC = "git+https://github.com/OCA/openupgradelib.git@46d66ff5ed6a99481f84d3c79fc6e50835da7286"
 

@@ -68,6 +68,9 @@ top-level groups are:
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.
+- `environments sync-live-target --apply` pushes the tracked Dokploy source and
+  tracked env overlay for a route into the live target before re-reading the
+  artifact-readiness summary.
 - `ship execute` and `promote execute` can take an explicit `--env-file` overlay
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,

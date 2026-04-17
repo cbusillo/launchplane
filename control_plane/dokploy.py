@@ -57,6 +57,12 @@ class DokployTargetDefinition(BaseModel):
     target_name: str = ""
     git_branch: str = ""
     source_git_ref: str = "origin/main"
+    source_type: str = ""
+    custom_git_url: str = ""
+    custom_git_branch: str = ""
+    compose_path: str = ""
+    watch_paths: tuple[str, ...] = ()
+    enable_submodules: bool | None = None
     require_test_gate: bool = False
     require_prod_gate: bool = False
     deploy_timeout_seconds: int | None = Field(default=None, ge=1)
@@ -539,6 +545,92 @@ def update_dokploy_target_env(
         return
 
     raise click.ClickException(f"Unsupported target type: {target_type}")
+
+
+def update_dokploy_target_source(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    target_payload: JsonObject,
+) -> None:
+    if target_definition.target_type != "compose":
+        raise click.ClickException(
+            "Live target source sync currently supports compose targets only. "
+            f"Configured={target_definition.target_type}."
+        )
+
+    environment_id = str(target_payload.get("environmentId") or "").strip()
+    target_name = str(target_payload.get("name") or target_definition.target_name or "").strip()
+    source_type = target_definition.source_type.strip() or str(target_payload.get("sourceType") or "").strip()
+    compose_path = target_definition.compose_path.strip() or str(target_payload.get("composePath") or "").strip()
+    custom_git_url = target_definition.custom_git_url.strip() or str(target_payload.get("customGitUrl") or "").strip()
+    custom_git_branch = target_definition.custom_git_branch.strip() or str(target_payload.get("customGitBranch") or "").strip()
+    custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
+    trigger_type = str(target_payload.get("triggerType") or "push").strip() or "push"
+    raw_watch_paths = target_payload.get("watchPaths")
+    watch_paths = list(target_definition.watch_paths) or (
+        list(raw_watch_paths) if isinstance(raw_watch_paths, list) else []
+    )
+    auto_deploy = bool(target_payload.get("autoDeploy"))
+    enable_submodules = (
+        target_definition.enable_submodules
+        if target_definition.enable_submodules is not None
+        else bool(target_payload.get("enableSubmodules"))
+    )
+
+    if not environment_id:
+        raise click.ClickException(
+            f"Dokploy target {target_definition.context}/{target_definition.instance} is missing environmentId in the live payload."
+        )
+    if not target_name:
+        raise click.ClickException(
+            f"Dokploy target {target_definition.context}/{target_definition.instance} is missing name in the live payload."
+        )
+    if not source_type:
+        raise click.ClickException(
+            f"Dokploy target {target_definition.context}/{target_definition.instance} requires source_type before live source sync."
+        )
+    if source_type != "git":
+        raise click.ClickException(
+            f"Live target source sync currently supports source_type=git only. Configured={source_type}."
+        )
+    if not custom_git_url:
+        raise click.ClickException(
+            f"Dokploy target {target_definition.context}/{target_definition.instance} requires custom_git_url before live source sync."
+        )
+    if not custom_git_branch:
+        raise click.ClickException(
+            f"Dokploy target {target_definition.context}/{target_definition.instance} requires custom_git_branch before live source sync."
+        )
+    if not compose_path:
+        raise click.ClickException(
+            f"Dokploy target {target_definition.context}/{target_definition.instance} requires compose_path before live source sync."
+        )
+
+    payload: JsonObject = {
+        "composeId": target_definition.target_id,
+        "name": target_name,
+        "environmentId": environment_id,
+        "sourceType": source_type,
+        "autoDeploy": auto_deploy,
+        "composePath": compose_path,
+        "customGitUrl": custom_git_url,
+        "customGitBranch": custom_git_branch,
+        "enableSubmodules": enable_submodules,
+        "triggerType": trigger_type,
+        "watchPaths": watch_paths,
+    }
+    if custom_git_ssh_key_id:
+        payload["customGitSSHKeyId"] = custom_git_ssh_key_id
+
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.update",
+        method="POST",
+        payload=payload,
+    )
 
 
 def wait_for_target_deployment(
