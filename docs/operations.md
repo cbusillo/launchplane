@@ -88,6 +88,9 @@ and `prod`, plus Harbor preview records and read models for PR review flows.
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,
   and `ODOO_DATA_WORKFLOW_LOCK_FILE`.
+- When multiple healthcheck URLs are resolved for a lane, Harbor treats them as
+  alternate verification surfaces and accepts the first `2xx` response instead
+  of requiring every URL to succeed.
 
 Artifact handoff example:
 

@@ -5692,9 +5692,19 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
         )
     if request.destination_health.timeout_seconds is None:
         raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
+    healthcheck_errors: list[str] = []
     for healthcheck_url in request.destination_health.urls:
-        _wait_for_ship_healthcheck(
-            url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds
+        try:
+            _wait_for_ship_healthcheck(
+                url=healthcheck_url, timeout_seconds=request.destination_health.timeout_seconds
+            )
+            return
+        except click.ClickException as error:
+            healthcheck_errors.append(str(error))
+    if healthcheck_errors:
+        raise click.ClickException(
+            "Healthcheck verification failed for all resolved URLs:\n"
+            + "\n".join(healthcheck_errors)
         )
 
 

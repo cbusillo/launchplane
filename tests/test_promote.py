@@ -1903,6 +1903,155 @@ target_id = "compose-123"
             self.assertIn('"status": "fail"', persisted_payload)
             self.assertIn('"post_deploy_update": {', persisted_payload)
             self.assertIn('"attempted": true', persisted_payload)
+
+    def test_ship_execute_accepts_first_passing_health_url_when_multiple_are_available(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health={
+                        "verified": False,
+                        "urls": [
+                            "https://prod-alt.example.com/web/health",
+                            "https://prod.example.com/web/health",
+                        ],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            captured_health_urls: list[str] = []
+
+            def _health_side_effect(url: str, timeout_seconds: int) -> None:
+                self.assertEqual(timeout_seconds, 45)
+                captured_health_urls.append(url)
+                if url == "https://prod-alt.example.com/web/health":
+                    raise click.ClickException("Healthcheck failed for https://prod-alt.example.com/web/health: http 401")
+
+            with patch(
+                "control_plane.cli._resolve_dokploy_target",
+                return_value=(
+                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
+                    600,
+                ),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._run_compose_post_deploy_update",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                side_effect=_health_side_effect,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(
+                captured_health_urls,
+                [
+                    "https://prod-alt.example.com/web/health",
+                    "https://prod.example.com/web/health",
+                ],
+            )
+
+    def test_ship_execute_marks_record_failed_when_all_health_urls_fail(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            _write_artifact_manifest(state_dir)
+            input_file = repo_root / "ship-request.json"
+            input_file.write_text(
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health={
+                        "verified": False,
+                        "urls": [
+                            "https://prod-alt.example.com/web/health",
+                            "https://prod.example.com/web/health",
+                        ],
+                        "timeout_seconds": 45,
+                        "status": "pending",
+                    },
+                ).model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            def _health_side_effect(url: str, timeout_seconds: int) -> None:
+                self.assertEqual(timeout_seconds, 45)
+                raise click.ClickException(f"Healthcheck failed for {url}: http 401")
+
+            with patch(
+                "control_plane.cli._resolve_dokploy_target",
+                return_value=(
+                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
+                    600,
+                ),
+            ), patch(
+                "control_plane.cli._sync_artifact_image_reference_for_target",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._execute_dokploy_deploy",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._run_compose_post_deploy_update",
+                side_effect=lambda **_kwargs: None,
+            ), patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                side_effect=_health_side_effect,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "ship",
+                        "execute",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("all resolved URLs", result.output)
+            self.assertIn("prod-alt.example.com", result.output)
+            self.assertIn("prod.example.com", result.output)
+            deployment_files = sorted((state_dir / "deployments").glob("*.json"))
+            self.assertEqual(len(deployment_files), 1)
+            persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "fail"', persisted_payload)
             self.assertIn('native control-plane Dokploy schedule workflow', persisted_payload)
 
