@@ -36,20 +36,9 @@ ODOO_ADDON_REPOSITORIES = "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2d
 OPENUPGRADE_ADDON_REPOSITORY = "OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
 OPENUPGRADELIB_INSTALL_SPEC = "git+https://github.com/OCA/openupgradelib.git@46d66ff5ed6a99481f84d3c79fc6e50835da7286"
 
-[[targets]]
-profile = "cm"
-context = "cm"
-instance = "dev"
-git_branch = "cm-dev"
-require_test_gate = false
-require_prod_gate = false
-domains = ["cm-dev.shinycomputers.com"]
-
-[targets.env]
-ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://cm-dev.shinycomputers.com"
-ENV_OVERRIDE_AUTHENTIK__BASE_URL = "https://authentik.cellmechanic.com"
-ENV_OVERRIDE_AUTHENTIK__DISABLE_PROVIDERS = "Odoo.com"
-ENV_OVERRIDE_AUTHENTIK__GROUP_CLAIM = "groups"
+# Stable Dokploy routes cover only the shared testing and prod lanes.
+# Pull-request previews are Harbor-managed ephemeral stacks, not durable routes
+# in this catalog.
 
 [[targets]]
 profile = "cm"
@@ -80,18 +69,6 @@ ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://odoo.cellmechanic.com"
 ENV_OVERRIDE_AUTHENTIK__BASE_URL = "https://authentik.cellmechanic.com"
 ENV_OVERRIDE_AUTHENTIK__DISABLE_PROVIDERS = "Odoo.com"
 ENV_OVERRIDE_AUTHENTIK__GROUP_CLAIM = "groups"
-
-[[targets]]
-profile = "opw"
-context = "opw"
-instance = "dev"
-git_branch = "opw-dev"
-require_test_gate = false
-require_prod_gate = false
-domains = ["opw-dev.shinycomputers.com"]
-
-[targets.env]
-ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-dev.shinycomputers.com"
 
 [[targets]]
 profile = "opw"
