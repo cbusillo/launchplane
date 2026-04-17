@@ -78,6 +78,52 @@ ODOO_DB_PASSWORD = "testing-secret"
                     instance_name="local",
                 )
 
+    def test_resolve_runtime_environment_values_merges_tracked_target_env_for_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            config_directory = control_plane_root / "config"
+            config_directory.mkdir(parents=True, exist_ok=True)
+            (config_directory / "runtime-environments.toml").write_text(
+                (
+                    'schema_version = 1\n\n'
+                    '[shared_env]\n'
+                    'ODOO_MASTER_PASSWORD = "shared-master"\n\n'
+                    '[contexts.cm.instances.testing.env]\n'
+                    'ODOO_DB_PASSWORD = "testing-secret"\n'
+                ),
+                encoding="utf-8",
+            )
+            (config_directory / "dokploy.toml").write_text(
+                (
+                    'schema_version = 2\n\n'
+                    '[[targets]]\n'
+                    'context = "cm"\n'
+                    'instance = "testing"\n'
+                    'target_id = "target-cm-testing"\n\n'
+                    '[targets.env]\n'
+                    'ODOO_ADDON_REPOSITORIES = "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d"\n'
+                    'ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://cm-testing.example.com"\n'
+                ),
+                encoding="utf-8",
+            )
+
+            resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                control_plane_root=control_plane_root,
+                context_name="cm",
+                instance_name="testing",
+            )
+
+        self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
+        self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "testing-secret")
+        self.assertEqual(
+            resolved_values["ODOO_ADDON_REPOSITORIES"],
+            "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d",
+        )
+        self.assertEqual(
+            resolved_values["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
+            "https://cm-testing.example.com",
+        )
+
     def test_resolve_runtime_context_values_merges_shared_and_context_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
