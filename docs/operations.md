@@ -35,6 +35,9 @@ top-level groups are:
   manifest is available.
 - Direct `ship` and `promote` execution fail closed when the referenced
   artifact manifest is missing.
+- Direct artifact-backed execution also fails closed when the Dokploy target
+  still points at a legacy monorepo source or carries mutable addon repository
+  refs instead of exact git SHAs.
 - Successful waited `ship` executions for `dev`, `testing`, and `prod` mint
   current release tuple records from stored artifact manifests.
 - `promote execute` requires the source lane's current release tuple to match

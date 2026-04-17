@@ -89,6 +89,7 @@ from control_plane.workflows.ship import (
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
 ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
+_LEGACY_MONOREPO_MARKER = "odoo-ai"
 
 
 @contextmanager
@@ -6329,6 +6330,77 @@ def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) 
     return f"{manifest.image.repository}@{manifest.image.digest}"
 
 
+def _validate_artifact_target_runtime_contract(
+    *,
+    artifact_manifest: ArtifactIdentityManifest | None,
+    resolved_target: ResolvedTargetEvidence,
+    target_payload: dict[str, object],
+    env_map: dict[str, str],
+) -> None:
+    if artifact_manifest is None:
+        return
+
+    legacy_source_values = []
+    for key_name in (
+        "customGitUrl",
+        "repository",
+        "githubRepository",
+        "gitlabRepository",
+        "giteaRepository",
+        "bitbucketRepository",
+    ):
+        raw_value = target_payload.get(key_name)
+        if not isinstance(raw_value, str):
+            continue
+        normalized_value = raw_value.strip()
+        if not normalized_value:
+            continue
+        if _LEGACY_MONOREPO_MARKER in normalized_value.lower():
+            legacy_source_values.append(normalized_value)
+
+    if legacy_source_values:
+        legacy_sources = ", ".join(sorted(set(legacy_source_values)))
+        raise click.ClickException(
+            "Artifact-backed deploy cannot target a legacy monorepo Dokploy source. "
+            f"Target {resolved_target.target_name or resolved_target.target_id} still references {legacy_sources}."
+        )
+
+    mutable_addon_entries = []
+    for env_key in ("ODOO_ADDON_REPOSITORIES", "OPENUPGRADE_ADDON_REPOSITORY"):
+        raw_value = env_map.get(env_key, "")
+        if not raw_value:
+            continue
+        for entry in _parse_addon_repository_entries(raw_value):
+            _, repo_ref = _split_addon_repository_entry(entry)
+            if not repo_ref or not control_plane_release_tuples.GIT_SHA_PATTERN.match(repo_ref):
+                mutable_addon_entries.append(entry)
+
+    if mutable_addon_entries:
+        addon_entry_list = ", ".join(sorted(set(mutable_addon_entries)))
+        raise click.ClickException(
+            "Artifact-backed deploy requires Dokploy addon repositories to use exact git SHAs. "
+            f"Target {resolved_target.target_name or resolved_target.target_id} still has mutable addon refs: {addon_entry_list}."
+        )
+
+
+def _parse_addon_repository_entries(raw_value: str) -> tuple[str, ...]:
+    normalized_value = raw_value.replace("\n", ",")
+    entries = []
+    for raw_entry in normalized_value.split(","):
+        entry = raw_entry.strip()
+        if entry:
+            entries.append(entry)
+    return tuple(entries)
+
+
+def _split_addon_repository_entry(entry: str) -> tuple[str, str]:
+    normalized_entry = entry.strip()
+    if "@" not in normalized_entry:
+        return normalized_entry, ""
+    repository_name, repository_ref = normalized_entry.rsplit("@", maxsplit=1)
+    return repository_name.strip(), repository_ref.strip()
+
+
 def _sync_artifact_image_reference_for_target(
     *,
     artifact_manifest: ArtifactIdentityManifest | None,
@@ -6343,6 +6415,12 @@ def _sync_artifact_image_reference_for_target(
         target_id=resolved_target.target_id,
     )
     env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    _validate_artifact_target_runtime_contract(
+        artifact_manifest=artifact_manifest,
+        resolved_target=resolved_target,
+        target_payload=target_payload,
+        env_map=env_map,
+    )
     desired_image_reference = ""
     if artifact_manifest is not None:
         desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
