@@ -90,6 +90,13 @@ ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
 ENVIRONMENT_STATUS_HISTORY_LIMIT = 3
 _LEGACY_MONOREPO_MARKER = "odoo-ai"
+_RUNTIME_CONTRACT_ENV_KEYS = (
+    ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
+    "ODOO_BASE_RUNTIME_IMAGE",
+    "ODOO_BASE_DEVTOOLS_IMAGE",
+    "ODOO_ADDON_REPOSITORIES",
+    "OPENUPGRADE_ADDON_REPOSITORY",
+)
 
 
 @contextmanager
@@ -6330,16 +6337,11 @@ def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) 
     return f"{manifest.image.repository}@{manifest.image.digest}"
 
 
-def _validate_artifact_target_runtime_contract(
+def _artifact_target_runtime_contract_findings(
     *,
-    artifact_manifest: ArtifactIdentityManifest | None,
-    resolved_target: ResolvedTargetEvidence,
     target_payload: dict[str, object],
     env_map: dict[str, str],
-) -> None:
-    if artifact_manifest is None:
-        return
-
+) -> dict[str, object]:
     legacy_source_values = []
     for key_name in (
         "customGitUrl",
@@ -6358,13 +6360,6 @@ def _validate_artifact_target_runtime_contract(
         if _LEGACY_MONOREPO_MARKER in normalized_value.lower():
             legacy_source_values.append(normalized_value)
 
-    if legacy_source_values:
-        legacy_sources = ", ".join(sorted(set(legacy_source_values)))
-        raise click.ClickException(
-            "Artifact-backed deploy cannot target a legacy monorepo Dokploy source. "
-            f"Target {resolved_target.target_name or resolved_target.target_id} still references {legacy_sources}."
-        )
-
     mutable_addon_entries = []
     for env_key in ("ODOO_ADDON_REPOSITORIES", "OPENUPGRADE_ADDON_REPOSITORY"):
         raw_value = env_map.get(env_key, "")
@@ -6375,8 +6370,51 @@ def _validate_artifact_target_runtime_contract(
             if not repo_ref or not control_plane_release_tuples.GIT_SHA_PATTERN.match(repo_ref):
                 mutable_addon_entries.append(entry)
 
+    legacy_source_values = sorted(set(legacy_source_values))
+    mutable_addon_entries = sorted(set(mutable_addon_entries))
+    blockers = []
+    if legacy_source_values:
+        blockers.append(
+            "Target still references legacy monorepo source(s): " + ", ".join(legacy_source_values)
+        )
     if mutable_addon_entries:
-        addon_entry_list = ", ".join(sorted(set(mutable_addon_entries)))
+        blockers.append(
+            "Target still has mutable addon refs: " + ", ".join(mutable_addon_entries)
+        )
+
+    return {
+        "artifact_ready": not blockers,
+        "legacy_monorepo_sources": legacy_source_values,
+        "mutable_addon_refs": mutable_addon_entries,
+        "blockers": blockers,
+    }
+
+
+def _validate_artifact_target_runtime_contract(
+    *,
+    artifact_manifest: ArtifactIdentityManifest | None,
+    resolved_target: ResolvedTargetEvidence,
+    target_payload: dict[str, object],
+    env_map: dict[str, str],
+) -> None:
+    if artifact_manifest is None:
+        return
+
+    findings = _artifact_target_runtime_contract_findings(
+        target_payload=target_payload,
+        env_map=env_map,
+    )
+    legacy_source_values = findings["legacy_monorepo_sources"]
+    if isinstance(legacy_source_values, list) and legacy_source_values:
+        legacy_sources = ", ".join(legacy_source_values)
+        raise click.ClickException(
+            "Artifact-backed deploy cannot target a legacy monorepo Dokploy source. "
+            f"Target {resolved_target.target_name or resolved_target.target_id} still references {legacy_sources}."
+        )
+
+    mutable_addon_entries = findings["mutable_addon_refs"]
+    if isinstance(mutable_addon_entries, list) and mutable_addon_entries:
+        addon_entry_list = ", ".join(mutable_addon_entries)
         raise click.ClickException(
             "Artifact-backed deploy requires Dokploy addon repositories to use exact git SHAs. "
             f"Target {resolved_target.target_name or resolved_target.target_id} still has mutable addon refs: {addon_entry_list}."
@@ -6399,6 +6437,69 @@ def _split_addon_repository_entry(entry: str) -> tuple[str, str]:
         return normalized_entry, ""
     repository_name, repository_ref = normalized_entry.rsplit("@", maxsplit=1)
     return repository_name.strip(), repository_ref.strip()
+
+
+def _runtime_contract_env_payload(env_map: dict[str, str]) -> dict[str, str]:
+    return {
+        env_key: env_map[env_key]
+        for env_key in _RUNTIME_CONTRACT_ENV_KEYS
+        if env_key in env_map and env_map[env_key].strip()
+    }
+
+
+def _build_live_target_runtime_contract_payload(
+    *,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, object]:
+    control_plane_root = _control_plane_root()
+    source_file = control_plane_dokploy.resolve_control_plane_dokploy_source_file(
+        control_plane_root,
+    )
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = _require_dokploy_target_definition(
+        source_file=source_file,
+        source_of_truth=source_of_truth,
+        context_name=context_name,
+        instance_name=instance_name,
+        operation_name="Live target inspection",
+    )
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_definition.target_type,
+        target_id=target_definition.target_id,
+    )
+    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    findings = _artifact_target_runtime_contract_findings(
+        target_payload=target_payload,
+        env_map=env_map,
+    )
+    return {
+        "context": context_name,
+        "instance": instance_name,
+        "tracked_target": {
+            "target_id": target_definition.target_id,
+            "target_type": target_definition.target_type,
+            "target_name": target_definition.target_name,
+            "source_git_ref": target_definition.source_git_ref,
+        },
+        "live_target": {
+            "name": str(target_payload.get("name") or "").strip(),
+            "app_name": str(target_payload.get("appName") or "").strip(),
+            "source_type": str(target_payload.get("sourceType") or "").strip(),
+            "custom_git_url": str(target_payload.get("customGitUrl") or "").strip(),
+            "custom_git_branch": str(target_payload.get("customGitBranch") or "").strip(),
+            "repository": str(target_payload.get("repository") or "").strip(),
+            "branch": str(target_payload.get("branch") or "").strip(),
+            "compose_path": str(target_payload.get("composePath") or "").strip(),
+            "environment": _runtime_contract_env_payload(env_map),
+        },
+        "artifact_runtime_contract": findings,
+    }
 
 
 def _sync_artifact_image_reference_for_target(
@@ -8192,6 +8293,17 @@ def environments_resolve(context_name: str, instance_name: str, json_output: boo
         return
     for environment_key in sorted(environment_values):
         click.echo(f"{environment_key}={environment_values[environment_key]}")
+
+
+@environments.command("show-live-target")
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+def environments_show_live_target(context_name: str, instance_name: str) -> None:
+    payload = _build_live_target_runtime_contract_payload(
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @main.group()
