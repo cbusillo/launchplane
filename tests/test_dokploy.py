@@ -349,6 +349,38 @@ target_type = "compose"
 
         self.assertIn("Duplicate Dokploy target definition for opw/prod", str(raised_error.exception))
 
+    def test_read_control_plane_dokploy_source_of_truth_rejects_dev_lane_targets(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            explicit_source_file = control_plane_root / "tmp" / "dokploy.toml"
+            explicit_source_file.parent.mkdir(parents=True, exist_ok=True)
+            explicit_source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "dev"
+target_id = "compose-123"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(explicit_source_file),
+                },
+                clear=True,
+            ):
+                with self.assertRaises(click.ClickException) as raised_error:
+                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
+
+        self.assertIn("stable remote instances prod, testing", str(raised_error.exception))
+        self.assertIn("opw/dev", str(raised_error.exception))
+        self.assertIn("Harbor preview records", str(raised_error.exception))
+
     def test_read_control_plane_dokploy_source_of_truth_rejects_unknown_target_id_override_routes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
