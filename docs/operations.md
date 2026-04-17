@@ -7,9 +7,9 @@ title: Operations
 Use `uv run control-plane --help` for the complete CLI surface. The current
 top-level groups are:
 
-Today this CLI is the Odoo-first Harbor operator surface. It owns stable-lane
-deploy and promotion workflows for `testing` and `prod`, plus Harbor preview
-records and read models for PR review flows.
+Today this CLI is the Harbor operator surface for the Odoo system owned by
+this repo. It owns stable-lane deploy and promotion workflows for `testing`
+and `prod`, plus Harbor preview records and read models for PR review flows.
 
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
@@ -156,5 +156,7 @@ blocked instead of guessing source inputs.
 - `odoo-control-plane` owns the durable operational truth behind those
   workflows: artifacts, release tuples, previews, deployments, promotions,
   backup gates, and inventory.
-- Broader reusable Harbor product direction is intentionally held in saved
-  plans until those boundaries become implemented repo contracts here.
+- Harbor is the operator surface inside this repo today, not a separate
+  general-purpose repo boundary.
+- Broader reusable Harbor product direction stays in saved plans until a
+  generic contract exists in code and operator surface.
