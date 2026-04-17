@@ -30,9 +30,6 @@ ENV_OVERRIDE_SHOPIFY__API_TOKEN = ""
 ENV_OVERRIDE_SHOPIFY__WEBHOOK_KEY = ""
 ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-local-client-id"
 
-[contexts.cm.instances.dev.env]
-ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-dev-client-id"
-
 [contexts.cm.instances.testing.env]
 ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-testing-client-id"
 
