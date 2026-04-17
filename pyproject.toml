@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.29.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -9,13 +9,13 @@ description = "Private control-plane contracts and workflows for Odoo artifact p
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.1",
-    "pydantic>=2.8",
+    "pydantic>=2.13.2",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=1.11",
-    "ruff>=0.12",
+    "mypy>=1.20.1",
+    "ruff>=0.15.11",
 ]
 
 [project.scripts]
