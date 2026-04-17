@@ -99,6 +99,9 @@ state/
   pending, passed, or failed.
 - Direct `ship` and `promote` execution fail closed if the referenced artifact
   id does not already have a stored manifest in control-plane state.
+- Artifact manifests may also carry `addon_selectors` metadata so operators can
+  inspect the original selector intent, but `addon_sources` remains the exact
+  SHA-backed release truth used for tuple minting and deploy execution.
 
 ## Release Tuple Record
 

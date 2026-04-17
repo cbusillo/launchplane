@@ -23,6 +23,13 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 artifact_id="artifact-20260410-f45db648",
                 source_commit="f45db648",
                 enterprise_base_digest="sha256:enterprise123",
+                addon_selectors=(
+                    {
+                        "repository": "cbusillo/disable_odoo_online",
+                        "selector": "main",
+                        "resolved_ref": "f45db648",
+                    },
+                ),
                 image=ArtifactImageReference(
                     repository="ghcr.io/cbusillo/odoo-private",
                     digest="sha256:image456",
@@ -35,6 +42,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertTrue(written_path.exists())
             self.assertEqual(loaded_manifest.artifact_id, manifest.artifact_id)
             self.assertEqual(loaded_manifest.image.digest, "sha256:image456")
+            self.assertEqual(loaded_manifest.addon_selectors[0].selector, "main")
 
     def test_write_and_read_release_tuple_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

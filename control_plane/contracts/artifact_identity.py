@@ -8,6 +8,14 @@ class ArtifactAddonSource(BaseModel):
     ref: str
 
 
+class ArtifactAddonSelector(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    selector: str
+    resolved_ref: str
+
+
 class ArtifactOpenUpgradeInputs(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -38,6 +46,7 @@ class ArtifactIdentityManifest(BaseModel):
     source_commit: str
     enterprise_base_digest: str
     addon_sources: tuple[ArtifactAddonSource, ...] = ()
+    addon_selectors: tuple[ArtifactAddonSelector, ...] = ()
     openupgrade_inputs: ArtifactOpenUpgradeInputs = Field(default_factory=ArtifactOpenUpgradeInputs)
     build_flags: ArtifactBuildFlags = Field(default_factory=ArtifactBuildFlags)
     image: ArtifactImageReference

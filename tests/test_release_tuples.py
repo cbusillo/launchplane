@@ -225,6 +225,40 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         self.assertEqual(release_tuple.repo_shas["shared-addons"], "def5678")
         self.assertEqual(release_tuple.provenance, "ship")
 
+    def test_build_release_tuple_record_ignores_addon_selector_metadata(self) -> None:
+        manifest = ArtifactIdentityManifest(
+            artifact_id="artifact-sha256-image456",
+            source_commit="abc1234",
+            enterprise_base_digest="sha256:enterprise123",
+            addon_sources=(
+                {
+                    "repository": "cbusillo/disable_odoo_online",
+                    "ref": "def5678",
+                },
+            ),
+            addon_selectors=(
+                {
+                    "repository": "cbusillo/disable_odoo_online",
+                    "selector": "main",
+                    "resolved_ref": "def5678",
+                },
+            ),
+            image={
+                "repository": "ghcr.io/cbusillo/odoo-private",
+                "digest": "sha256:image456",
+            },
+        )
+
+        release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+            context_name="opw",
+            channel_name="testing",
+            artifact_manifest=manifest,
+            deployment_record_id="deployment-1",
+            minted_at="2026-04-10T18:24:00Z",
+        )
+
+        self.assertEqual(release_tuple.repo_shas, {"tenant-opw": "abc1234", "disable_odoo_online": "def5678"})
+
     def test_build_release_tuple_record_rejects_branch_refs(self) -> None:
         manifest = ArtifactIdentityManifest(
             artifact_id="artifact-sha256-image456",
