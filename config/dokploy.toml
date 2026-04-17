@@ -17,6 +17,7 @@ healthcheck_enabled = true
 healthcheck_path = "/web/health"
 
 [profiles.odoo.env]
+DOCKER_PULL_POLICY = "missing"
 ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL_FREEZE = "True"
 ODOO_WEB_COMMAND = "python3 /volumes/scripts/run_odoo_startup.py -c /tmp/platform.odoo.conf"
 ODOO_ADDON_REPOSITORIES = "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d"

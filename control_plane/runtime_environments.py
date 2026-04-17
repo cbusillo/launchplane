@@ -7,6 +7,8 @@ from pathlib import Path
 
 import click
 
+from control_plane import dokploy as control_plane_dokploy
+
 RUNTIME_ENVIRONMENTS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE"
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
 
@@ -80,6 +82,13 @@ def resolve_runtime_environment_values(
             f"Runtime environments file has no instance definition for {context_name}/{instance_name}."
         )
     merged_values.update(_normalize_scalar_map(instance_definition.env))
+    merged_values.update(
+        resolve_tracked_target_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    )
     return merged_values
 
 
@@ -97,6 +106,28 @@ def resolve_runtime_context_values(
         )
     merged_values.update(_normalize_scalar_map(context_definition.shared_env))
     return merged_values
+
+
+def resolve_tracked_target_environment_values(
+    *,
+    control_plane_root: Path,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, str]:
+    source_file_path = control_plane_dokploy.resolve_control_plane_dokploy_source_file(control_plane_root)
+    if not source_file_path.exists():
+        return {}
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root
+    )
+    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if target_definition is None:
+        return {}
+    return dict(target_definition.env)
 
 
 def _parse_runtime_environment_definition(
