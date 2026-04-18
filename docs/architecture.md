@@ -101,7 +101,7 @@ promotion behavior.
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
 - `odoo-devkit` is the expected build/publish handoff for those manifests: it
-  stages the tenant and shared-addon sources into a real downstream image
+  stages the tenant and shared source inputs into a real downstream image
   build context, pushes the image, resolves the pushed digest, and emits JSON
   for `artifacts write` / `artifacts ingest` here.
 - Artifact-backed execution also rejects Dokploy targets that still depend on

@@ -34,7 +34,7 @@ and `prod`, plus Harbor preview records and read models for PR review flows.
   before later workflows depend on them.
 - The normal split-repo build/export handoff comes from `odoo-devkit`
   `platform runtime publish`, which writes a control-plane-compatible artifact
-  manifest JSON file after it stages tenant/shared addon sources, pushes the
+  manifest JSON file after it stages tenant/shared source inputs, pushes the
   image, and resolves the pushed digest.
 - Promotion execution validates a stored passing backup-gate record for the
   destination environment before ship execution begins.
