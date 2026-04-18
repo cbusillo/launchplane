@@ -92,6 +92,10 @@ promotion behavior.
 - The Odoo-specific compose post-deploy update runs natively here via
   a control-plane-owned Dokploy schedule workflow, so deploy execution no
   longer shells back into another repo at runtime.
+- That post-deploy path is also the first real candidate for an eventual Odoo
+  driver seam in Harbor: it is a product-specific runtime call pattern already
+  owned end to end by this control plane, without forcing broader runtime
+  abstraction ahead of evidence.
 - Deployment records persist post-deploy update evidence as first-class
   control-plane state instead of hiding that work behind another repo's CLI.
 - Current environment inventory is also persisted here and refreshed by
