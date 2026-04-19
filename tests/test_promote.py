@@ -1236,6 +1236,55 @@ domains = ["https://prod.example.com"]
             self.assertIn('"record_id": "deployment-20260411T182231Z-opw-prod"', result.output)
             self.assertIn('"source_git_ref": "def456"', result.output)
 
+    def test_deployments_write_persists_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "deployment-record.json"
+            record = DeploymentRecord(
+                record_id="deployment-20260411T182231Z-opw-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                context="opw",
+                instance="prod",
+                source_git_ref="def456",
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="compose",
+                    target_id="compose-123",
+                    target_name="opw-prod",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    deployment_id="control-plane-dokploy",
+                    status="pass",
+                    started_at="2026-04-11T18:22:31Z",
+                    finished_at="2026-04-11T18:22:31Z",
+                ),
+            )
+            input_file.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+
+            result = runner.invoke(
+                main,
+                [
+                    "deployments",
+                    "write",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            written_path = state_dir / "deployments" / "deployment-20260411T182231Z-opw-prod.json"
+            self.assertEqual(Path(result.output.strip()), written_path)
+            self.assertEqual(
+                DeploymentRecord.model_validate(json.loads(written_path.read_text(encoding="utf-8"))),
+                record,
+            )
+
     def test_promote_execute_requires_stored_artifact_manifest(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

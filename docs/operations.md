@@ -13,7 +13,7 @@ and `prod`, plus Harbor preview records and read models for PR review flows.
 
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
-- `deployments`: inspect deployment records.
+- `deployments`: write and inspect deployment records.
 - `environments`: resolve runtime environment contracts.
 - `harbor-previews`: inspect, mutate, render, ingest, and replay Harbor preview
   state.

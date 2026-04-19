@@ -7118,6 +7118,17 @@ def deployments() -> None:
     """Deployment record commands."""
 
 
+@deployments.command("write")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def deployments_write(state_dir: Path, input_file: Path) -> None:
+    record = DeploymentRecord.model_validate(_load_json_file(input_file))
+    record_path = _store(state_dir).write_deployment_record(record)
+    click.echo(record_path)
+
+
 @deployments.command("show")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
