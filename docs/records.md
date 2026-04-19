@@ -12,6 +12,11 @@ These records are the durable Odoo-first Harbor truth for this repo today.
 Stable lane records (`testing`, `prod`) and preview records are separate on
 purpose: previews are not another long-lived environment lane.
 
+The current cross-product posture is evidence-first. A second product such as
+VeriReel should first land in these existing Harbor record shapes through
+deployment, promotion, inventory, and preview evidence ingestion before this
+control plane takes over product-specific runtime actions.
+
 ## Layout
 
 ```text
@@ -63,6 +68,9 @@ state/
   shelling out for a pre-rendered JSON request.
 - Promotion execution requires the source lane to have a current release tuple
   record for the requested artifact before it can deploy to the destination.
+- For a second product such as VeriReel, promotion evidence from the existing
+  production-promotion workflow is the smallest proof point that this record
+  shape works beyond Odoo.
 
 ## Backup Gate Record
 
@@ -102,6 +110,9 @@ state/
 - Artifact manifests may also carry `addon_selectors` metadata so operators can
   inspect the original selector intent, but `addon_sources` remains the exact
   SHA-backed release truth used for tuple minting and deploy execution.
+- For a second product such as VeriReel, the first Harbor onboarding slice
+  should ingest deployment evidence from that product's existing release
+  workflows into this record shape before Harbor owns the deploy execution.
 
 ## Release Tuple Record
 
@@ -137,6 +148,10 @@ state/
 - Higher-level transition commands may also rewrite preview records through the
   tested Harbor transition helpers so operators do not have to hand-edit link
   fields for common lifecycle states.
+- For a second product such as VeriReel, preview-control-plane and cleanup
+  workflow evidence is the first candidate source for proving this preview
+  model without forcing Harbor to provision or destroy those previews itself
+  on day one.
 
 ## Harbor Preview Generation Record
 
@@ -180,3 +195,6 @@ state/
 - Successful waited `promote` executions refresh the same inventory record and
   add promotion linkage so the current state can still be tied back to the
   controlling promotion record.
+- For a second product such as VeriReel, inventory should first be derived from
+  ingested deployment/promotion evidence before Harbor becomes the runtime
+  executor for that product.
