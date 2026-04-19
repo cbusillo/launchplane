@@ -24,6 +24,10 @@ and `prod`, plus Harbor preview records and read models for PR review flows.
   TOML catalog from minted state.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 
+`deployments write` and `inventory write-from-deployment` are the first small
+evidence-ingest surfaces that let Harbor accept externally-produced deployment
+facts without claiming it executed that product's runtime action itself.
+
 ## Core Rules
 
 - Promotions and deploys reference explicit artifact identifiers.

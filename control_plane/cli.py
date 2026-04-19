@@ -7164,6 +7164,21 @@ def inventory() -> None:
     """Environment inventory commands."""
 
 
+@inventory.command("write-from-deployment")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--record-id", required=True)
+def inventory_write_from_deployment(state_dir: Path, record_id: str) -> None:
+    record_store = _store(state_dir)
+    deployment_record = record_store.read_deployment_record(record_id)
+    inventory_path = _write_environment_inventory(
+        record_store=record_store,
+        deployment_record=deployment_record,
+    )
+    click.echo(inventory_path)
+
+
 @inventory.command("show")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True

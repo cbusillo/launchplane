@@ -1285,6 +1285,61 @@ domains = ["https://prod.example.com"]
                 record,
             )
 
+    def test_inventory_write_from_deployment_persists_inventory(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            deployment_dir = state_dir / "deployments"
+            deployment_dir.mkdir(parents=True, exist_ok=True)
+            record = DeploymentRecord(
+                record_id="deployment-20260411T182231Z-opw-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                context="opw",
+                instance="prod",
+                source_git_ref="def456",
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="compose",
+                    target_id="compose-123",
+                    target_name="opw-prod",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    deployment_id="control-plane-dokploy",
+                    status="pass",
+                    started_at="2026-04-11T18:22:31Z",
+                    finished_at="2026-04-11T18:22:31Z",
+                ),
+            )
+            (deployment_dir / f"{record.record_id}.json").write_text(
+                record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "inventory",
+                    "write-from-deployment",
+                    "--state-dir",
+                    str(state_dir),
+                    "--record-id",
+                    record.record_id,
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            written_path = state_dir / "inventory" / "opw-prod.json"
+            self.assertEqual(Path(result.output.strip()), written_path)
+            written_payload = json.loads(written_path.read_text(encoding="utf-8"))
+            self.assertEqual(written_payload["context"], "opw")
+            self.assertEqual(written_payload["instance"], "prod")
+            self.assertEqual(written_payload["deployment_record_id"], record.record_id)
+            self.assertEqual(written_payload["source_git_ref"], "def456")
+            self.assertEqual(written_payload["artifact_identity"]["artifact_id"], "artifact-2")
+
     def test_promote_execute_requires_stored_artifact_manifest(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
