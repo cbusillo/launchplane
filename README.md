@@ -51,7 +51,9 @@ Shared-service core records can now be backed by Postgres with
 `HARBOR_DATABASE_URL` or `uv run harbor service serve --database-url ...`.
 The same service boundary now exposes authenticated operator read endpoints for
 deployment, promotion, inventory, preview, preview history, and recent
-context-scoped operations.
+context-scoped operations. Harbor-managed secrets now use the same Postgres
+backend, with encrypted secret values stored in DB and a bootstrap import path
+from the existing `dokploy.env` and runtime-environment file surfaces.
 
 ## Quick Start
 
@@ -61,6 +63,7 @@ cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run harbor --help
 uv run harbor service serve --help
 uv run harbor storage import-core-records --help
+uv run harbor secrets import-bootstrap --help
 uv run python -m unittest
 ```
 
@@ -69,6 +72,11 @@ external Harbor config files such as
 `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env` and
 `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml`, not from
 repo-local secret files.
+
+Once Harbor-managed secret records exist in Postgres, Harbor reads those
+encrypted DB-backed values first for Dokploy credentials and runtime
+environment secret keys, then falls back to the older file/env surfaces only
+when no Harbor-managed secret has been written yet.
 
 For the first local Harbor service run, copy
 `config/harbor-authz.toml.example` to a local policy file and adjust the repo,
@@ -94,13 +102,15 @@ The entrypoint can bootstrap operator-local files from environment variables so
 the deployed service does not need checked-in secret or target-id files:
 
 - `HARBOR_DATABASE_URL`
+- `HARBOR_MASTER_ENCRYPTION_KEY`
 - `HARBOR_POLICY_TOML` or `HARBOR_POLICY_B64`
 - `HARBOR_DOKPLOY_TARGET_IDS_TOML` or `HARBOR_DOKPLOY_TARGET_IDS_B64`
 - `HARBOR_RUNTIME_ENVIRONMENTS_TOML` or `HARBOR_RUNTIME_ENVIRONMENTS_B64`
 
 Regular runtime env such as `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, and any
 `DOKPLOY_SHIP_MODE_*` overrides can still be passed directly as process
-environment variables.
+environment variables. `HARBOR_MASTER_ENCRYPTION_KEY` must be present whenever
+Harbor needs to read or write DB-backed managed secrets.
 
 ## Docs
 

@@ -1,11 +1,13 @@
 import io
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord, PreviewPullRequestSummary
@@ -14,6 +16,7 @@ from control_plane.contracts.promotion_record import ArtifactIdentityReference, 
 from control_plane.service import create_harbor_service_app
 from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, HarborAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_testing_deploy import VeriReelTestingDeployResult
 
 
@@ -837,6 +840,86 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(len(operations_payload["recent_deployments"]), 1)
             self.assertEqual(len(operations_payload["recent_promotions"]), 1)
             self.assertEqual(len(operations_payload["recent_previews"]), 1)
+
+    def test_secret_status_endpoints_return_operator_read_models(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = f"sqlite+pysqlite:///{root / 'harbor.sqlite3'}"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="global",
+                    integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+                    name="token",
+                    plaintext_value="dokploy-token",
+                    binding_key="DOKPLOY_TOKEN",
+                    actor="test",
+                )
+                context_secret = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="GITHUB_WEBHOOK_SECRET",
+                    plaintext_value="webhook-secret",
+                    binding_key="GITHUB_WEBHOOK_SECRET",
+                    context_name="opw",
+                    actor="test",
+                )
+            store.close()
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "contexts": ["opw"],
+                            "actions": ["secret.read", "secret.list"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "HARBOR_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                list_status_code, list_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/contexts/opw/secrets",
+                )
+                show_status_code, show_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path=f"/v1/secrets/{context_secret['secret_id']}",
+                )
+
+            self.assertEqual(list_status_code, 200)
+            self.assertEqual(list_payload["context"], "opw")
+            self.assertEqual(len(list_payload["secrets"]), 2)
+            self.assertEqual(show_status_code, 200)
+            self.assertEqual(show_payload["secret"]["secret_id"], context_secret["secret_id"])
+            self.assertEqual(show_payload["secret"]["binding"]["binding_key"], "GITHUB_WEBHOOK_SECRET")
 
     def test_preview_generation_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

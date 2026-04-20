@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -7024,6 +7025,11 @@ def storage() -> None:
     """Harbor storage commands."""
 
 
+@main.group()
+def secrets() -> None:
+    """Harbor managed secret commands."""
+
+
 @storage.command("import-core-records")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -7040,6 +7046,124 @@ def storage_import_core_records(state_dir: Path, database_url: str) -> None:
     postgres_store.ensure_schema()
     counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
     click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
+
+
+@secrets.command("import-bootstrap")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Harbor repo root to scan for existing bootstrap secret sources.",
+)
+@click.option("--actor", default="bootstrap", show_default=True)
+def secrets_import_bootstrap(database_url: str, control_plane_root: Path | None, actor: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        summary = control_plane_secrets.import_bootstrap_secrets(
+            record_store=postgres_store,
+            control_plane_root=control_plane_root or _control_plane_root(),
+            actor=actor,
+        )
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps({"status": "ok", "summary": summary}, indent=2, sort_keys=True))
+
+
+@secrets.command("put")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option("--scope", type=click.Choice(["global", "context", "context_instance"]), required=True)
+@click.option("--integration", required=True)
+@click.option("--name", required=True)
+@click.option("--binding-key", required=True)
+@click.option("--value", required=True)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--description", default="")
+@click.option("--actor", default="cli", show_default=True)
+def secrets_put(
+    database_url: str,
+    scope: str,
+    integration: str,
+    name: str,
+    binding_key: str,
+    value: str,
+    context_name: str,
+    instance_name: str,
+    description: str,
+    actor: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        result = control_plane_secrets.write_secret_value(
+            record_store=postgres_store,
+            scope=scope,
+            integration=integration,
+            name=name,
+            plaintext_value=value,
+            binding_key=binding_key,
+            context_name=context_name,
+            instance_name=instance_name,
+            description=description,
+            actor=actor,
+        )
+        payload = control_plane_secrets.build_secret_status(postgres_store, secret_id=result["secret_id"])
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps({"status": "ok", "result": result, "secret": payload}, indent=2, sort_keys=True))
+
+
+@secrets.command("list")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option("--integration", default="")
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+def secrets_list(database_url: str, integration: str, context_name: str, instance_name: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        payload = control_plane_secrets.list_secret_statuses(
+            postgres_store,
+            integration=integration,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@secrets.command("show")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option("--secret-id", required=True)
+def secrets_show(database_url: str, secret_id: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        payload = control_plane_secrets.build_secret_status(postgres_store, secret_id=secret_id)
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @service.command("serve")

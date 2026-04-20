@@ -10,15 +10,23 @@ title: Secrets
 ## Current Contract
 
 - Dokploy credentials belong to `harbor`.
-- Keep real Dokploy values in the current process environment or in an
+- Harbor can now persist managed secret values in the Postgres shared-service
+  backend when `HARBOR_DATABASE_URL` is configured.
+- Managed secret values are encrypted before Harbor stores them; the master key
+  stays outside the database in `HARBOR_MASTER_ENCRYPTION_KEY`.
+- Keep existing bootstrap values in the current process environment or in an
   external Harbor config file such as
-  `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env`.
+  `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env` until they have been
+  imported into Harbor-managed secret records.
 - Local runtime environment truth should live outside the repo checkout, such
   as `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml`.
 - Live Dokploy `target_id` values belong in the control-plane repo's untracked
   `config/dokploy-targets.toml`.
 - `DOKPLOY_HOST` and `DOKPLOY_TOKEN` may also be provided through the current
   process environment.
+- Harbor can import the current `DOKPLOY_HOST` / `DOKPLOY_TOKEN` values with
+  `uv run harbor secrets import-bootstrap --database-url ...` so the first
+  shared-service bring-up does not require manual secret re-entry.
 - Optional ship-mode overrides such as `DOKPLOY_SHIP_MODE` and
   `DOKPLOY_SHIP_MODE_<CONTEXT>_<INSTANCE>` are also read from the same
   control-plane env surface.
@@ -30,6 +38,19 @@ title: Secrets
 - If you need a non-default runtime environments file location, set
   `ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE`.
 
+## DB-Backed Secret Resolution
+
+- Harbor reads DB-backed managed secrets first when matching secret records
+  exist for:
+  - Dokploy `DOKPLOY_HOST`
+  - Dokploy `DOKPLOY_TOKEN`
+  - runtime-environment keys that look like secrets, such as `*_PASSWORD`,
+    `*_TOKEN`, `*_SECRET`, and `*_KEY`
+- Harbor falls back to the older file/env surfaces only when no managed secret
+  record exists for a requested binding.
+- Secret status surfaces return metadata only. Harbor does not expose routine
+  plaintext read commands or service endpoints.
+
 ## Rules
 
 - Do not keep real secret files in the repo checkout.
@@ -40,6 +61,8 @@ title: Secrets
   start from `config/dokploy-targets.toml.example`.
 - Do not rely on a repo-local `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
+- Missing `HARBOR_MASTER_ENCRYPTION_KEY` is a hard error when Harbor needs to
+  read or write DB-backed managed secrets.
 
 ## Local Runtime Contract
 
@@ -63,4 +86,6 @@ cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 cp config/runtime-environments.toml.example \
   "${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml"
 cp .env.example "${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env"
+export HARBOR_MASTER_ENCRYPTION_KEY="replace-me"
+uv run harbor secrets import-bootstrap --database-url "$HARBOR_DATABASE_URL"
 ```

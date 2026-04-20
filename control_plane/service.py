@@ -10,6 +10,7 @@ from wsgiref.simple_server import make_server
 import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
@@ -177,8 +178,20 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "preview.read", {"preview_id": segments[2]}
     if len(segments) == 4 and segments[:2] == ["v1", "previews"] and segments[3] == "history":
         return "preview.read", {"preview_id": segments[2], "include_history": "true"}
+    if len(segments) == 3 and segments[:2] == ["v1", "secrets"]:
+        return "secret.read", {"secret_id": segments[2]}
+    if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "secrets":
+        return "secret.list", {"context": segments[2]}
+    if len(segments) == 6 and segments[:2] == ["v1", "contexts"] and segments[3] == "instances" and segments[5] == "secrets":
+        return "secret.list", {"context": segments[2], "instance": segments[4]}
     if len(segments) == 5 and segments[:2] == ["v1", "contexts"] and segments[3:] == ["operations", "recent"]:
         return "operations.read", {"context": segments[2]}
+    return None
+
+
+def _secret_capable_store(record_store: object):
+    if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
+        return record_store
     return None
 
 
@@ -425,6 +438,102 @@ def create_harbor_service_app(
                             "status": "ok",
                             "trace_id": request_trace_id,
                             "record": preview.model_dump(mode="json"),
+                        },
+                    )
+                if action == "secret.read":
+                    secret_store = _secret_capable_store(record_store)
+                    if secret_store is None:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=404,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "not_found",
+                                    "message": "Harbor secret status routes require the Postgres storage backend.",
+                                },
+                            },
+                        )
+                    secret_status = control_plane_secrets.build_secret_status(
+                        secret_store,
+                        secret_id=params["secret_id"],
+                    )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="harbor",
+                        context=str(secret_status["context"]),
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Harbor managed secret status for the requested context.",
+                                },
+                            },
+                        )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "secret": secret_status,
+                        },
+                    )
+                if action == "secret.list":
+                    context_name = params["context"]
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="harbor",
+                        context=context_name,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot list Harbor managed secret status for the requested context.",
+                                },
+                            },
+                        )
+                    secret_store = _secret_capable_store(record_store)
+                    if secret_store is None:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=404,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "not_found",
+                                    "message": "Harbor secret status routes require the Postgres storage backend.",
+                                },
+                            },
+                        )
+                    statuses = control_plane_secrets.list_secret_statuses(
+                        secret_store,
+                        context_name=context_name,
+                        instance_name=params.get("instance", ""),
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "context": context_name,
+                            "instance": params.get("instance", ""),
+                            "secrets": statuses,
                         },
                     )
                 context_name = params["context"]

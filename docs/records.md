@@ -8,6 +8,9 @@ title: Records
 - Use Postgres-backed Harbor core-record tables for shared-service ingress when
   Harbor is running with `HARBOR_DATABASE_URL` or `harbor service serve
   --database-url ...`.
+- Use Postgres-backed Harbor secret tables for managed secret records when
+  Harbor is running with `HARBOR_DATABASE_URL` and
+  `HARBOR_MASTER_ENCRYPTION_KEY`.
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
