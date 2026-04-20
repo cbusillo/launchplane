@@ -77,7 +77,7 @@ state/
 - Promotion execution should normalize backup-gate evidence from a stored
   backup-gate record instead of trusting ad-hoc inline request payloads.
 - Promotion execution also resolves the deployable ship request natively in
-  `odoo-control-plane` from this repo's Dokploy source-of-truth, instead of
+  `harbor` from this repo's Dokploy source-of-truth, instead of
   shelling out for a pre-rendered JSON request.
 - Promotion execution requires the source lane to have a current release tuple
   record for the requested artifact before it can deploy to the destination.
@@ -96,7 +96,7 @@ state/
 
 ## Deployment Record
 
-- One file per direct ship attempt owned by `odoo-control-plane`.
+- One file per direct ship attempt owned by `harbor`.
 - Record the requested source git ref, target, deploy status, recorded
   executor, post-deploy update evidence, and destination health evidence.
 - Ship execution no longer delegates runtime deploy/update work back to

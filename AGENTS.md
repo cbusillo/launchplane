@@ -1,7 +1,7 @@
 # AGENTS.md — Codex CLI Operating Guide (Read Me First)
 
 Treat this file as the launch checklist for every Codex session in
-`odoo-control-plane`.
+`harbor`.
 
 ## Start Here
 
@@ -43,7 +43,7 @@ Treat this file as the launch checklist for every Codex session in
 
 ## Repo Boundaries
 
-- `odoo-control-plane` owns:
+- `harbor` owns:
   - artifact manifests
   - release tuple catalogs
   - backup-gate records

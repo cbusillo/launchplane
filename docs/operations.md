@@ -4,7 +4,7 @@ title: Operations
 
 ## Command Groups
 
-Use `uv run control-plane --help` for the complete CLI surface. The current
+Use `uv run harbor --help` for the complete CLI surface. The current
 top-level groups are:
 
 Today this CLI is the local Harbor operator surface for the Odoo system owned
@@ -66,7 +66,7 @@ and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
 The first implemented service command is:
 
 ```bash
-uv run control-plane service serve \
+uv run harbor service serve \
   --state-dir ./state \
   --policy-file ./config/harbor-authz.toml
 ```
@@ -168,7 +168,7 @@ uv --directory ../odoo-devkit run platform runtime publish \
   --image-repository ghcr.io/example/odoo-opw \
   --image-tag opw-20260416-deadbeef \
   --output-file /tmp/opw-artifact.json
-uv run control-plane artifacts write \
+uv run harbor artifacts write \
   --state-dir ./state \
   --input-file /tmp/opw-artifact.json
 ```
@@ -307,7 +307,7 @@ blocked instead of guessing source inputs.
 
 - GitHub remains the engineering workflow surface: issues, branches, pull
   requests, labels, checks, PR comments, releases, and CI execution.
-- `odoo-control-plane` owns the durable operational truth behind those
+- `harbor` owns the durable operational truth behind those
   workflows: artifacts, release tuples, previews, deployments, promotions,
   backup gates, and inventory.
 - Harbor should converge on a separate long-running service boundary even while

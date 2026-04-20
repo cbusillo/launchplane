@@ -12,12 +12,12 @@ This repo is the current Odoo implementation of the Harbor operator surface.
 The contracts documented here now need to serve two jobs at once: describe the
 implemented Odoo control-plane behavior that exists today, and describe the
 target Harbor boundary that future cross-product work should aim at. Harbor is
-still implemented inside `odoo-control-plane` today, but the target shape is a
+still implemented inside `harbor` today, but the target shape is a
 long-running Harbor service rather than a permanently repo-local CLI.
 
 ## Repo Boundary
 
-`odoo-control-plane` owns:
+`harbor` owns:
 
 - artifact manifests
 - release tuple catalogs
@@ -68,7 +68,7 @@ promotion behavior.
 ## Harbor Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
-- Harbor currently lives inside `odoo-control-plane`; there is no separate
+- Harbor currently lives inside `harbor`; there is no separate
   extracted Harbor repo or package contract yet.
 - The CLI and file-backed state directory remain the current implementation
   surface, but they should be treated as temporary local scaffolding around the

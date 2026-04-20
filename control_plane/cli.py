@@ -217,7 +217,7 @@ def _build_harbor_action_script(
         lines.append(f'cat >"${variable_name}" <<\'JSON\'')
         lines.append(json.dumps(payload, indent=2, sort_keys=True))
         lines.append("JSON")
-    command_parts = ["uv", "run", "control-plane", "harbor-previews", command_name, "--state-dir", '"$STATE_DIR"']
+    command_parts = ["uv", "run", "harbor", "harbor-previews", command_name, "--state-dir", '"$STATE_DIR"']
     command_parts.extend(command_args)
     lines.append(" ".join(command_parts))
     return "\n".join(lines)
@@ -414,7 +414,7 @@ def _build_harbor_promotion_resolve_recipe_script(
     return "\n".join(
         (
             'PROMOTION_REQUEST_FILE="/tmp/harbor-promotion-request.json"',
-            f'uv run control-plane promote resolve --context "{context_name}" --from-instance testing --to-instance prod --artifact-id "{artifact_id}" --backup-record-id "{resolved_backup_record_id}" >"$PROMOTION_REQUEST_FILE"',
+            f'uv run harbor promote resolve --context "{context_name}" --from-instance testing --to-instance prod --artifact-id "{artifact_id}" --backup-record-id "{resolved_backup_record_id}" >"$PROMOTION_REQUEST_FILE"',
             'cat "$PROMOTION_REQUEST_FILE"',
         )
     )
@@ -443,7 +443,7 @@ def _build_harbor_backup_gate_write_recipe_script(
         'cat >"$BACKUP_GATE_FILE" <<\'JSON\'',
         json.dumps(payload, indent=2, sort_keys=True),
         'JSON',
-        'uv run control-plane backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
+        'uv run harbor backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
     ]
     return "\n".join(lines)
 
@@ -453,7 +453,7 @@ def _build_harbor_promotion_execute_recipe_script(*, state_dir: str) -> str:
         (
             f'STATE_DIR="{state_dir or "/path/to/state"}"',
             'PROMOTION_REQUEST_FILE="/tmp/harbor-promotion-request.json"',
-            'uv run control-plane promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
+            'uv run harbor promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
         )
     )
 
@@ -470,9 +470,9 @@ def _build_harbor_environment_ship_recipe_script(
         (
             'STATE_DIR="/path/to/state"',
             f'SHIP_REQUEST_FILE="{request_file}"',
-            f'uv run control-plane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
+            f'uv run harbor ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
             'cat "$SHIP_REQUEST_FILE"',
-            'uv run control-plane ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
+            'uv run harbor ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
         )
     )
 

@@ -2,7 +2,7 @@
 title: Control Plane Docs
 ---
 
-Use these docs as the source of truth for `odoo-control-plane`.
+Use these docs as the source of truth for `harbor`.
 
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
 - [service-boundary.md](service-boundary.md) — Harbor HTTP ingress, GitHub

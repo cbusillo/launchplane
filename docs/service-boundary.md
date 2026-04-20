@@ -23,7 +23,7 @@ on.
 
 The first service slice is now implemented locally in this repo:
 
-- CLI: `uv run control-plane service serve`
+- CLI: `uv run harbor service serve`
 - health route: `GET /v1/health`
 - authenticated evidence routes:
   - `POST /v1/evidence/deployments`

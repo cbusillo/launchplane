@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "odoo-control-plane"
+name = "harbor"
 version = "0.1.0"
-description = "Private control-plane contracts and workflows for Odoo artifact promotion"
+description = "Harbor control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.1",
@@ -20,7 +20,7 @@ dev = [
 ]
 
 [project.scripts]
-control-plane = "control_plane.cli:main"
+harbor = "control_plane.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["control_plane"]

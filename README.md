@@ -1,4 +1,4 @@
-# odoo-control-plane
+# harbor
 
 Private Odoo control-plane repo for release records, environment operations,
 Harbor preview state, and promotion orchestration.
@@ -23,9 +23,9 @@ The target shape is now explicit: Harbor should become a long-running control
 plane service with authenticated ingress, rather than treating the repo-local
 CLI as the permanent cross-product boundary.
 
-That also means the current `odoo-control-plane` name should be treated as
-transitional. Once Harbor has a real service/API/OIDC boundary, the main
-repo/package/CLI naming should move to Harbor-first naming.
+That rename has now started at the repo and CLI surface. The internal Python
+module layout still uses `control_plane` for continuity during the transition,
+but the public repo and command naming should now be treated as Harbor-first.
 
 ## Bootstrap Scope
 
@@ -53,8 +53,8 @@ evidence ingress for deployments, promotions, and the full preview lifecycle.
 ```bash
 cp .env.example .env
 cp config/dokploy-targets.toml.example config/dokploy-targets.toml
-uv run control-plane --help
-uv run control-plane service serve --help
+uv run harbor --help
+uv run harbor service serve --help
 uv run python -m unittest
 ```
 

@@ -9,7 +9,7 @@ title: Secrets
 
 ## Current Contract
 
-- Dokploy credentials belong to `odoo-control-plane`.
+- Dokploy credentials belong to `harbor`.
 - Keep real values in the control-plane repo's untracked `.env` by default.
 - Local runtime environment truth may live in the control-plane repo's
   untracked `config/runtime-environments.toml`.
@@ -38,14 +38,14 @@ title: Secrets
 
 ## Local Runtime Contract
 
-- `uv run control-plane environments resolve --context <ctx> --instance
+- `uv run harbor environments resolve --context <ctx> --instance
 <instance> --json-output`
   emits the resolved runtime environment payload for a tenant environment.
 - Harbor preview write/build helpers read `HARBOR_PREVIEW_BASE_URL` from the
   shared plus context-scoped runtime environment contract, with shared values
   providing the default and context values allowed to override it.
 - `odoo-devkit` may consume that contract when the operator points
-  `ODOO_CONTROL_PLANE_ROOT` at a valid `odoo-control-plane` checkout.
+  `ODOO_CONTROL_PLANE_ROOT` at a valid `harbor` checkout.
 - When `odoo-devkit` is configured to use the control-plane contract, legacy
   devkit-local `.env` / `platform/.env` / `platform/secrets.toml` files should
   be removed so environment authority stays single-source and fail-closed.

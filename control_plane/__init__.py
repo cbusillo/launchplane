@@ -1,1 +1,1 @@
-"""odoo-control-plane package."""
+"""Harbor package."""
