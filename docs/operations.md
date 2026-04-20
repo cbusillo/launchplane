@@ -127,7 +127,7 @@ The current command group supports:
   `render-policy-page`, `render-site`
 - direct record writes: `write-preview`, `write-generation`,
   `write-enablement`
-- external evidence ingest: `write-from-generation`
+- external evidence ingest: `write-from-generation`, `write-destroyed`
 - lifecycle transitions: `request-generation`, `mark-generation-ready`,
   `mark-generation-failed`, `destroy-preview`
 - PR/webhook ingest: `ingest-pr-event`, `ingest-github-webhook`
@@ -145,11 +145,84 @@ requests flow through Harbor preview records instead of a tracked long-lived
 tuple records under the selected state directory rather than silently rewriting
 this tracked file.
 
-`harbor-previews write-from-generation` is the first small preview-evidence
-ingest surface for products whose preview runtime already exists outside Harbor.
-When the preview request carries an explicit `canonical_url`, Harbor can store
-the live preview route and generation status directly from external workflow
-evidence without requiring a Harbor-managed preview base-url contract.
+`harbor-previews write-from-generation` and `harbor-previews write-destroyed`
+are the explicit preview-evidence ingest surfaces for products whose preview
+runtime already exists outside Harbor. When the preview request carries an
+explicit `canonical_url`, Harbor can store the live preview route, generation
+status, and cleanup outcome directly from external workflow evidence without
+requiring a Harbor-managed preview base-url contract.
+
+### VeriReel Preview Evidence Handoff
+
+VeriReel already computes the route, PR slug, image tags, and workflow run URL
+inside `.github/workflows/preview-control-plane.yml` and
+`.github/workflows/preview-cleanup.yml`. Harbor's handoff contract should stay
+at that evidence layer instead of asking VeriReel to adopt Harbor-owned preview
+provisioning first.
+
+For a successful or failed preview refresh, emit two JSON payloads and hand
+them to `harbor-previews write-from-generation`:
+
+```json
+{
+  "context": "verireel-testing",
+  "anchor_repo": "verireel",
+  "anchor_pr_number": 123,
+  "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+  "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
+  "state": "active",
+  "updated_at": "2026-04-16T08:10:00Z",
+  "eligible_at": "2026-04-16T08:10:00Z"
+}
+```
+
+```json
+{
+  "context": "verireel-testing",
+  "anchor_repo": "verireel",
+  "anchor_pr_number": 123,
+  "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+  "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
+  "state": "ready",
+  "requested_reason": "external_preview_refresh",
+  "requested_at": "2026-04-16T08:02:00Z",
+  "ready_at": "2026-04-16T08:10:00Z",
+  "finished_at": "2026-04-16T08:10:00Z",
+  "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
+  "artifact_id": "ghcr.io/every/verireel-app:pr-123-6b3c9d7",
+  "deploy_status": "pass",
+  "verify_status": "pass",
+  "overall_health_status": "pass"
+}
+```
+
+That evidence maps directly from the VeriReel workflow outputs:
+
+- `preview_url` -> `preview.canonical_url`
+- `pr_number` -> `anchor_pr_number`
+- `pr_sha` -> `anchor_head_sha`
+- `run_url` should be retained in the calling workflow logs or wrapper script
+  alongside the payload write for traceability
+- immutable preview image tag or digest -> `artifact_id`
+
+For cleanup, emit the destroy payload and hand it to
+`harbor-previews write-destroyed` once the preview teardown has actually
+completed:
+
+```json
+{
+  "context": "verireel-testing",
+  "anchor_repo": "verireel",
+  "anchor_pr_number": 123,
+  "destroyed_at": "2026-04-16T09:04:00Z",
+  "destroy_reason": "external_preview_cleanup_completed"
+}
+```
+
+That cleanup payload should be written only after the preview URL, Dokploy app,
+and backing database teardown has succeeded. If cleanup fails, Harbor should
+keep the preview record live and instead receive a failed generation or workflow
+signal later, rather than a premature destroyed transition.
 
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an operator is ready to review and

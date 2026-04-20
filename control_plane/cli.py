@@ -7462,6 +7462,21 @@ def harbor_previews_write_from_generation(
     click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
 
 
+@harbor_previews.command("write-destroyed")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
+def harbor_previews_write_destroyed(state_dir: Path, input_file: Path) -> None:
+    record_store = _store(state_dir)
+    request = PreviewDestroyMutationRequest.model_validate(_load_json_file(input_file))
+    result_payload = _apply_harbor_destroy_preview(
+        record_store=record_store,
+        request=request,
+    )
+    click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
+
+
 @harbor_previews.command("mark-generation-ready")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -8566,6 +8581,7 @@ def _apply_harbor_destroy_preview(
     return {
         "preview_id": transitioned_preview.preview_id,
         "preview_path": str(preview_path),
+        "transition": "destroyed",
     }
 
 

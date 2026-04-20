@@ -109,6 +109,9 @@ promotion behavior.
   live preview route can be supplied as explicit evidence, and preview plus
   generation state can be refreshed from external workflow results without
   requiring Harbor to provision the preview itself first.
+- Harbor now has the matching cleanup-evidence path too, so an external product
+  can report confirmed preview teardown into the same durable preview identity
+  without Harbor claiming it executed that teardown itself.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.

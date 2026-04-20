@@ -163,6 +163,9 @@ state/
   workflow evidence is the first candidate source for proving this preview
   model without forcing Harbor to provision or destroy those previews itself
   on day one.
+- `harbor-previews write-destroyed` is the matching cleanup-evidence ingest
+  surface for that model: it accepts typed teardown evidence and applies the
+  stored destroyed transition without implying Harbor executed the cleanup.
 
 ## Harbor Preview Generation Record
 
@@ -184,6 +187,9 @@ state/
   surface for that path: it accepts typed preview plus generation evidence,
   writes the generation record, and refreshes the preview linkage according to
   the ingested generation state.
+- Together with `harbor-previews write-destroyed`, Harbor can now ingest the
+  full external preview lifecycle: create or refresh route evidence, persist
+  generation outcome, and record confirmed cleanup.
 
 ## Harbor Preview Enablement Record
 

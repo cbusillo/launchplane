@@ -3529,6 +3529,65 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "")
             self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
 
+    def test_harbor_previews_write_destroyed_ingests_external_cleanup_evidence(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                _preview_record(
+                    preview_id="preview-verireel-pr-123",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    state="active",
+                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
+                    active_generation_id="preview-verireel-pr-123-generation-0003",
+                    serving_generation_id="preview-verireel-pr-123-generation-0003",
+                    latest_generation_id="preview-verireel-pr-123-generation-0003",
+                )
+            )
+            input_file = control_plane_root / "write-destroyed-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "verireel-testing",
+                        "anchor_repo": "verireel",
+                        "anchor_pr_number": 123,
+                        "destroyed_at": "2026-04-16T08:12:00Z",
+                        "destroy_reason": "external_preview_cleanup_completed",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "harbor-previews",
+                    "write-destroyed",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["preview_id"], "preview-verireel-pr-123")
+            self.assertEqual(payload["transition"], "destroyed")
+
+            preview = store.read_preview_record("preview-verireel-pr-123")
+            self.assertEqual(preview.state, "destroyed")
+            self.assertEqual(preview.destroyed_at, "2026-04-16T08:12:00Z")
+            self.assertEqual(preview.destroy_reason, "external_preview_cleanup_completed")
+            self.assertEqual(preview.active_generation_id, "")
+            self.assertEqual(preview.serving_generation_id, "")
+            self.assertEqual(preview.latest_generation_id, "preview-verireel-pr-123-generation-0003")
+
     def test_harbor_previews_ingest_pr_event_enables_preview_when_label_added(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
