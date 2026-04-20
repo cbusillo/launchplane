@@ -231,6 +231,10 @@ state/
 - Successful waited `promote` executions refresh the same inventory record and
   add promotion linkage so the current state can still be tied back to the
   controlling promotion and deployment records.
+- Harbor service evidence ingress now applies the same pattern for external
+  evidence: accepted deployment evidence refreshes inventory immediately, and
+  accepted promotion evidence refreshes destination inventory when the
+  promotion record carries explicit deployment linkage.
 - For a second product such as VeriReel, inventory should first be derived from
   ingested deployment/promotion evidence before Harbor becomes the runtime
   executor for that product. The first explicit mutation surfaces for that are

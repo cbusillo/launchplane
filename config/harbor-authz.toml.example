@@ -21,6 +21,26 @@ contexts = ["verireel-testing"]
 actions = ["preview_destroyed.write"]
 
 [[github_actions]]
+repository = "every/verireel"
+workflow_refs = [
+  "every/verireel/.github/workflows/publish-image.yml@refs/heads/main",
+]
+event_names = ["push", "workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel"]
+actions = ["deployment.write"]
+
+[[github_actions]]
+repository = "every/verireel"
+workflow_refs = [
+  "every/verireel/.github/workflows/promote-image.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel"]
+actions = ["promotion.write"]
+
+[[github_actions]]
 repository = "every/tenant-opw"
 workflow_refs = [
   "every/tenant-opw/.github/workflows/harbor-preview.yml@refs/heads/main",

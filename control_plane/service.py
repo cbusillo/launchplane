@@ -24,6 +24,10 @@ from control_plane.harbor_mutations import (
 )
 from control_plane.service_auth import HarborAuthzPolicy, TokenVerifier, load_authz_policy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.evidence_ingestion import (
+    apply_deployment_evidence,
+    apply_promotion_evidence,
+)
 
 
 class PreviewGenerationEvidenceEnvelope(BaseModel):
@@ -232,8 +236,10 @@ def create_harbor_service_app(
                             },
                         },
                     )
-                record_store.write_deployment_record(request.deployment)
-                result = {"deployment_record_id": request.deployment.record_id}
+                result = apply_deployment_evidence(
+                    record_store=record_store,
+                    deployment_record=request.deployment,
+                )
             elif path == "/v1/evidence/promotions":
                 request = PromotionEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -257,8 +263,10 @@ def create_harbor_service_app(
                             },
                         },
                     )
-                record_store.write_promotion_record(request.promotion)
-                result = {"promotion_record_id": request.promotion.record_id}
+                result = apply_promotion_evidence(
+                    record_store=record_store,
+                    promotion_record=request.promotion,
+                )
             elif path == "/v1/evidence/previews/generations":
                 request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -357,6 +365,7 @@ def create_harbor_service_app(
                     if key
                     in {
                         "deployment_record_id",
+                        "inventory_record_id",
                         "preview_id",
                         "generation_id",
                         "promotion_record_id",

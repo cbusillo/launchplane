@@ -6,7 +6,9 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.service import create_harbor_service_app
 from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, HarborAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -262,19 +264,51 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
-                {"deployment_record_id": "deployment-20260420T153000Z-opw-testing"},
+                {
+                    "deployment_record_id": "deployment-20260420T153000Z-opw-testing",
+                    "inventory_record_id": "opw-testing",
+                },
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             deployment = store.read_deployment_record("deployment-20260420T153000Z-opw-testing")
+            inventory = store.read_environment_inventory(
+                context_name="opw",
+                instance_name="testing",
+            )
             self.assertEqual(deployment.context, "opw")
             self.assertEqual(deployment.instance, "testing")
             self.assertEqual(deployment.deploy.status, "pass")
             self.assertEqual(deployment.resolved_target.target_id, "compose-123")
+            self.assertEqual(inventory.deployment_record_id, deployment.record_id)
+            self.assertEqual(inventory.promotion_record_id, "")
 
     def test_promotion_endpoint_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T160500Z-opw-prod",
+                    artifact_identity={"artifact_id": "artifact-20260420-a1b2c3d4"},
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="compose",
+                        target_id="compose-456",
+                        target_name="opw-prod",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="opw-prod",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        status="pass",
+                        started_at="2026-04-20T16:05:00Z",
+                        finished_at="2026-04-20T16:08:30Z",
+                    ),
+                )
+            )
             policy = HarborAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -315,6 +349,7 @@ class HarborServiceTests(unittest.TestCase):
                     "promotion": {
                         "record_id": "promotion-20260420T160500Z-opw-testing-to-prod",
                         "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                        "deployment_record_id": "deployment-20260420T160500Z-opw-prod",
                         "backup_record_id": "backup-opw-prod-20260420T155000Z",
                         "context": "opw",
                         "from_instance": "testing",
@@ -346,17 +381,26 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
-                {"promotion_record_id": "promotion-20260420T160500Z-opw-testing-to-prod"},
+                {
+                    "promotion_record_id": "promotion-20260420T160500Z-opw-testing-to-prod",
+                    "inventory_record_id": "opw-prod",
+                },
             )
-            store = FilesystemRecordStore(state_dir=state_dir)
             promotion = store.read_promotion_record(
                 "promotion-20260420T160500Z-opw-testing-to-prod"
+            )
+            inventory = store.read_environment_inventory(
+                context_name="opw",
+                instance_name="prod",
             )
             self.assertEqual(promotion.context, "opw")
             self.assertEqual(promotion.from_instance, "testing")
             self.assertEqual(promotion.to_instance, "prod")
             self.assertEqual(promotion.deploy.status, "pass")
             self.assertEqual(promotion.backup_gate.status, "pass")
+            self.assertEqual(inventory.deployment_record_id, "deployment-20260420T160500Z-opw-prod")
+            self.assertEqual(inventory.promotion_record_id, promotion.record_id)
+            self.assertEqual(inventory.promoted_from_instance, "testing")
 
     def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

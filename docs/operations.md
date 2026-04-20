@@ -86,6 +86,13 @@ The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
 boundary rather than creating separate ad hoc ingress patterns.
 
+Current derived-state behavior:
+
+- accepted deployment evidence also refreshes current environment inventory for
+  that `context/instance`
+- accepted promotion evidence refreshes destination inventory when the
+  promotion record includes valid `deployment_record_id` linkage
+
 ## Core Rules
 
 - Promotions and deploys reference explicit artifact identifiers.
