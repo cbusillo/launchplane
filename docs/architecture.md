@@ -6,13 +6,14 @@ title: Architecture
 
 - Keep long-term release ownership out of code and local-DX repos.
 - Make artifact identity and promotion records first-class control-plane data.
-- Own promotion and deploy orchestration behind explicit contracts.
+- Own promotion, deploy, and preview orchestration behind explicit contracts.
 
 This repo is the current Odoo implementation of the Harbor operator surface.
-The contracts documented here are the implemented Odoo control-plane
-boundaries that exist today. Reusable Harbor product direction lives in saved
-plans until the same concepts are expressed through generic code and operator
-surfaces.
+The contracts documented here now need to serve two jobs at once: describe the
+implemented Odoo control-plane behavior that exists today, and describe the
+target Harbor boundary that future cross-product work should aim at. Harbor is
+still implemented inside `odoo-control-plane` today, but the target shape is a
+long-running Harbor service rather than a permanently repo-local CLI.
 
 ## Repo Boundary
 
@@ -44,11 +45,35 @@ This repository is not the generic Harbor product boundary today. It is the
 Odoo-specific control plane that currently contains Harbor preview and
 promotion behavior.
 
+## Target Harbor Shape
+
+- Harbor should become a long-running control-plane service, expected to live
+  behind a stable address such as `harbor.shinycomputers.com`.
+- Harbor should expose authenticated service ingress for runtime evidence,
+  operator actions, and eventually driver-triggered orchestration.
+- GitHub Actions OIDC should be the default machine-to-machine authentication
+  boundary for product workflows talking to Harbor.
+- Harbor should authorize workflow callers from GitHub-issued identity claims
+  such as repository, workflow, ref, environment, and event context, rather
+  than from copied long-lived static tokens.
+- Harbor core should own durable records, operator read models, auditability,
+  and shared orchestration contracts.
+- Product-specific runtime logic should live behind Harbor-owned drivers,
+  starting with Odoo and VeriReel, instead of being duplicated as near-identical
+  scripts across many client repos.
+- Repo-specific variation should enter Harbor as thin repo extensions,
+  declarative config, or small driver inputs, not as a full second copy of the
+  same operational workflow in every product repo.
+
 ## Harbor Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
 - Harbor currently lives inside `odoo-control-plane`; there is no separate
   extracted Harbor repo or package contract yet.
+- The CLI and file-backed state directory remain the current implementation
+  surface, but they should be treated as temporary local scaffolding around the
+  target Harbor service boundary rather than as the final cross-product ingress
+  contract.
 - PR previews are Harbor-managed preview identities backed by separate preview
   generations and ephemeral preview runtime state, not extra long-lived Dokploy
   lanes.
@@ -57,6 +82,49 @@ promotion behavior.
 - Durable control-plane records use generic deployment nouns when the concept
   is reusable across products, but Odoo-specific runtime behavior remains
   explicit in the Odoo workflow code and deploy evidence.
+
+## Harbor Core And Drivers
+
+Harbor should converge on three layers:
+
+```text
+Harbor core
+  - API and operator UI
+  - GitHub OIDC authentication and authorization
+  - durable records and audit log
+  - read models and operator views
+  - shared orchestration engine
+
+Harbor drivers
+  - odoo driver
+  - verireel driver
+  - future product drivers
+
+Repo extensions
+  - product/repo inputs
+  - optional repo-specific config
+  - small hooks only when genuinely needed
+```
+
+The intent is to keep common operational behavior centralized in Harbor while
+still leaving room for product-specific execution differences. A driver lives
+in Harbor. A repo extension only supplies the minimum extra information a
+specific repo needs.
+
+## Ingress And Trust
+
+- The canonical Harbor ingress should be authenticated HTTP, not repo-to-repo
+  shelling into a CLI as the long-term contract.
+- GitHub Actions workflows should authenticate with Harbor using OIDC-issued
+  identity from GitHub.
+- Harbor should map those claims to allowed products, contexts, actions, and
+  environments. Example: a VeriReel preview workflow may be allowed to write
+  preview evidence for `verireel-testing`, while a promotion workflow may be
+  allowed to write promotion evidence for production lanes.
+- Human/operator access in Harbor may still use a separate auth layer, but
+  machine evidence ingress should trust workflow identity first.
+- The stable cross-product contract is the typed Harbor API payload, not the
+  particular client used to submit it.
 
 ## Current Contract
 
@@ -135,8 +203,13 @@ promotion behavior.
   ownership, promotion-request rendering, deploy execution, and compose
   post-deploy update all terminate here.
 
-## Runtime Shape
+## Implementation Posture
 
-- Persist records to a local state directory.
-- Keep storage pluggable, but start with file-backed JSON.
-- Avoid service/API complexity until the workflow boundary is proven.
+- Persist records to a local state directory today.
+- Keep storage pluggable, but start with file-backed JSON while Harbor still
+  lives inside this repo.
+- Treat the current CLI and local JSON layout as implementation scaffolding,
+  not as the final communication contract for external products.
+- New cross-product integrations should target the future Harbor service
+  boundary in design, even if a temporary local adapter is still required
+  during migration.

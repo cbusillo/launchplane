@@ -7,9 +7,11 @@ title: Operations
 Use `uv run control-plane --help` for the complete CLI surface. The current
 top-level groups are:
 
-Today this CLI is the Harbor operator surface for the Odoo system owned by
-this repo. It owns stable-lane deploy and promotion workflows for `testing`
-and `prod`, plus Harbor preview records and read models for PR review flows.
+Today this CLI is the local Harbor operator surface for the Odoo system owned
+by this repo. It owns stable-lane deploy and promotion workflows for
+`testing` and `prod`, plus Harbor preview records and read models for PR
+review flows. It should not be treated as the final cross-product ingress
+boundary for Harbor.
 
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
@@ -29,6 +31,33 @@ and `prod`, plus Harbor preview records and read models for PR review flows.
 are the current small evidence-ingest surfaces that let Harbor accept
 externally-produced deployment and promotion facts without claiming it
 executed that product's runtime action itself.
+
+Those commands are current implementation scaffolding. The target Harbor
+boundary is a long-running service with authenticated HTTP ingress, where the
+CLI becomes a client of Harbor's stable API contract instead of defining that
+contract itself.
+
+## Target Harbor Ingress
+
+The target communication model is:
+
+- Harbor runs as a long-running service behind a stable host such as
+  `harbor.shinycomputers.com`.
+- Product workflows communicate with Harbor over authenticated HTTP.
+- GitHub Actions OIDC is the default machine-to-machine trust boundary.
+- Harbor authorizes requests from GitHub-issued identity claims such as repo,
+  workflow, ref, environment, and event context.
+- Typed evidence payloads are the stable contract; CLI commands are temporary
+  adapters while the service boundary is being built.
+
+Harbor should eventually expose API ingress for at least:
+
+- deployment evidence
+- promotion evidence
+- inventory refresh triggers or derived writes
+- preview generation evidence
+- preview destroyed evidence
+- driver-triggered runtime actions where Harbor owns execution
 
 ## Core Rules
 
@@ -146,11 +175,12 @@ tuple records under the selected state directory rather than silently rewriting
 this tracked file.
 
 `harbor-previews write-from-generation` and `harbor-previews write-destroyed`
-are the explicit preview-evidence ingest surfaces for products whose preview
-runtime already exists outside Harbor. When the preview request carries an
-explicit `canonical_url`, Harbor can store the live preview route, generation
-status, and cleanup outcome directly from external workflow evidence without
-requiring a Harbor-managed preview base-url contract.
+are the current local preview-evidence ingest adapters for products whose
+preview runtime already exists outside Harbor. They mirror the payload shape
+Harbor should later accept through its service ingress. When the preview
+request carries an explicit `canonical_url`, Harbor can store the live preview
+route, generation status, and cleanup outcome directly from external workflow
+evidence without requiring a Harbor-managed preview base-url contract.
 
 ### VeriReel Preview Evidence Handoff
 
@@ -158,10 +188,13 @@ VeriReel already computes the route, PR slug, image tags, and workflow run URL
 inside `.github/workflows/preview-control-plane.yml` and
 `.github/workflows/preview-cleanup.yml`. Harbor's handoff contract should stay
 at that evidence layer instead of asking VeriReel to adopt Harbor-owned preview
-provisioning first.
+provisioning first. The target integration is OIDC-authenticated HTTP into
+Harbor. The local CLI examples below exist only to pin the payload shape while
+the Harbor service ingress is still under construction.
 
 For a successful or failed preview refresh, emit two JSON payloads and hand
-them to `harbor-previews write-from-generation`:
+them to Harbor's preview-generation evidence ingress. The current local adapter
+is `harbor-previews write-from-generation`:
 
 ```json
 {
@@ -206,8 +239,9 @@ That evidence maps directly from the VeriReel workflow outputs:
 - immutable preview image tag or digest -> `artifact_id`
 
 For cleanup, emit the destroy payload and hand it to
-`harbor-previews write-destroyed` once the preview teardown has actually
-completed:
+Harbor's preview-destroyed evidence ingress once the preview teardown has
+actually completed. The current local adapter is
+`harbor-previews write-destroyed`:
 
 ```json
 {
@@ -249,7 +283,7 @@ blocked instead of guessing source inputs.
 - `odoo-control-plane` owns the durable operational truth behind those
   workflows: artifacts, release tuples, previews, deployments, promotions,
   backup gates, and inventory.
-- Harbor is the operator surface inside this repo today, not a separate
-  general-purpose repo boundary.
-- Broader reusable Harbor product direction stays in saved plans until a
-  generic contract exists in code and operator surface.
+- Harbor should converge on a separate long-running service boundary even while
+  the first implementation still lives inside this repo.
+- The stable Harbor contract should be service ingress plus Harbor-owned
+  drivers, not repo-local shell wrappers around file writes.

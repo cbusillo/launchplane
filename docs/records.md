@@ -8,6 +8,11 @@ title: Records
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
+This file layout describes today's local Harbor implementation, not the final
+cross-product communication boundary. The stable long-term contract should be
+Harbor's authenticated service ingress plus the durable record semantics those
+API payloads map onto.
+
 These records are the durable Odoo-first Harbor truth for this repo today.
 Stable lane records (`testing`, `prod`) and preview records are separate on
 purpose: previews are not another long-lived environment lane.
@@ -16,6 +21,11 @@ The current cross-product posture is evidence-first. A second product such as
 VeriReel should first land in these existing Harbor record shapes through
 deployment, promotion, inventory, and preview evidence ingestion before this
 control plane takes over product-specific runtime actions.
+
+Under the target Harbor shape, product workflows and drivers should speak in
+typed evidence payloads. Harbor may store those facts in file-backed JSON while
+it still lives in this repo, but callers should treat the durable record model
+as canonical and the storage engine as replaceable.
 
 ## Layout
 
@@ -166,6 +176,8 @@ state/
 - `harbor-previews write-destroyed` is the matching cleanup-evidence ingest
   surface for that model: it accepts typed teardown evidence and applies the
   stored destroyed transition without implying Harbor executed the cleanup.
+  Under the target Harbor service shape, that same payload should enter through
+  authenticated API ingress rather than a repo-local CLI command.
 
 ## Harbor Preview Generation Record
 
@@ -190,6 +202,9 @@ state/
 - Together with `harbor-previews write-destroyed`, Harbor can now ingest the
   full external preview lifecycle: create or refresh route evidence, persist
   generation outcome, and record confirmed cleanup.
+- Those CLI surfaces should be treated as temporary adapters for the target
+  Harbor API payloads, not as the final integration boundary external products
+  are expected to couple to forever.
 
 ## Harbor Preview Enablement Record
 

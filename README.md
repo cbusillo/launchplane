@@ -19,6 +19,10 @@ this repository is still the Odoo-specific implementation, not a standalone
 general Harbor repo. Broader Harbor product direction stays in saved plans
 until matching generic code and operator surfaces exist.
 
+The target shape is now explicit: Harbor should become a long-running control
+plane service with authenticated ingress, rather than treating the repo-local
+CLI as the permanent cross-product boundary.
+
 ## Bootstrap Scope
 
 - File-backed artifact manifests, backup gates, deployment records, promotion
@@ -26,6 +30,15 @@ until matching generic code and operator surfaces exist.
 - A CLI for records, inventory, backup gates, Harbor preview operations, and
   ship/promotion planning and execution.
 - Repo-local docs, policies, CI, and dependency automation.
+
+These are the current implementation surfaces, not the final Harbor product
+shape. The intended direction is:
+
+- Harbor service ingress over authenticated HTTP.
+- GitHub Actions OIDC for workflow-to-Harbor trust.
+- Harbor-owned product drivers plus thin repo extensions.
+- CLI tools that act as local/operator clients of Harbor contracts rather than
+  defining the contract themselves.
 
 ## Quick Start
 
