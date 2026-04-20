@@ -23,6 +23,10 @@ The target shape is now explicit: Harbor should become a long-running control
 plane service with authenticated ingress, rather than treating the repo-local
 CLI as the permanent cross-product boundary.
 
+That also means the current `odoo-control-plane` name should be treated as
+transitional. Once Harbor has a real service/API/OIDC boundary, the main
+repo/package/CLI naming should move to Harbor-first naming.
+
 ## Bootstrap Scope
 
 - File-backed artifact manifests, backup gates, deployment records, promotion
