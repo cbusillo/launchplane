@@ -47,6 +47,11 @@ shape. The intended direction is:
 The first implemented ingress slice now exists in this repo as a local Harbor
 service command with GitHub OIDC verification, a static workflow policy, and
 evidence ingress for deployments, promotions, and the full preview lifecycle.
+Shared-service core records can now be backed by Postgres with
+`HARBOR_DATABASE_URL` or `uv run harbor service serve --database-url ...`.
+The same service boundary now exposes authenticated operator read endpoints for
+deployment, promotion, inventory, preview, preview history, and recent
+context-scoped operations.
 
 ## Quick Start
 
@@ -55,6 +60,7 @@ mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/harbor"
 cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run harbor --help
 uv run harbor service serve --help
+uv run harbor storage import-core-records --help
 uv run python -m unittest
 ```
 
@@ -74,6 +80,27 @@ operator-local target IDs supplied through `config/dokploy-targets.toml`.
 The stable remote lane catalog is now `testing` plus `prod`; pull requests use
 Harbor-managed preview identities and ephemeral preview stacks instead of a
 durable shared `dev` lane.
+
+## Service Container Deploy
+
+The repo now includes a containerized Harbor service entrypoint for Dokploy or
+similar long-running hosts:
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `scripts/start-harbor-service.sh`
+
+The entrypoint can bootstrap operator-local files from environment variables so
+the deployed service does not need checked-in secret or target-id files:
+
+- `HARBOR_DATABASE_URL`
+- `HARBOR_POLICY_TOML` or `HARBOR_POLICY_B64`
+- `HARBOR_DOKPLOY_TARGET_IDS_TOML` or `HARBOR_DOKPLOY_TARGET_IDS_B64`
+- `HARBOR_RUNTIME_ENVIRONMENTS_TOML` or `HARBOR_RUNTIME_ENVIRONMENTS_B64`
+
+Regular runtime env such as `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, and any
+`DOKPLOY_SHIP_MODE_*` overrides can still be passed directly as process
+environment variables.
 
 ## Docs
 

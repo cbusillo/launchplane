@@ -58,6 +58,7 @@ from control_plane.harbor_mutations import (
 )
 from control_plane.service import serve_harbor_service
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.harbor import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
@@ -701,6 +702,10 @@ def _build_harbor_preview_enablement_action_payload(
             "summary": "The current tenant snapshot is missing the exact anchor PR evidence needed for a typed request-generation recipe.",
             "recipe": "",
         }
+    if request_metadata_companions and not request_metadata_companion_summaries:
+        return unresolved_companion_payload(
+            detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+        )
 
     synthetic_event = GitHubPullRequestEvent(
         action="opened",
@@ -7014,6 +7019,29 @@ def service() -> None:
     """Harbor service commands."""
 
 
+@main.group()
+def storage() -> None:
+    """Harbor storage commands."""
+
+
+@storage.command("import-core-records")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor shared-service core records.",
+)
+def storage_import_core_records(state_dir: Path, database_url: str) -> None:
+    filesystem_store = FilesystemRecordStore(state_dir=state_dir)
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
+    click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
+
+
 @service.command("serve")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -7027,13 +7055,27 @@ def service() -> None:
     show_default=True,
     help="Expected GitHub OIDC audience for Harbor service tokens.",
 )
-def service_serve(state_dir: Path, policy_file: Path, host: str, port: int, audience: str) -> None:
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    default=None,
+    help="Postgres connection string for Harbor shared-service core records.",
+)
+def service_serve(
+    state_dir: Path,
+    policy_file: Path,
+    host: str,
+    port: int,
+    audience: str,
+    database_url: str | None,
+) -> None:
     serve_harbor_service(
         state_dir=state_dir,
         policy_file=policy_file,
         host=host,
         port=port,
         audience=audience,
+        database_url=database_url,
     )
 
 

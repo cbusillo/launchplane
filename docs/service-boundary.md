@@ -188,6 +188,12 @@ writes, not on every possible operator action.
 - `GET /v1/inventory/{context}/{instance}`
 - `GET /v1/promotions/{record_id}`
 - `GET /v1/deployments/{record_id}`
+- `GET /v1/contexts/{context}/operations/recent`
+
+These operator reads use the same Harbor authn/authz boundary as evidence
+ingress. The intent is to give operators a minimal typed read surface for the
+current Harbor record nouns without forcing them to infer state from workflow
+logs or host-local files.
 
 ### Driver execution endpoints
 

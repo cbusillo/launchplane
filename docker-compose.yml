@@ -1,0 +1,16 @@
+services:
+  harbor:
+    build:
+      context: .
+    command:
+      - /app/scripts/start-harbor-service.sh
+    environment:
+      HARBOR_SERVICE_AUDIENCE: ${HARBOR_SERVICE_AUDIENCE:-harbor.shinycomputers.com}
+      HARBOR_SERVICE_HOST: 0.0.0.0
+      HARBOR_SERVICE_PORT: 8080
+      HARBOR_STATE_DIR: /app/state
+    volumes:
+      - harbor-state:/app/state
+
+volumes:
+  harbor-state: {}

@@ -93,3 +93,15 @@ domains = ["opw-prod.shinycomputers.com"]
 
 [targets.env]
 ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://opw-prod.shinycomputers.com"
+
+[[targets]]
+project_name = "verireel"
+target_type = "application"
+context = "verireel"
+instance = "testing"
+target_name = "ver-testing-app"
+require_test_gate = true
+require_prod_gate = false
+deploy_timeout_seconds = 600
+healthcheck_enabled = false
+domains = ["ver-testing.shinycomputers.com"]

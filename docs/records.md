@@ -4,7 +4,10 @@ title: Records
 
 ## Storage Policy
 
-- Persist records as JSON files in a local state directory.
+- Persist local-dev records as JSON files in a local state directory.
+- Use Postgres-backed Harbor core-record tables for shared-service ingress when
+  Harbor is running with `HARBOR_DATABASE_URL` or `harbor service serve
+  --database-url ...`.
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
@@ -23,9 +26,9 @@ deployment, promotion, inventory, and preview evidence ingestion before this
 control plane takes over product-specific runtime actions.
 
 Under the target Harbor shape, product workflows and drivers should speak in
-typed evidence payloads. Harbor may store those facts in file-backed JSON while
-it still lives in this repo, but callers should treat the durable record model
-as canonical and the storage engine as replaceable.
+typed evidence payloads. Harbor may still store those facts in file-backed JSON
+for local development, but the shared-service path should write the same record
+nouns into Postgres-backed tables without inventing a second record model.
 
 ## Layout
 
