@@ -111,6 +111,9 @@ still leaving room for product-specific execution differences. A driver lives
 in Harbor. A repo extension only supplies the minimum extra information a
 specific repo needs.
 
+The first concrete HTTP/OIDC/API shape for that boundary is defined in
+[`service-boundary.md`](service-boundary.md).
+
 ## Ingress And Trust
 
 - The canonical Harbor ingress should be authenticated HTTP, not repo-to-repo

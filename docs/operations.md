@@ -59,6 +59,9 @@ Harbor should eventually expose API ingress for at least:
 - preview destroyed evidence
 - driver-triggered runtime actions where Harbor owns execution
 
+The first explicit version of that boundary, including the OIDC claim mapping
+and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
+
 ## Core Rules
 
 - Promotions and deploys reference explicit artifact identifiers.

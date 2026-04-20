@@ -63,5 +63,6 @@ durable shared `dev` lane.
 
 - [docs/README.md](docs/README.md)
 - [docs/architecture.md](docs/architecture.md)
+- [docs/service-boundary.md](docs/service-boundary.md)
 - [docs/operations.md](docs/operations.md)
 - [docs/records.md](docs/records.md)
