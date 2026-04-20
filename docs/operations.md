@@ -78,6 +78,7 @@ Current implementation scope:
 
 - `GET /v1/health`
 - `POST /v1/evidence/previews/generations`
+- `POST /v1/evidence/previews/destroyed`
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz

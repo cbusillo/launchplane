@@ -25,12 +25,13 @@ The first service slice is now implemented locally in this repo:
 
 - CLI: `uv run control-plane service serve`
 - health route: `GET /v1/health`
-- first authenticated evidence route:
-  `POST /v1/evidence/previews/generations`
+- authenticated evidence routes:
+  - `POST /v1/evidence/previews/generations`
+  - `POST /v1/evidence/previews/destroyed`
 
-That slice is intentionally narrow. It proves the Harbor HTTP/OIDC/authz
-boundary in code before broader evidence routes and driver-triggered actions
-move across it.
+That slice is still intentionally narrow. It proves the Harbor HTTP/OIDC/authz
+boundary in code across the full preview lifecycle before broader evidence
+routes and driver-triggered actions move across it.
 
 ## First Host Assumption
 
@@ -312,10 +313,9 @@ Repo-specific variation should stay thin and declarative where possible.
 
 ## Recommended Next Implementation Steps
 
-1. Add a Harbor API design slice in code with these first evidence endpoints.
-2. Implement GitHub OIDC verification and a static claim-to-permission policy.
-3. Expose one real preview evidence ingress path end to end.
-4. Convert the existing CLI preview evidence commands into local clients of the
+1. Add deployment evidence ingress on the same Harbor authn/authz boundary.
+2. Add promotion evidence ingress on the same Harbor authn/authz boundary.
+3. Convert the existing CLI preview evidence commands into local clients of the
    same service-layer handler or payload contract.
-5. Define the first explicit Odoo and VeriReel driver interfaces after the
+4. Define the first explicit Odoo and VeriReel driver interfaces after the
    service ingress exists.

@@ -11,10 +11,15 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from control_plane.contracts.preview_mutation_request import (
+    PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
-from control_plane.harbor_mutations import apply_harbor_generation_evidence, control_plane_root
+from control_plane.harbor_mutations import (
+    apply_harbor_destroy_preview,
+    apply_harbor_generation_evidence,
+    control_plane_root,
+)
 from control_plane.service_auth import HarborAuthzPolicy, TokenVerifier, load_authz_policy
 from control_plane.storage.filesystem import FilesystemRecordStore
 
@@ -39,6 +44,20 @@ class PreviewGenerationEvidenceEnvelope(BaseModel):
             raise ValueError("preview generation evidence requires matching anchor_pr_number")
         if self.preview.anchor_pr_url != self.generation.anchor_pr_url:
             raise ValueError("preview generation evidence requires matching anchor_pr_url")
+        return self
+
+
+class PreviewDestroyedEvidenceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    destroy: PreviewDestroyMutationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "PreviewDestroyedEvidenceEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview destroyed evidence requires product")
         return self
 
 
@@ -127,7 +146,10 @@ def create_harbor_service_app(
                 status_code=200,
                 payload={"status": "ok", "trace_id": request_trace_id},
             )
-        if path != "/v1/evidence/previews/generations":
+        if path not in {
+            "/v1/evidence/previews/generations",
+            "/v1/evidence/previews/destroyed",
+        }:
             return _json_response(
                 start_response=start_response,
                 status_code=404,
@@ -154,35 +176,63 @@ def create_harbor_service_app(
             token = _bearer_token(environ)
             identity = verifier.verify(token)
             payload = _read_json_request(environ)
-            request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
-            if not authz_policy.allows(
-                identity=identity,
-                action="preview_generation.write",
-                product=request.product,
-                context=request.preview.context,
-            ):
-                return _json_response(
-                    start_response=start_response,
-                    status_code=403,
-                    payload={
-                        "status": "rejected",
-                        "trace_id": request_trace_id,
-                        "error": {
-                            "code": "authorization_denied",
-                            "message": (
-                                "Workflow cannot write preview generation evidence for the requested"
-                                " product/context."
-                            ),
-                        },
-                    },
-                )
             record_store = FilesystemRecordStore(state_dir=state_dir)
-            result = apply_harbor_generation_evidence(
-                control_plane_root_path=resolved_root,
-                record_store=record_store,
-                preview_request=request.preview,
-                generation_request=request.generation,
-            )
+            if path == "/v1/evidence/previews/generations":
+                request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_generation.write",
+                    product=request.product,
+                    context=request.preview.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write preview generation evidence for the"
+                                    " requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                result = apply_harbor_generation_evidence(
+                    control_plane_root_path=resolved_root,
+                    record_store=record_store,
+                    preview_request=request.preview,
+                    generation_request=request.generation,
+                )
+            else:
+                request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_destroyed.write",
+                    product=request.product,
+                    context=request.destroy.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write preview destroyed evidence for the"
+                                    " requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                result = apply_harbor_destroy_preview(
+                    record_store=record_store,
+                    request=request.destroy,
+                )
         except PermissionError as exc:
             return _json_response(
                 start_response=start_response,
@@ -220,9 +270,9 @@ def create_harbor_service_app(
                 "status": "accepted",
                 "trace_id": request_trace_id,
                 "records": {
-                    "preview_id": str(result["preview_id"]),
-                    "generation_id": str(result["generation_id"]),
-                    "transition": str(result["transition"]),
+                    key: str(value)
+                    for key, value in result.items()
+                    if key in {"preview_id", "generation_id", "transition"}
                 },
             },
         )

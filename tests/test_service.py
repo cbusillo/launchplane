@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.service import create_harbor_service_app
 from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, HarborAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -181,6 +182,94 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(generation.state, "ready")
             self.assertEqual(generation.artifact_id, "ghcr.io/every/verireel-app:pr-123-6b3c9d7")
 
+    def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    preview_label="verireel-testing/verireel/pr-123",
+                    state="active",
+                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
+                    created_at="2026-04-16T08:02:00Z",
+                    updated_at="2026-04-16T08:10:00Z",
+                    eligible_at="2026-04-16T08:10:00Z",
+                    active_generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    serving_generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    latest_generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                )
+            )
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_destroyed.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main"
+                        )
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/previews/destroyed",
+                payload={
+                    "product": "verireel",
+                    "destroy": {
+                        "context": "verireel-testing",
+                        "anchor_repo": "verireel",
+                        "anchor_pr_number": 123,
+                        "destroyed_at": "2026-04-16T09:04:00Z",
+                        "destroy_reason": "external_preview_cleanup_completed",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "preview_id": "preview-verireel-testing-verireel-pr-123",
+                    "transition": "destroyed",
+                },
+            )
+            preview = store.read_preview_record("preview-verireel-testing-verireel-pr-123")
+            self.assertEqual(preview.state, "destroyed")
+            self.assertEqual(preview.destroyed_at, "2026-04-16T09:04:00Z")
+            self.assertEqual(preview.destroy_reason, "external_preview_cleanup_completed")
+            self.assertEqual(preview.active_generation_id, "")
+            self.assertEqual(preview.serving_generation_id, "")
+            self.assertEqual(
+                preview.latest_generation_id,
+                "preview-verireel-testing-verireel-pr-123-generation-0001",
+            )
+
     def test_preview_generation_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -230,6 +319,51 @@ class HarborServiceTests(unittest.TestCase):
                         "requested_reason": "external_preview_refresh",
                         "requested_at": "2026-04-16T08:02:00Z",
                         "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_preview_destroyed_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/previews/destroyed",
+                payload={
+                    "product": "verireel",
+                    "destroy": {
+                        "context": "verireel-testing",
+                        "anchor_repo": "verireel",
+                        "anchor_pr_number": 123,
+                        "destroyed_at": "2026-04-16T09:04:00Z",
+                        "destroy_reason": "external_preview_cleanup_completed",
                     },
                 },
             )

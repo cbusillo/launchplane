@@ -45,7 +45,8 @@ shape. The intended direction is:
   defining the contract themselves.
 
 The first implemented ingress slice now exists in this repo as a local Harbor
-service command with GitHub OIDC verification and a static workflow policy.
+service command with GitHub OIDC verification, a static workflow policy, and
+preview lifecycle evidence ingress for both generation and teardown writes.
 
 ## Quick Start
 
