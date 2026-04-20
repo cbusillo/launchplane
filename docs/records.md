@@ -57,6 +57,9 @@ state/
 - One file per promotion attempt.
 - Record source, destination, artifact id, gate evidence, deploy evidence, and
   destination health.
+- Promotion records can also carry `deployment_record_id` so Harbor can
+  refresh current inventory from externally produced promotion evidence
+  without guessing which deployment record established the promoted state.
 - Promote inputs should reference the immutable artifact id directly.
 - Promotion records also persist the authorizing `backup_record_id` so
   current inventory can be traced back to the exact stored backup-gate record
@@ -194,7 +197,8 @@ state/
   deployment record.
 - Successful waited `promote` executions refresh the same inventory record and
   add promotion linkage so the current state can still be tied back to the
-  controlling promotion record.
+  controlling promotion and deployment records.
 - For a second product such as VeriReel, inventory should first be derived from
   ingested deployment/promotion evidence before Harbor becomes the runtime
-  executor for that product.
+  executor for that product. The first explicit mutation surfaces for that are
+  `inventory write-from-deployment` and `inventory write-from-promotion`.

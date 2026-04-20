@@ -15,6 +15,7 @@ def build_promotion_record(
     *,
     record_id: str,
     artifact_id: str,
+    deployment_record_id: str = "",
     backup_record_id: str = "",
     context_name: str,
     from_instance_name: str,
@@ -30,6 +31,7 @@ def build_promotion_record(
     return PromotionRecord(
         record_id=record_id,
         artifact_identity=ArtifactIdentityReference(artifact_id=artifact_id),
+        deployment_record_id=deployment_record_id,
         backup_record_id=backup_record_id,
         context=context_name,
         from_instance=from_instance_name,
@@ -98,10 +100,12 @@ def build_executed_promotion_record(
     record_id: str,
     deployment_id: str,
     deployment_status: str,
+    deployment_record_id: str = "",
 ) -> PromotionRecord:
     return PromotionRecord(
         record_id=record_id,
         artifact_identity=ArtifactIdentityReference(artifact_id=request.artifact_id),
+        deployment_record_id=deployment_record_id,
         backup_record_id=request.backup_record_id,
         context=request.context,
         from_instance=request.from_instance,

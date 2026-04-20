@@ -101,6 +101,10 @@ promotion behavior.
 - Current environment inventory is also persisted here and refreshed by
   successful waited `ship`/`promote` flows, so this repo owns both append-only
   deploy history and the replace-in-place current-state view.
+- That same inventory view can now also be refreshed from stored external
+  promotion evidence when Harbor has both a promotion record and explicit
+  linked deployment record, which keeps second-product onboarding evidence-
+  first instead of forcing Harbor to own runtime execution on day one.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.

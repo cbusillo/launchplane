@@ -6674,6 +6674,47 @@ def _write_environment_inventory(
     return record_store.write_environment_inventory(inventory_record)
 
 
+def _write_environment_inventory_from_promotion(
+    *,
+    record_store: FilesystemRecordStore,
+    promotion_record: PromotionRecord,
+) -> Path:
+    deployment_record_id = promotion_record.deployment_record_id.strip()
+    if not deployment_record_id:
+        raise click.ClickException(
+            "Promotion record is missing deployment_record_id. "
+            "Write a promotion record with explicit deployment linkage before refreshing inventory from it."
+        )
+
+    deployment_record = record_store.read_deployment_record(deployment_record_id)
+    if deployment_record.context != promotion_record.context:
+        raise click.ClickException(
+            "Promotion record context does not match linked deployment record context."
+        )
+    if deployment_record.instance != promotion_record.to_instance:
+        raise click.ClickException(
+            "Promotion destination instance does not match linked deployment record instance."
+        )
+
+    promotion_artifact_id = _artifact_id_or_empty(promotion_record.artifact_identity)
+    deployment_artifact_id = _artifact_id_or_empty(deployment_record.artifact_identity)
+    if (
+        promotion_artifact_id
+        and deployment_artifact_id
+        and promotion_artifact_id != deployment_artifact_id
+    ):
+        raise click.ClickException(
+            "Promotion artifact_id does not match linked deployment record artifact_id."
+        )
+
+    return _write_environment_inventory(
+        record_store=record_store,
+        deployment_record=deployment_record,
+        promotion_record_id=promotion_record.record_id,
+        promoted_from_instance=promotion_record.from_instance,
+    )
+
+
 def _write_release_tuple_from_deployment(
     *,
     record_store: FilesystemRecordStore,
@@ -6767,6 +6808,7 @@ def _summarize_promotion_record(record: PromotionRecord) -> dict[str, object]:
         "from_instance": record.from_instance,
         "to_instance": record.to_instance,
         "artifact_id": _artifact_id_or_empty(record.artifact_identity),
+        "deployment_record_id": record.deployment_record_id,
         "backup_record_id": record.backup_record_id,
         "backup_status": record.backup_gate.status,
         "deploy_status": record.deploy.status,
@@ -7175,6 +7217,21 @@ def inventory_write_from_deployment(state_dir: Path, record_id: str) -> None:
     inventory_path = _write_environment_inventory(
         record_store=record_store,
         deployment_record=deployment_record,
+    )
+    click.echo(inventory_path)
+
+
+@inventory.command("write-from-promotion")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--record-id", required=True)
+def inventory_write_from_promotion(state_dir: Path, record_id: str) -> None:
+    record_store = _store(state_dir)
+    promotion_record = record_store.read_promotion_record(record_id)
+    inventory_path = _write_environment_inventory_from_promotion(
+        record_store=record_store,
+        promotion_record=promotion_record,
     )
     click.echo(inventory_path)
 
@@ -8624,6 +8681,7 @@ def promote_execute(
         final_record = build_executed_promotion_record(
             request=resolved_request,
             record_id=record_id,
+            deployment_record_id=deployment_record.record_id,
             deployment_id=deployment_record.deploy.deployment_id,
             deployment_status=deployment_record.deploy.status,
         )

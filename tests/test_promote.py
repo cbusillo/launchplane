@@ -150,11 +150,13 @@ class PromoteWorkflowTests(unittest.TestCase):
         record = build_executed_promotion_record(
             request=request,
             record_id="promotion-1",
+            deployment_record_id="deployment-1",
             deployment_id="delegated-ship",
             deployment_status="pass",
         )
 
         self.assertEqual(record.deploy.status, "pass")
+        self.assertEqual(record.deployment_record_id, "deployment-1")
         self.assertEqual(record.backup_record_id, "backup-opw-prod-20260410T182231Z")
         self.assertTrue(record.destination_health.verified)
         self.assertEqual(record.destination_health.status, "pass")
@@ -1285,6 +1287,59 @@ domains = ["https://prod.example.com"]
                 record,
             )
 
+    def test_promotions_write_persists_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            input_file = repo_root / "promotion-record.json"
+            record = PromotionRecord(
+                record_id="promotion-20260411T182231Z-opw-testing-to-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                deployment_record_id="deployment-20260411T182231Z-opw-prod",
+                backup_record_id="backup-opw-prod-20260410T182231Z",
+                context="opw",
+                from_instance="testing",
+                to_instance="prod",
+                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                deploy={
+                    "target_name": "opw-prod",
+                    "target_type": "compose",
+                    "deploy_mode": "dokploy-compose-api",
+                    "deployment_id": "control-plane-dokploy",
+                    "status": "pass",
+                    "started_at": "2026-04-11T18:22:31Z",
+                    "finished_at": "2026-04-11T18:22:31Z",
+                },
+                destination_health={
+                    "verified": True,
+                    "urls": ["https://prod.example.com/web/health"],
+                    "timeout_seconds": 45,
+                    "status": "pass",
+                },
+            )
+            input_file.write_text(record.model_dump_json(indent=2), encoding="utf-8")
+
+            result = runner.invoke(
+                main,
+                [
+                    "promotions",
+                    "write",
+                    "--state-dir",
+                    str(state_dir),
+                    "--input-file",
+                    str(input_file),
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            written_path = state_dir / "promotions" / "promotion-20260411T182231Z-opw-testing-to-prod.json"
+            self.assertEqual(Path(result.output.strip()), written_path)
+            self.assertEqual(
+                PromotionRecord.model_validate(json.loads(written_path.read_text(encoding="utf-8"))),
+                record,
+            )
+
     def test_inventory_write_from_deployment_persists_inventory(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -1339,6 +1394,136 @@ domains = ["https://prod.example.com"]
             self.assertEqual(written_payload["deployment_record_id"], record.record_id)
             self.assertEqual(written_payload["source_git_ref"], "def456")
             self.assertEqual(written_payload["artifact_identity"]["artifact_id"], "artifact-2")
+
+    def test_inventory_write_from_promotion_persists_inventory(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            deployment_dir = state_dir / "deployments"
+            promotion_dir = state_dir / "promotions"
+            deployment_dir.mkdir(parents=True, exist_ok=True)
+            promotion_dir.mkdir(parents=True, exist_ok=True)
+            deployment_record = DeploymentRecord(
+                record_id="deployment-20260411T182231Z-opw-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                context="opw",
+                instance="prod",
+                source_git_ref="def456",
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="compose",
+                    target_id="compose-123",
+                    target_name="opw-prod",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    deployment_id="control-plane-dokploy",
+                    status="pass",
+                    started_at="2026-04-11T18:22:31Z",
+                    finished_at="2026-04-11T18:22:31Z",
+                ),
+            )
+            promotion_record = PromotionRecord(
+                record_id="promotion-20260411T182231Z-opw-testing-to-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                deployment_record_id=deployment_record.record_id,
+                backup_record_id="backup-opw-prod-20260410T182231Z",
+                context="opw",
+                from_instance="testing",
+                to_instance="prod",
+                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                deploy={
+                    "target_name": "opw-prod",
+                    "target_type": "compose",
+                    "deploy_mode": "dokploy-compose-api",
+                    "deployment_id": "control-plane-dokploy",
+                    "status": "pass",
+                    "started_at": "2026-04-11T18:22:31Z",
+                    "finished_at": "2026-04-11T18:22:31Z",
+                },
+                destination_health={
+                    "verified": True,
+                    "urls": ["https://prod.example.com/web/health"],
+                    "timeout_seconds": 45,
+                    "status": "pass",
+                },
+            )
+            (deployment_dir / f"{deployment_record.record_id}.json").write_text(
+                deployment_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            (promotion_dir / f"{promotion_record.record_id}.json").write_text(
+                promotion_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "inventory",
+                    "write-from-promotion",
+                    "--state-dir",
+                    str(state_dir),
+                    "--record-id",
+                    promotion_record.record_id,
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            written_path = state_dir / "inventory" / "opw-prod.json"
+            self.assertEqual(Path(result.output.strip()), written_path)
+            written_payload = json.loads(written_path.read_text(encoding="utf-8"))
+            self.assertEqual(written_payload["deployment_record_id"], deployment_record.record_id)
+            self.assertEqual(written_payload["promotion_record_id"], promotion_record.record_id)
+            self.assertEqual(written_payload["promoted_from_instance"], "testing")
+            self.assertEqual(written_payload["artifact_identity"]["artifact_id"], "artifact-2")
+
+    def test_inventory_write_from_promotion_requires_deployment_linkage(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            promotion_dir = state_dir / "promotions"
+            promotion_dir.mkdir(parents=True, exist_ok=True)
+            promotion_record = PromotionRecord(
+                record_id="promotion-20260411T182231Z-opw-testing-to-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                backup_record_id="backup-opw-prod-20260410T182231Z",
+                context="opw",
+                from_instance="testing",
+                to_instance="prod",
+                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                deploy={
+                    "target_name": "opw-prod",
+                    "target_type": "compose",
+                    "deploy_mode": "dokploy-compose-api",
+                    "deployment_id": "control-plane-dokploy",
+                    "status": "pass",
+                    "started_at": "2026-04-11T18:22:31Z",
+                    "finished_at": "2026-04-11T18:22:31Z",
+                },
+            )
+            (promotion_dir / f"{promotion_record.record_id}.json").write_text(
+                promotion_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "inventory",
+                    "write-from-promotion",
+                    "--state-dir",
+                    str(state_dir),
+                    "--record-id",
+                    promotion_record.record_id,
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("missing deployment_record_id", result.output)
 
     def test_promote_execute_requires_stored_artifact_manifest(self) -> None:
         runner = CliRunner()

@@ -75,6 +75,7 @@ class PromotionRecord(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     record_id: str
     artifact_identity: ArtifactIdentityReference
+    deployment_record_id: str = ""
     backup_record_id: str = ""
     context: str
     from_instance: str

@@ -24,8 +24,9 @@ and `prod`, plus Harbor preview records and read models for PR review flows.
   TOML catalog from minted state.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 
-`deployments write` and `inventory write-from-deployment` are the first small
-evidence-ingest surfaces that let Harbor accept externally-produced deployment
+`deployments write`, `promotions write`, `inventory write-from-deployment`,
+and `inventory write-from-promotion` are the current small evidence-ingest
+surfaces that let Harbor accept externally-produced deployment and promotion
 facts without claiming it executed that product's runtime action itself.
 
 ## Core Rules
@@ -57,6 +58,9 @@ facts without claiming it executed that product's runtime action itself.
   lane after the deploy passes.
 - Current environment inventory is refreshed from successful waited `ship` and
   `promote` executions.
+- Externally produced promotion evidence can also refresh current inventory
+  when the stored promotion record carries explicit `deployment_record_id`
+  linkage to the deployment record that established the promoted state.
 - The tracked Dokploy route catalog is only for stable remote lanes. If a pull
   request needs runtime state, Harbor models that through preview records and
   preview generations instead of adding another long-lived route.
