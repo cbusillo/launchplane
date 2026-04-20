@@ -271,6 +271,93 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(deployment.deploy.status, "pass")
             self.assertEqual(deployment.resolved_target.target_id, "compose-123")
 
+    def test_promotion_endpoint_writes_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["promotion.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/promote-prod.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/promotions",
+                payload={
+                    "product": "odoo",
+                    "promotion": {
+                        "record_id": "promotion-20260420T160500Z-opw-testing-to-prod",
+                        "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                        "backup_record_id": "backup-opw-prod-20260420T155000Z",
+                        "context": "opw",
+                        "from_instance": "testing",
+                        "to_instance": "prod",
+                        "backup_gate": {
+                            "required": True,
+                            "status": "pass",
+                            "evidence": {"recorded_by": "harbor-service"},
+                        },
+                        "deploy": {
+                            "target_name": "opw-prod",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                            "status": "pass",
+                            "started_at": "2026-04-20T16:05:00Z",
+                            "finished_at": "2026-04-20T16:08:30Z",
+                        },
+                        "destination_health": {
+                            "verified": True,
+                            "urls": ["https://prod.example.com/web/health"],
+                            "timeout_seconds": 45,
+                            "status": "pass",
+                        },
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"promotion_record_id": "promotion-20260420T160500Z-opw-testing-to-prod"},
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            promotion = store.read_promotion_record(
+                "promotion-20260420T160500Z-opw-testing-to-prod"
+            )
+            self.assertEqual(promotion.context, "opw")
+            self.assertEqual(promotion.from_instance, "testing")
+            self.assertEqual(promotion.to_instance, "prod")
+            self.assertEqual(promotion.deploy.status, "pass")
+            self.assertEqual(promotion.backup_gate.status, "pass")
+
     def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -462,6 +549,64 @@ class HarborServiceTests(unittest.TestCase):
                         "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
                         "deploy": {
                             "target_name": "opw-testing",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                        },
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_promotion_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/promote-prod.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/promotions",
+                payload={
+                    "product": "odoo",
+                    "promotion": {
+                        "record_id": "promotion-20260420T160500Z-opw-testing-to-prod",
+                        "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                        "context": "opw",
+                        "from_instance": "testing",
+                        "to_instance": "prod",
+                        "deploy": {
+                            "target_name": "opw-prod",
                             "target_type": "compose",
                             "deploy_mode": "dokploy-compose-api",
                         },

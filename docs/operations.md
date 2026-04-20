@@ -78,6 +78,7 @@ Current implementation scope:
 
 - `GET /v1/health`
 - `POST /v1/evidence/deployments`
+- `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 

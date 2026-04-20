@@ -16,6 +16,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.harbor_mutations import (
     apply_harbor_destroy_preview,
     apply_harbor_generation_evidence,
@@ -73,6 +74,20 @@ class DeploymentEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "DeploymentEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("deployment evidence requires product")
+        return self
+
+
+class PromotionEvidenceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    promotion: PromotionRecord
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "PromotionEvidenceEnvelope":
+        if not self.product.strip():
+            raise ValueError("promotion evidence requires product")
         return self
 
 
@@ -165,6 +180,7 @@ def create_harbor_service_app(
             "/v1/evidence/deployments",
             "/v1/evidence/previews/generations",
             "/v1/evidence/previews/destroyed",
+            "/v1/evidence/promotions",
         }:
             return _json_response(
                 start_response=start_response,
@@ -218,6 +234,31 @@ def create_harbor_service_app(
                     )
                 record_store.write_deployment_record(request.deployment)
                 result = {"deployment_record_id": request.deployment.record_id}
+            elif path == "/v1/evidence/promotions":
+                request = PromotionEvidenceEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="promotion.write",
+                    product=request.product,
+                    context=request.promotion.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write promotion evidence for the requested"
+                                    " product/context."
+                                ),
+                            },
+                        },
+                    )
+                record_store.write_promotion_record(request.promotion)
+                result = {"promotion_record_id": request.promotion.record_id}
             elif path == "/v1/evidence/previews/generations":
                 request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

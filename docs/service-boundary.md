@@ -27,12 +27,13 @@ The first service slice is now implemented locally in this repo:
 - health route: `GET /v1/health`
 - authenticated evidence routes:
   - `POST /v1/evidence/deployments`
+  - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
 
-That slice is still intentionally narrow. It proves the Harbor HTTP/OIDC/authz
-boundary in code for deployment evidence plus the full preview lifecycle before
-promotion evidence and driver-triggered actions move across it.
+That slice now covers the first documented evidence surface end to end. Harbor
+can verify GitHub OIDC, authorize workflow identity claims, and accept the
+first deployment, promotion, and preview lifecycle evidence writes over HTTP.
 
 ## First Host Assumption
 
@@ -314,8 +315,9 @@ Repo-specific variation should stay thin and declarative where possible.
 
 ## Recommended Next Implementation Steps
 
-1. Add promotion evidence ingress on the same Harbor authn/authz boundary.
-2. Convert the existing CLI preview evidence commands into local clients of the
+1. Convert the existing CLI preview evidence commands into local clients of the
    same service-layer handler or payload contract.
+2. Add local clients for deployment and promotion evidence where Harbor-facing
+   workflows still write through repo-local CLI adapters.
 3. Define the first explicit Odoo and VeriReel driver interfaces after the
    service ingress exists.
