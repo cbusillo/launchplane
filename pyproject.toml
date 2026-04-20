@@ -12,6 +12,7 @@ dependencies = [
     "pydantic>=2.8",
     "psycopg[binary]>=3.2",
     "pyjwt[crypto]>=2.10",
+    "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]
