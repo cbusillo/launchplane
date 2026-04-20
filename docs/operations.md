@@ -81,6 +81,7 @@ Current implementation scope:
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
+- `POST /v1/drivers/verireel/testing-deploy`
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
@@ -92,6 +93,10 @@ Current derived-state behavior:
   that `context/instance`
 - accepted promotion evidence refreshes destination inventory when the
   promotion record includes valid `deployment_record_id` linkage
+- Harbor can also execute the first explicit driver action directly:
+  `POST /v1/drivers/verireel/testing-deploy` triggers the shared testing deploy,
+  writes an initial deployment record, and returns deploy timing/status for the
+  caller to thread into later evidence reporting.
 
 ## Core Rules
 

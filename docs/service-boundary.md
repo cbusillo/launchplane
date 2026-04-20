@@ -30,10 +30,14 @@ The first service slice is now implemented locally in this repo:
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
+- first driver route:
+  - `POST /v1/drivers/verireel/testing-deploy`
 
-That slice now covers the first documented evidence surface end to end. Harbor
-can verify GitHub OIDC, authorize workflow identity claims, and accept the
-first deployment, promotion, and preview lifecycle evidence writes over HTTP.
+That slice now covers the first documented evidence surface end to end plus the
+first explicit Harbor-owned driver action. Harbor can verify GitHub OIDC,
+authorize workflow identity claims, accept deployment/promotion/preview
+lifecycle evidence over HTTP, and execute the VeriReel shared testing deploy as
+an authenticated Harbor route.
 
 ## First Host Assumption
 
@@ -148,6 +152,7 @@ event_name: push or workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
 allowed actions:
+  - verireel_testing_deploy.execute
   - deployment.write
 ```
 
@@ -186,12 +191,17 @@ writes, not on every possible operator action.
 
 ### Driver execution endpoints
 
-These can exist later, but should use the same authn/authz boundary:
+These use the same authn/authz boundary as evidence ingress:
 
 - `POST /v1/drivers/odoo/...`
 - `POST /v1/drivers/verireel/...`
 
-Do not block the first evidence-ingest service slice on driver execution.
+The first explicit driver route now in service is:
+
+- `POST /v1/drivers/verireel/testing-deploy`
+
+Do not generalize the full driver surface before a few product-specific routes
+have proven the shape.
 
 ## Request And Response Rules
 

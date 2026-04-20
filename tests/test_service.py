@@ -12,6 +12,7 @@ from control_plane.contracts.promotion_record import DeploymentEvidence
 from control_plane.service import create_harbor_service_app
 from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, HarborAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.workflows.verireel_testing_deploy import VeriReelTestingDeployResult
 
 
 class _StubVerifier:
@@ -489,6 +490,124 @@ class HarborServiceTests(unittest.TestCase):
                 preview.latest_generation_id,
                 "preview-verireel-testing-verireel-pr-123-generation-0001",
             )
+
+    def test_verireel_testing_deploy_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_testing_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_testing_deploy",
+                return_value=VeriReelTestingDeployResult(
+                    deployment_record_id="deployment-verireel-testing-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-20T18:20:00Z",
+                    deploy_finished_at="2026-04-20T18:21:15Z",
+                    target_name="ver-testing-app",
+                    target_type="application",
+                    target_id="testing-app-123",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/testing-deploy",
+                    payload={
+                        "product": "verireel",
+                        "deploy": {
+                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1"},
+            )
+            self.assertEqual(payload["result"]["deploy_status"], "pass")
+            self.assertEqual(payload["result"]["target_id"], "testing-app-123")
+            execute_mock.assert_called_once()
+
+    def test_verireel_testing_deploy_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/testing-deploy",
+                payload={
+                    "product": "verireel",
+                    "deploy": {
+                        "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                        "source_git_ref": "abcdef1234567890",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_preview_generation_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

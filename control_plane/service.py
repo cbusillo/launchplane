@@ -28,6 +28,10 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.verireel_testing_deploy import (
+    VeriReelTestingDeployRequest,
+    execute_verireel_testing_deploy,
+)
 
 
 class PreviewGenerationEvidenceEnvelope(BaseModel):
@@ -92,6 +96,20 @@ class PromotionEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "PromotionEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("promotion evidence requires product")
+        return self
+
+
+class VeriReelTestingDeployEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    deploy: VeriReelTestingDeployRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelTestingDeployEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel testing deploy requires product 'verireel'.")
         return self
 
 
@@ -185,6 +203,7 @@ def create_harbor_service_app(
             "/v1/evidence/previews/generations",
             "/v1/evidence/previews/destroyed",
             "/v1/evidence/promotions",
+            "/v1/drivers/verireel/testing-deploy",
         }:
             return _json_response(
                 start_response=start_response,
@@ -204,7 +223,7 @@ def create_harbor_service_app(
                     "trace_id": request_trace_id,
                     "error": {
                         "code": "method_not_allowed",
-                        "message": "Only POST is allowed for this Harbor evidence route.",
+                        "message": "Only POST is allowed for this Harbor route.",
                     },
                 },
             )
@@ -213,6 +232,7 @@ def create_harbor_service_app(
             identity = verifier.verify(token)
             payload = _read_json_request(environ)
             record_store = FilesystemRecordStore(state_dir=state_dir)
+            driver_result = None
             if path == "/v1/evidence/deployments":
                 request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -240,6 +260,35 @@ def create_harbor_service_app(
                     record_store=record_store,
                     deployment_record=request.deployment,
                 )
+            elif path == "/v1/drivers/verireel/testing-deploy":
+                request = VeriReelTestingDeployEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_testing_deploy.execute",
+                    product=request.product,
+                    context=request.deploy.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel testing deploy driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                driver_result = execute_verireel_testing_deploy(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.deploy,
+                )
+                result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == "/v1/evidence/promotions":
                 request = PromotionEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -372,6 +421,7 @@ def create_harbor_service_app(
                         "transition",
                     }
                 },
+                **({"result": driver_result.model_dump(mode="json")} if driver_result else {}),
             },
         )
 

@@ -33,6 +33,16 @@ actions = ["deployment.write"]
 [[github_actions]]
 repository = "every/verireel"
 workflow_refs = [
+  "every/verireel/.github/workflows/publish-image.yml@refs/heads/main",
+]
+event_names = ["push", "workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel"]
+actions = ["verireel_testing_deploy.execute"]
+
+[[github_actions]]
+repository = "every/verireel"
+workflow_refs = [
   "every/verireel/.github/workflows/promote-image.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
