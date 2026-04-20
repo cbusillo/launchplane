@@ -2,6 +2,8 @@ services:
   harbor:
     image: ${DOCKER_IMAGE_REFERENCE:-harbor:local}
     pull_policy: always
+    env_file:
+      - .env
     command:
       - /app/scripts/start-harbor-service.sh
     environment:
