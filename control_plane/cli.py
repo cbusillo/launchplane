@@ -6758,6 +6758,34 @@ def _read_source_release_tuple_for_promotion(
     )
 
 
+def _read_source_release_tuple_for_promotion_record(
+    *,
+    record_store: FilesystemRecordStore,
+    promotion_record: PromotionRecord,
+) -> ReleaseTupleRecord:
+    artifact_id = _artifact_id_or_empty(promotion_record.artifact_identity)
+    if not artifact_id:
+        raise click.ClickException(
+            "Promotion record is missing artifact_identity.artifact_id required for release tuple promotion."
+        )
+    try:
+        source_tuple = record_store.read_release_tuple_record(
+            context_name=promotion_record.context,
+            channel_name=promotion_record.from_instance,
+        )
+    except FileNotFoundError:
+        raise click.ClickException(
+            "Promotion requires a current source release tuple before Harbor can mint the destination tuple. "
+            f"Write or mint {promotion_record.context}/{promotion_record.from_instance} first."
+        ) from None
+    return control_plane_release_tuples.require_source_release_tuple_for_promotion(
+        source_tuple=source_tuple,
+        artifact_id=artifact_id,
+        context_name=promotion_record.context,
+        from_channel_name=promotion_record.from_instance,
+    )
+
+
 def _write_promoted_release_tuple(
     *,
     record_store: FilesystemRecordStore,
@@ -7053,6 +7081,46 @@ def release_tuples_export_catalog(state_dir: Path, output_file: Path | None) -> 
     output_file.parent.mkdir(parents=True, exist_ok=True)
     output_file.write_text(rendered_catalog, encoding="utf-8")
     click.echo(output_file)
+
+
+@release_tuples.command("write-from-promotion")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--record-id", required=True)
+def release_tuples_write_from_promotion(state_dir: Path, record_id: str) -> None:
+    record_store = _store(state_dir)
+    promotion_record = record_store.read_promotion_record(record_id)
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        promotion_record.from_instance
+    ) or not control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        promotion_record.to_instance
+    ):
+        raise click.ClickException(
+            "Release tuple promotion only supports stable remote channels testing, prod."
+        )
+    deployment_record_id = promotion_record.deployment_record_id.strip()
+    if not deployment_record_id:
+        raise click.ClickException(
+            "Promotion record is missing deployment_record_id. "
+            "Write a promotion record with explicit deployment linkage before minting a promoted release tuple."
+        )
+    deployment_record = record_store.read_deployment_record(deployment_record_id)
+    source_tuple = _read_source_release_tuple_for_promotion_record(
+        record_store=record_store,
+        promotion_record=promotion_record,
+    )
+    tuple_path = _write_promoted_release_tuple(
+        record_store=record_store,
+        source_tuple=source_tuple,
+        deployment_record=deployment_record,
+        promotion_record=promotion_record,
+    )
+    if tuple_path is None:
+        raise click.ClickException(
+            "Promotion record did not produce a stable release tuple destination."
+        )
+    click.echo(tuple_path)
 
 
 @main.group("backup-gates")

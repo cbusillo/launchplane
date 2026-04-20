@@ -1525,6 +1525,134 @@ domains = ["https://prod.example.com"]
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("missing deployment_record_id", result.output)
 
+    def test_release_tuples_write_from_promotion_persists_promoted_tuple(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            deployment_dir = state_dir / "deployments"
+            promotion_dir = state_dir / "promotions"
+            deployment_dir.mkdir(parents=True, exist_ok=True)
+            promotion_dir.mkdir(parents=True, exist_ok=True)
+            _write_release_tuple_record(state_dir, artifact_id="artifact-2", tenant_sha="def4567")
+            deployment_record = DeploymentRecord(
+                record_id="deployment-20260411T182231Z-opw-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                context="opw",
+                instance="prod",
+                source_git_ref="def456",
+                resolved_target=ResolvedTargetEvidence(
+                    target_type="compose",
+                    target_id="compose-123",
+                    target_name="opw-prod",
+                ),
+                deploy=DeploymentEvidence(
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    deployment_id="control-plane-dokploy",
+                    status="pass",
+                    started_at="2026-04-11T18:22:31Z",
+                    finished_at="2026-04-11T18:22:31Z",
+                ),
+            )
+            promotion_record = PromotionRecord(
+                record_id="promotion-20260411T182231Z-opw-testing-to-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                deployment_record_id=deployment_record.record_id,
+                backup_record_id="backup-opw-prod-20260410T182231Z",
+                context="opw",
+                from_instance="testing",
+                to_instance="prod",
+                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                deploy={
+                    "target_name": "opw-prod",
+                    "target_type": "compose",
+                    "deploy_mode": "dokploy-compose-api",
+                    "deployment_id": "control-plane-dokploy",
+                    "status": "pass",
+                    "started_at": "2026-04-11T18:22:31Z",
+                    "finished_at": "2026-04-11T18:22:31Z",
+                },
+            )
+            (deployment_dir / f"{deployment_record.record_id}.json").write_text(
+                deployment_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+            (promotion_dir / f"{promotion_record.record_id}.json").write_text(
+                promotion_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "release-tuples",
+                    "write-from-promotion",
+                    "--state-dir",
+                    str(state_dir),
+                    "--record-id",
+                    promotion_record.record_id,
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            written_path = state_dir / "release_tuples" / "opw-prod.json"
+            self.assertEqual(Path(result.output.strip()), written_path)
+            written_record = ReleaseTupleRecord.model_validate(
+                json.loads(written_path.read_text(encoding="utf-8"))
+            )
+            self.assertEqual(written_record.provenance, "promotion")
+            self.assertEqual(written_record.promoted_from_channel, "testing")
+            self.assertEqual(written_record.deployment_record_id, deployment_record.record_id)
+            self.assertEqual(written_record.promotion_record_id, promotion_record.record_id)
+            self.assertEqual(written_record.repo_shas["tenant-opw"], "def4567")
+
+    def test_release_tuples_write_from_promotion_requires_deployment_linkage(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            state_dir = repo_root / "state"
+            promotion_dir = state_dir / "promotions"
+            promotion_dir.mkdir(parents=True, exist_ok=True)
+            promotion_record = PromotionRecord(
+                record_id="promotion-20260411T182231Z-opw-testing-to-prod",
+                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                backup_record_id="backup-opw-prod-20260410T182231Z",
+                context="opw",
+                from_instance="testing",
+                to_instance="prod",
+                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                deploy={
+                    "target_name": "opw-prod",
+                    "target_type": "compose",
+                    "deploy_mode": "dokploy-compose-api",
+                    "deployment_id": "control-plane-dokploy",
+                    "status": "pass",
+                    "started_at": "2026-04-11T18:22:31Z",
+                    "finished_at": "2026-04-11T18:22:31Z",
+                },
+            )
+            (promotion_dir / f"{promotion_record.record_id}.json").write_text(
+                promotion_record.model_dump_json(indent=2),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "release-tuples",
+                    "write-from-promotion",
+                    "--state-dir",
+                    str(state_dir),
+                    "--record-id",
+                    promotion_record.record_id,
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("missing deployment_record_id", result.output)
+
     def test_promote_execute_requires_stored_artifact_manifest(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

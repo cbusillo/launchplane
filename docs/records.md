@@ -128,6 +128,10 @@ state/
 - Promotion execution copies the source channel tuple to the destination
   channel after the destination deploy passes, retaining the promotion and
   deployment record ids that established the promoted state.
+- Externally produced promotion evidence can mint the same destination tuple
+  through `release-tuples write-from-promotion` when the stored promotion
+  record carries explicit `deployment_record_id` linkage and Harbor already has
+  the current source tuple for the promoted-from lane.
 - Harbor previews are not long-lived release-tuple channels; they derive their
   baseline from stored tuple evidence plus preview generation records.
 - Runtime tuple records live under `state/` and do not rewrite the tracked
