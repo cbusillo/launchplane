@@ -50,13 +50,19 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.harbor_mutations import (
+    apply_harbor_destroy_preview as shared_apply_harbor_destroy_preview,
+    apply_harbor_generation_evidence as shared_apply_harbor_generation_evidence,
+    control_plane_root as shared_control_plane_root,
+    upsert_harbor_preview_from_request as shared_upsert_harbor_preview_from_request,
+)
+from control_plane.service import serve_harbor_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.harbor import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
     apply_generation_ready_transition,
     apply_generation_requested_transition,
-    apply_preview_destroyed_transition,
     build_pull_request_feedback_payload,
     build_preview_generation_record_from_request,
     build_preview_history_payload,
@@ -121,7 +127,7 @@ def _store(state_dir: Path) -> FilesystemRecordStore:
 
 
 def _control_plane_root() -> Path:
-    return Path(__file__).resolve().parent.parent
+    return shared_control_plane_root()
 
 
 def _require_harbor_preview_status_payload(
@@ -5030,7 +5036,6 @@ def _render_harbor_preview_status_page_html(
         identity_html = f'<p class="identity-line">{"<span>&bull;</span>".join(identity_bits)}</p>'
 
     action_slug = _harbor_action_slug(preview_label)
-    anchor_head_sha = escape(str(input_summary.get("anchor", {}).get("head_sha", ""))) if isinstance(input_summary.get("anchor"), dict) else ""
     raw_anchor_head_sha = str(input_summary.get("anchor", {}).get("head_sha", "")).strip() if isinstance(input_summary.get("anchor"), dict) else ""
     raw_baseline_release_tuple_id = str(input_summary.get("baseline_release_tuple_id", "")).strip()
     raw_source_map = [item for item in source_map if isinstance(item, dict)]
@@ -7004,6 +7009,34 @@ def artifacts() -> None:
     """Artifact manifest commands."""
 
 
+@main.group()
+def service() -> None:
+    """Harbor service commands."""
+
+
+@service.command("serve")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--policy-file", type=click.Path(exists=True, path_type=Path), required=True)
+@click.option("--host", default="127.0.0.1", show_default=True)
+@click.option("--port", type=int, default=8080, show_default=True)
+@click.option(
+    "--audience",
+    default="harbor.shinycomputers.com",
+    show_default=True,
+    help="Expected GitHub OIDC audience for Harbor service tokens.",
+)
+def service_serve(state_dir: Path, policy_file: Path, host: str, port: int, audience: str) -> None:
+    serve_harbor_service(
+        state_dir=state_dir,
+        policy_file=policy_file,
+        host=host,
+        port=port,
+        audience=audience,
+    )
+
+
 @artifacts.command("write")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -8491,32 +8524,11 @@ def _upsert_harbor_preview_from_request(
     record_store: FilesystemRecordStore,
     request: PreviewMutationRequest,
 ) -> PreviewRecord:
-    existing_preview = find_preview_record(
+    return shared_upsert_harbor_preview_from_request(
+        control_plane_root_path=control_plane_root,
         record_store=record_store,
-        context_name=request.context,
-        anchor_repo=request.anchor_repo,
-        anchor_pr_number=request.anchor_pr_number,
+        request=request,
     )
-    preview_record = (
-        existing_preview.model_copy(
-            update={
-                "anchor_pr_url": request.anchor_pr_url,
-                "canonical_url": request.canonical_url.strip() or existing_preview.canonical_url,
-                "updated_at": request.updated_at.strip() or existing_preview.updated_at,
-                "eligible_at": request.eligible_at.strip() or existing_preview.eligible_at,
-                "paused_at": request.paused_at or existing_preview.paused_at,
-                "destroy_after": request.destroy_after or existing_preview.destroy_after,
-            }
-        )
-        if existing_preview is not None
-        else build_preview_record_from_request(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            request=request,
-        )
-    )
-    record_store.write_preview_record(preview_record)
-    return preview_record
 
 
 def _apply_harbor_generation_evidence(
@@ -8526,39 +8538,12 @@ def _apply_harbor_generation_evidence(
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
-    preview_record = _upsert_harbor_preview_from_request(
-        control_plane_root=control_plane_root,
+    return shared_apply_harbor_generation_evidence(
+        control_plane_root_path=control_plane_root,
         record_store=record_store,
-        request=preview_request,
+        preview_request=preview_request,
+        generation_request=generation_request,
     )
-    generation_record = build_preview_generation_record_from_request(
-        record_store=record_store,
-        request=generation_request,
-    )
-    if generation_record.state == "ready":
-        transitioned_preview = apply_generation_ready_transition(
-            preview=preview_record,
-            generation=generation_record,
-        )
-    elif generation_record.state == "failed":
-        transitioned_preview = apply_generation_failed_transition(
-            preview=preview_record,
-            generation=generation_record,
-        )
-    else:
-        transitioned_preview = apply_generation_requested_transition(
-            preview=preview_record,
-            generation=generation_record,
-        )
-    generation_path = record_store.write_preview_generation_record(generation_record)
-    preview_path = record_store.write_preview_record(transitioned_preview)
-    return {
-        "generation_id": generation_record.generation_id,
-        "generation_path": str(generation_path),
-        "preview_id": transitioned_preview.preview_id,
-        "preview_path": str(preview_path),
-        "transition": generation_record.state,
-    }
 
 
 def _apply_harbor_destroy_preview(
@@ -8566,23 +8551,10 @@ def _apply_harbor_destroy_preview(
     record_store: FilesystemRecordStore,
     request: PreviewDestroyMutationRequest,
 ) -> dict[str, object]:
-    preview_record = _read_harbor_preview_or_fail(
+    return shared_apply_harbor_destroy_preview(
         record_store=record_store,
-        context_name=request.context,
-        anchor_repo=request.anchor_repo,
-        anchor_pr_number=request.anchor_pr_number,
+        request=request,
     )
-    transitioned_preview = apply_preview_destroyed_transition(
-        preview=preview_record,
-        destroyed_at=request.destroyed_at,
-        destroy_reason=request.destroy_reason,
-    )
-    preview_path = record_store.write_preview_record(transitioned_preview)
-    return {
-        "preview_id": transitioned_preview.preview_id,
-        "preview_path": str(preview_path),
-        "transition": "destroyed",
-    }
 
 
 def _apply_harbor_pr_event_intent(

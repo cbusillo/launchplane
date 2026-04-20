@@ -44,14 +44,23 @@ shape. The intended direction is:
 - CLI tools that act as local/operator clients of Harbor contracts rather than
   defining the contract themselves.
 
+The first implemented ingress slice now exists in this repo as a local Harbor
+service command with GitHub OIDC verification and a static workflow policy.
+
 ## Quick Start
 
 ```bash
 cp .env.example .env
 cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run control-plane --help
+uv run control-plane service serve --help
 uv run python -m unittest
 ```
+
+For the first local Harbor service run, copy
+`config/harbor-authz.toml.example` to a local policy file and adjust the repo,
+workflow, product, context, and action allow-lists to match the workflows you
+want Harbor to trust.
 
 The tracked Dokploy route catalog lives in `config/dokploy.toml`, with
 operator-local target IDs supplied through `config/dokploy-targets.toml`.

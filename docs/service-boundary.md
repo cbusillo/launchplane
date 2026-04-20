@@ -19,6 +19,19 @@ The current repo-local CLI and file-backed state directory are implementation
 scaffolding. This document defines the boundary those adapters should converge
 on.
 
+## Current Implementation Status
+
+The first service slice is now implemented locally in this repo:
+
+- CLI: `uv run control-plane service serve`
+- health route: `GET /v1/health`
+- first authenticated evidence route:
+  `POST /v1/evidence/previews/generations`
+
+That slice is intentionally narrow. It proves the Harbor HTTP/OIDC/authz
+boundary in code before broader evidence routes and driver-triggered actions
+move across it.
+
 ## First Host Assumption
 
 - Harbor runs behind `https://harbor.shinycomputers.com`.

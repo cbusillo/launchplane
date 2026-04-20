@@ -24,6 +24,7 @@ boundary for Harbor.
 - `promotions`: write and inspect promotion records.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
   TOML catalog from minted state.
+- `service`: run the first local Harbor HTTP ingress slice.
 - `ship`: plan, resolve, and execute artifact-backed deploy requests.
 
 `deployments write`, `promotions write`, `inventory write-from-deployment`,
@@ -61,6 +62,26 @@ Harbor should eventually expose API ingress for at least:
 
 The first explicit version of that boundary, including the OIDC claim mapping
 and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
+
+The first implemented service command is:
+
+```bash
+uv run control-plane service serve \
+  --state-dir ./state \
+  --policy-file ./config/harbor-authz.toml
+```
+
+Start from `config/harbor-authz.toml.example` when creating the first local
+policy file.
+
+Current implementation scope:
+
+- `GET /v1/health`
+- `POST /v1/evidence/previews/generations`
+
+The service currently uses a static authz policy file and GitHub OIDC bearer
+tokens. Additional evidence routes should land against the same authn/authz
+boundary rather than creating separate ad hoc ingress patterns.
 
 ## Core Rules
 

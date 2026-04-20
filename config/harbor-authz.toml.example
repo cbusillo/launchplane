@@ -1,0 +1,31 @@
+schema_version = 1
+
+[[github_actions]]
+repository = "every/verireel"
+workflow_refs = [
+  "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+]
+event_names = ["pull_request"]
+products = ["verireel"]
+contexts = ["verireel-testing"]
+actions = ["preview_generation.write"]
+
+[[github_actions]]
+repository = "every/verireel"
+workflow_refs = [
+  "every/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main",
+]
+event_names = ["pull_request"]
+products = ["verireel"]
+contexts = ["verireel-testing"]
+actions = ["preview_destroyed.write"]
+
+[[github_actions]]
+repository = "every/tenant-opw"
+workflow_refs = [
+  "every/tenant-opw/.github/workflows/harbor-preview.yml@refs/heads/main",
+]
+event_names = ["pull_request"]
+products = ["odoo"]
+contexts = ["opw"]
+actions = ["preview_generation.write"]
