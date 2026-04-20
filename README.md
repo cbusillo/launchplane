@@ -51,12 +51,18 @@ evidence ingress for deployments, promotions, and the full preview lifecycle.
 ## Quick Start
 
 ```bash
-cp .env.example .env
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/harbor"
 cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run harbor --help
 uv run harbor service serve --help
 uv run python -m unittest
 ```
+
+Runtime secrets should come from the current process environment or from
+external Harbor config files such as
+`${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env` and
+`${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml`, not from
+repo-local secret files.
 
 For the first local Harbor service run, copy
 `config/harbor-authz.toml.example` to a local policy file and adjust the repo,

@@ -12,11 +12,7 @@ dist/
 *.egg-info/
 
 # Local env and secrets
-.env
-.env.*
-!.env.example
 config/dokploy-targets.toml
-config/runtime-environments.toml
 
 # Local state and scratch artifacts
 state/

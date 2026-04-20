@@ -22,6 +22,8 @@ CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_F
 CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE"
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
+DEFAULT_HARBOR_CONFIG_DIRNAME = "harbor"
+DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME = "dokploy.env"
 DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
@@ -306,6 +308,13 @@ def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[s
     return load_runtime_environment_values(default_env_file=control_plane_env_file)
 
 
+def resolve_harbor_config_dir() -> Path:
+    configured_xdg_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
+    if configured_xdg_home:
+        return Path(configured_xdg_home).expanduser() / DEFAULT_HARBOR_CONFIG_DIRNAME
+    return Path.home() / ".config" / DEFAULT_HARBOR_CONFIG_DIRNAME
+
+
 def resolve_control_plane_dokploy_source_file(control_plane_root: Path) -> Path:
     configured_source_file = os.environ.get(CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR, "").strip()
     if configured_source_file:
@@ -399,22 +408,29 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     host = environment_values.get("DOKPLOY_HOST", "").strip()
     token = environment_values.get("DOKPLOY_TOKEN", "").strip()
     if not host or not token:
+        external_env_file = resolve_harbor_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
         raise click.ClickException(
             "Missing DOKPLOY_HOST or DOKPLOY_TOKEN for control-plane Dokploy execution. "
-            "Define them in the control-plane .env, the file pointed to by ODOO_CONTROL_PLANE_ENV_FILE, "
-            "or the current process environment."
+            f"Define them in the current process environment, set {CONTROL_PLANE_ENV_FILE_ENV_VAR}, "
+            f"or create {external_env_file}."
         )
     return host, token
 
 
-def resolve_control_plane_env_file(control_plane_root: Path) -> Path:
+def resolve_control_plane_env_file(control_plane_root: Path) -> Path | None:
     configured_env_file = os.environ.get(CONTROL_PLANE_ENV_FILE_ENV_VAR, "").strip()
     if configured_env_file:
         candidate_path = Path(configured_env_file)
         if not candidate_path.is_absolute():
             candidate_path = control_plane_root / candidate_path
         return candidate_path
-    return control_plane_root / ".env"
+    legacy_repo_env_file = control_plane_root / ".env"
+    if legacy_repo_env_file.exists():
+        return legacy_repo_env_file
+    external_env_file = resolve_harbor_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
+    if external_env_file.exists():
+        return external_env_file
+    return None
 
 
 def trigger_deployment(*, host: str, token: str, target_type: str, target_id: str, no_cache: bool) -> None:

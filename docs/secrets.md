@@ -10,9 +10,11 @@ title: Secrets
 ## Current Contract
 
 - Dokploy credentials belong to `harbor`.
-- Keep real values in the control-plane repo's untracked `.env` by default.
-- Local runtime environment truth may live in the control-plane repo's
-  untracked `config/runtime-environments.toml`.
+- Keep real Dokploy values in the current process environment or in an
+  external Harbor config file such as
+  `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env`.
+- Local runtime environment truth should live outside the repo checkout, such
+  as `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml`.
 - Live Dokploy `target_id` values belong in the control-plane repo's untracked
   `config/dokploy-targets.toml`.
 - `DOKPLOY_HOST` and `DOKPLOY_TOKEN` may also be provided through the current
@@ -25,15 +27,18 @@ title: Secrets
   web base URLs.
 - If you need a non-default secret file location, set
   `ODOO_CONTROL_PLANE_ENV_FILE` to an alternate untracked env file path.
+- If you need a non-default runtime environments file location, set
+  `ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE`.
 
 ## Rules
 
-- Never commit `.env`, alternate secret files, or rendered env artifacts.
-- Never commit `config/runtime-environments.toml`; keep the real file
-  untracked and start from `config/runtime-environments.toml.example`.
+- Do not keep real secret files in the repo checkout.
+- Never commit alternate secret files or rendered env artifacts.
+- Never commit a real runtime environments file; keep it outside the repo and
+  start from `config/runtime-environments.toml.example`.
 - Never commit `config/dokploy-targets.toml`; keep the real file untracked and
   start from `config/dokploy-targets.toml.example`.
-- Do not rely on a separate code repo's `.env` for control-plane-owned secrets.
+- Do not rely on a repo-local `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
 
 ## Local Runtime Contract
@@ -53,7 +58,9 @@ title: Secrets
 ## Bootstrap
 
 ```bash
-cp .env.example .env
+mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/harbor"
 cp config/dokploy-targets.toml.example config/dokploy-targets.toml
-cp config/runtime-environments.toml.example config/runtime-environments.toml
+cp config/runtime-environments.toml.example \
+  "${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml"
+cp .env.example "${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env"
 ```

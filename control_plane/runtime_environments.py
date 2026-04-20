@@ -11,6 +11,7 @@ from control_plane import dokploy as control_plane_dokploy
 
 RUNTIME_ENVIRONMENTS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE"
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
+DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE = "runtime-environments.toml"
 
 ScalarValue = str | int | float | bool
 ScalarMap = dict[str, ScalarValue]
@@ -34,24 +35,32 @@ class RuntimeEnvironmentDefinition:
     contexts: dict[str, RuntimeEnvironmentContextDefinition]
 
 
-def resolve_runtime_environments_file(control_plane_root: Path) -> Path:
+def resolve_runtime_environments_file(control_plane_root: Path) -> Path | None:
     configured_file = os.environ.get(RUNTIME_ENVIRONMENTS_FILE_ENV_VAR, "").strip()
     if configured_file:
         candidate_path = Path(configured_file)
         if not candidate_path.is_absolute():
             candidate_path = control_plane_root / candidate_path
         return candidate_path
-    return control_plane_root / DEFAULT_RUNTIME_ENVIRONMENTS_FILE
+    legacy_repo_file = control_plane_root / DEFAULT_RUNTIME_ENVIRONMENTS_FILE
+    if legacy_repo_file.exists():
+        return legacy_repo_file
+    external_file = control_plane_dokploy.resolve_harbor_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
+    if external_file.exists():
+        return external_file
+    return None
 
 
 def load_runtime_environment_definition(
     *, control_plane_root: Path
 ) -> RuntimeEnvironmentDefinition:
     environments_file = resolve_runtime_environments_file(control_plane_root)
-    if not environments_file.exists():
+    if environments_file is None or not environments_file.exists():
+        external_file = control_plane_dokploy.resolve_harbor_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
         raise click.ClickException(
             "Missing control-plane runtime environments file. "
-            f"Create {environments_file} or point {RUNTIME_ENVIRONMENTS_FILE_ENV_VAR} at an alternate file."
+            f"Set {RUNTIME_ENVIRONMENTS_FILE_ENV_VAR}, create {external_file}, "
+            f"or use the legacy repo-local file at {control_plane_root / DEFAULT_RUNTIME_ENVIRONMENTS_FILE}."
         )
     try:
         payload = tomllib.loads(environments_file.read_text(encoding="utf-8"))

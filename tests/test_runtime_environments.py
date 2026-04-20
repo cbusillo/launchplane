@@ -153,6 +153,43 @@ ENV_OVERRIDE_DISABLE_CRON = true
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
         self.assertEqual(resolved_values["ENV_OVERRIDE_DISABLE_CRON"], "True")
 
+    def test_resolve_runtime_environment_values_uses_external_harbor_config_dir_when_repo_file_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name) / "repo"
+            control_plane_root.mkdir(parents=True, exist_ok=True)
+            xdg_config_home = Path(temporary_directory_name) / "xdg"
+            environments_file = xdg_config_home / "harbor" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_MASTER_PASSWORD = "shared-master"
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "XDG_CONFIG_HOME": str(xdg_config_home),
+                },
+                clear=True,
+            ):
+                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="opw",
+                    instance_name="local",
+                )
+
+        self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
+        self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "local-secret")
+
     def test_environments_resolve_command_emits_json_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)

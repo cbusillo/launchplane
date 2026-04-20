@@ -477,6 +477,30 @@ target_id = "compose-456"
         self.assertEqual(host, "https://dokploy.explicit.example")
         self.assertEqual(token, "explicit-token")
 
+    def test_read_dokploy_config_uses_external_harbor_config_dir_when_repo_file_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name) / "repo"
+            control_plane_root.mkdir(parents=True, exist_ok=True)
+            xdg_config_home = Path(temporary_directory_name) / "xdg"
+            external_env_file = xdg_config_home / "harbor" / "dokploy.env"
+            external_env_file.parent.mkdir(parents=True, exist_ok=True)
+            external_env_file.write_text(
+                "DOKPLOY_HOST=https://dokploy.external.example\nDOKPLOY_TOKEN=external-token\n",
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    "XDG_CONFIG_HOME": str(xdg_config_home),
+                },
+                clear=True,
+            ):
+                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+
+        self.assertEqual(host, "https://dokploy.external.example")
+        self.assertEqual(token, "external-token")
+
     def test_read_control_plane_environment_values_includes_process_overrides(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -501,16 +525,17 @@ target_id = "compose-456"
     def test_read_dokploy_config_fails_closed_without_control_plane_secret_source(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
+            xdg_config_home = Path(temporary_directory_name) / "xdg"
 
             with patch.dict(
                 os.environ,
-                {},
+                {"XDG_CONFIG_HOME": str(xdg_config_home)},
                 clear=True,
             ):
                 with self.assertRaises(click.ClickException) as raised_error:
                     control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
 
-        self.assertIn("control-plane .env", str(raised_error.exception))
+        self.assertIn("DOKPLOY_HOST or DOKPLOY_TOKEN", str(raised_error.exception))
 
     def test_run_compose_post_deploy_update_applies_explicit_env_file_without_control_plane_secrets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
