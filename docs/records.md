@@ -4,7 +4,13 @@ title: Records
 
 ## Storage Policy
 
-- Persist records as JSON files in a local state directory.
+- Persist local-dev records as JSON files in a local state directory.
+- Use Postgres-backed Harbor core-record tables for shared-service ingress when
+  Harbor is running with `HARBOR_DATABASE_URL` or `harbor service serve
+  --database-url ...`.
+- Use Postgres-backed Harbor secret tables for managed secret records when
+  Harbor is running with `HARBOR_DATABASE_URL` and
+  `HARBOR_MASTER_ENCRYPTION_KEY`.
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
@@ -23,9 +29,9 @@ deployment, promotion, inventory, and preview evidence ingestion before this
 control plane takes over product-specific runtime actions.
 
 Under the target Harbor shape, product workflows and drivers should speak in
-typed evidence payloads. Harbor may store those facts in file-backed JSON while
-it still lives in this repo, but callers should treat the durable record model
-as canonical and the storage engine as replaceable.
+typed evidence payloads. Harbor may still store those facts in file-backed JSON
+for local development, but the shared-service path should write the same record
+nouns into Postgres-backed tables without inventing a second record model.
 
 ## Layout
 
@@ -231,6 +237,10 @@ state/
 - Successful waited `promote` executions refresh the same inventory record and
   add promotion linkage so the current state can still be tied back to the
   controlling promotion and deployment records.
+- Harbor service evidence ingress now applies the same pattern for external
+  evidence: accepted deployment evidence refreshes inventory immediately, and
+  accepted promotion evidence refreshes destination inventory when the
+  promotion record carries explicit deployment linkage.
 - For a second product such as VeriReel, inventory should first be derived from
   ingested deployment/promotion evidence before Harbor becomes the runtime
   executor for that product. The first explicit mutation surfaces for that are

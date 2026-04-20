@@ -14,6 +14,8 @@ from urllib.request import Request, urlopen
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane import secrets as control_plane_secrets
+
 DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS = 600
 DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS = 180
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
@@ -305,7 +307,8 @@ def load_runtime_environment_values(
 
 def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[str, str]:
     control_plane_env_file = resolve_control_plane_env_file(control_plane_root)
-    return load_runtime_environment_values(default_env_file=control_plane_env_file)
+    environment_values = load_runtime_environment_values(default_env_file=control_plane_env_file)
+    return control_plane_secrets.overlay_dokploy_environment_values(environment_values=environment_values)
 
 
 def resolve_harbor_config_dir() -> Path:
@@ -518,6 +521,21 @@ def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
         key_part, value_part = stripped_line.split("=", 1)
         env_map[key_part.strip()] = value_part
     return env_map
+
+
+def render_dokploy_env_text_with_overrides(
+    raw_env_text: str,
+    *,
+    updates: Mapping[str, str] | None = None,
+    removals: tuple[str, ...] = (),
+) -> str:
+    env_map = parse_dokploy_env_text(raw_env_text)
+    for env_key in removals:
+        env_map.pop(env_key, None)
+    if updates is not None:
+        for env_key, env_value in updates.items():
+            env_map[env_key] = env_value
+    return serialize_dokploy_env_text(env_map)
 
 
 def serialize_dokploy_env_text(env_map: dict[str, str]) -> str:

@@ -30,10 +30,14 @@ The first service slice is now implemented locally in this repo:
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
+- first driver route:
+  - `POST /v1/drivers/verireel/testing-deploy`
 
-That slice now covers the first documented evidence surface end to end. Harbor
-can verify GitHub OIDC, authorize workflow identity claims, and accept the
-first deployment, promotion, and preview lifecycle evidence writes over HTTP.
+That slice now covers the first documented evidence surface end to end plus the
+first explicit Harbor-owned driver action. Harbor can verify GitHub OIDC,
+authorize workflow identity claims, accept deployment/promotion/preview
+lifecycle evidence over HTTP, and execute the VeriReel shared testing deploy as
+an authenticated Harbor route.
 
 ## First Host Assumption
 
@@ -139,6 +143,29 @@ allowed actions:
   - preview_destroyed.write
 ```
 
+Stable-lane examples:
+
+```text
+repository: every/verireel
+workflow_ref: every/verireel/.github/workflows/publish-image.yml@refs/heads/main
+event_name: push or workflow_dispatch
+allowed product: verireel
+allowed contexts: verireel
+allowed actions:
+  - verireel_testing_deploy.execute
+  - deployment.write
+```
+
+```text
+repository: every/verireel
+workflow_ref: every/verireel/.github/workflows/promote-image.yml@refs/heads/main
+event_name: workflow_dispatch
+allowed product: verireel
+allowed contexts: verireel
+allowed actions:
+  - promotion.write
+```
+
 The initial policy engine can be config-backed and static. It does not need a
 full RBAC system yet.
 
@@ -161,15 +188,30 @@ writes, not on every possible operator action.
 - `GET /v1/inventory/{context}/{instance}`
 - `GET /v1/promotions/{record_id}`
 - `GET /v1/deployments/{record_id}`
+- `GET /v1/contexts/{context}/secrets`
+- `GET /v1/contexts/{context}/instances/{instance}/secrets`
+- `GET /v1/secrets/{secret_id}`
+- `GET /v1/contexts/{context}/operations/recent`
+
+These operator reads use the same Harbor authn/authz boundary as evidence
+ingress. The intent is to give operators a minimal typed read surface for the
+current Harbor record nouns without forcing them to infer state from workflow
+logs or host-local files. Secret status reads return metadata only: Harbor does
+not expose plaintext secret retrieval through the service boundary.
 
 ### Driver execution endpoints
 
-These can exist later, but should use the same authn/authz boundary:
+These use the same authn/authz boundary as evidence ingress:
 
 - `POST /v1/drivers/odoo/...`
 - `POST /v1/drivers/verireel/...`
 
-Do not block the first evidence-ingest service slice on driver execution.
+The first explicit driver route now in service is:
+
+- `POST /v1/drivers/verireel/testing-deploy`
+
+Do not generalize the full driver surface before a few product-specific routes
+have proven the shape.
 
 ## Request And Response Rules
 
@@ -276,6 +318,11 @@ CLI adapters and expose them over HTTP.
 
 The deployment and promotion endpoints should follow the same pattern: stable
 typed record payloads inside a Harbor-owned API envelope.
+
+For VeriReel's first stable-lane Harbor slice, use context `verireel` for the
+long-lived `testing` and `prod` instances. Preview evidence remains separate
+under `verireel-testing` because previews are not another durable promotion
+lane.
 
 ## CLI Relationship
 

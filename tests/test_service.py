@@ -1,15 +1,23 @@
 import io
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord, PreviewPullRequestSummary
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, PromotionRecord
 from control_plane.service import create_harbor_service_app
 from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, HarborAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows.verireel_testing_deploy import VeriReelTestingDeployResult
 
 
 class _StubVerifier:
@@ -107,6 +115,21 @@ class GitHubOidcVerifierTests(unittest.TestCase):
 
 
 class HarborServiceTests(unittest.TestCase):
+    def test_health_endpoint_reports_storage_backend(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_harbor_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=HarborAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            status_code, payload = _invoke_app(app, method="GET", path="/v1/health", authorization="")
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["storage_backend"], "filesystem")
+
     def test_preview_generation_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -262,19 +285,51 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
-                {"deployment_record_id": "deployment-20260420T153000Z-opw-testing"},
+                {
+                    "deployment_record_id": "deployment-20260420T153000Z-opw-testing",
+                    "inventory_record_id": "opw-testing",
+                },
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             deployment = store.read_deployment_record("deployment-20260420T153000Z-opw-testing")
+            inventory = store.read_environment_inventory(
+                context_name="opw",
+                instance_name="testing",
+            )
             self.assertEqual(deployment.context, "opw")
             self.assertEqual(deployment.instance, "testing")
             self.assertEqual(deployment.deploy.status, "pass")
             self.assertEqual(deployment.resolved_target.target_id, "compose-123")
+            self.assertEqual(inventory.deployment_record_id, deployment.record_id)
+            self.assertEqual(inventory.promotion_record_id, "")
 
     def test_promotion_endpoint_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T160500Z-opw-prod",
+                    artifact_identity={"artifact_id": "artifact-20260420-a1b2c3d4"},
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="compose",
+                        target_id="compose-456",
+                        target_name="opw-prod",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="opw-prod",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        status="pass",
+                        started_at="2026-04-20T16:05:00Z",
+                        finished_at="2026-04-20T16:08:30Z",
+                    ),
+                )
+            )
             policy = HarborAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -315,6 +370,7 @@ class HarborServiceTests(unittest.TestCase):
                     "promotion": {
                         "record_id": "promotion-20260420T160500Z-opw-testing-to-prod",
                         "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                        "deployment_record_id": "deployment-20260420T160500Z-opw-prod",
                         "backup_record_id": "backup-opw-prod-20260420T155000Z",
                         "context": "opw",
                         "from_instance": "testing",
@@ -346,17 +402,26 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(
                 payload["records"],
-                {"promotion_record_id": "promotion-20260420T160500Z-opw-testing-to-prod"},
+                {
+                    "promotion_record_id": "promotion-20260420T160500Z-opw-testing-to-prod",
+                    "inventory_record_id": "opw-prod",
+                },
             )
-            store = FilesystemRecordStore(state_dir=state_dir)
             promotion = store.read_promotion_record(
                 "promotion-20260420T160500Z-opw-testing-to-prod"
+            )
+            inventory = store.read_environment_inventory(
+                context_name="opw",
+                instance_name="prod",
             )
             self.assertEqual(promotion.context, "opw")
             self.assertEqual(promotion.from_instance, "testing")
             self.assertEqual(promotion.to_instance, "prod")
             self.assertEqual(promotion.deploy.status, "pass")
             self.assertEqual(promotion.backup_gate.status, "pass")
+            self.assertEqual(inventory.deployment_record_id, "deployment-20260420T160500Z-opw-prod")
+            self.assertEqual(inventory.promotion_record_id, promotion.record_id)
+            self.assertEqual(inventory.promoted_from_instance, "testing")
 
     def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -445,6 +510,416 @@ class HarborServiceTests(unittest.TestCase):
                 preview.latest_generation_id,
                 "preview-verireel-testing-verireel-pr-123-generation-0001",
             )
+
+    def test_verireel_testing_deploy_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_testing_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_testing_deploy",
+                return_value=VeriReelTestingDeployResult(
+                    deployment_record_id="deployment-verireel-testing-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-20T18:20:00Z",
+                    deploy_finished_at="2026-04-20T18:21:15Z",
+                    target_name="ver-testing-app",
+                    target_type="application",
+                    target_id="testing-app-123",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/testing-deploy",
+                    payload={
+                        "product": "verireel",
+                        "deploy": {
+                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1"},
+            )
+            self.assertEqual(payload["result"]["deploy_status"], "pass")
+            self.assertEqual(payload["result"]["target_id"], "testing-app-123")
+            execute_mock.assert_called_once()
+
+    def test_verireel_testing_deploy_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/testing-deploy",
+                payload={
+                    "product": "verireel",
+                    "deploy": {
+                        "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                        "source_git_ref": "abcdef1234567890",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_deployment_read_endpoint_returns_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-opw-testing",
+                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    context="opw",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="compose",
+                        target_id="compose-123",
+                        target_name="opw-testing",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="opw-testing",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        deployment_id="delegated-compose-ship",
+                        status="pass",
+                        started_at="2026-04-20T15:30:00Z",
+                        finished_at="2026-04-20T15:32:10Z",
+                    ),
+                )
+            )
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "contexts": ["opw"],
+                            "actions": ["deployment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/deployments/deployment-20260420T153000Z-opw-testing",
+            )
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["record"]["record_id"], "deployment-20260420T153000Z-opw-testing")
+            self.assertEqual(payload["record"]["resolved_target"]["target_id"], "compose-123")
+
+    def test_preview_history_and_recent_operations_endpoints_return_operator_read_models(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    preview_label="verireel/pr-123",
+                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:05:00Z",
+                    eligible_at="2026-04-20T10:05:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                PreviewGenerationRecord(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    sequence=1,
+                    state="ready",
+                    requested_reason="external_preview_refresh",
+                    requested_at="2026-04-20T10:01:00Z",
+                    ready_at="2026-04-20T10:05:00Z",
+                    finished_at="2026-04-20T10:05:00Z",
+                    resolved_manifest_fingerprint="preview-manifest-123",
+                    artifact_id="ghcr.io/every/verireel-app:pr-123",
+                    anchor_summary=PreviewPullRequestSummary(
+                        repo="verireel",
+                        pr_number=123,
+                        head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        pr_url="https://github.com/every/verireel/pull/123",
+                    ),
+                    deploy_status="pass",
+                    verify_status="pass",
+                    overall_health_status="pass",
+                )
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-verireel-testing",
+                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    context="verireel-testing",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application",
+                        target_id="app-123",
+                        target_name="verireel-testing",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="verireel-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="delegated-app-ship",
+                        status="pass",
+                        started_at="2026-04-20T15:30:00Z",
+                        finished_at="2026-04-20T15:32:10Z",
+                    ),
+                )
+            )
+            store.write_promotion_record(
+                PromotionRecord(
+                    record_id="promotion-20260420T160500Z-verireel-testing-to-prod",
+                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    deployment_record_id="deployment-20260420T153000Z-verireel-testing",
+                    backup_record_id="backup-verireel-prod-20260420T160000Z",
+                    context="verireel-testing",
+                    from_instance="testing",
+                    to_instance="prod",
+                    deploy=DeploymentEvidence(
+                        target_name="verireel-prod",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="delegated-app-promote",
+                        status="pass",
+                        started_at="2026-04-20T16:05:00Z",
+                        finished_at="2026-04-20T16:07:00Z",
+                    ),
+                )
+            )
+            store.write_environment_inventory(
+                EnvironmentInventory(
+                    context="verireel-testing",
+                    instance="testing",
+                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="verireel-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="delegated-app-ship",
+                        status="pass",
+                        started_at="2026-04-20T15:30:00Z",
+                        finished_at="2026-04-20T15:32:10Z",
+                    ),
+                    updated_at="2026-04-20T15:33:00Z",
+                    deployment_record_id="deployment-20260420T153000Z-verireel-testing",
+                )
+            )
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview.read", "operations.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            history_status_code, history_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/preview-verireel-testing-verireel-pr-123/history",
+            )
+            operations_status_code, operations_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/verireel-testing/operations/recent",
+            )
+
+            self.assertEqual(history_status_code, 200)
+            self.assertEqual(history_payload["preview"]["preview_id"], "preview-verireel-testing-verireel-pr-123")
+            self.assertEqual(len(history_payload["generations"]), 1)
+            self.assertEqual(history_payload["generations"][0]["state"], "ready")
+
+            self.assertEqual(operations_status_code, 200)
+            self.assertEqual(operations_payload["context"], "verireel-testing")
+            self.assertEqual(operations_payload["storage_backend"], "filesystem")
+            self.assertEqual(len(operations_payload["inventory"]), 1)
+            self.assertEqual(len(operations_payload["recent_deployments"]), 1)
+            self.assertEqual(len(operations_payload["recent_promotions"]), 1)
+            self.assertEqual(len(operations_payload["recent_previews"]), 1)
+
+    def test_secret_status_endpoints_return_operator_read_models(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = f"sqlite+pysqlite:///{root / 'harbor.sqlite3'}"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="global",
+                    integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+                    name="token",
+                    plaintext_value="dokploy-token",
+                    binding_key="DOKPLOY_TOKEN",
+                    actor="test",
+                )
+                context_secret = control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="GITHUB_WEBHOOK_SECRET",
+                    plaintext_value="webhook-secret",
+                    binding_key="GITHUB_WEBHOOK_SECRET",
+                    context_name="opw",
+                    actor="test",
+                )
+            store.close()
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "contexts": ["opw"],
+                            "actions": ["secret.read", "secret.list"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "HARBOR_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                list_status_code, list_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/contexts/opw/secrets",
+                )
+                show_status_code, show_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path=f"/v1/secrets/{context_secret['secret_id']}",
+                )
+
+            self.assertEqual(list_status_code, 200)
+            self.assertEqual(list_payload["context"], "opw")
+            self.assertEqual(len(list_payload["secrets"]), 2)
+            self.assertEqual(show_status_code, 200)
+            self.assertEqual(show_payload["secret"]["secret_id"], context_secret["secret_id"])
+            self.assertEqual(show_payload["secret"]["binding"]["binding_key"], "GITHUB_WEBHOOK_SECRET")
 
     def test_preview_generation_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -23,3 +23,8 @@ target_id = "opw-testing-compose-id"
 context = "opw"
 instance = "prod"
 target_id = "opw-prod-compose-id"
+
+[[targets]]
+context = "verireel"
+instance = "testing"
+target_id = "verireel-testing-application-id"

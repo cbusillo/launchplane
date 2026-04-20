@@ -16,6 +16,7 @@ from pydantic import ValidationError
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -58,6 +59,7 @@ from control_plane.harbor_mutations import (
 )
 from control_plane.service import serve_harbor_service
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.harbor import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
@@ -701,6 +703,10 @@ def _build_harbor_preview_enablement_action_payload(
             "summary": "The current tenant snapshot is missing the exact anchor PR evidence needed for a typed request-generation recipe.",
             "recipe": "",
         }
+    if request_metadata_companions and not request_metadata_companion_summaries:
+        return unresolved_companion_payload(
+            detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+        )
 
     synthetic_event = GitHubPullRequestEvent(
         action="opened",
@@ -5714,6 +5720,138 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
         )
 
 
+def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: int) -> None:
+    if not health_urls:
+        raise click.ClickException("At least one Harbor service health URL is required.")
+    if timeout_seconds <= 0:
+        raise click.ClickException("Harbor service health timeout must be greater than zero seconds.")
+    healthcheck_errors: list[str] = []
+    for healthcheck_url in health_urls:
+        try:
+            _wait_for_ship_healthcheck(url=healthcheck_url, timeout_seconds=timeout_seconds)
+            return
+        except click.ClickException as error:
+            healthcheck_errors.append(str(error))
+    raise click.ClickException(
+        "Harbor service health verification failed for all configured URLs:\n"
+        + "\n".join(healthcheck_errors)
+    )
+
+
+def _apply_dokploy_image_reference(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+) -> dict[str, object]:
+    normalized_image_reference = image_reference.strip()
+    if not normalized_image_reference:
+        raise click.ClickException("Harbor service deploy requires a non-empty image reference.")
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    raw_env_text = str(target_payload.get("env") or "")
+    env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
+    previous_value_present = ARTIFACT_IMAGE_REFERENCE_ENV_KEY in env_map
+    previous_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
+    updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+        raw_env_text,
+        updates={ARTIFACT_IMAGE_REFERENCE_ENV_KEY: normalized_image_reference},
+    )
+    if updated_env_text != raw_env_text:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+            target_payload=target_payload,
+            env_text=updated_env_text,
+        )
+    return {
+        "previous_image_reference": previous_image_reference,
+        "previous_image_reference_present": previous_value_present,
+        "image_reference_changed": updated_env_text != raw_env_text,
+    }
+
+
+def _restore_dokploy_image_reference(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+    value_present: bool,
+) -> dict[str, object]:
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    raw_env_text = str(target_payload.get("env") or "")
+    if value_present:
+        restored_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+            raw_env_text,
+            updates={ARTIFACT_IMAGE_REFERENCE_ENV_KEY: image_reference},
+        )
+    else:
+        restored_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+            raw_env_text,
+            removals=(ARTIFACT_IMAGE_REFERENCE_ENV_KEY,),
+        )
+    if restored_env_text != raw_env_text:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+            target_payload=target_payload,
+            env_text=restored_env_text,
+        )
+    return {"image_reference_changed": restored_env_text != raw_env_text}
+
+
+def _trigger_and_wait_for_dokploy_target_deploy(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    deploy_timeout_seconds: int,
+    no_cache: bool,
+) -> dict[str, str]:
+    if deploy_timeout_seconds <= 0:
+        raise click.ClickException("Harbor service deploy timeout must be greater than zero seconds.")
+    latest_before = control_plane_dokploy.latest_deployment_for_target(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    control_plane_dokploy.trigger_deployment(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        no_cache=no_cache,
+    )
+    deployment_result = control_plane_dokploy.wait_for_target_deployment(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        before_key=control_plane_dokploy.deployment_key(latest_before),
+        timeout_seconds=deploy_timeout_seconds,
+    )
+    return {"deployment_result": deployment_result}
+
+
 def _resolve_dokploy_target(
     *,
     request: ShipRequest,
@@ -7014,6 +7152,152 @@ def service() -> None:
     """Harbor service commands."""
 
 
+@main.group()
+def storage() -> None:
+    """Harbor storage commands."""
+
+
+@main.group()
+def secrets() -> None:
+    """Harbor managed secret commands."""
+
+
+@storage.command("import-core-records")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor shared-service core records.",
+)
+def storage_import_core_records(state_dir: Path, database_url: str) -> None:
+    filesystem_store = FilesystemRecordStore(state_dir=state_dir)
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
+    click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
+
+
+@secrets.command("import-bootstrap")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Harbor repo root to scan for existing bootstrap secret sources.",
+)
+@click.option("--actor", default="bootstrap", show_default=True)
+def secrets_import_bootstrap(database_url: str, control_plane_root: Path | None, actor: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        summary = control_plane_secrets.import_bootstrap_secrets(
+            record_store=postgres_store,
+            control_plane_root=control_plane_root or _control_plane_root(),
+            actor=actor,
+        )
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps({"status": "ok", "summary": summary}, indent=2, sort_keys=True))
+
+
+@secrets.command("put")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option("--scope", type=click.Choice(["global", "context", "context_instance"]), required=True)
+@click.option("--integration", required=True)
+@click.option("--name", required=True)
+@click.option("--binding-key", required=True)
+@click.option("--value", required=True)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--description", default="")
+@click.option("--actor", default="cli", show_default=True)
+def secrets_put(
+    database_url: str,
+    scope: str,
+    integration: str,
+    name: str,
+    binding_key: str,
+    value: str,
+    context_name: str,
+    instance_name: str,
+    description: str,
+    actor: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        result = control_plane_secrets.write_secret_value(
+            record_store=postgres_store,
+            scope=scope,
+            integration=integration,
+            name=name,
+            plaintext_value=value,
+            binding_key=binding_key,
+            context_name=context_name,
+            instance_name=instance_name,
+            description=description,
+            actor=actor,
+        )
+        payload = control_plane_secrets.build_secret_status(postgres_store, secret_id=result["secret_id"])
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps({"status": "ok", "result": result, "secret": payload}, indent=2, sort_keys=True))
+
+
+@secrets.command("list")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option("--integration", default="")
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+def secrets_list(database_url: str, integration: str, context_name: str, instance_name: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        payload = control_plane_secrets.list_secret_statuses(
+            postgres_store,
+            integration=integration,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@secrets.command("show")
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    required=True,
+    help="Postgres connection string for Harbor managed secrets.",
+)
+@click.option("--secret-id", required=True)
+def secrets_show(database_url: str, secret_id: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        payload = control_plane_secrets.build_secret_status(postgres_store, secret_id=secret_id)
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
 @service.command("serve")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -7027,14 +7311,150 @@ def service() -> None:
     show_default=True,
     help="Expected GitHub OIDC audience for Harbor service tokens.",
 )
-def service_serve(state_dir: Path, policy_file: Path, host: str, port: int, audience: str) -> None:
+@click.option(
+    "--database-url",
+    envvar="HARBOR_DATABASE_URL",
+    default=None,
+    help="Postgres connection string for Harbor shared-service core records.",
+)
+def service_serve(
+    state_dir: Path,
+    policy_file: Path,
+    host: str,
+    port: int,
+    audience: str,
+    database_url: str | None,
+) -> None:
     serve_harbor_service(
         state_dir=state_dir,
         policy_file=policy_file,
         host=host,
         port=port,
         audience=audience,
+        database_url=database_url,
     )
+
+
+@service.command("deploy-dokploy-image")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar="HARBOR_DOKPLOY_TARGET_TYPE",
+    required=True,
+    help="Dokploy target type for the live Harbor service.",
+)
+@click.option(
+    "--target-id",
+    envvar="HARBOR_DOKPLOY_TARGET_ID",
+    required=True,
+    help="Dokploy target id for the live Harbor service.",
+)
+@click.option("--image-reference", required=True, help="Immutable image reference to deploy, usually repo@sha256:...")
+@click.option(
+    "--health-url",
+    "health_urls",
+    multiple=True,
+    required=True,
+    help="Public Harbor health URL to verify after Dokploy rollout. Repeat for alternate URLs.",
+)
+@click.option("--deploy-timeout-seconds", type=int, default=600, show_default=True)
+@click.option("--health-timeout-seconds", type=int, default=180, show_default=True)
+@click.option("--rollback-on-failure/--no-rollback-on-failure", default=True, show_default=True)
+@click.option("--no-cache", is_flag=True, default=False, help="Request Dokploy no-cache redeploy semantics when supported.")
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Harbor repo root used to resolve Dokploy credentials.",
+)
+def service_deploy_dokploy_image(
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+    health_urls: tuple[str, ...],
+    deploy_timeout_seconds: int,
+    health_timeout_seconds: int,
+    rollback_on_failure: bool,
+    no_cache: bool,
+    control_plane_root: Path | None,
+) -> None:
+    harbor_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=harbor_root)
+    normalized_health_urls = tuple(url.strip() for url in health_urls if url.strip())
+    apply_result = _apply_dokploy_image_reference(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        image_reference=image_reference,
+    )
+    payload: dict[str, object] = {
+        "status": "pending",
+        "target_type": target_type,
+        "target_id": target_id,
+        "image_reference": image_reference,
+        "health_urls": list(normalized_health_urls),
+        "deploy_timeout_seconds": deploy_timeout_seconds,
+        "health_timeout_seconds": health_timeout_seconds,
+        "rollback_on_failure": rollback_on_failure,
+        **apply_result,
+    }
+    previous_image_reference = str(apply_result["previous_image_reference"])
+    previous_value_present = bool(apply_result["previous_image_reference_present"])
+    rollback_payload: dict[str, object] | None = None
+    try:
+        payload.update(
+            _trigger_and_wait_for_dokploy_target_deploy(
+                host=host,
+                token=token,
+                target_type=target_type,
+                target_id=target_id,
+                deploy_timeout_seconds=deploy_timeout_seconds,
+                no_cache=no_cache,
+            )
+        )
+        _verify_healthcheck_urls(health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds)
+        payload["status"] = "ok"
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    except click.ClickException as error:
+        payload["status"] = "failed"
+        payload["error"] = str(error)
+        if rollback_on_failure:
+            rollback_payload = {
+                "requested_image_reference": previous_image_reference,
+                "requested_image_reference_present": previous_value_present,
+                "status": "pending",
+            }
+            try:
+                rollback_payload.update(
+                    _restore_dokploy_image_reference(
+                        host=host,
+                        token=token,
+                        target_type=target_type,
+                        target_id=target_id,
+                        image_reference=previous_image_reference,
+                        value_present=previous_value_present,
+                    )
+                )
+                rollback_payload.update(
+                    _trigger_and_wait_for_dokploy_target_deploy(
+                        host=host,
+                        token=token,
+                        target_type=target_type,
+                        target_id=target_id,
+                        deploy_timeout_seconds=deploy_timeout_seconds,
+                        no_cache=no_cache,
+                    )
+                )
+                _verify_healthcheck_urls(health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds)
+                rollback_payload["status"] = "ok"
+            except click.ClickException as rollback_error:
+                rollback_payload["status"] = "failed"
+                rollback_payload["error"] = str(rollback_error)
+        payload["rollback"] = rollback_payload
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        raise click.ClickException(str(error)) from error
 
 
 @artifacts.command("write")

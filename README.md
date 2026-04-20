@@ -47,6 +47,13 @@ shape. The intended direction is:
 The first implemented ingress slice now exists in this repo as a local Harbor
 service command with GitHub OIDC verification, a static workflow policy, and
 evidence ingress for deployments, promotions, and the full preview lifecycle.
+Shared-service core records can now be backed by Postgres with
+`HARBOR_DATABASE_URL` or `uv run harbor service serve --database-url ...`.
+The same service boundary now exposes authenticated operator read endpoints for
+deployment, promotion, inventory, preview, preview history, and recent
+context-scoped operations. Harbor-managed secrets now use the same Postgres
+backend, with encrypted secret values stored in DB and a bootstrap import path
+from the existing `dokploy.env` and runtime-environment file surfaces.
 
 ## Quick Start
 
@@ -55,6 +62,8 @@ mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/harbor"
 cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run harbor --help
 uv run harbor service serve --help
+uv run harbor storage import-core-records --help
+uv run harbor secrets import-bootstrap --help
 uv run python -m unittest
 ```
 
@@ -63,6 +72,11 @@ external Harbor config files such as
 `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env` and
 `${XDG_CONFIG_HOME:-$HOME/.config}/harbor/runtime-environments.toml`, not from
 repo-local secret files.
+
+Once Harbor-managed secret records exist in Postgres, Harbor reads those
+encrypted DB-backed values first for Dokploy credentials and runtime
+environment secret keys, then falls back to the older file/env surfaces only
+when no Harbor-managed secret has been written yet.
 
 For the first local Harbor service run, copy
 `config/harbor-authz.toml.example` to a local policy file and adjust the repo,
@@ -74,6 +88,66 @@ operator-local target IDs supplied through `config/dokploy-targets.toml`.
 The stable remote lane catalog is now `testing` plus `prod`; pull requests use
 Harbor-managed preview identities and ephemeral preview stacks instead of a
 durable shared `dev` lane.
+
+## Service Container Deploy
+
+The repo now includes a containerized Harbor service entrypoint for Dokploy or
+similar long-running hosts:
+
+- `Dockerfile`
+- `docker-compose.yml`
+- `scripts/start-harbor-service.sh`
+
+The compose service now expects the Harbor container image through
+`DOCKER_IMAGE_REFERENCE`. Dokploy should set that to an immutable GHCR digest
+for real Harbor deploys. For purely local compose usage, build a local image
+first, for example `docker build -t harbor:local .`, then run `docker compose up`.
+
+The entrypoint can bootstrap operator-local files from environment variables so
+the deployed service does not need checked-in secret or target-id files:
+
+- `HARBOR_DATABASE_URL`
+- `HARBOR_MASTER_ENCRYPTION_KEY`
+- `HARBOR_POLICY_TOML` or `HARBOR_POLICY_B64`
+- `HARBOR_DOKPLOY_TARGET_IDS_TOML` or `HARBOR_DOKPLOY_TARGET_IDS_B64`
+- `HARBOR_RUNTIME_ENVIRONMENTS_TOML` or `HARBOR_RUNTIME_ENVIRONMENTS_B64`
+
+Regular runtime env such as `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, and any
+`DOKPLOY_SHIP_MODE_*` overrides can still be passed directly as process
+environment variables. `HARBOR_MASTER_ENCRYPTION_KEY` must be present whenever
+Harbor needs to read or write DB-backed managed secrets.
+
+The intended first real Harbor bring-up path is GitHub-driven deploy, not a
+manual laptop-side image swap. The current operator posture is:
+
+- `CI` remains the separate test gate and must pass before Harbor deploy
+  automation replaces the live Dokploy app.
+- Harbor currently targets a single real Dokploy-hosted service instance,
+  without a separate Harbor testing lane yet.
+- Deploys should update Dokploy by immutable image digest and capture the
+  previously running digest before replacement.
+- Deploy automation should verify Harbor health after rollout and immediately
+  restore the previous digest when the new image fails health checks.
+- Until Harbor has a formal schema migration system, Postgres schema changes
+  must remain additive and backward-compatible so code rollback stays viable.
+
+The repo now includes `.github/workflows/deploy-harbor.yml` for that path.
+Configure these GitHub settings before enabling it:
+
+- repository secrets:
+  - `DOKPLOY_HOST`
+  - `DOKPLOY_TOKEN`
+- repository variables:
+  - `HARBOR_DOKPLOY_TARGET_TYPE`
+  - `HARBOR_DOKPLOY_TARGET_ID`
+  - `HARBOR_DEPLOY_HEALTH_URLS`
+  - optional `HARBOR_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
+  - optional `HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS`
+  - optional `HARBOR_IMAGE_REPOSITORY`
+
+Manual `workflow_dispatch` may also deploy an explicit prior image reference,
+which acts as the first operator rollback path while Harbor still has only one
+real Dokploy-hosted service instance.
 
 ## Docs
 

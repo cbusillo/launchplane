@@ -8,6 +8,7 @@ from pathlib import Path
 import click
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import secrets as control_plane_secrets
 
 RUNTIME_ENVIRONMENTS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE"
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
@@ -98,7 +99,11 @@ def resolve_runtime_environment_values(
             instance_name=instance_name,
         )
     )
-    return merged_values
+    return control_plane_secrets.overlay_runtime_environment_secret_values(
+        environment_values=merged_values,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
 
 
 def resolve_runtime_context_values(
@@ -114,7 +119,10 @@ def resolve_runtime_context_values(
             f"Runtime environments file has no context definition for {context_name!r}."
         )
     merged_values.update(_normalize_scalar_map(context_definition.shared_env))
-    return merged_values
+    return control_plane_secrets.overlay_runtime_environment_secret_values(
+        environment_values=merged_values,
+        context_name=context_name,
+    )
 
 
 def resolve_tracked_target_environment_values(

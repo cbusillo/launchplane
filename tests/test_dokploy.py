@@ -664,5 +664,134 @@ target_id = "compose-456"
         self.assertIn("UNRELATED_RUNTIME_KEY", str(raised_error.exception))
 
 
+class HarborServiceDeployTests(unittest.TestCase):
+    def test_render_dokploy_env_text_with_overrides_updates_and_removes_keys(self) -> None:
+        rendered = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+            "KEEP=1\nREMOVE=old\n",
+            updates={"ADD": "2"},
+            removals=("REMOVE",),
+        )
+
+        self.assertEqual(rendered, "KEEP=1\nADD=2")
+
+    def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:
+        runner = CliRunner()
+        captured_env_updates: list[dict[str, object]] = []
+        captured_trigger_calls: list[dict[str, object]] = []
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"},
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+            side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+        ), patch(
+            "control_plane.dokploy.latest_deployment_for_target",
+            return_value={"deploymentId": "deploy-old"},
+        ), patch(
+            "control_plane.dokploy.trigger_deployment",
+            side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
+        ), patch(
+            "control_plane.dokploy.wait_for_target_deployment",
+            return_value="deployment=deploy-new status=done",
+        ), patch(
+            "control_plane.cli._wait_for_ship_healthcheck",
+            return_value=None,
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "deploy-dokploy-image",
+                    "--target-type",
+                    "compose",
+                    "--target-id",
+                    "compose-123",
+                    "--image-reference",
+                    "ghcr.io/every/harbor@sha256:new",
+                    "--health-url",
+                    "https://harbor.example.com/v1/health",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(len(captured_env_updates), 1)
+        self.assertEqual(len(captured_trigger_calls), 1)
+        self.assertIn("sha256:new", str(captured_env_updates[0]["env_text"]))
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["previous_image_reference"], "ghcr.io/every/harbor@sha256:old")
+        self.assertEqual(payload["deployment_result"], "deployment=deploy-new status=done")
+
+    def test_service_deploy_dokploy_image_rolls_back_when_health_verification_fails(self) -> None:
+        runner = CliRunner()
+        captured_env_updates: list[dict[str, object]] = []
+        captured_trigger_calls: list[dict[str, object]] = []
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            side_effect=[
+                {"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"},
+                {"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:new\n"},
+            ],
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+            side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+        ), patch(
+            "control_plane.dokploy.latest_deployment_for_target",
+            side_effect=[
+                {"deploymentId": "deploy-old"},
+                {"deploymentId": "deploy-new"},
+            ],
+        ), patch(
+            "control_plane.dokploy.trigger_deployment",
+            side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
+        ), patch(
+            "control_plane.dokploy.wait_for_target_deployment",
+            side_effect=[
+                "deployment=deploy-new status=done",
+                "deployment=deploy-rollback status=done",
+            ],
+        ), patch(
+            "control_plane.cli._wait_for_ship_healthcheck",
+            side_effect=[
+                click.ClickException("Healthcheck failed for https://harbor.example.com/v1/health: http 503"),
+                None,
+            ],
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "deploy-dokploy-image",
+                    "--target-type",
+                    "compose",
+                    "--target-id",
+                    "compose-123",
+                    "--image-reference",
+                    "ghcr.io/every/harbor@sha256:new",
+                    "--health-url",
+                    "https://harbor.example.com/v1/health",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(len(captured_env_updates), 2)
+        self.assertEqual(len(captured_trigger_calls), 2)
+        self.assertIn("sha256:new", str(captured_env_updates[0]["env_text"]))
+        self.assertIn("sha256:old", str(captured_env_updates[1]["env_text"]))
+        self.assertIn("Harbor service health verification failed", result.output)
+        payload_text = result.output.split("Error:", 1)[0].strip()
+        payload = json.loads(payload_text) if payload_text else {}
+        self.assertEqual(payload.get("status"), "failed")
+        self.assertEqual(payload.get("rollback", {}).get("status"), "ok")
+
+
 if __name__ == "__main__":
     unittest.main()
