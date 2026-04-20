@@ -523,6 +523,21 @@ def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
     return env_map
 
 
+def render_dokploy_env_text_with_overrides(
+    raw_env_text: str,
+    *,
+    updates: Mapping[str, str] | None = None,
+    removals: tuple[str, ...] = (),
+) -> str:
+    env_map = parse_dokploy_env_text(raw_env_text)
+    for env_key in removals:
+        env_map.pop(env_key, None)
+    if updates is not None:
+        for env_key, env_value in updates.items():
+            env_map[env_key] = env_value
+    return serialize_dokploy_env_text(env_map)
+
+
 def serialize_dokploy_env_text(env_map: dict[str, str]) -> str:
     if not env_map:
         return ""

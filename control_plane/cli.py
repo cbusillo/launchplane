@@ -5720,6 +5720,138 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
         )
 
 
+def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: int) -> None:
+    if not health_urls:
+        raise click.ClickException("At least one Harbor service health URL is required.")
+    if timeout_seconds <= 0:
+        raise click.ClickException("Harbor service health timeout must be greater than zero seconds.")
+    healthcheck_errors: list[str] = []
+    for healthcheck_url in health_urls:
+        try:
+            _wait_for_ship_healthcheck(url=healthcheck_url, timeout_seconds=timeout_seconds)
+            return
+        except click.ClickException as error:
+            healthcheck_errors.append(str(error))
+    raise click.ClickException(
+        "Harbor service health verification failed for all configured URLs:\n"
+        + "\n".join(healthcheck_errors)
+    )
+
+
+def _apply_dokploy_image_reference(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+) -> dict[str, object]:
+    normalized_image_reference = image_reference.strip()
+    if not normalized_image_reference:
+        raise click.ClickException("Harbor service deploy requires a non-empty image reference.")
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    raw_env_text = str(target_payload.get("env") or "")
+    env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
+    previous_value_present = ARTIFACT_IMAGE_REFERENCE_ENV_KEY in env_map
+    previous_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
+    updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+        raw_env_text,
+        updates={ARTIFACT_IMAGE_REFERENCE_ENV_KEY: normalized_image_reference},
+    )
+    if updated_env_text != raw_env_text:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+            target_payload=target_payload,
+            env_text=updated_env_text,
+        )
+    return {
+        "previous_image_reference": previous_image_reference,
+        "previous_image_reference_present": previous_value_present,
+        "image_reference_changed": updated_env_text != raw_env_text,
+    }
+
+
+def _restore_dokploy_image_reference(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+    value_present: bool,
+) -> dict[str, object]:
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    raw_env_text = str(target_payload.get("env") or "")
+    if value_present:
+        restored_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+            raw_env_text,
+            updates={ARTIFACT_IMAGE_REFERENCE_ENV_KEY: image_reference},
+        )
+    else:
+        restored_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+            raw_env_text,
+            removals=(ARTIFACT_IMAGE_REFERENCE_ENV_KEY,),
+        )
+    if restored_env_text != raw_env_text:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+            target_payload=target_payload,
+            env_text=restored_env_text,
+        )
+    return {"image_reference_changed": restored_env_text != raw_env_text}
+
+
+def _trigger_and_wait_for_dokploy_target_deploy(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+    deploy_timeout_seconds: int,
+    no_cache: bool,
+) -> dict[str, str]:
+    if deploy_timeout_seconds <= 0:
+        raise click.ClickException("Harbor service deploy timeout must be greater than zero seconds.")
+    latest_before = control_plane_dokploy.latest_deployment_for_target(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    control_plane_dokploy.trigger_deployment(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        no_cache=no_cache,
+    )
+    deployment_result = control_plane_dokploy.wait_for_target_deployment(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        before_key=control_plane_dokploy.deployment_key(latest_before),
+        timeout_seconds=deploy_timeout_seconds,
+    )
+    return {"deployment_result": deployment_result}
+
+
 def _resolve_dokploy_target(
     *,
     request: ShipRequest,
@@ -7201,6 +7333,128 @@ def service_serve(
         audience=audience,
         database_url=database_url,
     )
+
+
+@service.command("deploy-dokploy-image")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar="HARBOR_DOKPLOY_TARGET_TYPE",
+    required=True,
+    help="Dokploy target type for the live Harbor service.",
+)
+@click.option(
+    "--target-id",
+    envvar="HARBOR_DOKPLOY_TARGET_ID",
+    required=True,
+    help="Dokploy target id for the live Harbor service.",
+)
+@click.option("--image-reference", required=True, help="Immutable image reference to deploy, usually repo@sha256:...")
+@click.option(
+    "--health-url",
+    "health_urls",
+    multiple=True,
+    required=True,
+    help="Public Harbor health URL to verify after Dokploy rollout. Repeat for alternate URLs.",
+)
+@click.option("--deploy-timeout-seconds", type=int, default=600, show_default=True)
+@click.option("--health-timeout-seconds", type=int, default=180, show_default=True)
+@click.option("--rollback-on-failure/--no-rollback-on-failure", default=True, show_default=True)
+@click.option("--no-cache", is_flag=True, default=False, help="Request Dokploy no-cache redeploy semantics when supported.")
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Harbor repo root used to resolve Dokploy credentials.",
+)
+def service_deploy_dokploy_image(
+    target_type: str,
+    target_id: str,
+    image_reference: str,
+    health_urls: tuple[str, ...],
+    deploy_timeout_seconds: int,
+    health_timeout_seconds: int,
+    rollback_on_failure: bool,
+    no_cache: bool,
+    control_plane_root: Path | None,
+) -> None:
+    harbor_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=harbor_root)
+    normalized_health_urls = tuple(url.strip() for url in health_urls if url.strip())
+    apply_result = _apply_dokploy_image_reference(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+        image_reference=image_reference,
+    )
+    payload: dict[str, object] = {
+        "status": "pending",
+        "target_type": target_type,
+        "target_id": target_id,
+        "image_reference": image_reference,
+        "health_urls": list(normalized_health_urls),
+        "deploy_timeout_seconds": deploy_timeout_seconds,
+        "health_timeout_seconds": health_timeout_seconds,
+        "rollback_on_failure": rollback_on_failure,
+        **apply_result,
+    }
+    previous_image_reference = str(apply_result["previous_image_reference"])
+    previous_value_present = bool(apply_result["previous_image_reference_present"])
+    rollback_payload: dict[str, object] | None = None
+    try:
+        payload.update(
+            _trigger_and_wait_for_dokploy_target_deploy(
+                host=host,
+                token=token,
+                target_type=target_type,
+                target_id=target_id,
+                deploy_timeout_seconds=deploy_timeout_seconds,
+                no_cache=no_cache,
+            )
+        )
+        _verify_healthcheck_urls(health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds)
+        payload["status"] = "ok"
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    except click.ClickException as error:
+        payload["status"] = "failed"
+        payload["error"] = str(error)
+        if rollback_on_failure:
+            rollback_payload = {
+                "requested_image_reference": previous_image_reference,
+                "requested_image_reference_present": previous_value_present,
+                "status": "pending",
+            }
+            try:
+                rollback_payload.update(
+                    _restore_dokploy_image_reference(
+                        host=host,
+                        token=token,
+                        target_type=target_type,
+                        target_id=target_id,
+                        image_reference=previous_image_reference,
+                        value_present=previous_value_present,
+                    )
+                )
+                rollback_payload.update(
+                    _trigger_and_wait_for_dokploy_target_deploy(
+                        host=host,
+                        token=token,
+                        target_type=target_type,
+                        target_id=target_id,
+                        deploy_timeout_seconds=deploy_timeout_seconds,
+                        no_cache=no_cache,
+                    )
+                )
+                _verify_healthcheck_urls(health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds)
+                rollback_payload["status"] = "ok"
+            except click.ClickException as rollback_error:
+                rollback_payload["status"] = "failed"
+                rollback_payload["error"] = str(rollback_error)
+        payload["rollback"] = rollback_payload
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        raise click.ClickException(str(error)) from error
 
 
 @artifacts.command("write")

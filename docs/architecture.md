@@ -216,3 +216,8 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - New cross-product integrations should target the future Harbor service
   boundary in design, even if a temporary local adapter is still required
   during migration.
+- Harbor now also has Postgres-backed shared-service storage and managed
+  secrets, but it does not yet have a formal schema migration system.
+- Until that migration story exists, schema changes for DB-backed Harbor state
+  should remain additive and backward-compatible so deploy rollback can safely
+  return to the previous Harbor image.

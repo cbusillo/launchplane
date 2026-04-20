@@ -87,6 +87,49 @@ The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
 boundary rather than creating separate ad hoc ingress patterns.
 
+## Harbor Service Deploy Posture
+
+The first real Harbor service deployment should be GitHub-driven and
+Dokploy-hosted.
+
+- Keep test and deploy automation separate.
+- `CI` is the gate for Harbor code changes and must pass before a deploy
+  workflow replaces the live Harbor app.
+- The first real Harbor bring-up should target a single Dokploy-hosted Harbor
+  instance rather than introducing a separate Harbor testing instance during
+  bootstrap.
+- Harbor deploy automation should publish an immutable image artifact, update
+  Dokploy by digest, and record the previously running digest before
+  replacement.
+- The current repo workflow for that posture is
+  `.github/workflows/deploy-harbor.yml`.
+- Deploy verification should probe Harbor's live health endpoint, currently
+  `GET /v1/health`, after the Dokploy update.
+- When rollout health fails, deploy automation should restore the previous
+  digest automatically instead of requiring a manual Dokploy click path.
+- Keep a manual rollback path too, so operators can redeploy a known-good
+  digest even after a technically successful rollout.
+
+This posture is the current safety net while Harbor still lacks a dedicated
+testing environment of its own.
+
+Required GitHub configuration for that workflow:
+
+- repository secrets:
+  - `DOKPLOY_HOST`
+  - `DOKPLOY_TOKEN`
+- repository variables:
+  - `HARBOR_DOKPLOY_TARGET_TYPE`
+  - `HARBOR_DOKPLOY_TARGET_ID`
+  - `HARBOR_DEPLOY_HEALTH_URLS`
+  - optional `HARBOR_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
+  - optional `HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS`
+  - optional `HARBOR_IMAGE_REPOSITORY`
+
+The Dokploy-hosted Harbor target should consume `DOCKER_IMAGE_REFERENCE` from
+its env so deploy automation can switch the service by immutable digest and
+roll back to the prior digest when verification fails.
+
 Current derived-state behavior:
 
 - accepted deployment evidence also refreshes current environment inventory for
@@ -137,6 +180,9 @@ Current derived-state behavior:
   preview generations instead of adding another long-lived route.
 - Operator read models compose inventory, deployment, promotion, and
   backup-gate records instead of requiring operators to inspect raw JSON first.
+- Until Harbor has a formal schema migration system, DB-backed schema changes
+  must stay additive and backward-compatible so image rollback remains a valid
+  recovery path.
 
 ## Dokploy Contracts
 

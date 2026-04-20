@@ -98,6 +98,11 @@ similar long-running hosts:
 - `docker-compose.yml`
 - `scripts/start-harbor-service.sh`
 
+The compose service now expects the Harbor container image through
+`DOCKER_IMAGE_REFERENCE`. Dokploy should set that to an immutable GHCR digest
+for real Harbor deploys. For purely local compose usage, build a local image
+first, for example `docker build -t harbor:local .`, then run `docker compose up`.
+
 The entrypoint can bootstrap operator-local files from environment variables so
 the deployed service does not need checked-in secret or target-id files:
 
@@ -111,6 +116,38 @@ Regular runtime env such as `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, and any
 `DOKPLOY_SHIP_MODE_*` overrides can still be passed directly as process
 environment variables. `HARBOR_MASTER_ENCRYPTION_KEY` must be present whenever
 Harbor needs to read or write DB-backed managed secrets.
+
+The intended first real Harbor bring-up path is GitHub-driven deploy, not a
+manual laptop-side image swap. The current operator posture is:
+
+- `CI` remains the separate test gate and must pass before Harbor deploy
+  automation replaces the live Dokploy app.
+- Harbor currently targets a single real Dokploy-hosted service instance,
+  without a separate Harbor testing lane yet.
+- Deploys should update Dokploy by immutable image digest and capture the
+  previously running digest before replacement.
+- Deploy automation should verify Harbor health after rollout and immediately
+  restore the previous digest when the new image fails health checks.
+- Until Harbor has a formal schema migration system, Postgres schema changes
+  must remain additive and backward-compatible so code rollback stays viable.
+
+The repo now includes `.github/workflows/deploy-harbor.yml` for that path.
+Configure these GitHub settings before enabling it:
+
+- repository secrets:
+  - `DOKPLOY_HOST`
+  - `DOKPLOY_TOKEN`
+- repository variables:
+  - `HARBOR_DOKPLOY_TARGET_TYPE`
+  - `HARBOR_DOKPLOY_TARGET_ID`
+  - `HARBOR_DEPLOY_HEALTH_URLS`
+  - optional `HARBOR_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
+  - optional `HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS`
+  - optional `HARBOR_IMAGE_REPOSITORY`
+
+Manual `workflow_dispatch` may also deploy an explicit prior image reference,
+which acts as the first operator rollback path while Harbor still has only one
+real Dokploy-hosted service instance.
 
 ## Docs
 
