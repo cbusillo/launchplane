@@ -105,6 +105,10 @@ promotion behavior.
   promotion evidence when Harbor has both a promotion record and explicit
   linked deployment record, which keeps second-product onboarding evidence-
   first instead of forcing Harbor to own runtime execution on day one.
+- Harbor preview records now support the same posture for preview runtime: the
+  live preview route can be supplied as explicit evidence, and preview plus
+  generation state can be refreshed from external workflow results without
+  requiring Harbor to provision the preview itself first.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.

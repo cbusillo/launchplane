@@ -127,6 +127,7 @@ The current command group supports:
   `render-policy-page`, `render-site`
 - direct record writes: `write-preview`, `write-generation`,
   `write-enablement`
+- external evidence ingest: `write-from-generation`
 - lifecycle transitions: `request-generation`, `mark-generation-ready`,
   `mark-generation-failed`, `destroy-preview`
 - PR/webhook ingest: `ingest-pr-event`, `ingest-github-webhook`
@@ -143,6 +144,12 @@ requests flow through Harbor preview records instead of a tracked long-lived
 `dev` tuple lane. Runtime `ship` and `promote` flows continue to write current
 tuple records under the selected state directory rather than silently rewriting
 this tracked file.
+
+`harbor-previews write-from-generation` is the first small preview-evidence
+ingest surface for products whose preview runtime already exists outside Harbor.
+When the preview request carries an explicit `canonical_url`, Harbor can store
+the live preview route and generation status directly from external workflow
+evidence without requiring a Harbor-managed preview base-url contract.
 
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an operator is ready to review and

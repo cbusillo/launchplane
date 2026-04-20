@@ -32,6 +32,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewMutationRequest,
 )
 from control_plane.contracts.preview_manifest import HarborResolvedPreviewManifest
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_request_metadata import (
     HarborCompanionPullRequestReference,
     HarborPreviewRequestMetadata,
@@ -7432,6 +7433,35 @@ def harbor_previews_request_generation(
     click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
 
 
+@harbor_previews.command("write-from-generation")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option(
+    "--preview-input-file", type=click.Path(exists=True, path_type=Path), required=True
+)
+@click.option(
+    "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
+)
+def harbor_previews_write_from_generation(
+    state_dir: Path,
+    preview_input_file: Path,
+    generation_input_file: Path,
+) -> None:
+    record_store = _store(state_dir)
+    preview_request = PreviewMutationRequest.model_validate(_load_json_file(preview_input_file))
+    generation_request = PreviewGenerationMutationRequest.model_validate(
+        _load_json_file(generation_input_file)
+    )
+    result_payload = _apply_harbor_generation_evidence(
+        control_plane_root=_control_plane_root(),
+        record_store=record_store,
+        preview_request=preview_request,
+        generation_request=generation_request,
+    )
+    click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
+
+
 @harbor_previews.command("mark-generation-ready")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
@@ -8417,30 +8447,11 @@ def _apply_harbor_request_generation(
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
-    existing_preview = find_preview_record(
+    preview_record = _upsert_harbor_preview_from_request(
+        control_plane_root=control_plane_root,
         record_store=record_store,
-        context_name=preview_request.context,
-        anchor_repo=preview_request.anchor_repo,
-        anchor_pr_number=preview_request.anchor_pr_number,
+        request=preview_request,
     )
-    preview_record = (
-        existing_preview.model_copy(
-            update={
-                "anchor_pr_url": preview_request.anchor_pr_url,
-                "updated_at": preview_request.updated_at.strip() or existing_preview.updated_at,
-                "eligible_at": preview_request.eligible_at.strip() or existing_preview.eligible_at,
-                "paused_at": preview_request.paused_at or existing_preview.paused_at,
-                "destroy_after": preview_request.destroy_after or existing_preview.destroy_after,
-            }
-        )
-        if existing_preview is not None
-        else build_preview_record_from_request(
-            control_plane_root=control_plane_root,
-            record_store=record_store,
-            request=preview_request,
-        )
-    )
-    record_store.write_preview_record(preview_record)
     generation_record = build_preview_generation_record_from_request(
         record_store=record_store,
         request=generation_request,
@@ -8456,6 +8467,82 @@ def _apply_harbor_request_generation(
         "generation_path": str(generation_path),
         "preview_id": transitioned_preview.preview_id,
         "preview_path": str(preview_path),
+    }
+
+
+def _upsert_harbor_preview_from_request(
+    *,
+    control_plane_root: Path,
+    record_store: FilesystemRecordStore,
+    request: PreviewMutationRequest,
+) -> PreviewRecord:
+    existing_preview = find_preview_record(
+        record_store=record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    preview_record = (
+        existing_preview.model_copy(
+            update={
+                "anchor_pr_url": request.anchor_pr_url,
+                "canonical_url": request.canonical_url.strip() or existing_preview.canonical_url,
+                "updated_at": request.updated_at.strip() or existing_preview.updated_at,
+                "eligible_at": request.eligible_at.strip() or existing_preview.eligible_at,
+                "paused_at": request.paused_at or existing_preview.paused_at,
+                "destroy_after": request.destroy_after or existing_preview.destroy_after,
+            }
+        )
+        if existing_preview is not None
+        else build_preview_record_from_request(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=request,
+        )
+    )
+    record_store.write_preview_record(preview_record)
+    return preview_record
+
+
+def _apply_harbor_generation_evidence(
+    *,
+    control_plane_root: Path,
+    record_store: FilesystemRecordStore,
+    preview_request: PreviewMutationRequest,
+    generation_request: PreviewGenerationMutationRequest,
+) -> dict[str, object]:
+    preview_record = _upsert_harbor_preview_from_request(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=preview_request,
+    )
+    generation_record = build_preview_generation_record_from_request(
+        record_store=record_store,
+        request=generation_request,
+    )
+    if generation_record.state == "ready":
+        transitioned_preview = apply_generation_ready_transition(
+            preview=preview_record,
+            generation=generation_record,
+        )
+    elif generation_record.state == "failed":
+        transitioned_preview = apply_generation_failed_transition(
+            preview=preview_record,
+            generation=generation_record,
+        )
+    else:
+        transitioned_preview = apply_generation_requested_transition(
+            preview=preview_record,
+            generation=generation_record,
+        )
+    generation_path = record_store.write_preview_generation_record(generation_record)
+    preview_path = record_store.write_preview_record(transitioned_preview)
+    return {
+        "generation_id": generation_record.generation_id,
+        "generation_path": str(generation_path),
+        "preview_id": transitioned_preview.preview_id,
+        "preview_path": str(preview_path),
+        "transition": generation_record.state,
     }
 
 

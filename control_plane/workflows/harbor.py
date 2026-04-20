@@ -1297,6 +1297,7 @@ def build_preview_record(
     updated_at: str = "",
     eligible_at: str = "",
     preview_base_url: str,
+    canonical_url: str = "",
     state: PreviewState = "pending",
     preview_id: str = "",
     paused_at: str = "",
@@ -1324,7 +1325,8 @@ def build_preview_record(
             anchor_repo=anchor_repo,
             anchor_pr_number=anchor_pr_number,
         ),
-        canonical_url=build_preview_canonical_url(
+        canonical_url=canonical_url
+        or build_preview_canonical_url(
             preview_base_url=preview_base_url,
             context_name=context_name,
             anchor_repo=anchor_repo,
@@ -1442,10 +1444,15 @@ def build_preview_record_from_request(
             anchor_pr_number=request.anchor_pr_number,
         )
     )
-    preview_base_url = resolve_harbor_preview_base_url(
-        control_plane_root=control_plane_root,
-        context_name=request.context,
+    resolved_canonical_url = request.canonical_url.strip() or (
+        existing_preview.canonical_url if existing_preview is not None else ""
     )
+    preview_base_url = ""
+    if not resolved_canonical_url:
+        preview_base_url = resolve_harbor_preview_base_url(
+            control_plane_root=control_plane_root,
+            context_name=request.context,
+        )
     return build_preview_record(
         context_name=request.context,
         anchor_repo=request.anchor_repo,
@@ -1455,6 +1462,7 @@ def build_preview_record_from_request(
         updated_at=resolved_updated_at,
         eligible_at=resolved_eligible_at,
         preview_base_url=preview_base_url,
+        canonical_url=resolved_canonical_url,
         state=request.state,
         preview_id=resolved_preview_id,
         paused_at=request.paused_at,

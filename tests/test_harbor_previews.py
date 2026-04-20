@@ -3024,6 +3024,47 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("HARBOR_PREVIEW_BASE_URL", result.output)
 
+    def test_harbor_previews_write_preview_accepts_explicit_canonical_url_without_base_url(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            input_file = control_plane_root / "preview-request.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
+                        "state": "active",
+                        "created_at": "2026-04-13T12:00:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "write-preview",
+                        "--state-dir",
+                        str(state_dir),
+                        "--input-file",
+                        str(input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            record = FilesystemRecordStore(state_dir=state_dir).read_preview_record(
+                "preview-opw-tenant-opw-pr-123"
+            )
+            self.assertEqual(record.canonical_url, "https://pr-123.ver-preview.shinycomputers.com")
+            self.assertEqual(record.state, "active")
+
     def test_harbor_previews_write_generation_assigns_next_sequence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -3208,6 +3249,85 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
             self.assertEqual(preview.serving_generation_id, "hgen_01jabc_1")
             self.assertEqual(generation.sequence, 2)
+
+    def test_harbor_previews_write_from_generation_accepts_external_preview_evidence(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            preview_input_file = control_plane_root / "external-preview-request.json"
+            preview_input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
+                        "created_at": "2026-04-13T12:00:00Z",
+                        "updated_at": "2026-04-13T12:25:00Z",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            generation_input_file = control_plane_root / "external-generation-request.json"
+            generation_input_file.write_text(
+                json.dumps(
+                    {
+                        "context": "opw",
+                        "anchor_repo": "tenant-opw",
+                        "anchor_pr_number": 123,
+                        "anchor_pr_url": "https://github.com/every/tenant-opw/pull/123",
+                        "anchor_head_sha": "aaaa2222",
+                        "state": "ready",
+                        "requested_reason": "external_preview_refresh",
+                        "requested_at": "2026-04-13T12:20:00Z",
+                        "ready_at": "2026-04-13T12:25:00Z",
+                        "finished_at": "2026-04-13T12:25:00Z",
+                        "resolved_manifest_fingerprint": "verireel-preview-manifest-001",
+                        "artifact_id": "artifact-verireel-pr-123",
+                        "deploy_status": "pass",
+                        "verify_status": "pass",
+                        "overall_health_status": "pass",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("control_plane.cli._control_plane_root", return_value=control_plane_root):
+                result = runner.invoke(
+                    main,
+                    [
+                        "harbor-previews",
+                        "write-from-generation",
+                        "--state-dir",
+                        str(state_dir),
+                        "--preview-input-file",
+                        str(preview_input_file),
+                        "--generation-input-file",
+                        str(generation_input_file),
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            preview = store.read_preview_record("preview-opw-tenant-opw-pr-123")
+            generation = store.read_preview_generation_record(
+                "preview-opw-tenant-opw-pr-123-generation-0001"
+            )
+            self.assertEqual(preview.canonical_url, "https://pr-123.ver-preview.shinycomputers.com")
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(
+                preview.active_generation_id,
+                "preview-opw-tenant-opw-pr-123-generation-0001",
+            )
+            self.assertEqual(
+                preview.serving_generation_id,
+                "preview-opw-tenant-opw-pr-123-generation-0001",
+            )
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.sequence, 1)
+            self.assertEqual(generation.artifact_id, "artifact-verireel-pr-123")
 
     def test_harbor_previews_mark_generation_ready_cuts_over_serving_generation(self) -> None:
         runner = CliRunner()

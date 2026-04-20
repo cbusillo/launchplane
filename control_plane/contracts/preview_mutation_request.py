@@ -21,6 +21,7 @@ class PreviewMutationRequest(BaseModel):
     anchor_repo: str
     anchor_pr_number: int = Field(ge=1)
     anchor_pr_url: str
+    canonical_url: str = ""
     state: PreviewState = "pending"
     created_at: str = ""
     updated_at: str = ""

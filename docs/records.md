@@ -152,6 +152,10 @@ state/
 - The initial explicit mutation surface is `harbor-previews write-preview`,
   which builds the stored record from typed request input plus the dedicated
   Harbor preview base-url runtime contract.
+- Preview mutations may also carry an explicit `canonical_url` when the live
+  preview route is produced outside Harbor, so a second product can land
+  preview evidence in the same record shape without first adopting Harbor-
+  managed routing.
 - Higher-level transition commands may also rewrite preview records through the
   tested Harbor transition helpers so operators do not have to hand-edit link
   fields for common lifecycle states.
@@ -176,6 +180,10 @@ state/
 - Higher-level transition commands such as generation request/ready/failed
   reuse the same stored generation records while updating preview linkage
   semantics through the Harbor transition helpers.
+- `harbor-previews write-from-generation` is the first explicit evidence-ingest
+  surface for that path: it accepts typed preview plus generation evidence,
+  writes the generation record, and refreshes the preview linkage according to
+  the ingested generation state.
 
 ## Harbor Preview Enablement Record
 
