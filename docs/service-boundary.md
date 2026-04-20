@@ -26,12 +26,13 @@ The first service slice is now implemented locally in this repo:
 - CLI: `uv run control-plane service serve`
 - health route: `GET /v1/health`
 - authenticated evidence routes:
+  - `POST /v1/evidence/deployments`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
 
 That slice is still intentionally narrow. It proves the Harbor HTTP/OIDC/authz
-boundary in code across the full preview lifecycle before broader evidence
-routes and driver-triggered actions move across it.
+boundary in code for deployment evidence plus the full preview lifecycle before
+promotion evidence and driver-triggered actions move across it.
 
 ## First Host Assumption
 
@@ -313,9 +314,8 @@ Repo-specific variation should stay thin and declarative where possible.
 
 ## Recommended Next Implementation Steps
 
-1. Add deployment evidence ingress on the same Harbor authn/authz boundary.
-2. Add promotion evidence ingress on the same Harbor authn/authz boundary.
-3. Convert the existing CLI preview evidence commands into local clients of the
+1. Add promotion evidence ingress on the same Harbor authn/authz boundary.
+2. Convert the existing CLI preview evidence commands into local clients of the
    same service-layer handler or payload contract.
-4. Define the first explicit Odoo and VeriReel driver interfaces after the
+3. Define the first explicit Odoo and VeriReel driver interfaces after the
    service ingress exists.

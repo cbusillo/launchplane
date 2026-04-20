@@ -182,6 +182,95 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(generation.state, "ready")
             self.assertEqual(generation.artifact_id, "ghcr.io/every/verireel-app:pr-123-6b3c9d7")
 
+    def test_deployment_endpoint_writes_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/deployments",
+                payload={
+                    "product": "odoo",
+                    "deployment": {
+                        "record_id": "deployment-20260420T153000Z-opw-testing",
+                        "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                        "context": "opw",
+                        "instance": "testing",
+                        "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                        "resolved_target": {
+                            "target_type": "compose",
+                            "target_id": "compose-123",
+                            "target_name": "opw-testing",
+                        },
+                        "deploy": {
+                            "target_name": "opw-testing",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                            "deployment_id": "delegated-compose-ship",
+                            "status": "pass",
+                            "started_at": "2026-04-20T15:30:00Z",
+                            "finished_at": "2026-04-20T15:32:10Z",
+                        },
+                        "post_deploy_update": {
+                            "attempted": True,
+                            "status": "pass",
+                            "detail": "Update completed.",
+                        },
+                        "destination_health": {
+                            "verified": True,
+                            "urls": ["https://testing.example.com/web/health"],
+                            "timeout_seconds": 45,
+                            "status": "pass",
+                        },
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"deployment_record_id": "deployment-20260420T153000Z-opw-testing"},
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            deployment = store.read_deployment_record("deployment-20260420T153000Z-opw-testing")
+            self.assertEqual(deployment.context, "opw")
+            self.assertEqual(deployment.instance, "testing")
+            self.assertEqual(deployment.deploy.status, "pass")
+            self.assertEqual(deployment.resolved_target.target_id, "compose-123")
+
     def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -319,6 +408,63 @@ class HarborServiceTests(unittest.TestCase):
                         "requested_reason": "external_preview_refresh",
                         "requested_at": "2026-04-16T08:02:00Z",
                         "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_deployment_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/deployments",
+                payload={
+                    "product": "odoo",
+                    "deployment": {
+                        "record_id": "deployment-20260420T153000Z-opw-testing",
+                        "context": "opw",
+                        "instance": "testing",
+                        "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                        "deploy": {
+                            "target_name": "opw-testing",
+                            "target_type": "compose",
+                            "deploy_mode": "dokploy-compose-api",
+                        },
                     },
                 },
             )

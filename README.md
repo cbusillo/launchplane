@@ -46,7 +46,7 @@ shape. The intended direction is:
 
 The first implemented ingress slice now exists in this repo as a local Harbor
 service command with GitHub OIDC verification, a static workflow policy, and
-preview lifecycle evidence ingress for both generation and teardown writes.
+evidence ingress for deployments plus the full preview lifecycle.
 
 ## Quick Start
 

@@ -10,6 +10,7 @@ from wsgiref.simple_server import make_server
 import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -58,6 +59,20 @@ class PreviewDestroyedEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "PreviewDestroyedEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("preview destroyed evidence requires product")
+        return self
+
+
+class DeploymentEvidenceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    deployment: DeploymentRecord
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "DeploymentEvidenceEnvelope":
+        if not self.product.strip():
+            raise ValueError("deployment evidence requires product")
         return self
 
 
@@ -147,6 +162,7 @@ def create_harbor_service_app(
                 payload={"status": "ok", "trace_id": request_trace_id},
             )
         if path not in {
+            "/v1/evidence/deployments",
             "/v1/evidence/previews/generations",
             "/v1/evidence/previews/destroyed",
         }:
@@ -177,7 +193,32 @@ def create_harbor_service_app(
             identity = verifier.verify(token)
             payload = _read_json_request(environ)
             record_store = FilesystemRecordStore(state_dir=state_dir)
-            if path == "/v1/evidence/previews/generations":
+            if path == "/v1/evidence/deployments":
+                request = DeploymentEvidenceEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="deployment.write",
+                    product=request.product,
+                    context=request.deployment.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write deployment evidence for the requested"
+                                    " product/context."
+                                ),
+                            },
+                        },
+                    )
+                record_store.write_deployment_record(request.deployment)
+                result = {"deployment_record_id": request.deployment.record_id}
+            elif path == "/v1/evidence/previews/generations":
                 request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
@@ -272,7 +313,14 @@ def create_harbor_service_app(
                 "records": {
                     key: str(value)
                     for key, value in result.items()
-                    if key in {"preview_id", "generation_id", "transition"}
+                    if key
+                    in {
+                        "deployment_record_id",
+                        "preview_id",
+                        "generation_id",
+                        "promotion_record_id",
+                        "transition",
+                    }
                 },
             },
         )
