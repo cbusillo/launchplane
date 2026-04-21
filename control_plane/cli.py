@@ -5854,9 +5854,9 @@ def _build_harbor_service_target_preflight(
             blockers.append(f"Harbor service target is missing {env_key}.")
 
     if not runtime_contract["policy_configured"]:
-        warnings.append(
-            "Harbor service target does not declare HARBOR_POLICY_* or HARBOR_POLICY_FILE in target env. "
-            "Startup will fall back to the repo example policy unless Dokploy mounts a real policy file separately."
+        blockers.append(
+            "Harbor service target is missing HARBOR_POLICY_* or HARBOR_POLICY_FILE. "
+            "Startup fails closed without an explicit policy input."
         )
     if not runtime_contract["target_ids_configured"]:
         warnings.append(

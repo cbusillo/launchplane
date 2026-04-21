@@ -1,9 +1,12 @@
 schema_version = 1
 
+# Copy this file to a non-.example path and replace every example-org/... value
+# before using it for a real Harbor service.
+
 [[github_actions]]
-repository = "every/verireel"
+repository = "example-org/verireel"
 workflow_refs = [
-  "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
 ]
 event_names = ["pull_request"]
 products = ["verireel"]
@@ -11,9 +14,9 @@ contexts = ["verireel-testing"]
 actions = ["verireel_preview_refresh.execute", "preview_generation.write"]
 
 [[github_actions]]
-repository = "every/verireel"
+repository = "example-org/verireel"
 workflow_refs = [
-  "every/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main",
 ]
 event_names = ["pull_request"]
 products = ["verireel"]
@@ -21,9 +24,9 @@ contexts = ["verireel-testing"]
 actions = ["verireel_preview_destroy.execute", "preview_destroyed.write"]
 
 [[github_actions]]
-repository = "every/verireel"
+repository = "example-org/verireel"
 workflow_refs = [
-  "every/verireel/.github/workflows/publish-image.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main",
 ]
 event_names = ["push", "workflow_dispatch"]
 products = ["verireel"]
@@ -31,9 +34,9 @@ contexts = ["verireel"]
 actions = ["deployment.write"]
 
 [[github_actions]]
-repository = "every/verireel"
+repository = "example-org/verireel"
 workflow_refs = [
-  "every/verireel/.github/workflows/publish-image.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main",
 ]
 event_names = ["push", "workflow_dispatch"]
 products = ["verireel"]
@@ -41,9 +44,9 @@ contexts = ["verireel"]
 actions = ["verireel_testing_deploy.execute"]
 
 [[github_actions]]
-repository = "every/verireel"
+repository = "example-org/verireel"
 workflow_refs = [
-  "every/verireel/.github/workflows/promote-image.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
@@ -51,9 +54,9 @@ contexts = ["verireel"]
 actions = ["deployment.write"]
 
 [[github_actions]]
-repository = "every/verireel"
+repository = "example-org/verireel"
 workflow_refs = [
-  "every/verireel/.github/workflows/promote-image.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
@@ -61,9 +64,9 @@ contexts = ["verireel"]
 actions = ["promotion.write"]
 
 [[github_actions]]
-repository = "every/tenant-opw"
+repository = "example-org/tenant-opw"
 workflow_refs = [
-  "every/tenant-opw/.github/workflows/harbor-preview.yml@refs/heads/main",
+  "example-org/tenant-opw/.github/workflows/harbor-preview.yml@refs/heads/main",
 ]
 event_names = ["pull_request"]
 products = ["odoo"]

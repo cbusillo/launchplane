@@ -877,6 +877,10 @@ class HarborServiceDeployTests(unittest.TestCase):
             "Harbor service target is missing HARBOR_DATABASE_URL.",
             payload.get("blockers", []),
         )
+        self.assertIn(
+            "Harbor service target is missing HARBOR_POLICY_* or HARBOR_POLICY_FILE. Startup fails closed without an explicit policy input.",
+            payload.get("blockers", []),
+        )
         self.assertIn("Harbor service Dokploy target preflight failed", result.output)
 
     def test_service_deploy_dokploy_image_stops_before_env_change_when_preflight_fails(self) -> None:
@@ -919,6 +923,10 @@ class HarborServiceDeployTests(unittest.TestCase):
         update_target_env.assert_not_called()
         trigger_deployment.assert_not_called()
         self.assertIn("Harbor service target is missing HARBOR_DATABASE_URL.", result.output)
+        self.assertIn(
+            "Harbor service target is missing HARBOR_POLICY_* or HARBOR_POLICY_FILE.",
+            result.output,
+        )
 
 
 if __name__ == "__main__":

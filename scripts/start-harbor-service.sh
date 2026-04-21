@@ -28,7 +28,7 @@ PY
 
 app_root="${HARBOR_APP_ROOT:-/app}"
 state_dir="${HARBOR_STATE_DIR:-$app_root/state}"
-policy_file="${HARBOR_POLICY_FILE:-$app_root/config/harbor-authz.toml.example}"
+policy_file=""
 
 mkdir -p "$state_dir"
 
@@ -38,6 +38,27 @@ if [ -n "${HARBOR_POLICY_TOML:-}" ]; then
 elif [ -n "${HARBOR_POLICY_B64:-}" ]; then
   policy_file="/tmp/harbor-authz.toml"
   write_base64_file "$policy_file" "HARBOR_POLICY_B64"
+elif [ -n "${HARBOR_POLICY_FILE:-}" ]; then
+  policy_file="$HARBOR_POLICY_FILE"
+fi
+
+if [ -z "$policy_file" ]; then
+  echo "Harbor service requires an explicit policy input via HARBOR_POLICY_TOML, HARBOR_POLICY_B64, or HARBOR_POLICY_FILE." >&2
+  echo "Copy $app_root/config/harbor-authz.toml.example to a real policy file and point HARBOR_POLICY_FILE at that copy." >&2
+  exit 1
+fi
+
+case "$policy_file" in
+  *.example)
+    echo "Refusing to start Harbor with example policy file: $policy_file" >&2
+    echo "Copy the example to a non-.example path and update the placeholder repo/workflow values first." >&2
+    exit 1
+    ;;
+esac
+
+if [ ! -f "$policy_file" ]; then
+  echo "Harbor policy file does not exist: $policy_file" >&2
+  exit 1
 fi
 
 if [ -n "${HARBOR_DOKPLOY_TARGET_IDS_TOML:-}" ]; then

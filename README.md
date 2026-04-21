@@ -79,9 +79,10 @@ environment secret keys, then falls back to the older file/env surfaces only
 when no Harbor-managed secret has been written yet.
 
 For the first local Harbor service run, copy
-`config/harbor-authz.toml.example` to a local policy file and adjust the repo,
-workflow, product, context, and action allow-lists to match the workflows you
-want Harbor to trust.
+`config/harbor-authz.toml.example` to a real local policy file such as
+`${XDG_CONFIG_HOME:-$HOME/.config}/harbor/harbor-authz.toml`, then replace the
+example repo/workflow values and adjust the product, context, and action
+allow-lists to match the workflows you want Harbor to trust.
 
 The tracked Dokploy route catalog lives in `config/dokploy.toml`, with
 operator-local target IDs supplied through `config/dokploy-targets.toml`.
@@ -111,6 +112,11 @@ the deployed service does not need checked-in secret or target-id files:
 - `HARBOR_POLICY_TOML` or `HARBOR_POLICY_B64`
 - `HARBOR_DOKPLOY_TARGET_IDS_TOML` or `HARBOR_DOKPLOY_TARGET_IDS_B64`
 - `HARBOR_RUNTIME_ENVIRONMENTS_TOML` or `HARBOR_RUNTIME_ENVIRONMENTS_B64`
+
+Harbor now fails closed at startup when no explicit policy input is provided.
+Do not point `HARBOR_POLICY_FILE` at `config/harbor-authz.toml.example`; copy
+the example to a non-`.example` path first and replace the placeholder repo
+identities.
 
 Regular runtime env such as `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, and any
 `DOKPLOY_SHIP_MODE_*` overrides can still be passed directly as process

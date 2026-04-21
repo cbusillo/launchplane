@@ -122,8 +122,8 @@ rule
 Example policy intent:
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main
 event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
@@ -135,8 +135,8 @@ allowed actions:
 Another example:
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main
 event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
@@ -148,8 +148,8 @@ allowed actions:
 Stable-lane examples:
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/publish-image.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main
 event_name: push or workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
@@ -159,8 +159,8 @@ allowed actions:
 ```
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/promote-image.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main
 event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
@@ -297,7 +297,7 @@ CLI adapters and expose them over HTTP.
     "context": "verireel-testing",
     "anchor_repo": "verireel",
     "anchor_pr_number": 123,
-    "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+    "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
     "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
     "state": "active",
     "updated_at": "2026-04-16T08:10:00Z",
@@ -308,7 +308,7 @@ CLI adapters and expose them over HTTP.
     "context": "verireel-testing",
     "anchor_repo": "verireel",
     "anchor_pr_number": 123,
-    "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+    "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
     "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
     "state": "ready",
     "requested_reason": "external_preview_refresh",
@@ -316,7 +316,7 @@ CLI adapters and expose them over HTTP.
     "ready_at": "2026-04-16T08:10:00Z",
     "finished_at": "2026-04-16T08:10:00Z",
     "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
-    "artifact_id": "ghcr.io/every/verireel-app:pr-123-6b3c9d7",
+    "artifact_id": "ghcr.io/example-org/verireel-app:pr-123-6b3c9d7",
     "deploy_status": "pass",
     "verify_status": "pass",
     "overall_health_status": "pass"

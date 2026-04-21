@@ -72,7 +72,8 @@ uv run harbor service serve \
 ```
 
 Start from `config/harbor-authz.toml.example` when creating the first local
-policy file.
+policy file, but copy it to a non-`.example` path and replace the placeholder
+repo/workflow values before using it.
 
 Current implementation scope:
 
@@ -86,6 +87,10 @@ Current implementation scope:
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
 boundary rather than creating separate ad hoc ingress patterns.
+
+The Harbor container entrypoint now fails closed unless one of
+`HARBOR_POLICY_TOML`, `HARBOR_POLICY_B64`, or `HARBOR_POLICY_FILE` is supplied.
+It also refuses to start from the checked-in `.example` policy path.
 
 ## Harbor Service Deploy Posture
 
@@ -313,7 +318,7 @@ is `harbor-previews write-from-generation`:
   "context": "verireel-testing",
   "anchor_repo": "verireel",
   "anchor_pr_number": 123,
-  "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+  "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
   "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
   "state": "active",
   "updated_at": "2026-04-16T08:10:00Z",
@@ -326,7 +331,7 @@ is `harbor-previews write-from-generation`:
   "context": "verireel-testing",
   "anchor_repo": "verireel",
   "anchor_pr_number": 123,
-  "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+  "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
   "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
   "state": "ready",
   "requested_reason": "external_preview_refresh",
@@ -334,7 +339,7 @@ is `harbor-previews write-from-generation`:
   "ready_at": "2026-04-16T08:10:00Z",
   "finished_at": "2026-04-16T08:10:00Z",
   "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
-  "artifact_id": "ghcr.io/every/verireel-app:pr-123-6b3c9d7",
+  "artifact_id": "ghcr.io/example-org/verireel-app:pr-123-6b3c9d7",
   "deploy_status": "pass",
   "verify_status": "pass",
   "overall_health_status": "pass"
