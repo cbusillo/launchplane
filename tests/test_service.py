@@ -120,6 +120,40 @@ class GitHubOidcVerifierTests(unittest.TestCase):
         self.assertEqual(identity.repository, "every/verireel")
         self.assertEqual(identity.workflow_ref, claims["workflow_ref"])
 
+    def test_policy_wildcard_matches_branch_specific_workflow_ref(self) -> None:
+        identity = _identity(
+            repository="cbusillo/verireel",
+            workflow_ref=(
+                "cbusillo/verireel/.github/workflows/preview-control-plane.yml"
+                "@refs/heads/code/2026-04-21-preview-validation-pr"
+            ),
+        )
+        policy = HarborAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/verireel",
+                        "workflow_refs": [
+                            "cbusillo/verireel/.github/workflows/preview-control-plane.yml@*"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["verireel"],
+                        "contexts": ["verireel-testing"],
+                        "actions": ["verireel_preview_refresh.execute"],
+                    }
+                ]
+            }
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="verireel_preview_refresh.execute",
+                product="verireel",
+                context="verireel-testing",
+            )
+        )
+
 
 class HarborServiceTests(unittest.TestCase):
     def test_health_endpoint_reports_storage_backend(self) -> None:

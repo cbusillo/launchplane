@@ -88,6 +88,10 @@ The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
 boundary rather than creating separate ad hoc ingress patterns.
 
+Preview workflows should normally authorize by workflow path with a wildcard
+ref suffix such as `.../preview-control-plane.yml@*`, because pull-request runs
+execute from branch-specific workflow refs rather than a fixed `main` ref.
+
 The Harbor container entrypoint now fails closed unless one of
 `HARBOR_POLICY_TOML`, `HARBOR_POLICY_B64`, or `HARBOR_POLICY_FILE` is supplied.
 It also refuses to start from the checked-in `.example` policy path.

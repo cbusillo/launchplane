@@ -6,7 +6,7 @@ schema_version = 1
 [[github_actions]]
 repository = "example-org/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/preview-control-plane.yml@*",
 ]
 event_names = ["pull_request"]
 products = ["verireel"]
@@ -16,7 +16,7 @@ actions = ["verireel_preview_refresh.execute", "preview_generation.write"]
 [[github_actions]]
 repository = "example-org/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main",
+  "example-org/verireel/.github/workflows/preview-cleanup.yml@*",
 ]
 event_names = ["pull_request"]
 products = ["verireel"]

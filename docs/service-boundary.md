@@ -123,7 +123,7 @@ Example policy intent:
 
 ```text
 repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main
+workflow_ref: example-org/verireel/.github/workflows/preview-control-plane.yml@*
 event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
@@ -136,7 +136,7 @@ Another example:
 
 ```text
 repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main
+workflow_ref: example-org/verireel/.github/workflows/preview-cleanup.yml@*
 event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
