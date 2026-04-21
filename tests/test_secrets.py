@@ -177,6 +177,7 @@ ODOO_DB_PASSWORD = "instance-password"
                 statuses = control_plane_secrets.list_secret_statuses(store, context_name="opw", instance_name="testing")
                 self.assertEqual(summary["dokploy"]["imported"], 2)
                 self.assertEqual(summary["runtime_environment"]["imported"], 3)
+                self.assertEqual(summary["runtime_environment"]["skipped_empty"], 0)
                 self.assertEqual(
                     {status["binding"]["binding_key"] for status in statuses if status["binding"] is not None},
                     {
@@ -187,6 +188,46 @@ ODOO_DB_PASSWORD = "instance-password"
                         "ODOO_DB_PASSWORD",
                     },
                 )
+            store.close()
+
+    def test_import_bootstrap_secrets_skips_empty_runtime_secret_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            xdg_config_home = control_plane_root / "xdg"
+            runtime_environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            runtime_environments_file.parent.mkdir(parents=True, exist_ok=True)
+            runtime_environments_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+ENV_OVERRIDE_SHOPIFY__API_TOKEN = ""
+ENV_OVERRIDE_SHOPIFY__SHOP_URL_KEY = ""
+ENV_OVERRIDE_SHOPIFY__WEBHOOK_KEY = ""
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "XDG_CONFIG_HOME": str(xdg_config_home),
+                },
+                clear=True,
+            ):
+                summary = control_plane_secrets.import_bootstrap_secrets(
+                    record_store=store,
+                    control_plane_root=control_plane_root,
+                    actor="bootstrap-test",
+                )
+                statuses = control_plane_secrets.list_secret_statuses(store, context_name="opw", instance_name="prod")
+                self.assertEqual(summary["runtime_environment"]["imported"], 0)
+                self.assertEqual(summary["runtime_environment"]["skipped_empty"], 3)
+                self.assertEqual(statuses, [])
             store.close()
 
     def test_secrets_cli_import_bootstrap_reports_summary(self) -> None:
