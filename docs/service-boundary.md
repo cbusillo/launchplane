@@ -172,7 +172,9 @@ event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
 allowed actions:
+  - backup_gate.write
   - verireel_prod_deploy.execute
+  - verireel_prod_promotion.execute
   - deployment.write
   - promotion.write
 ```
