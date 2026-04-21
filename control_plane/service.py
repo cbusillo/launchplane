@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import hashlib
 import io
 import json
 import uuid
@@ -12,6 +14,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -141,12 +145,17 @@ def _http_status_text(status_code: int) -> str:
         403: "Forbidden",
         404: "Not Found",
         405: "Method Not Allowed",
+        409: "Conflict",
         500: "Internal Server Error",
     }.get(status_code, "OK")
 
 
 def _trace_id() -> str:
     return f"harbor_req_{uuid.uuid4().hex}"
+
+
+def _utc_now_timestamp() -> str:
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _not_found_response(
@@ -193,6 +202,181 @@ def _secret_capable_store(record_store: object):
     if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
         return record_store
     return None
+
+
+def _idempotency_capable_store(record_store: object):
+    if hasattr(record_store, "read_idempotency_record") and hasattr(record_store, "write_idempotency_record"):
+        return record_store
+    return None
+
+
+def _idempotency_key(environ: dict[str, object]) -> str:
+    return str(environ.get("HTTP_IDEMPOTENCY_KEY", "")).strip()
+
+
+def _idempotency_scope(identity) -> str:
+    workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
+    return "|".join(
+        (
+            str(identity.repository).strip(),
+            str(workflow_ref).strip(),
+            str(identity.subject).strip(),
+        )
+    )
+
+
+def _request_fingerprint(payload: dict[str, object]) -> str:
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _accepted_payload(
+    *,
+    trace_id: str,
+    result: dict[str, object],
+    driver_result: BaseModel | dict[str, object] | None,
+    replayed: bool = False,
+    original_trace_id: str = "",
+) -> dict[str, object]:
+    serialized_driver_result: dict[str, object] | None = None
+    if isinstance(driver_result, BaseModel):
+        serialized_driver_result = driver_result.model_dump(mode="json")
+    elif isinstance(driver_result, dict):
+        serialized_driver_result = dict(driver_result)
+    payload: dict[str, object] = {
+        "status": "accepted",
+        "trace_id": trace_id,
+        "records": {
+            key: str(value)
+            for key, value in result.items()
+            if key
+            in {
+                "deployment_record_id",
+                "inventory_record_id",
+                "preview_id",
+                "generation_id",
+                "promotion_record_id",
+                "transition",
+            }
+        },
+        **({"result": serialized_driver_result} if serialized_driver_result else {}),
+    }
+    if replayed:
+        payload["replayed"] = True
+        payload["original_trace_id"] = original_trace_id
+    return payload
+
+
+def _replay_idempotent_response(
+    *,
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    trace_id: str,
+    stored_record: HarborIdempotencyRecord,
+) -> list[bytes]:
+    stored_payload = dict(stored_record.response_payload)
+    stored_driver_result = stored_payload.get("result")
+    result_payload = _accepted_payload(
+        trace_id=trace_id,
+        result=dict(stored_payload.get("records") or {}),
+        driver_result=stored_driver_result if isinstance(stored_driver_result, dict) else None,
+        replayed=True,
+        original_trace_id=stored_record.response_trace_id,
+    )
+    return _json_response(
+        start_response=start_response,
+        status_code=stored_record.response_status_code,
+        payload=result_payload,
+    )
+
+
+def _read_idempotency_record(
+    *,
+    record_store: object,
+    scope: str,
+    route_path: str,
+    idempotency_key: str,
+) -> HarborIdempotencyRecord | None:
+    idempotency_store = _idempotency_capable_store(record_store)
+    if idempotency_store is None or not idempotency_key:
+        return None
+    return idempotency_store.read_idempotency_record(
+        scope=scope,
+        route_path=route_path,
+        idempotency_key=idempotency_key,
+    )
+
+
+def _write_idempotency_record(
+    *,
+    record_store: object,
+    scope: str,
+    route_path: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    response_status_code: int,
+    response_trace_id: str,
+    response_payload: dict[str, object],
+) -> None:
+    idempotency_store = _idempotency_capable_store(record_store)
+    if idempotency_store is None or not idempotency_key:
+        return
+    idempotency_store.write_idempotency_record(
+        HarborIdempotencyRecord(
+            record_id=build_harbor_idempotency_record_id(
+                scope=scope,
+                route_path=route_path,
+                idempotency_key=idempotency_key,
+            ),
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+            request_fingerprint=request_fingerprint,
+            response_status_code=response_status_code,
+            response_trace_id=response_trace_id,
+            recorded_at=_utc_now_timestamp(),
+            response_payload=response_payload,
+        )
+    )
+
+
+def _check_idempotent_request(
+    *,
+    record_store: object,
+    scope: str,
+    route_path: str,
+    idempotency_key: str,
+    request_fingerprint: str,
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    trace_id: str,
+) -> list[bytes] | None:
+    stored_record = _read_idempotency_record(
+        record_store=record_store,
+        scope=scope,
+        route_path=route_path,
+        idempotency_key=idempotency_key,
+    )
+    if stored_record is None:
+        return None
+    if stored_record.request_fingerprint != request_fingerprint:
+        return _json_response(
+            start_response=start_response,
+            status_code=409,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "idempotency_key_reused",
+                    "message": (
+                        "Idempotency-Key was already used for a different Harbor request payload on this route."
+                    ),
+                },
+            },
+        )
+    return _replay_idempotent_response(
+        start_response=start_response,
+        trace_id=trace_id,
+        stored_record=stored_record,
+    )
 
 
 def _read_json_request(environ: dict[str, object]) -> dict[str, object]:
@@ -578,6 +762,9 @@ def create_harbor_service_app(
                     },
                 )
             payload = _read_json_request(environ)
+            request_idempotency_key = _idempotency_key(environ)
+            request_scope = _idempotency_scope(identity)
+            request_fingerprint = _request_fingerprint(payload)
             driver_result = None
             if path == "/v1/evidence/deployments":
                 request = DeploymentEvidenceEnvelope.model_validate(payload)
@@ -602,6 +789,17 @@ def create_harbor_service_app(
                             },
                         },
                     )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 result = apply_deployment_evidence(
                     record_store=record_store,
                     deployment_record=request.deployment,
@@ -629,6 +827,17 @@ def create_harbor_service_app(
                             },
                         },
                     )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 driver_result = execute_verireel_testing_deploy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
@@ -658,6 +867,17 @@ def create_harbor_service_app(
                             },
                         },
                     )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 result = apply_promotion_evidence(
                     record_store=record_store,
                     promotion_record=request.promotion,
@@ -685,6 +905,17 @@ def create_harbor_service_app(
                             },
                         },
                     )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 result = apply_harbor_generation_evidence(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
@@ -714,6 +945,17 @@ def create_harbor_service_app(
                             },
                         },
                     )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 result = apply_harbor_destroy_preview(
                     record_store=record_store,
                     request=request.destroy,
@@ -754,27 +996,26 @@ def create_harbor_service_app(
                     "error": {"code": "invalid_request", "message": str(exc)},
                 },
             )
+        accepted_payload = _accepted_payload(
+            trace_id=request_trace_id,
+            result=result,
+            driver_result=driver_result,
+        )
+        if method == "POST" and request_idempotency_key:
+            _write_idempotency_record(
+                record_store=record_store,
+                scope=request_scope,
+                route_path=path,
+                idempotency_key=request_idempotency_key,
+                request_fingerprint=request_fingerprint,
+                response_status_code=202,
+                response_trace_id=request_trace_id,
+                response_payload=accepted_payload,
+            )
         return _json_response(
             start_response=start_response,
             status_code=202,
-            payload={
-                "status": "accepted",
-                "trace_id": request_trace_id,
-                "records": {
-                    key: str(value)
-                    for key, value in result.items()
-                    if key
-                    in {
-                        "deployment_record_id",
-                        "inventory_record_id",
-                        "preview_id",
-                        "generation_id",
-                        "promotion_record_id",
-                        "transition",
-                    }
-                },
-                **({"result": driver_result.model_dump(mode="json")} if driver_result else {}),
-            },
+            payload=accepted_payload,
         )
 
     return app

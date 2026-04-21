@@ -8,6 +8,8 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -85,6 +87,28 @@ class FilesystemRecordStore:
         records = list(self._list_models(ReleaseTupleRecord, "release_tuples"))
         records.sort(key=lambda record: (record.context, record.channel))
         return tuple(records)
+
+    def write_idempotency_record(self, record: HarborIdempotencyRecord) -> Path:
+        return self._write_model("idempotency", record.record_id, record)
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> HarborIdempotencyRecord | None:
+        record_id = build_harbor_idempotency_record_id(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+        record_path = self._record_path("idempotency", record_id)
+        if not record_path.exists():
+            return None
+        return HarborIdempotencyRecord.model_validate(
+            self._read_model(HarborIdempotencyRecord, "idempotency", record_id).model_dump(mode="json")
+        )
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:
         return self._write_model("backup_gates", record.record_id, record)
