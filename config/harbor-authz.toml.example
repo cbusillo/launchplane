@@ -8,7 +8,7 @@ workflow_refs = [
 event_names = ["pull_request"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["preview_generation.write"]
+actions = ["verireel_preview_refresh.execute", "preview_generation.write"]
 
 [[github_actions]]
 repository = "every/verireel"
@@ -18,7 +18,7 @@ workflow_refs = [
 event_names = ["pull_request"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["preview_destroyed.write"]
+actions = ["verireel_preview_destroy.execute", "preview_destroyed.write"]
 
 [[github_actions]]
 repository = "every/verireel"

@@ -37,6 +37,12 @@ from control_plane.workflows.verireel_testing_deploy import (
     VeriReelTestingDeployRequest,
     execute_verireel_testing_deploy,
 )
+from control_plane.workflows.verireel_preview_driver import (
+    VeriReelPreviewDestroyRequest,
+    VeriReelPreviewRefreshRequest,
+    execute_verireel_preview_destroy,
+    execute_verireel_preview_refresh,
+)
 
 
 class PreviewGenerationEvidenceEnvelope(BaseModel):
@@ -115,6 +121,34 @@ class VeriReelTestingDeployEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelTestingDeployEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel testing deploy requires product 'verireel'.")
+        return self
+
+
+class VeriReelPreviewRefreshEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    refresh: VeriReelPreviewRefreshRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelPreviewRefreshEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel preview refresh requires product 'verireel'.")
+        return self
+
+
+class VeriReelPreviewDestroyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    destroy: VeriReelPreviewDestroyRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelPreviewDestroyEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel preview destroy requires product 'verireel'.")
         return self
 
 
@@ -423,6 +457,8 @@ def create_harbor_service_app(
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/evidence/promotions",
+        "/v1/drivers/verireel/preview-refresh",
+        "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/testing-deploy",
     }
 
@@ -844,6 +880,84 @@ def create_harbor_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/verireel/preview-refresh":
+                request = VeriReelPreviewRefreshEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_preview_refresh.execute",
+                    product=request.product,
+                    context=request.refresh.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel preview refresh driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_preview_refresh(
+                    control_plane_root=resolved_root,
+                    request=request.refresh,
+                )
+                result = {}
+            elif path == "/v1/drivers/verireel/preview-destroy":
+                request = VeriReelPreviewDestroyEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_preview_destroy.execute",
+                    product=request.product,
+                    context=request.destroy.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel preview destroy driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_preview_destroy(
+                    control_plane_root=resolved_root,
+                    request=request.destroy,
+                )
+                result = {}
             elif path == "/v1/evidence/promotions":
                 request = PromotionEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
