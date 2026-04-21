@@ -87,6 +87,8 @@ class VeriReelProdPromotionResult(BaseModel):
     backup_record_id: str
     deploy_status: str
     rollout_status: str = "skipped"
+    migration_status: str = "skipped"
+    health_status: str = "skipped"
     deploy_started_at: str = ""
     deploy_finished_at: str = ""
     target_name: str
@@ -105,6 +107,14 @@ def _default_target_type() -> str:
 
 def _default_deploy_mode() -> str:
     return "dokploy-application-api"
+
+
+def _default_migration_command() -> str:
+    return "npx prisma migrate deploy --config prisma.config.ts"
+
+
+def _default_migration_schedule_name() -> str:
+    return "ver-apply-prisma-migrations"
 
 
 def _read_backup_gate_record(
@@ -162,27 +172,22 @@ def _build_promotion_record(
     deploy_status: str,
     deploy_started_at: str,
     deploy_finished_at: str,
-    rollout_result: VeriReelRolloutVerificationResult | None,
+    migration_status: str,
+    migration_detail: str,
+    health_result: VeriReelRolloutVerificationResult | None,
 ) -> PromotionRecord:
     deploy_mode = _default_deploy_mode()
     if deployment_record is not None:
         deploy_mode = deployment_record.deploy.deploy_mode
-    destination_health = HealthcheckEvidence(status="skipped")
-    if rollout_result is not None:
-        if rollout_result.status == "pass":
-            destination_health = HealthcheckEvidence(
-                verified=True,
-                urls=rollout_result.health_urls,
-                timeout_seconds=request.rollout_timeout_seconds,
-                status="pass",
-            )
-        elif rollout_result.status == "fail":
-            destination_health = HealthcheckEvidence(
-                verified=True,
-                urls=rollout_result.health_urls,
-                timeout_seconds=request.rollout_timeout_seconds,
-                status="fail",
-            )
+    destination_health = _build_destination_health(
+        request=request,
+        health_result=health_result,
+    )
+    post_deploy_update = _build_post_deploy_update(
+        instance_name=request.to_instance,
+        migration_status=migration_status,
+        migration_detail=migration_detail,
+    )
     return PromotionRecord(
         record_id=request.promotion_record_id,
         artifact_identity=ArtifactIdentityReference(artifact_id=request.artifact_id),
@@ -206,8 +211,50 @@ def _build_promotion_record(
             started_at=deploy_started_at,
             finished_at=deploy_finished_at,
         ),
-        post_deploy_update=PostDeployUpdateEvidence(),
+        post_deploy_update=post_deploy_update,
         destination_health=destination_health,
+    )
+
+
+def _build_post_deploy_update(
+    *,
+    instance_name: str,
+    migration_status: str,
+    migration_detail: str,
+) -> PostDeployUpdateEvidence:
+    if migration_status == "skipped":
+        return PostDeployUpdateEvidence(
+            attempted=False,
+            status="skipped",
+            detail=migration_detail,
+        )
+    detail = migration_detail
+    if not detail:
+        if migration_status == "pass":
+            detail = f"Prisma migrations completed on {instance_name}."
+        elif migration_status == "fail":
+            detail = f"Prisma migrations failed on {instance_name}."
+    return PostDeployUpdateEvidence(
+        attempted=True,
+        status=migration_status,
+        detail=detail,
+    )
+
+
+def _build_destination_health(
+    *,
+    request: VeriReelProdPromotionRequest,
+    health_result: VeriReelRolloutVerificationResult | None,
+) -> HealthcheckEvidence:
+    if health_result is None:
+        return HealthcheckEvidence(status="skipped")
+    if not health_result.health_urls:
+        return HealthcheckEvidence(status=health_result.status)
+    return HealthcheckEvidence(
+        verified=True,
+        urls=health_result.health_urls,
+        timeout_seconds=request.rollout_timeout_seconds,
+        status=health_result.status,
     )
 
 
@@ -224,18 +271,16 @@ def _write_failed_promotion_record(
     target_name: str | None = None,
     target_type: str | None = None,
     target_id: str = "",
-    rollout_result: VeriReelRolloutVerificationResult | None = None,
+    migration_status: str = "skipped",
+    migration_detail: str = "",
+    health_result: VeriReelRolloutVerificationResult | None = None,
 ) -> None:
     resolved_target_name = target_name or _default_target_name()
     resolved_target_type = target_type or _default_target_type()
-    destination_health = HealthcheckEvidence(status="skipped")
-    if rollout_result is not None:
-        destination_health = HealthcheckEvidence(
-            verified=bool(rollout_result.health_urls),
-            urls=rollout_result.health_urls,
-            timeout_seconds=(request.rollout_timeout_seconds if rollout_result.health_urls else None),
-            status="fail" if rollout_result.status == "fail" else rollout_result.status,
-        )
+    destination_health = _build_destination_health(
+        request=request,
+        health_result=health_result,
+    )
     record_store.write_promotion_record(
         PromotionRecord(
             record_id=request.promotion_record_id,
@@ -264,10 +309,10 @@ def _write_failed_promotion_record(
                 started_at=deploy_started_at,
                 finished_at=deploy_finished_at,
             ),
-            post_deploy_update=PostDeployUpdateEvidence(
-                attempted=False,
-                status="skipped",
-                detail=error_message,
+            post_deploy_update=_build_post_deploy_update(
+                instance_name=request.to_instance,
+                migration_status=migration_status,
+                migration_detail=(migration_detail or error_message),
             ),
             destination_health=destination_health,
         )
@@ -415,6 +460,173 @@ def _verify_rollout(
     raise click.ClickException(f"VeriReel prod rollout verification timed out: {last_error}")
 
 
+def _resolve_application_id(
+    *,
+    control_plane_root: Path,
+    request: VeriReelProdPromotionRequest,
+    target_type: str,
+    target_id: str,
+) -> str:
+    if target_type == "application" and target_id.strip():
+        return target_id.strip()
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=request.context,
+        instance_name=request.to_instance,
+    )
+    if target_definition is None or target_definition.target_type != "application" or not target_definition.target_id.strip():
+        raise click.ClickException(
+            f"VeriReel prod promotion post-deploy update requires an application target for {request.context}/{request.to_instance}."
+        )
+    return target_definition.target_id.strip()
+
+
+def _find_application_schedule(*, host: str, token: str, application_id: str, schedule_name: str) -> dict[str, object] | None:
+    for schedule in control_plane_dokploy.list_dokploy_schedules(
+        host=host,
+        token=token,
+        target_id=application_id,
+        schedule_type="application",
+    ):
+        if str(schedule.get("name") or "").strip() == schedule_name:
+            return dict(schedule)
+    return None
+
+
+def _upsert_application_schedule(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    schedule_name: str,
+    command: str,
+) -> str:
+    existing_schedule = _find_application_schedule(
+        host=host,
+        token=token,
+        application_id=application_id,
+        schedule_name=schedule_name,
+    )
+    payload: dict[str, object] = {
+        "name": schedule_name,
+        "cronExpression": control_plane_dokploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "scheduleType": "application",
+        "shellType": "sh",
+        "command": command,
+        "applicationId": application_id,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    if existing_schedule is None:
+        control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.create",
+            method="POST",
+            payload=payload,
+        )
+    else:
+        control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/schedule.update",
+            method="POST",
+            payload={"scheduleId": control_plane_dokploy.schedule_key(existing_schedule), **payload},
+        )
+    resolved_schedule = _find_application_schedule(
+        host=host,
+        token=token,
+        application_id=application_id,
+        schedule_name=schedule_name,
+    )
+    if resolved_schedule is None:
+        raise click.ClickException(
+            f"Dokploy schedule {schedule_name!r} for application {application_id!r} could not be resolved."
+        )
+    schedule_id = control_plane_dokploy.schedule_key(resolved_schedule)
+    if not schedule_id:
+        raise click.ClickException(
+            f"Dokploy schedule {schedule_name!r} for application {application_id!r} did not expose a schedule id."
+        )
+    return schedule_id
+
+
+def _run_application_command_with_retries(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    schedule_name: str,
+    command: str,
+    timeout_seconds: int,
+    attempts: int = 4,
+    retry_delay_seconds: float = 5.0,
+) -> None:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    for attempt in range(1, attempts + 1):
+        try:
+            schedule_id = _upsert_application_schedule(
+                host=host,
+                token=token,
+                application_id=application_id,
+                schedule_name=schedule_name,
+                command=command,
+            )
+            latest_before = control_plane_dokploy.latest_deployment_for_schedule(
+                host=host,
+                token=token,
+                schedule_id=schedule_id,
+            )
+            control_plane_dokploy.dokploy_request(
+                host=host,
+                token=token,
+                path="/api/schedule.runManually",
+                method="POST",
+                payload={"scheduleId": schedule_id},
+                timeout_seconds=timeout_seconds,
+            )
+            control_plane_dokploy.wait_for_dokploy_schedule_deployment(
+                host=host,
+                token=token,
+                schedule_id=schedule_id,
+                before_key=control_plane_dokploy.deployment_key(latest_before),
+                timeout_seconds=timeout_seconds,
+            )
+            return
+        except click.ClickException:
+            if attempt >= attempts:
+                raise
+            time.sleep(retry_delay_seconds)
+
+
+def _run_prisma_migrations(
+    *,
+    control_plane_root: Path,
+    request: VeriReelProdPromotionRequest,
+    target_type: str,
+    target_id: str,
+) -> None:
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    application_id = _resolve_application_id(
+        control_plane_root=control_plane_root,
+        request=request,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    _run_application_command_with_retries(
+        host=host,
+        token=token,
+        application_id=application_id,
+        schedule_name=_default_migration_schedule_name(),
+        command=_default_migration_command(),
+        timeout_seconds=request.rollout_timeout_seconds,
+    )
+
+
 def execute_verireel_prod_promotion(
     *,
     control_plane_root: Path,
@@ -439,6 +651,8 @@ def execute_verireel_prod_promotion(
             backup_record_id=request.backup_record_id,
             deploy_status="fail",
             rollout_status="skipped",
+            migration_status="skipped",
+            health_status="skipped",
             target_name=_default_target_name(),
             target_type=_default_target_type(),
             target_id="",
@@ -478,7 +692,9 @@ def execute_verireel_prod_promotion(
             deploy_status=deployment_result.deploy_status,
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
-            rollout_result=None,
+            migration_status="skipped",
+            migration_detail="",
+            health_result=None,
         )
         record_store.write_promotion_record(promotion_record)
         return VeriReelProdPromotionResult(
@@ -487,6 +703,8 @@ def execute_verireel_prod_promotion(
             backup_record_id=backup_gate_record.record_id,
             deploy_status=deployment_result.deploy_status,
             rollout_status="skipped",
+            migration_status="skipped",
+            health_status="skipped",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
             target_name=deployment_result.target_name,
@@ -527,7 +745,7 @@ def execute_verireel_prod_promotion(
             target_name=deployment_result.target_name,
             target_type=deployment_result.target_type,
             target_id=deployment_result.target_id,
-            rollout_result=failed_rollout_result,
+            health_result=failed_rollout_result,
         )
         return VeriReelProdPromotionResult(
             promotion_record_id=request.promotion_record_id,
@@ -535,6 +753,101 @@ def execute_verireel_prod_promotion(
             backup_record_id=backup_gate_record.record_id,
             deploy_status=deployment_result.deploy_status,
             rollout_status="fail",
+            migration_status="skipped",
+            health_status="skipped",
+            deploy_started_at=deployment_result.deploy_started_at,
+            deploy_finished_at=deployment_result.deploy_finished_at,
+            target_name=deployment_result.target_name,
+            target_type=deployment_result.target_type,
+            target_id=deployment_result.target_id,
+            error_message=error_message,
+        )
+
+    try:
+        _run_prisma_migrations(
+            control_plane_root=control_plane_root,
+            request=request,
+            target_type=deployment_result.target_type,
+            target_id=deployment_result.target_id,
+        )
+    except click.ClickException as exc:
+        error_message = str(exc)
+        _write_failed_promotion_record(
+            record_store=record_store,
+            request=request,
+            backup_gate_record=backup_gate_record,
+            error_message=error_message,
+            deployment_record_id=deployment_result.deployment_record_id,
+            deploy_status="pass",
+            deploy_started_at=deployment_result.deploy_started_at,
+            deploy_finished_at=deployment_result.deploy_finished_at,
+            target_name=deployment_result.target_name,
+            target_type=deployment_result.target_type,
+            target_id=deployment_result.target_id,
+            migration_status="fail",
+            migration_detail=error_message,
+            health_result=None,
+        )
+        return VeriReelProdPromotionResult(
+            promotion_record_id=request.promotion_record_id,
+            deployment_record_id=deployment_result.deployment_record_id,
+            backup_record_id=backup_gate_record.record_id,
+            deploy_status=deployment_result.deploy_status,
+            rollout_status=rollout_result.status,
+            migration_status="fail",
+            health_status="skipped",
+            deploy_started_at=deployment_result.deploy_started_at,
+            deploy_finished_at=deployment_result.deploy_finished_at,
+            target_name=deployment_result.target_name,
+            target_type=deployment_result.target_type,
+            target_id=deployment_result.target_id,
+            error_message=error_message,
+        )
+
+    try:
+        health_result = _verify_rollout(
+            control_plane_root=control_plane_root,
+            request=request,
+        )
+    except click.ClickException as exc:
+        error_message = str(exc)
+        failed_health_result = VeriReelRolloutVerificationResult(status="fail")
+        try:
+            base_urls = _resolve_rollout_base_urls(
+                control_plane_root=control_plane_root,
+                request=request,
+            )
+            failed_health_result = VeriReelRolloutVerificationResult(
+                status="fail",
+                base_url=base_urls[0],
+                health_urls=(f"{base_urls[0].rstrip('/')}/api/health",),
+            )
+        except click.ClickException:
+            pass
+        _write_failed_promotion_record(
+            record_store=record_store,
+            request=request,
+            backup_gate_record=backup_gate_record,
+            error_message=error_message,
+            deployment_record_id=deployment_result.deployment_record_id,
+            deploy_status="pass",
+            deploy_started_at=deployment_result.deploy_started_at,
+            deploy_finished_at=deployment_result.deploy_finished_at,
+            target_name=deployment_result.target_name,
+            target_type=deployment_result.target_type,
+            target_id=deployment_result.target_id,
+            migration_status="pass",
+            migration_detail="",
+            health_result=failed_health_result,
+        )
+        return VeriReelProdPromotionResult(
+            promotion_record_id=request.promotion_record_id,
+            deployment_record_id=deployment_result.deployment_record_id,
+            backup_record_id=backup_gate_record.record_id,
+            deploy_status=deployment_result.deploy_status,
+            rollout_status=rollout_result.status,
+            migration_status="pass",
+            health_status="fail",
             deploy_started_at=deployment_result.deploy_started_at,
             deploy_finished_at=deployment_result.deploy_finished_at,
             target_name=deployment_result.target_name,
@@ -554,7 +867,9 @@ def execute_verireel_prod_promotion(
         deploy_status=deployment_result.deploy_status,
         deploy_started_at=deployment_result.deploy_started_at,
         deploy_finished_at=deployment_result.deploy_finished_at,
-        rollout_result=rollout_result,
+        migration_status="pass",
+        migration_detail="",
+        health_result=health_result,
     )
     record_store.write_promotion_record(promotion_record)
     return VeriReelProdPromotionResult(
@@ -563,6 +878,8 @@ def execute_verireel_prod_promotion(
         backup_record_id=backup_gate_record.record_id,
         deploy_status=deployment_result.deploy_status,
         rollout_status=rollout_result.status,
+        migration_status="pass",
+        health_status=health_result.status,
         deploy_started_at=deployment_result.deploy_started_at,
         deploy_finished_at=deployment_result.deploy_finished_at,
         target_name=deployment_result.target_name,

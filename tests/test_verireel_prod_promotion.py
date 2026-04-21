@@ -81,14 +81,26 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     target_id="prod-app-123",
                 ),
             ), patch(
+                "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                return_value=None,
+            ), patch(
                 "control_plane.workflows.verireel_prod_promotion._verify_rollout",
-                return_value=VeriReelRolloutVerificationResult(
-                    status="pass",
-                    base_url="https://ver-prod.shinycomputers.com",
-                    health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    started_at="2026-04-21T18:21:16Z",
-                    finished_at="2026-04-21T18:21:45Z",
-                ),
+                side_effect=[
+                    VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-prod.shinycomputers.com",
+                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        started_at="2026-04-21T18:21:16Z",
+                        finished_at="2026-04-21T18:21:45Z",
+                    ),
+                    VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-prod.shinycomputers.com",
+                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        started_at="2026-04-21T18:21:46Z",
+                        finished_at="2026-04-21T18:22:15Z",
+                    ),
+                ],
             ):
                 result = execute_verireel_prod_promotion(
                     control_plane_root=root,
@@ -106,6 +118,8 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             )
             self.assertEqual(result.deploy_status, "pass")
             self.assertEqual(result.rollout_status, "pass")
+            self.assertEqual(result.migration_status, "pass")
+            self.assertEqual(result.health_status, "pass")
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
@@ -114,11 +128,151 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             self.assertEqual(promotion.deploy.deployment_id, "prod-app-123")
             self.assertEqual(promotion.deploy.started_at, "2026-04-21T18:20:00Z")
             self.assertEqual(promotion.deploy.finished_at, "2026-04-21T18:21:15Z")
+            self.assertEqual(promotion.post_deploy_update.status, "pass")
             self.assertEqual(promotion.destination_health.status, "pass")
             self.assertEqual(
                 promotion.destination_health.urls,
                 ("https://ver-prod.shinycomputers.com/api/health",),
             )
+
+    def test_execute_writes_failed_promotion_record_when_prisma_migration_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    context="verireel",
+                    instance="prod",
+                    created_at="2026-04-21T18:05:00Z",
+                    source="verireel-prod-gate",
+                    status="pass",
+                    evidence={"snapshot_name": "ver-predeploy-20260421T180500Z"},
+                )
+            )
+            request = VeriReelProdPromotionRequest(
+                artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                source_git_ref="abcdef1234567890",
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                expected_build_revision="abcdef1234567890",
+                expected_build_tag="sha-abcdef1234567890",
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                return_value=VeriReelStableDeployResult(
+                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-21T18:20:00Z",
+                    deploy_finished_at="2026-04-21T18:21:15Z",
+                    target_name="ver-prod-app",
+                    target_type="application",
+                    target_id="prod-app-123",
+                ),
+            ), patch(
+                "control_plane.workflows.verireel_prod_promotion._verify_rollout",
+                return_value=VeriReelRolloutVerificationResult(
+                    status="pass",
+                    base_url="https://ver-prod.shinycomputers.com",
+                    health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                    started_at="2026-04-21T18:21:16Z",
+                    finished_at="2026-04-21T18:21:45Z",
+                ),
+            ), patch(
+                "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                side_effect=click.ClickException("Dokploy schedule deployment failed during Prisma migration."),
+            ):
+                result = execute_verireel_prod_promotion(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=request,
+                )
+
+            self.assertEqual(result.deploy_status, "pass")
+            self.assertEqual(result.rollout_status, "pass")
+            self.assertEqual(result.migration_status, "fail")
+            self.assertEqual(result.health_status, "skipped")
+            self.assertIn("Prisma migration", result.error_message)
+            promotion = store.read_promotion_record(
+                "promotion-verireel-testing-to-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(promotion.backup_gate.status, "pass")
+            self.assertEqual(promotion.deploy.status, "pass")
+            self.assertEqual(promotion.post_deploy_update.status, "fail")
+            self.assertEqual(promotion.destination_health.status, "skipped")
+
+    def test_execute_writes_failed_promotion_record_when_final_health_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    context="verireel",
+                    instance="prod",
+                    created_at="2026-04-21T18:05:00Z",
+                    source="verireel-prod-gate",
+                    status="pass",
+                    evidence={"snapshot_name": "ver-predeploy-20260421T180500Z"},
+                )
+            )
+            request = VeriReelProdPromotionRequest(
+                artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                source_git_ref="abcdef1234567890",
+                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                expected_build_revision="abcdef1234567890",
+                expected_build_tag="sha-abcdef1234567890",
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                return_value=VeriReelStableDeployResult(
+                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-21T18:20:00Z",
+                    deploy_finished_at="2026-04-21T18:21:15Z",
+                    target_name="ver-prod-app",
+                    target_type="application",
+                    target_id="prod-app-123",
+                ),
+            ), patch(
+                "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                return_value=None,
+            ), patch(
+                "control_plane.workflows.verireel_prod_promotion._verify_rollout",
+                side_effect=[
+                    VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-prod.shinycomputers.com",
+                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        started_at="2026-04-21T18:21:16Z",
+                        finished_at="2026-04-21T18:21:45Z",
+                    ),
+                    click.ClickException("VeriReel prod rollout verification timed out: health payload mismatch."),
+                ],
+            ), patch(
+                "control_plane.workflows.verireel_prod_promotion._resolve_rollout_base_urls",
+                return_value=("https://ver-prod.shinycomputers.com",),
+            ):
+                result = execute_verireel_prod_promotion(
+                    control_plane_root=root,
+                    record_store=store,
+                    request=request,
+                )
+
+            self.assertEqual(result.deploy_status, "pass")
+            self.assertEqual(result.rollout_status, "pass")
+            self.assertEqual(result.migration_status, "pass")
+            self.assertEqual(result.health_status, "fail")
+            promotion = store.read_promotion_record(
+                "promotion-verireel-testing-to-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(promotion.post_deploy_update.status, "pass")
+            self.assertEqual(promotion.destination_health.status, "fail")
 
     def test_execute_writes_failed_rollout_status_when_rollout_verification_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
