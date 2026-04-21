@@ -1,18 +1,18 @@
 ---
-title: Harbor Service Boundary
+title: Launchplane Service Boundary
 ---
 
 ## Purpose
 
-This document defines the first explicit Harbor service boundary: the initial
+This document defines the first explicit Launchplane service boundary: the initial
 HTTP ingress, the GitHub Actions OIDC trust model, the claim-to-permission
-mapping, and the first stable API payloads Harbor should accept.
+mapping, and the first stable API payloads Launchplane should accept.
 
-It exists to keep new cross-product work aligned with Harbor's target form:
+It exists to keep new cross-product work aligned with Launchplane's target form:
 
 - long-running service
 - authenticated machine ingress
-- Harbor-owned drivers
+- Launchplane-owned drivers
 - thin repo extensions
 
 The current repo-local CLI and file-backed state directory are implementation
@@ -23,7 +23,7 @@ on.
 
 The first service slice is now implemented locally in this repo:
 
-- CLI: `uv run harbor service serve`
+- CLI: `uv run launchplane service serve`
 - health route: `GET /v1/health`
 - authenticated evidence routes:
   - `POST /v1/evidence/deployments`
@@ -34,54 +34,54 @@ The first service slice is now implemented locally in this repo:
   - `POST /v1/drivers/verireel/testing-deploy`
 
 That slice now covers the first documented evidence surface end to end plus the
-first explicit Harbor-owned driver action. Harbor can verify GitHub OIDC,
+first explicit Launchplane-owned driver action. Launchplane can verify GitHub OIDC,
 authorize workflow identity claims, accept deployment/promotion/preview
 lifecycle evidence over HTTP, and execute the VeriReel shared testing deploy as
-an authenticated Harbor route.
+an authenticated Launchplane route.
 
 ## First Host Assumption
 
-- Harbor runs behind `https://harbor.shinycomputers.com`.
-- Harbor exposes versioned API ingress under `/v1`.
-- Harbor returns JSON for both success and failure cases.
+- Launchplane runs behind `https://launchplane.shinycomputers.com`.
+- Launchplane exposes versioned API ingress under `/v1`.
+- Launchplane returns JSON for both success and failure cases.
 
 ## Boundary Layers
 
 ```text
 GitHub Actions workflow
   -> OIDC token from GitHub
-  -> Harbor HTTP ingress
-  -> Harbor authn/authz
-  -> Harbor core record/write logic
-  -> Harbor read models and driver hooks
+  -> Launchplane HTTP ingress
+  -> Launchplane authn/authz
+  -> Launchplane core record/write logic
+  -> Launchplane read models and driver hooks
 ```
 
 ## Authentication
 
 Machine callers should authenticate with GitHub Actions OIDC.
 
-Harbor should verify:
+Launchplane should verify:
 
 - `iss` is GitHub's OIDC issuer
-- `aud` matches Harbor's expected audience
+- `aud` matches Launchplane's expected audience
 - signature validates against GitHub's published keys
 - token is not expired and is valid for current time
 
 Recommended first audience:
 
-- `harbor.shinycomputers.com`
+- `launchplane.shinycomputers.com`
 
-That keeps the audience tied to the Harbor service identity instead of to a
+That keeps the audience tied to the Launchplane service identity instead of to a
 temporary repo or local CLI name.
 
 ## Authorization Model
 
-Harbor should authorize machine callers from workflow identity claims, not from
+Launchplane should authorize machine callers from workflow identity claims, not from
 human repo-admin status and not from copied long-lived service tokens.
 
 The first policy model should be allow-list based and fail closed.
 
-### Claims Harbor should rely on first
+### Claims Launchplane should rely on first
 
 - `repository`
 - `repository_owner`
@@ -94,7 +94,7 @@ The first policy model should be allow-list based and fail closed.
 - `sub`
 - `sha`
 
-### Claims Harbor should not treat as the primary authorization boundary
+### Claims Launchplane should not treat as the primary authorization boundary
 
 - `actor`
 - `actor_id`
@@ -105,7 +105,7 @@ primarily trust the workflow identity GitHub issued.
 
 ### First policy shape
 
-Harbor should map verified claims to a small policy rule set:
+Launchplane should map verified claims to a small policy rule set:
 
 ```text
 rule
@@ -122,8 +122,8 @@ rule
 Example policy intent:
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/preview-control-plane.yml@*
 event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
@@ -135,8 +135,8 @@ allowed actions:
 Another example:
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/preview-cleanup.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/preview-cleanup.yml@*
 event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
@@ -148,8 +148,8 @@ allowed actions:
 Stable-lane examples:
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/publish-image.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main
 event_name: push or workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
@@ -159,8 +159,8 @@ allowed actions:
 ```
 
 ```text
-repository: every/verireel
-workflow_ref: every/verireel/.github/workflows/promote-image.yml@refs/heads/main
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main
 event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
@@ -174,7 +174,7 @@ full RBAC system yet.
 
 ## First API Surface
 
-The first Harbor service surface should focus on evidence ingress and record
+The first Launchplane service surface should focus on evidence ingress and record
 writes, not on every possible operator action.
 
 ### Evidence ingress endpoints
@@ -196,10 +196,10 @@ writes, not on every possible operator action.
 - `GET /v1/secrets/{secret_id}`
 - `GET /v1/contexts/{context}/operations/recent`
 
-These operator reads use the same Harbor authn/authz boundary as evidence
+These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the
-current Harbor record nouns without forcing them to infer state from workflow
-logs or host-local files. Secret status reads return metadata only: Harbor does
+current Launchplane record nouns without forcing them to infer state from workflow
+logs or host-local files. Secret status reads return metadata only: Launchplane does
 not expose plaintext secret retrieval through the service boundary.
 
 ### Driver execution endpoints
@@ -215,7 +215,7 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
 
-The first preview driver cut stays intentionally narrow: Harbor owns preview
+The first preview driver cut stays intentionally narrow: Launchplane owns preview
 runtime refresh and teardown, while VeriReel still owns image build/publish,
 browser verification, and the follow-up preview evidence write.
 
@@ -225,11 +225,11 @@ have proven the shape.
 ## Request And Response Rules
 
 - Requests and responses are JSON.
-- Evidence endpoints should be idempotent from Harbor's perspective when the
+- Evidence endpoints should be idempotent from Launchplane's perspective when the
   same product/workflow submits the same stable identity twice.
-- Harbor should support an explicit idempotency key header for workflow retries.
-- Harbor should return durable record identifiers, not local file paths.
-- Harbor should include a request or trace id in every response.
+- Launchplane should support an explicit idempotency key header for workflow retries.
+- Launchplane should return durable record identifiers, not local file paths.
+- Launchplane should include a request or trace id in every response.
 
 Recommended first headers:
 
@@ -237,10 +237,10 @@ Recommended first headers:
 - `Content-Type: application/json`
 - `Idempotency-Key: <stable-retry-key>`
 
-The current Harbor service implementation now honors `Idempotency-Key` for all
-write routes. Harbor replays the first successful accepted response when the
+The current Launchplane service implementation now honors `Idempotency-Key` for all
+write routes. Launchplane replays the first successful accepted response when the
 same authenticated workflow scope retries the same route with the same key and
-the same request fingerprint. Harbor rejects reuse of the same key for a
+the same request fingerprint. Launchplane rejects reuse of the same key for a
 different payload on the same route.
 
 Current VeriReel key shapes:
@@ -259,7 +259,7 @@ Recommended first success shape:
 ```json
 {
   "status": "accepted",
-  "trace_id": "harbor_req_01jabc...",
+  "trace_id": "launchplane_req_01jabc...",
   "records": {
     "preview_id": "preview-verireel-pr-123",
     "generation_id": "preview-verireel-pr-123-generation-0003"
@@ -272,7 +272,7 @@ Recommended first error shape:
 ```json
 {
   "status": "rejected",
-  "trace_id": "harbor_req_01jabc...",
+  "trace_id": "launchplane_req_01jabc...",
   "error": {
     "code": "authorization_denied",
     "message": "Workflow cannot write preview evidence for verireel-testing."
@@ -282,7 +282,7 @@ Recommended first error shape:
 
 ## First Stable Payloads
 
-Harbor should keep the typed evidence payloads already proven in the current
+Launchplane should keep the typed evidence payloads already proven in the current
 CLI adapters and expose them over HTTP.
 
 ### Preview generation evidence
@@ -297,7 +297,7 @@ CLI adapters and expose them over HTTP.
     "context": "verireel-testing",
     "anchor_repo": "verireel",
     "anchor_pr_number": 123,
-    "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+    "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
     "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
     "state": "active",
     "updated_at": "2026-04-16T08:10:00Z",
@@ -308,7 +308,7 @@ CLI adapters and expose them over HTTP.
     "context": "verireel-testing",
     "anchor_repo": "verireel",
     "anchor_pr_number": 123,
-    "anchor_pr_url": "https://github.com/every/verireel/pull/123",
+    "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
     "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
     "state": "ready",
     "requested_reason": "external_preview_refresh",
@@ -316,7 +316,7 @@ CLI adapters and expose them over HTTP.
     "ready_at": "2026-04-16T08:10:00Z",
     "finished_at": "2026-04-16T08:10:00Z",
     "resolved_manifest_fingerprint": "verireel-preview-manifest-pr-123-6b3c9d7",
-    "artifact_id": "ghcr.io/every/verireel-app:pr-123-6b3c9d7",
+    "artifact_id": "ghcr.io/example-org/verireel-app:pr-123-6b3c9d7",
     "deploy_status": "pass",
     "verify_status": "pass",
     "overall_health_status": "pass"
@@ -343,9 +343,9 @@ CLI adapters and expose them over HTTP.
 ```
 
 The deployment and promotion endpoints should follow the same pattern: stable
-typed record payloads inside a Harbor-owned API envelope.
+typed record payloads inside a Launchplane-owned API envelope.
 
-For VeriReel's first stable-lane Harbor slice, use context `verireel` for the
+For VeriReel's first stable-lane Launchplane slice, use context `verireel` for the
 long-lived `testing` and `prod` instances. Preview evidence remains separate
 under `verireel-testing` because previews are not another durable promotion
 lane.
@@ -354,22 +354,22 @@ lane.
 
 Current commands such as:
 
-- `control-plane harbor-previews write-from-generation`
-- `control-plane harbor-previews write-destroyed`
+- `control-plane launchplane-previews write-from-generation`
+- `control-plane launchplane-previews write-destroyed`
 
-should be treated as temporary compatibility clients of these Harbor payloads.
+should be treated as temporary compatibility clients of these Launchplane payloads.
 They should not remain the permanent integration boundary for external product
 workflows.
 
 ## Driver Relationship
 
-The first Harbor API should separate two concerns:
+The first Launchplane API should separate two concerns:
 
-- evidence ingress into Harbor core records
-- runtime execution through Harbor-owned drivers
+- evidence ingress into Launchplane core records
+- runtime execution through Launchplane-owned drivers
 
 That keeps the initial service slice small while still allowing a later shift
-from repo-owned operational scripts into Harbor-owned driver execution.
+from repo-owned operational scripts into Launchplane-owned driver execution.
 
 The first explicit drivers should be:
 
@@ -390,7 +390,7 @@ Repo-specific variation should stay thin and declarative where possible.
 
 1. Convert the existing CLI preview evidence commands into local clients of the
    same service-layer handler or payload contract.
-2. Add local clients for deployment and promotion evidence where Harbor-facing
+2. Add local clients for deployment and promotion evidence where Launchplane-facing
    workflows still write through repo-local CLI adapters.
 3. Define the first explicit Odoo and VeriReel driver interfaces after the
    service ingress exists.

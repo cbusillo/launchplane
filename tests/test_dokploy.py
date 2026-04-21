@@ -379,7 +379,7 @@ target_type = "compose"
 
         self.assertIn("stable remote instances prod, testing", str(raised_error.exception))
         self.assertIn("opw/dev", str(raised_error.exception))
-        self.assertIn("Harbor preview records", str(raised_error.exception))
+        self.assertIn("Launchplane preview records", str(raised_error.exception))
 
     def test_read_control_plane_dokploy_source_of_truth_rejects_unknown_target_id_override_routes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -477,12 +477,12 @@ target_id = "compose-456"
         self.assertEqual(host, "https://dokploy.explicit.example")
         self.assertEqual(token, "explicit-token")
 
-    def test_read_dokploy_config_uses_external_harbor_config_dir_when_repo_file_missing(self) -> None:
+    def test_read_dokploy_config_uses_external_launchplane_config_dir_when_repo_file_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name) / "repo"
             control_plane_root.mkdir(parents=True, exist_ok=True)
             xdg_config_home = Path(temporary_directory_name) / "xdg"
-            external_env_file = xdg_config_home / "harbor" / "dokploy.env"
+            external_env_file = xdg_config_home / "launchplane" / "dokploy.env"
             external_env_file.parent.mkdir(parents=True, exist_ok=True)
             external_env_file.write_text(
                 "DOKPLOY_HOST=https://dokploy.external.example\nDOKPLOY_TOKEN=external-token\n",
@@ -664,14 +664,14 @@ target_id = "compose-456"
         self.assertIn("UNRELATED_RUNTIME_KEY", str(raised_error.exception))
 
 
-class HarborServiceDeployTests(unittest.TestCase):
+class LaunchplaneServiceDeployTests(unittest.TestCase):
     @staticmethod
     def _target_payload(*, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123") -> dict[str, object]:
         return {
-            "name": "harbor",
-            "appName": "compose-harbor",
+            "name": "launchplane",
+            "appName": "compose-launchplane",
             "sourceType": "git",
-            "customGitUrl": "git@github.com:example/harbor.git",
+            "customGitUrl": "git@github.com:example/launchplane.git",
             "customGitBranch": "main",
             "customGitSSHKeyId": custom_git_ssh_key_id,
             "composePath": "./docker-compose.yml",
@@ -700,14 +700,14 @@ class HarborServiceDeployTests(unittest.TestCase):
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value=self._target_payload(
                 env_text=(
-                    "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"
-                    "HARBOR_DATABASE_URL=postgresql+psycopg://harbor:test@db.internal:5432/harbor\n"
-                    "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                    "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
+                    "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
                     "DOKPLOY_HOST=https://dokploy.example.com\n"
                     "DOKPLOY_TOKEN=token-123\n"
-                    "HARBOR_POLICY_B64=dGVzdA==\n"
-                    "HARBOR_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
-                    "HARBOR_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
+                    "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                    "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
+                    "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
                 ),
             ),
         ), patch(
@@ -736,9 +736,9 @@ class HarborServiceDeployTests(unittest.TestCase):
                     "--target-id",
                     "compose-123",
                     "--image-reference",
-                    "ghcr.io/every/harbor@sha256:new",
+                    "ghcr.io/every/launchplane@sha256:new",
                     "--health-url",
-                    "https://harbor.example.com/v1/health",
+                    "https://launchplane.example.com/v1/health",
                 ],
             )
 
@@ -748,7 +748,7 @@ class HarborServiceDeployTests(unittest.TestCase):
         self.assertIn("sha256:new", str(captured_env_updates[0]["env_text"]))
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["previous_image_reference"], "ghcr.io/every/harbor@sha256:old")
+        self.assertEqual(payload["previous_image_reference"], "ghcr.io/every/launchplane@sha256:old")
         self.assertEqual(payload["deployment_result"], "deployment=deploy-new status=done")
         self.assertEqual(payload["preflight"]["runtime_contract"]["database_host"], "db.internal")
         self.assertTrue(payload["preflight"]["custom_git_ssh_key_configured"])
@@ -766,26 +766,26 @@ class HarborServiceDeployTests(unittest.TestCase):
             side_effect=[
                 self._target_payload(
                     env_text=(
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"
-                        "HARBOR_DATABASE_URL=postgresql+psycopg://harbor:test@db.internal:5432/harbor\n"
-                        "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
+                        "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
                         "DOKPLOY_HOST=https://dokploy.example.com\n"
                         "DOKPLOY_TOKEN=token-123\n"
-                        "HARBOR_POLICY_B64=dGVzdA==\n"
-                        "HARBOR_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
-                        "HARBOR_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
+                        "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                        "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
+                        "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
                     ),
                 ),
                 self._target_payload(
                     env_text=(
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:new\n"
-                        "HARBOR_DATABASE_URL=postgresql+psycopg://harbor:test@db.internal:5432/harbor\n"
-                        "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:new\n"
+                        "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
                         "DOKPLOY_HOST=https://dokploy.example.com\n"
                         "DOKPLOY_TOKEN=token-123\n"
-                        "HARBOR_POLICY_B64=dGVzdA==\n"
-                        "HARBOR_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
-                        "HARBOR_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
+                        "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                        "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
+                        "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
                     ),
                 ),
             ],
@@ -810,7 +810,7 @@ class HarborServiceDeployTests(unittest.TestCase):
         ), patch(
             "control_plane.cli._wait_for_ship_healthcheck",
             side_effect=[
-                click.ClickException("Healthcheck failed for https://harbor.example.com/v1/health: http 503"),
+                click.ClickException("Healthcheck failed for https://launchplane.example.com/v1/health: http 503"),
                 None,
             ],
         ):
@@ -824,9 +824,9 @@ class HarborServiceDeployTests(unittest.TestCase):
                     "--target-id",
                     "compose-123",
                     "--image-reference",
-                    "ghcr.io/every/harbor@sha256:new",
+                    "ghcr.io/every/launchplane@sha256:new",
                     "--health-url",
-                    "https://harbor.example.com/v1/health",
+                    "https://launchplane.example.com/v1/health",
                 ],
             )
 
@@ -835,7 +835,7 @@ class HarborServiceDeployTests(unittest.TestCase):
         self.assertEqual(len(captured_trigger_calls), 2)
         self.assertIn("sha256:new", str(captured_env_updates[0]["env_text"]))
         self.assertIn("sha256:old", str(captured_env_updates[1]["env_text"]))
-        self.assertIn("Harbor service health verification failed", result.output)
+        self.assertIn("Launchplane service health verification failed", result.output)
         payload_text = result.output.split("Error:", 1)[0].strip()
         payload = json.loads(payload_text) if payload_text else {}
         self.assertEqual(payload.get("status"), "failed")
@@ -850,7 +850,7 @@ class HarborServiceDeployTests(unittest.TestCase):
         ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value=self._target_payload(
-                env_text="DOCKER_IMAGE_REFERENCE=ghcr.io/example/harbor@sha256:old\n",
+                env_text="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
                 custom_git_ssh_key_id="",
             ),
         ):
@@ -874,10 +874,14 @@ class HarborServiceDeployTests(unittest.TestCase):
             payload.get("blockers", []),
         )
         self.assertIn(
-            "Harbor service target is missing HARBOR_DATABASE_URL.",
+            "Launchplane service target is missing LAUNCHPLANE_DATABASE_URL.",
             payload.get("blockers", []),
         )
-        self.assertIn("Harbor service Dokploy target preflight failed", result.output)
+        self.assertIn(
+            "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE. Startup fails closed without an explicit policy input.",
+            payload.get("blockers", []),
+        )
+        self.assertIn("Launchplane service Dokploy target preflight failed", result.output)
 
     def test_service_deploy_dokploy_image_stops_before_env_change_when_preflight_fails(self) -> None:
         runner = CliRunner()
@@ -889,7 +893,7 @@ class HarborServiceDeployTests(unittest.TestCase):
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value=self._target_payload(
                 env_text=(
-                    "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
                     "DOKPLOY_HOST=https://dokploy.example.com\n"
                     "DOKPLOY_TOKEN=token-123\n"
                 ),
@@ -909,16 +913,20 @@ class HarborServiceDeployTests(unittest.TestCase):
                     "--target-id",
                     "compose-123",
                     "--image-reference",
-                    "ghcr.io/example/harbor@sha256:new",
+                    "ghcr.io/example/launchplane@sha256:new",
                     "--health-url",
-                    "https://harbor.example.com/v1/health",
+                    "https://launchplane.example.com/v1/health",
                 ],
             )
 
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         update_target_env.assert_not_called()
         trigger_deployment.assert_not_called()
-        self.assertIn("Harbor service target is missing HARBOR_DATABASE_URL.", result.output)
+        self.assertIn("Launchplane service target is missing LAUNCHPLANE_DATABASE_URL.", result.output)
+        self.assertIn(
+            "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE.",
+            result.output,
+        )
 
 
 if __name__ == "__main__":

@@ -105,6 +105,6 @@ class GitHubWebhookReplayEnvelope(BaseModel):
             raise ValueError("GitHub webhook replay envelope requires payload_text or payload")
         if not self.allow_unsigned and not self.payload_text.strip():
             raise ValueError(
-                "Signed GitHub webhook replay requires payload_text so Harbor can verify the original bytes."
+                "Signed GitHub webhook replay requires payload_text so Launchplane can verify the original bytes."
             )
         return self

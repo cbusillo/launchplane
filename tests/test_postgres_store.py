@@ -9,8 +9,8 @@ from control_plane.cli import main
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -173,7 +173,7 @@ def _secret_record(*, secret_id: str, updated_at: str, current_version_id: str) 
         current_version_id=current_version_id,
         created_at="2026-04-20T18:00:00Z",
         updated_at=updated_at,
-        updated_by="harbor-bootstrap",
+        updated_by="launchplane-bootstrap",
     )
 
 
@@ -182,7 +182,7 @@ def _secret_version(*, version_id: str, secret_id: str, created_at: str) -> Secr
         version_id=version_id,
         secret_id=secret_id,
         created_at=created_at,
-        created_by="harbor-bootstrap",
+        created_by="launchplane-bootstrap",
         ciphertext="gAAAAABo-bootstrap-ciphertext",
     )
 
@@ -206,7 +206,7 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
         secret_id=secret_id,
         event_type="imported",
         recorded_at=recorded_at,
-        actor="harbor-bootstrap",
+        actor="launchplane-bootstrap",
         detail="Imported existing Dokploy secret",
         metadata={"source": "dokploy.env"},
     )
@@ -215,12 +215,12 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 class PostgresRecordStoreTests(unittest.TestCase):
     def test_idempotency_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_path = Path(temporary_directory_name) / "harbor.sqlite3"
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
             store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
             store.ensure_schema()
 
-            record = HarborIdempotencyRecord(
-                record_id=build_harbor_idempotency_record_id(
+            record = LaunchplaneIdempotencyRecord(
+                record_id=build_launchplane_idempotency_record_id(
                     scope="every/verireel|workflow|repo:every/verireel:pull_request",
                     route_path="/v1/evidence/previews/generations",
                     idempotency_key="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
@@ -230,7 +230,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 idempotency_key="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
                 request_fingerprint="fingerprint-123",
                 response_status_code=202,
-                response_trace_id="harbor_req_123",
+                response_trace_id="launchplane_req_123",
                 recorded_at="2026-04-21T01:00:00Z",
                 response_payload={"status": "accepted", "records": {"preview_id": "preview-35"}},
             )
@@ -270,12 +270,12 @@ class PostgresRecordStoreTests(unittest.TestCase):
                         "--state-dir",
                         temporary_directory_name,
                         "--database-url",
-                        "postgresql://harbor:test@db/harbor",
+                        "postgresql://launchplane:test@db/launchplane",
                     ],
                 )
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        store_class.assert_called_once_with(database_url="postgresql://harbor:test@db/harbor")
+        store_class.assert_called_once_with(database_url="postgresql://launchplane:test@db/launchplane")
         postgres_store.ensure_schema.assert_called_once_with()
         postgres_store.import_core_records_from_filesystem.assert_called_once()
         self.assertIn('"deployments": 1', result.output)
@@ -283,7 +283,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_write_and_read_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "harbor.sqlite3")
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
             )
 
             store.ensure_schema()
@@ -304,7 +304,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_list_preview_records_filters_and_limits(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "harbor.sqlite3")
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
             )
             store.ensure_schema()
 
@@ -348,7 +348,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_secret_records_round_trip_and_find_latest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "harbor.sqlite3")
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
             )
             store.ensure_schema()
 
@@ -419,7 +419,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_import_core_records_from_filesystem(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "harbor.sqlite3")
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
             )
             store.ensure_schema()
             filesystem_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")

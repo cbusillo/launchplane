@@ -16,7 +16,8 @@ from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
-HARBOR_SECRET_MASTER_KEY_ENV_VAR = "HARBOR_MASTER_ENCRYPTION_KEY"
+LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR = "LAUNCHPLANE_MASTER_ENCRYPTION_KEY"
+LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS = (LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR,)
 DOKPLOY_SECRET_INTEGRATION = "dokploy"
 RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
 SECRET_STATUS_CONFIGURED = "configured"
@@ -67,8 +68,9 @@ def _runtime_environment_key_is_secret(key_name: str) -> bool:
 def _master_fernet_key(raw_key: str) -> bytes:
     normalized = raw_key.strip()
     if not normalized:
+        expected_keys = " or ".join(LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS)
         raise click.ClickException(
-            f"Harbor managed secrets require {HARBOR_SECRET_MASTER_KEY_ENV_VAR} to read or write encrypted values."
+            f"Launchplane managed secrets require {expected_keys} to read or write encrypted values."
         )
     encoded = normalized.encode("utf-8")
     try:
@@ -80,7 +82,11 @@ def _master_fernet_key(raw_key: str) -> bytes:
 
 
 def _secret_cipher() -> Fernet:
-    return Fernet(_master_fernet_key(os.environ.get(HARBOR_SECRET_MASTER_KEY_ENV_VAR, "")))
+    for environment_key in LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS:
+        configured_value = os.environ.get(environment_key, "")
+        if configured_value.strip():
+            return Fernet(_master_fernet_key(configured_value))
+    return Fernet(_master_fernet_key(""))
 
 
 def _encrypt_secret_value(plaintext_value: str) -> str:
@@ -92,7 +98,7 @@ def _decrypt_secret_value(ciphertext: str) -> str:
         return _secret_cipher().decrypt(ciphertext.encode("utf-8")).decode("utf-8")
     except InvalidToken as error:
         raise click.ClickException(
-            "Harbor could not decrypt a managed secret with the configured master key."
+            "Launchplane could not decrypt a managed secret with the configured master key."
         ) from error
 
 
@@ -204,7 +210,7 @@ def write_secret_value(
     source_label: str = "manual",
 ) -> dict[str, str]:
     if not plaintext_value.strip():
-        raise click.ClickException("Harbor managed secrets require a non-empty plaintext value.")
+        raise click.ClickException("Launchplane managed secrets require a non-empty plaintext value.")
     now = utc_now_timestamp()
     existing_record = record_store.find_secret_record(
         scope=scope,
@@ -281,7 +287,7 @@ def write_secret_value(
             event_type="created" if action == "created" else "rotated",
             recorded_at=now,
             actor=actor,
-            detail=f"Harbor {action} managed secret from {source_label}.",
+            detail=f"Launchplane {action} managed secret from {source_label}.",
             metadata={"source": source_label, "binding_key": binding_key},
         )
     )

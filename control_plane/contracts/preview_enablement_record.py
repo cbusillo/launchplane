@@ -5,8 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.github_pull_request_event import PullRequestAction, PullRequestState
 from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
 from control_plane.contracts.preview_request_metadata import (
-    HarborCompanionPullRequestReference,
-    HarborPreviewRequestParseStatus,
+    LaunchplaneCompanionPullRequestReference,
+    LaunchplanePreviewRequestParseStatus,
 )
 
 
@@ -25,10 +25,10 @@ class PreviewEnablementRecord(BaseModel):
     updated_at: str
     label_enabled: bool = False
     action_label: str = ""
-    request_metadata_status: HarborPreviewRequestParseStatus = "missing"
+    request_metadata_status: LaunchplanePreviewRequestParseStatus = "missing"
     request_metadata_error: str = ""
     request_metadata_baseline_channel: str = ""
-    request_metadata_companions: tuple[HarborCompanionPullRequestReference, ...] = ()
+    request_metadata_companions: tuple[LaunchplaneCompanionPullRequestReference, ...] = ()
     request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...] = ()
 
     @model_validator(mode="after")

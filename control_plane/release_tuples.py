@@ -45,7 +45,7 @@ def _require_stable_release_tuple_channel(channel_name: str, *, scope: str) -> s
         supported_channels = ", ".join(sorted(LONG_LIVED_RELEASE_TUPLE_CHANNELS))
         raise click.ClickException(
             f"{scope} only supports stable remote channels {supported_channels}; got {normalized_channel_name!r}. "
-            "Use Harbor preview records for preview/dev runtime instead of minting or tracking release tuples there."
+            "Use Launchplane preview records for preview/dev runtime instead of minting or tracking release tuples there."
         )
     return normalized_channel_name
 

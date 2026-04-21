@@ -28,19 +28,19 @@ from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhook
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
 from control_plane.contracts.preview_mutation_request import (
-    HarborPullRequestMutationIntent,
+    LaunchplanePullRequestMutationIntent,
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
-from control_plane.contracts.preview_manifest import HarborResolvedPreviewManifest
+from control_plane.contracts.preview_manifest import LaunchplaneResolvedPreviewManifest
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_request_metadata import (
-    HarborCompanionPullRequestReference,
-    HarborPreviewRequestMetadata,
-    HARBOR_ALLOWED_COMPANION_REPOS,
-    HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING,
-    HarborPreviewRequestParseResult,
+    LaunchplaneCompanionPullRequestReference,
+    LaunchplanePreviewRequestMetadata,
+    LAUNCHPLANE_ALLOWED_COMPANION_REPOS,
+    LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING,
+    LaunchplanePreviewRequestParseResult,
 )
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
@@ -52,16 +52,16 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.harbor_mutations import (
-    apply_harbor_destroy_preview as shared_apply_harbor_destroy_preview,
-    apply_harbor_generation_evidence as shared_apply_harbor_generation_evidence,
+from control_plane.launchplane_mutations import (
+    apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
+    apply_launchplane_generation_evidence as shared_apply_launchplane_generation_evidence,
     control_plane_root as shared_control_plane_root,
-    upsert_harbor_preview_from_request as shared_upsert_harbor_preview_from_request,
+    upsert_launchplane_preview_from_request as shared_upsert_launchplane_preview_from_request,
 )
-from control_plane.service import serve_harbor_service
+from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.harbor import (
+from control_plane.workflows.launchplane import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
     apply_generation_ready_transition,
@@ -75,13 +75,13 @@ from control_plane.workflows.harbor import (
     build_preview_status_payload,
     deliver_pull_request_feedback,
     find_preview_record,
-    harbor_anchor_repo_context,
-    harbor_preview_label_enabled,
-    DEFAULT_HARBOR_BASELINE_CHANNEL,
-    HARBOR_PREVIEW_ENABLE_LABEL,
-    HARBOR_TENANT_ANCHOR_CONTEXTS,
+    launchplane_anchor_repo_context,
+    launchplane_preview_label_enabled,
+    DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL,
+    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+    LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS,
     resolve_pull_request_event_manifest,
-    resolve_harbor_github_webhook_secret,
+    resolve_launchplane_github_webhook_secret,
     verify_github_webhook_signature,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -107,32 +107,36 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
     "ODOO_ADDON_REPOSITORIES",
     "OPENUPGRADE_ADDON_REPOSITORY",
 )
-_HARBOR_SERVICE_REQUIRED_ENV_KEYS = (
-    "HARBOR_DATABASE_URL",
-    "HARBOR_MASTER_ENCRYPTION_KEY",
+_DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
+_LAUNCHPLANE_SERVICE_REQUIRED_ENV_KEYS = (
+    "LAUNCHPLANE_DATABASE_URL",
+    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY",
     "DOKPLOY_HOST",
     "DOKPLOY_TOKEN",
 )
-_HARBOR_SERVICE_POLICY_ENV_KEYS = (
-    "HARBOR_POLICY_TOML",
-    "HARBOR_POLICY_B64",
-    "HARBOR_POLICY_FILE",
+_LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
+    "LAUNCHPLANE_POLICY_TOML",
+    "LAUNCHPLANE_POLICY_B64",
+    "LAUNCHPLANE_POLICY_FILE",
 )
-_HARBOR_SERVICE_TARGET_IDS_ENV_KEYS = (
-    "HARBOR_DOKPLOY_TARGET_IDS_TOML",
-    "HARBOR_DOKPLOY_TARGET_IDS_B64",
+_LAUNCHPLANE_SERVICE_TARGET_IDS_ENV_KEYS = (
+    "LAUNCHPLANE_DOKPLOY_TARGET_IDS_TOML",
+    "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64",
     "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE",
 )
-_HARBOR_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS = (
-    "HARBOR_RUNTIME_ENVIRONMENTS_TOML",
-    "HARBOR_RUNTIME_ENVIRONMENTS_B64",
+_LAUNCHPLANE_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS = (
+    "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_TOML",
+    "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64",
     "ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE",
 )
+_SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
+_SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
 @contextmanager
-def _harbor_release_tuples_file_override(release_tuples_file: Path | None):
+def _launchplane_release_tuples_file_override(release_tuples_file: Path | None):
     if release_tuples_file is None:
         yield
         return
@@ -155,7 +159,7 @@ def _control_plane_root() -> Path:
     return shared_control_plane_root()
 
 
-def _require_harbor_preview_status_payload(
+def _require_launchplane_preview_status_payload(
     *,
     state_dir: Path,
     context_name: str,
@@ -170,7 +174,7 @@ def _require_harbor_preview_status_payload(
     )
     if payload is None:
         raise click.ClickException(
-            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
+            f"No Launchplane preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
         )
     return payload
 
@@ -195,13 +199,13 @@ def _generation_in_progress(value: str) -> bool:
     return value.strip().lower() in {"resolving", "building", "deploying", "verifying"}
 
 
-def _harbor_action_slug(value: str) -> str:
+def _launchplane_action_slug(value: str) -> str:
     compact = "".join(character.lower() if character.isalnum() else "-" for character in value.strip())
     normalized = "-".join(part for part in compact.split("-") if part)
-    return normalized or "harbor-preview"
+    return normalized or "launchplane-preview"
 
 
-def _render_harbor_action_recipe(
+def _render_launchplane_action_recipe(
     *,
     title: str,
     summary: str,
@@ -230,7 +234,7 @@ def _render_harbor_action_recipe(
     """
 
 
-def _build_harbor_action_script(
+def _build_launchplane_action_script(
     *,
     command_name: str,
     file_payloads: tuple[tuple[str, str, dict[str, object]], ...],
@@ -242,13 +246,13 @@ def _build_harbor_action_script(
         lines.append(f'cat >"${variable_name}" <<\'JSON\'')
         lines.append(json.dumps(payload, indent=2, sort_keys=True))
         lines.append("JSON")
-    command_parts = ["uv", "run", "harbor", "harbor-previews", command_name, "--state-dir", '"$STATE_DIR"']
+    command_parts = ["uv", "run", "launchplane", "launchplane-previews", command_name, "--state-dir", '"$STATE_DIR"']
     command_parts.extend(command_args)
     lines.append(" ".join(command_parts))
     return "\n".join(lines)
 
 
-def _render_harbor_shell_document(
+def _render_launchplane_shell_document(
     *,
     page_title: str,
     context_name: str,
@@ -264,7 +268,7 @@ def _render_harbor_shell_document(
         ("policy", "Policy"),
     )
     nav_html = "".join(
-        _render_harbor_shell_nav_item(
+        _render_launchplane_shell_nav_item(
             key=key,
             label=label,
             active_nav=active_nav,
@@ -354,11 +358,11 @@ def _render_harbor_shell_document(
   <div class=\"app-shell\">
     <header class=\"shell-topbar\">
       <div class=\"shell-brand\">
-        <div class=\"shell-brand-mark\">Harbor control plane</div>
+        <div class=\"shell-brand-mark\">Launchplane control plane</div>
         <h1>Tenant environments and PR previews</h1>
-        <p>Harbor links testing, prod, and PR preview lanes for {context_html}. GitHub remains the review source; Harbor carries environment state, routing, and promotion evidence.</p>
+        <p>Launchplane links testing, prod, and PR preview lanes for {context_html}. GitHub remains the review source; Launchplane carries environment state, routing, and promotion evidence.</p>
       </div>
-      <nav class=\"shell-nav\" aria-label=\"Harbor sections\">{nav_html}</nav>
+      <nav class=\"shell-nav\" aria-label=\"Launchplane sections\">{nav_html}</nav>
     </header>
     <main class=\"page-body {body_class}\">{body_html}</main>
   </div>
@@ -367,14 +371,14 @@ def _render_harbor_shell_document(
 """
 
 
-def _render_harbor_shell_nav_item(*, key: str, label: str, active_nav: str, href: str) -> str:
+def _render_launchplane_shell_nav_item(*, key: str, label: str, active_nav: str, href: str) -> str:
     class_name = "shell-nav-item active" if key == active_nav else "shell-nav-item"
     if href:
         return f'<a class="{class_name}" href="{escape(href)}">{escape(label)}</a>'
     return f'<span class="{class_name}">{escape(label)}</span>'
 
 
-def _harbor_preview_bundle_relative_path(
+def _launchplane_preview_bundle_relative_path(
     *,
     context_name: str,
     anchor_repo: str,
@@ -383,11 +387,11 @@ def _harbor_preview_bundle_relative_path(
     return Path("previews") / context_name / anchor_repo / f"pr-{anchor_pr_number}.html"
 
 
-def _harbor_environment_bundle_relative_path(*, context_name: str, instance_name: str) -> Path:
+def _launchplane_environment_bundle_relative_path(*, context_name: str, instance_name: str) -> Path:
     return Path("environments") / context_name / f"{instance_name}.html"
 
 
-def _harbor_promotion_bundle_relative_path(*, context_name: str) -> Path:
+def _launchplane_promotion_bundle_relative_path(*, context_name: str) -> Path:
     return Path("promotions") / context_name / "testing-to-prod.html"
 
 
@@ -395,17 +399,17 @@ def _relative_href(*, from_file: Path, to_file: Path) -> str:
     return os.path.relpath(to_file, start=from_file.parent)
 
 
-def _harbor_context_anchor_repo(*, context_name: str) -> str:
+def _launchplane_context_anchor_repo(*, context_name: str) -> str:
     normalized_context = context_name.strip()
     if not normalized_context:
         return ""
-    for repo_name, repo_context in sorted(HARBOR_TENANT_ANCHOR_CONTEXTS.items()):
+    for repo_name, repo_context in sorted(LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS.items()):
         if repo_context == normalized_context:
             return repo_name
     return ""
 
 
-def _harbor_inventory_bucket(row: dict[str, object]) -> str:
+def _launchplane_inventory_bucket(row: dict[str, object]) -> str:
     state = str(row.get("state", "")).strip().lower()
     health = str(row.get("overall_health_status", "")).strip().lower()
     latest_id = str(row.get("latest_generation_id", "")).strip()
@@ -425,11 +429,11 @@ def _harbor_inventory_bucket(row: dict[str, object]) -> str:
     return "live"
 
 
-def _harbor_preview_enablement_record_id(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:
+def _launchplane_preview_enablement_record_id(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:
     return f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
 
 
-def _build_harbor_promotion_resolve_recipe_script(
+def _build_launchplane_promotion_resolve_recipe_script(
     *,
     context_name: str,
     artifact_id: str,
@@ -438,14 +442,14 @@ def _build_harbor_promotion_resolve_recipe_script(
     resolved_backup_record_id = backup_record_id.strip() or "backup-prod-pass-record-id"
     return "\n".join(
         (
-            'PROMOTION_REQUEST_FILE="/tmp/harbor-promotion-request.json"',
-            f'uv run harbor promote resolve --context "{context_name}" --from-instance testing --to-instance prod --artifact-id "{artifact_id}" --backup-record-id "{resolved_backup_record_id}" >"$PROMOTION_REQUEST_FILE"',
+            'PROMOTION_REQUEST_FILE="/tmp/launchplane-promotion-request.json"',
+            f'uv run launchplane promote resolve --context "{context_name}" --from-instance testing --to-instance prod --artifact-id "{artifact_id}" --backup-record-id "{resolved_backup_record_id}" >"$PROMOTION_REQUEST_FILE"',
             'cat "$PROMOTION_REQUEST_FILE"',
         )
     )
 
 
-def _build_harbor_backup_gate_write_recipe_script(
+def _build_launchplane_backup_gate_write_recipe_script(
     *,
     context_name: str,
     source: str,
@@ -464,45 +468,45 @@ def _build_harbor_backup_gate_write_recipe_script(
     }
     lines = [
         'STATE_DIR="/path/to/state"',
-        'BACKUP_GATE_FILE="/tmp/harbor-backup-gate.json"',
+        'BACKUP_GATE_FILE="/tmp/launchplane-backup-gate.json"',
         'cat >"$BACKUP_GATE_FILE" <<\'JSON\'',
         json.dumps(payload, indent=2, sort_keys=True),
         'JSON',
-        'uv run harbor backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
+        'uv run launchplane backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
     ]
     return "\n".join(lines)
 
 
-def _build_harbor_promotion_execute_recipe_script(*, state_dir: str) -> str:
+def _build_launchplane_promotion_execute_recipe_script(*, state_dir: str) -> str:
     return "\n".join(
         (
             f'STATE_DIR="{state_dir or "/path/to/state"}"',
-            'PROMOTION_REQUEST_FILE="/tmp/harbor-promotion-request.json"',
-            'uv run harbor promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
+            'PROMOTION_REQUEST_FILE="/tmp/launchplane-promotion-request.json"',
+            'uv run launchplane promote execute --state-dir "$STATE_DIR" --input-file "$PROMOTION_REQUEST_FILE"',
         )
     )
 
 
-def _build_harbor_environment_ship_recipe_script(
+def _build_launchplane_environment_ship_recipe_script(
     *,
     context_name: str,
     instance_name: str,
     artifact_id: str,
     source_git_ref: str,
 ) -> str:
-    request_file = f"/tmp/harbor-{context_name}-{instance_name}-ship-request.json"
+    request_file = f"/tmp/launchplane-{context_name}-{instance_name}-ship-request.json"
     return "\n".join(
         (
             'STATE_DIR="/path/to/state"',
             f'SHIP_REQUEST_FILE="{request_file}"',
-            f'uv run harbor ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
+            f'uv run launchplane ship resolve --context "{context_name}" --instance "{instance_name}" --artifact-id "{artifact_id}" --source-ref "{source_git_ref}" >"$SHIP_REQUEST_FILE"',
             'cat "$SHIP_REQUEST_FILE"',
-            'uv run harbor ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
+            'uv run launchplane ship execute --state-dir "$STATE_DIR" --input-file "$SHIP_REQUEST_FILE"',
         )
     )
 
 
-def _build_harbor_environment_action_payload(
+def _build_launchplane_environment_action_payload(
     *,
     context_name: str,
     instance_name: str,
@@ -518,7 +522,7 @@ def _build_harbor_environment_action_payload(
             "status": "missing_evidence",
             "tone": "neutral",
             "headline": f"{instance_name.capitalize()} has no actionable ship evidence yet.",
-            "summary": "Harbor needs a live artifact id and source ref before it can emit a typed ship recipe for this lane.",
+            "summary": "Launchplane needs a live artifact id and source ref before it can emit a typed ship recipe for this lane.",
             "recipe": "",
         }
     tone = "good" if deploy_status == "pass" else "warn"
@@ -528,11 +532,11 @@ def _build_harbor_environment_action_payload(
         "tone": tone,
         "headline": f"Re-ship current {instance_name} artifact",
         "summary": (
-            f"Resolve and execute Harbor's typed ship flow for the current {instance_name} artifact without re-deriving inputs by hand."
+            f"Resolve and execute Launchplane's typed ship flow for the current {instance_name} artifact without re-deriving inputs by hand."
         ),
         "artifact_id": artifact_id,
         "source_git_ref": source_git_ref,
-        "recipe": _build_harbor_environment_ship_recipe_script(
+        "recipe": _build_launchplane_environment_ship_recipe_script(
             context_name=context_name,
             instance_name=instance_name,
             artifact_id=artifact_id,
@@ -541,7 +545,7 @@ def _build_harbor_environment_action_payload(
     }
 
 
-def _build_harbor_preview_enablement_action_payload(
+def _build_launchplane_preview_enablement_action_payload(
     *,
     control_plane_root: Path | None,
     context_name: str,
@@ -553,7 +557,7 @@ def _build_harbor_preview_enablement_action_payload(
     label_enabled: bool,
     request_metadata_status: str,
     request_metadata_baseline_channel: str,
-    request_metadata_companions: tuple[HarborCompanionPullRequestReference, ...],
+    request_metadata_companions: tuple[LaunchplaneCompanionPullRequestReference, ...],
     request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
     preview_row: dict[str, object] | None,
 ) -> dict[str, object]:
@@ -602,14 +606,14 @@ def _build_harbor_preview_enablement_action_payload(
             "verify_status": "pending",
             "overall_health_status": "pending",
         }
-        action_slug = _harbor_action_slug(f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}")
-        recipe = _build_harbor_action_script(
+        action_slug = _launchplane_action_slug(f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}")
+        recipe = _build_launchplane_action_script(
             command_name="request-generation",
             file_payloads=(
-                ("PREVIEW_FILE", f"/tmp/harbor-{action_slug}-preview.json", preview_request_payload),
+                ("PREVIEW_FILE", f"/tmp/launchplane-{action_slug}-preview.json", preview_request_payload),
                 (
                     "GENERATION_FILE",
-                    f"/tmp/harbor-{action_slug}-generation.json",
+                    f"/tmp/launchplane-{action_slug}-generation.json",
                     generation_request_payload,
                 ),
             ),
@@ -621,11 +625,11 @@ def _build_harbor_preview_enablement_action_payload(
             ),
         )
         if state == "requested":
-            headline = "Materialize requested Harbor preview"
+            headline = "Materialize requested Launchplane preview"
         elif label_enabled:
-            headline = "Request Harbor preview from saved label state"
+            headline = "Request Launchplane preview from saved label state"
         else:
-            headline = "Request Harbor preview"
+            headline = "Request Launchplane preview"
         return {
             "status": "actionable",
             "tone": "warn",
@@ -662,7 +666,7 @@ def _build_harbor_preview_enablement_action_payload(
         return {
             "status": "blocked",
             "tone": "bad",
-            "headline": "Companion PR snapshots are required before Harbor can request this preview.",
+            "headline": "Companion PR snapshots are required before Launchplane can request this preview.",
             "summary": detail,
             "recipe": "",
         }
@@ -680,22 +684,22 @@ def _build_harbor_preview_enablement_action_payload(
             "status": "none",
             "tone": "neutral",
             "headline": "No preview action available.",
-            "summary": "This preview row does not need an initial Harbor request recipe right now.",
+            "summary": "This preview row does not need an initial Launchplane request recipe right now.",
             "recipe": "",
         }
     if request_metadata_status == "invalid":
         return {
             "status": "blocked",
             "tone": "bad",
-            "headline": "Preview metadata must be fixed before Harbor can request this preview.",
-            "summary": "The saved PR snapshot says the Harbor preview metadata is invalid, so Harbor avoids printing a request recipe that would drift from the PR contract.",
+            "headline": "Preview metadata must be fixed before Launchplane can request this preview.",
+            "summary": "The saved PR snapshot says the Launchplane preview metadata is invalid, so Launchplane avoids printing a request recipe that would drift from the PR contract.",
             "recipe": "",
         }
-    request_metadata = HarborPreviewRequestParseResult(status="missing")
+    request_metadata = LaunchplanePreviewRequestParseResult(status="missing")
     if request_metadata_status == "valid":
-        request_metadata = HarborPreviewRequestParseResult(
+        request_metadata = LaunchplanePreviewRequestParseResult(
             status="valid",
-            metadata=HarborPreviewRequestMetadata(
+            metadata=LaunchplanePreviewRequestMetadata(
                 baseline_channel=request_metadata_baseline_channel,
                 companions=request_metadata_companions,
             ),
@@ -703,11 +707,11 @@ def _build_harbor_preview_enablement_action_payload(
     if control_plane_root is None:
         if request_metadata_companions and not request_metadata_companion_summaries:
             return unresolved_companion_payload(
-                detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+                detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
             )
         return actionable_payload(
             summary=(
-                "Harbor cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
+                "Launchplane cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
@@ -722,13 +726,13 @@ def _build_harbor_preview_enablement_action_payload(
         return {
             "status": "missing_evidence",
             "tone": "neutral",
-            "headline": "Harbor needs the latest PR URL and head SHA before it can request this preview.",
+            "headline": "Launchplane needs the latest PR URL and head SHA before it can request this preview.",
             "summary": "The current tenant snapshot is missing the exact anchor PR evidence needed for a typed request-generation recipe.",
             "recipe": "",
         }
     if request_metadata_companions and not request_metadata_companion_summaries:
         return unresolved_companion_payload(
-            detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+            detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
         )
 
     synthetic_event = GitHubPullRequestEvent(
@@ -741,8 +745,8 @@ def _build_harbor_preview_enablement_action_payload(
         state="open",
         merged=False,
         head_sha=anchor_head_sha,
-        label_names=(HARBOR_PREVIEW_ENABLE_LABEL,) if label_enabled else (),
-        action_label=HARBOR_PREVIEW_ENABLE_LABEL if label_enabled else "",
+        label_names=(LAUNCHPLANE_PREVIEW_ENABLE_LABEL,) if label_enabled else (),
+        action_label=LAUNCHPLANE_PREVIEW_ENABLE_LABEL if label_enabled else "",
     )
     try:
         resolved_manifest = resolve_pull_request_event_manifest(
@@ -757,13 +761,13 @@ def _build_harbor_preview_enablement_action_payload(
         if request_metadata_companions and not request_metadata_companion_summaries:
             return unresolved_companion_payload(
                 detail=(
-                    "The saved PR metadata asks Harbor to include companion pull requests, but Harbor could not prove their exact head SHAs from stored evidence. "
+                    "The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane could not prove their exact head SHAs from stored evidence. "
                     f"Resolve the companion snapshots before running the request recipe: {exc}"
                 ),
             )
         return actionable_payload(
             summary=(
-                "Harbor could not resolve the default preview manifest automatically for this PR yet. "
+                "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
                 f"Use the typed request recipe below after replacing the baseline placeholders: {exc}"
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
@@ -778,11 +782,11 @@ def _build_harbor_preview_enablement_action_payload(
     if resolved_manifest is None:
         if request_metadata_companions and not request_metadata_companion_summaries:
             return unresolved_companion_payload(
-                detail="The saved PR metadata asks Harbor to include companion pull requests, but Harbor has no exact companion head SHA snapshot for this enablement record."
+                detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
             )
         return actionable_payload(
             summary=(
-                "Harbor could not resolve the default preview manifest automatically for this PR yet. "
+                "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
                 "Use the typed request recipe below after replacing the baseline tuple id and manifest fingerprint placeholders."
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
@@ -797,11 +801,11 @@ def _build_harbor_preview_enablement_action_payload(
 
     return actionable_payload(
         summary=(
-            "This tenant PR is preview-eligible but still inactive. Run Harbor's typed request-generation flow to create the initial preview route from the default testing baseline."
+            "This tenant PR is preview-eligible but still inactive. Run Launchplane's typed request-generation flow to create the initial preview route from the default testing baseline."
             if state != "requested" and not label_enabled
-            else "GitHub already marked this PR for preview. Run Harbor's typed request-generation flow to turn that saved label state into a live preview route."
+            else "GitHub already marked this PR for preview. Run Launchplane's typed request-generation flow to turn that saved label state into a live preview route."
             if label_enabled and state != "requested"
-            else "A preview request exists, but Harbor has not produced a serving route yet. Run the typed request-generation flow to materialize the preview from the saved PR snapshot."
+            else "A preview request exists, but Launchplane has not produced a serving route yet. Run the typed request-generation flow to materialize the preview from the saved PR snapshot."
         ),
         baseline_release_tuple_id=resolved_manifest.baseline_release_tuple_id,
         resolved_manifest_fingerprint=resolved_manifest.resolved_manifest_fingerprint,
@@ -812,7 +816,7 @@ def _build_harbor_preview_enablement_action_payload(
     )
 
 
-def _build_harbor_promotion_action_payload(
+def _build_launchplane_promotion_action_payload(
     *,
     record_store: FilesystemRecordStore,
     context_name: str,
@@ -856,7 +860,7 @@ def _build_harbor_promotion_action_payload(
 
     evidence_checks: list[dict[str, str]] = []
     candidate_status = "pending"
-    candidate_detail = "Harbor is waiting for testing/prod inventory evidence before it can name a promotion candidate."
+    candidate_detail = "Launchplane is waiting for testing/prod inventory evidence before it can name a promotion candidate."
     if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
         candidate_status = "pass"
         candidate_detail = f"Testing and prod are already aligned on {testing_artifact_id}."
@@ -867,7 +871,7 @@ def _build_harbor_promotion_action_payload(
         )
     elif prod_artifact_id:
         candidate_status = "fail"
-        candidate_detail = "Prod has an artifact, but Harbor has no current testing artifact to promote from."
+        candidate_detail = "Prod has an artifact, but Launchplane has no current testing artifact to promote from."
     evidence_checks.append(
         {
             "label": "Promotion candidate",
@@ -884,7 +888,7 @@ def _build_harbor_promotion_action_payload(
             "detail": (
                 f"Latest testing deployment status is {testing_deploy_status or 'unavailable'}."
                 if testing_live is not None
-                else "Harbor has not recorded a live testing deployment yet."
+                else "Launchplane has not recorded a live testing deployment yet."
             ),
         }
     )
@@ -897,13 +901,13 @@ def _build_harbor_promotion_action_payload(
             "detail": (
                 f"Latest testing health status is {testing_health_status or 'unavailable'}."
                 if testing_live is not None
-                else "Harbor has not recorded testing health evidence yet."
+                else "Launchplane has not recorded testing health evidence yet."
             ),
         }
     )
 
     backup_check_status = "pending"
-    backup_detail = "Harbor has no prod backup-gate evidence yet. Promotion stays blocked until one is recorded."
+    backup_detail = "Launchplane has no prod backup-gate evidence yet. Promotion stays blocked until one is recorded."
     backup_record_id = ""
     backup_gate_source = "prod-gate"
     backup_gate_evidence: dict[str, str] = {"snapshot": "s3://path/to/prod-backup"}
@@ -929,9 +933,9 @@ def _build_harbor_promotion_action_payload(
     )
 
     promotion_status = "unknown"
-    headline = "Harbor cannot plan the next promotion yet."
-    summary = "Testing and prod need clearer environment evidence before Harbor can describe the next action."
-    next_action = "Wait for Harbor to record current tenant environment evidence."
+    headline = "Launchplane cannot plan the next promotion yet."
+    summary = "Testing and prod need clearer environment evidence before Launchplane can describe the next action."
+    next_action = "Wait for Launchplane to record current tenant environment evidence."
     tone = "neutral"
     backup_gate_recipe = ""
     resolve_recipe = ""
@@ -951,36 +955,36 @@ def _build_harbor_promotion_action_payload(
         if all_checks_pass:
             promotion_status = "promotable"
             headline = "Testing is ready to promote into prod."
-            summary = "Harbor has the artifact, testing evidence, and backup authorization needed to plan the next promotion request."
+            summary = "Launchplane has the artifact, testing evidence, and backup authorization needed to plan the next promotion request."
             next_action = "Resolve the typed promotion request, review it, then execute it against prod."
             tone = "good"
-            resolve_recipe = _build_harbor_promotion_resolve_recipe_script(
+            resolve_recipe = _build_launchplane_promotion_resolve_recipe_script(
                 context_name=context_name,
                 artifact_id=testing_artifact_id,
                 backup_record_id=backup_record_id,
             )
-            execute_recipe = _build_harbor_promotion_execute_recipe_script(state_dir="/path/to/state")
+            execute_recipe = _build_launchplane_promotion_execute_recipe_script(state_dir="/path/to/state")
         else:
             promotion_status = "blocked"
-            headline = "A newer testing artifact exists, but Harbor cannot promote it yet."
+            headline = "A newer testing artifact exists, but Launchplane cannot promote it yet."
             summary = "The tenant has a promotion candidate, but one or more required evidence checks are still missing or failing."
-            next_action = "Clear the failing evidence checks before using Harbor's promotion flow."
+            next_action = "Clear the failing evidence checks before using Launchplane's promotion flow."
             tone = "warn"
             if backup_check_status != "pass":
-                backup_gate_recipe = _build_harbor_backup_gate_write_recipe_script(
+                backup_gate_recipe = _build_launchplane_backup_gate_write_recipe_script(
                     context_name=context_name,
                     source=backup_gate_source,
                     evidence=backup_gate_evidence,
                 )
     elif prod_artifact_id:
         promotion_status = "prod_only"
-        headline = "Prod has live evidence, but Harbor has no current testing candidate."
-        summary = "Harbor cannot promote until testing is carrying the next exact artifact for this tenant."
+        headline = "Prod has live evidence, but Launchplane has no current testing candidate."
+        summary = "Launchplane cannot promote until testing is carrying the next exact artifact for this tenant."
         next_action = "Ship a new artifact into testing first, then return here to plan promotion."
         tone = "neutral"
 
     retained_evidence = (
-        "Harbor will append a promotion record, keep backup-gate evidence, and refresh prod inventory when a waited promotion completes successfully."
+        "Launchplane will append a promotion record, keep backup-gate evidence, and refresh prod inventory when a waited promotion completes successfully."
     )
     return {
         "status": promotion_status,
@@ -1001,7 +1005,7 @@ def _build_harbor_promotion_action_payload(
     }
 
 
-def _build_harbor_promotion_detail_payload(
+def _build_launchplane_promotion_detail_payload(
     *,
     record_store: FilesystemRecordStore,
     context_name: str,
@@ -1055,7 +1059,7 @@ def _build_harbor_promotion_detail_payload(
         "status": str(promotion_action.get("status", "unknown")).strip() or "unknown",
         "tone": str(promotion_action.get("tone", "neutral")).strip() or "neutral",
         "headline": str(
-            promotion_action.get("headline", "Harbor cannot describe the promotion path yet.")
+            promotion_action.get("headline", "Launchplane cannot describe the promotion path yet.")
         ),
         "summary": str(promotion_action.get("summary", "No promotion summary recorded.")),
         "next_action": str(promotion_action.get("next_action", "No next action recorded.")),
@@ -1080,19 +1084,19 @@ def _build_harbor_promotion_detail_payload(
     }
 
 
-def _build_harbor_preview_enablement_record(
+def _build_launchplane_preview_enablement_record(
     *,
     context_name: str,
     event: GitHubPullRequestEvent,
-    request_metadata: HarborPreviewRequestParseResult,
-    resolved_manifest: HarborResolvedPreviewManifest | None = None,
+    request_metadata: LaunchplanePreviewRequestParseResult,
+    resolved_manifest: LaunchplaneResolvedPreviewManifest | None = None,
 ) -> PreviewEnablementRecord | None:
     resolved_context = context_name.strip()
     if not resolved_context:
         return None
     updated_at = event.occurred_at.strip() or utc_now_timestamp()
     return PreviewEnablementRecord(
-        record_id=_harbor_preview_enablement_record_id(
+        record_id=_launchplane_preview_enablement_record_id(
             context_name=resolved_context,
             anchor_repo=event.repo,
             anchor_pr_number=event.pr_number,
@@ -1105,7 +1109,7 @@ def _build_harbor_preview_enablement_record(
         action=event.action,
         pr_state=event.state,
         updated_at=updated_at,
-        label_enabled=harbor_preview_label_enabled(label_names=event.label_names),
+        label_enabled=launchplane_preview_label_enabled(label_names=event.label_names),
         action_label=event.action_label,
         request_metadata_status=request_metadata.status,
         request_metadata_error=request_metadata.error,
@@ -1124,8 +1128,8 @@ def _build_harbor_preview_enablement_record(
 
 def _enablement_companion_summaries_snapshot(
     *,
-    request_metadata: HarborPreviewRequestParseResult,
-    resolved_manifest: HarborResolvedPreviewManifest | None,
+    request_metadata: LaunchplanePreviewRequestParseResult,
+    resolved_manifest: LaunchplaneResolvedPreviewManifest | None,
 ) -> tuple[PreviewPullRequestSummary, ...]:
     if request_metadata.metadata is None or resolved_manifest is None:
         return ()
@@ -1148,7 +1152,7 @@ def _enablement_companion_summaries_snapshot(
     return tuple(summaries)
 
 
-def _build_harbor_preview_enablement_items(
+def _build_launchplane_preview_enablement_items(
     *,
     control_plane_root: Path | None,
     record_store: FilesystemRecordStore,
@@ -1191,7 +1195,7 @@ def _build_harbor_preview_enablement_items(
         if label_enabled:
             return "github_label"
         if latest_requested_reason.startswith("operator_requested"):
-            return "harbor"
+            return "launchplane"
         if preview_row is not None and not label_enabled:
             return "history"
         return "none"
@@ -1225,23 +1229,23 @@ def _build_harbor_preview_enablement_items(
         if state == "candidate":
             return "Eligible tenant PR. No preview request is active yet."
         if state == "retained":
-            return "Harbor is keeping this PR's preview history as retained evidence."
+            return "Launchplane is keeping this PR's preview history as retained evidence."
         if source == "github_label":
             if request_metadata_status == "invalid":
                 return (
-                    "GitHub label harbor-preview requested a preview, but Harbor preview metadata is invalid: "
+                    "GitHub label launchplane-preview requested a preview, but Launchplane preview metadata is invalid: "
                     f"{request_metadata_error}"
                 )
             if preview_row is None:
                 return (
-                    "GitHub label harbor-preview requested a preview, but Harbor has not created the preview record yet."
+                    "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet."
                 )
-            return "GitHub label harbor-preview is the current preview request source."
-        if source == "harbor":
-            return "Harbor explicitly requested this preview without relying on the GitHub label."
+            return "GitHub label launchplane-preview is the current preview request source."
+        if source == "launchplane":
+            return "Launchplane explicitly requested this preview without relying on the GitHub label."
         if state == "paused":
-            return "Harbor is intentionally holding this preview in place until operators resume it."
-        return "Harbor still has preview evidence from an earlier request even though no current GitHub label is present."
+            return "Launchplane is intentionally holding this preview in place until operators resume it."
+        return "Launchplane still has preview evidence from an earlier request even though no current GitHub label is present."
 
     def item_status_summary(*, state: str, preview_row: dict[str, object] | None) -> str:
         if preview_row is not None:
@@ -1251,7 +1255,7 @@ def _build_harbor_preview_enablement_items(
         if state == "candidate":
             return "Ready for opt-in preview enablement."
         if state == "requested":
-            return "Preview request recorded; Harbor has not materialized a serving route yet."
+            return "Preview request recorded; Launchplane has not materialized a serving route yet."
         return "No additional preview lifecycle evidence recorded yet."
 
     keys = set(enablement_by_key) | set(preview_by_key)
@@ -1319,7 +1323,7 @@ def _build_harbor_preview_enablement_items(
             if preview_row is not None
             else f"{context_name}/{item_anchor_repo}/pr-{item_pr_number}"
         )
-        action_payload = _build_harbor_preview_enablement_action_payload(
+        action_payload = _build_launchplane_preview_enablement_action_payload(
             control_plane_root=control_plane_root,
             context_name=context_name,
             anchor_repo=item_anchor_repo,
@@ -1381,7 +1385,7 @@ def _build_harbor_preview_enablement_items(
     return items, counts
 
 
-def _build_harbor_tenant_payload(
+def _build_launchplane_tenant_payload(
     *,
     control_plane_root: Path | None = None,
     record_store: FilesystemRecordStore,
@@ -1391,9 +1395,9 @@ def _build_harbor_tenant_payload(
     resolved_context = context_name.strip()
     resolved_anchor_repo = anchor_repo.strip()
     if resolved_context and not resolved_anchor_repo:
-        resolved_anchor_repo = _harbor_context_anchor_repo(context_name=resolved_context)
+        resolved_anchor_repo = _launchplane_context_anchor_repo(context_name=resolved_context)
     if resolved_anchor_repo and not resolved_context:
-        resolved_context = harbor_anchor_repo_context(repo=resolved_anchor_repo)
+        resolved_context = launchplane_anchor_repo_context(repo=resolved_anchor_repo)
 
     if not resolved_context and not resolved_anchor_repo:
         return None
@@ -1423,7 +1427,7 @@ def _build_harbor_tenant_payload(
     else:
         environments = {"testing": None, "prod": None}
 
-    preview_enablement, preview_enablement_counts = _build_harbor_preview_enablement_items(
+    preview_enablement, preview_enablement_counts = _build_launchplane_preview_enablement_items(
         control_plane_root=control_plane_root,
         record_store=record_store,
         context_name=resolved_context,
@@ -1436,14 +1440,14 @@ def _build_harbor_tenant_payload(
 
     preview_counts = {
         "all": len(previews),
-        "attention": sum(1 for row in previews if _harbor_inventory_bucket(row) == "attention"),
-        "in_flight": sum(1 for row in previews if _harbor_inventory_bucket(row) == "in_flight"),
-        "live": sum(1 for row in previews if _harbor_inventory_bucket(row) == "live"),
-        "retained": sum(1 for row in previews if _harbor_inventory_bucket(row) == "retained"),
+        "attention": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "attention"),
+        "in_flight": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "in_flight"),
+        "live": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "live"),
+        "retained": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "retained"),
         "reviewable": sum(
             1
             for row in previews
-            if _harbor_inventory_bucket(row) == "live"
+            if _launchplane_inventory_bucket(row) == "live"
             and str(row.get("canonical_url", "")).strip()
             and str(row.get("serving_generation_id", "")).strip()
         ),
@@ -1461,7 +1465,7 @@ def _build_harbor_tenant_payload(
     prod_artifact_id = str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
     promotion_summary = {
         "status": "unknown",
-        "summary": "Harbor has not recorded enough tenant environment evidence to describe promotion state yet.",
+        "summary": "Launchplane has not recorded enough tenant environment evidence to describe promotion state yet.",
     }
     if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
         promotion_summary = {
@@ -1481,16 +1485,16 @@ def _build_harbor_tenant_payload(
     elif prod_artifact_id:
         promotion_summary = {
             "status": "prod_only",
-            "summary": "Prod has live deployment evidence, but Harbor does not yet have current testing evidence for comparison.",
+            "summary": "Prod has live deployment evidence, but Launchplane does not yet have current testing evidence for comparison.",
             "artifact_id": prod_artifact_id,
         }
-    promotion_action = _build_harbor_promotion_action_payload(
+    promotion_action = _build_launchplane_promotion_action_payload(
         record_store=record_store,
         context_name=resolved_context,
         testing_environment=testing_environment if isinstance(testing_environment, dict) else None,
         prod_environment=prod_environment if isinstance(prod_environment, dict) else None,
     )
-    promotion_detail = _build_harbor_promotion_detail_payload(
+    promotion_detail = _build_launchplane_promotion_detail_payload(
         record_store=record_store,
         context_name=resolved_context,
         testing_environment=testing_environment if isinstance(testing_environment, dict) else None,
@@ -1498,7 +1502,7 @@ def _build_harbor_tenant_payload(
         promotion_action=promotion_action,
     )
     environment_actions = {
-        instance_name: _build_harbor_environment_action_payload(
+        instance_name: _build_launchplane_environment_action_payload(
             context_name=resolved_context,
             instance_name=instance_name,
             environment_payload=environments.get(instance_name) if isinstance(environments, dict) else None,
@@ -1523,7 +1527,7 @@ def _build_harbor_tenant_payload(
     }
 
 
-def _write_harbor_site_bundle(
+def _write_launchplane_site_bundle(
     *,
     state_dir: Path,
     output_dir: Path,
@@ -1531,12 +1535,12 @@ def _write_harbor_site_bundle(
     release_tuples_file: Path | None = None,
 ) -> None:
     record_store = _store(state_dir)
-    with _harbor_release_tuples_file_override(release_tuples_file):
+    with _launchplane_release_tuples_file_override(release_tuples_file):
         inventory_payload = build_preview_inventory_payload(
             record_store=record_store,
             context_name=context_name,
         )
-        tenant_payload = _build_harbor_tenant_payload(
+        tenant_payload = _build_launchplane_tenant_payload(
             control_plane_root=_control_plane_root(),
             record_store=record_store,
             context_name=context_name,
@@ -1559,7 +1563,7 @@ def _write_harbor_site_bundle(
     if isinstance(tenant_promotion_detail, dict):
         item_context = str(tenant_promotion_detail.get("context", "")).strip() or context_name
         if item_context:
-            promotion_output_map[item_context] = output_dir / _harbor_promotion_bundle_relative_path(
+            promotion_output_map[item_context] = output_dir / _launchplane_promotion_bundle_relative_path(
                 context_name=item_context,
             )
 
@@ -1570,7 +1574,7 @@ def _write_harbor_site_bundle(
             if not isinstance(environment_payload, dict):
                 continue
             item_context = str(environment_payload.get("context", "")).strip() or context_name
-            relative_path = _harbor_environment_bundle_relative_path(
+            relative_path = _launchplane_environment_bundle_relative_path(
                 context_name=item_context,
                 instance_name=instance_name,
             )
@@ -1581,7 +1585,7 @@ def _write_harbor_site_bundle(
         item_context = str(item.get("context", ""))
         anchor_repo = str(item.get("anchor_repo", ""))
         anchor_pr_number = int(item.get("anchor_pr_number", 0) or 0)
-        relative_path = _harbor_preview_bundle_relative_path(
+        relative_path = _launchplane_preview_bundle_relative_path(
             context_name=item_context,
             anchor_repo=anchor_repo,
             anchor_pr_number=anchor_pr_number,
@@ -1615,7 +1619,7 @@ def _write_harbor_site_bundle(
     if first_detail_file is not None:
         index_nav_links["detail"] = _relative_href(from_file=index_file, to_file=first_detail_file)
 
-    index_html = _render_harbor_preview_index_page_html(
+    index_html = _render_launchplane_preview_index_page_html(
         inventory_payload,
         tenant_payload=tenant_payload,
         detail_href_builder=detail_href_builder,
@@ -1628,7 +1632,7 @@ def _write_harbor_site_bundle(
     policy_nav_links = {"overview": _relative_href(from_file=policy_file, to_file=index_file), "policy": "policy.html"}
     if first_detail_file is not None:
         policy_nav_links["detail"] = _relative_href(from_file=policy_file, to_file=first_detail_file)
-    policy_html = _render_harbor_preview_policy_page_html(
+    policy_html = _render_launchplane_preview_policy_page_html(
         inventory_payload,
         nav_links=policy_nav_links,
     )
@@ -1642,7 +1646,7 @@ def _write_harbor_site_bundle(
                 "policy": _relative_href(from_file=detail_file, to_file=policy_file),
                 "detail": detail_file.name,
             }
-            detail_html = _render_harbor_promotion_status_page_html(
+            detail_html = _render_launchplane_promotion_status_page_html(
                 tenant_promotion_detail,
                 nav_links=detail_nav_links,
             )
@@ -1665,7 +1669,7 @@ def _write_harbor_site_bundle(
                 "policy": _relative_href(from_file=detail_file, to_file=policy_file),
                 "detail": detail_file.name,
             }
-            detail_html = _render_harbor_environment_status_page_html(
+            detail_html = _render_launchplane_environment_status_page_html(
                 environment_payload,
                 action_payload=action_payload,
                 nav_links=detail_nav_links,
@@ -1673,7 +1677,7 @@ def _write_harbor_site_bundle(
             detail_file.write_text(detail_html, encoding="utf-8")
 
     for item_context, anchor_repo, anchor_pr_number in preview_output_map:
-        status_payload = _require_harbor_preview_status_payload(
+        status_payload = _require_launchplane_preview_status_payload(
             state_dir=state_dir,
             context_name=item_context,
             anchor_repo=anchor_repo,
@@ -1686,14 +1690,14 @@ def _write_harbor_site_bundle(
             "policy": _relative_href(from_file=detail_file, to_file=policy_file),
             "detail": detail_file.name,
         }
-        detail_html = _render_harbor_preview_status_page_html(
+        detail_html = _render_launchplane_preview_status_page_html(
             status_payload,
             nav_links=detail_nav_links,
         )
         detail_file.write_text(detail_html, encoding="utf-8")
 
 
-def _render_harbor_preview_index_page_html(
+def _render_launchplane_preview_index_page_html(
     payload: dict[str, object],
     *,
     tenant_payload: dict[str, object] | None = None,
@@ -1707,7 +1711,7 @@ def _render_harbor_preview_index_page_html(
     preview_rows = [item for item in previews if isinstance(item, dict)]
 
     def preview_matches_filter(row: dict[str, object], filter_key: str) -> bool:
-        bucket = _harbor_inventory_bucket(row)
+        bucket = _launchplane_inventory_bucket(row)
         canonical_url = str(row.get("canonical_url", "")).strip()
         serving_id = str(row.get("serving_generation_id", "")).strip()
         if filter_key == "all":
@@ -1737,7 +1741,7 @@ def _render_harbor_preview_index_page_html(
         return 4
 
     def row_filter_keys(row: dict[str, object]) -> list[str]:
-        keys = ["all", _harbor_inventory_bucket(row)]
+        keys = ["all", _launchplane_inventory_bucket(row)]
         if preview_matches_filter(row, "reviewable"):
             keys.append("reviewable")
         return keys
@@ -1795,13 +1799,13 @@ def _render_harbor_preview_index_page_html(
         ("retained", "Retained evidence", "Destroyed previews that still matter as historical evidence."),
     )
     filter_specs = (
-        ("all", "All fleet", "Scan the full Harbor queue without losing lane structure."),
+        ("all", "All fleet", "Scan the full Launchplane queue without losing lane structure."),
         ("attention", "Needs attention", "Surface broken, blocked, or non-serving previews first."),
         ("in_flight", "In flight", "Track previews that are building or rotating toward a new generation."),
         ("reviewable", "Reviewable now", "Show only previews that are currently serving a stable review route."),
         ("retained", "Retained", "Limit the queue to historical evidence kept after cleanup."),
     )
-    scope_specs: list[tuple[str, str, str]] = [("all", "All scopes", "Across every Harbor context and anchor repo.")]
+    scope_specs: list[tuple[str, str, str]] = [("all", "All scopes", "Across every Launchplane context and anchor repo.")]
     contexts = sorted(
         {str(row.get("context", "")).strip() for row in preview_rows if str(row.get("context", "")).strip()}
     )
@@ -1817,7 +1821,7 @@ def _render_harbor_preview_index_page_html(
             (
                 f"context:{context_value}",
                 f"Context {context_value}",
-                f"Limit the queue to Harbor context {context_value}.",
+                f"Limit the queue to Launchplane context {context_value}.",
             )
             for context_value in contexts
         )
@@ -1832,7 +1836,7 @@ def _render_harbor_preview_index_page_html(
         )
     grouped_rows = {key: [] for key, _, _ in bucket_specs}
     for row in preview_rows:
-        grouped_rows[_harbor_inventory_bucket(row)].append(row)
+        grouped_rows[_launchplane_inventory_bucket(row)].append(row)
     for rows in grouped_rows.values():
         rows.sort(key=lambda row: escape(str(row.get("preview_label", ""))))
         rows.sort(key=lambda row: str(row.get("updated_at", "")), reverse=True)
@@ -1856,7 +1860,7 @@ def _render_harbor_preview_index_page_html(
     show_scope_controls = len(scope_specs) > 1
 
     def render_preview_row(row: dict[str, object]) -> str:
-        preview_label = escape(str(row.get("preview_label", "Harbor preview")))
+        preview_label = escape(str(row.get("preview_label", "Launchplane preview")))
         detail_href = ""
         if detail_href_builder is not None:
             detail_href = str(
@@ -1879,7 +1883,7 @@ def _render_harbor_preview_index_page_html(
         status_summary = escape(str(row.get("status_summary", "")))
         state_tone = _status_tone(state)
         health_tone = _status_tone(health)
-        bucket = _harbor_inventory_bucket(row)
+        bucket = _launchplane_inventory_bucket(row)
         filters = " ".join(row_filter_keys(row))
         scopes = " ".join(row_scope_keys(row))
         signal_html = "".join(
@@ -2011,7 +2015,7 @@ def _render_harbor_preview_index_page_html(
                 </div>
                 <span class=\"tone-pill tone-neutral\">No evidence</span>
               </div>
-              <p class=\"environment-summary\">Harbor has not recorded a live {escape(instance_name)} deployment for this tenant yet.</p>
+              <p class=\"environment-summary\">Launchplane has not recorded a live {escape(instance_name)} deployment for this tenant yet.</p>
             </section>
             """
         detail_href = ""
@@ -2098,7 +2102,7 @@ def _render_harbor_preview_index_page_html(
                 <button class=\"copy-button\" type=\"button\" data-copy-target=\"{recipe_id}\">Copy recipe</button>
               </div>
               <details class=\"action-details\">
-                <summary>Show Harbor request recipe</summary>
+                <summary>Show Launchplane request recipe</summary>
                 <pre id=\"{recipe_id}\" class=\"action-pre\">{escape(recipe)}</pre>
               </details>
             </div>
@@ -2121,10 +2125,10 @@ def _render_harbor_preview_index_page_html(
         request_source = str(item.get("request_source", "none")).strip()
         source_label = {
             "github_label": "GitHub label",
-            "harbor": "Harbor request",
+            "launchplane": "Launchplane request",
             "history": "Earlier request",
             "none": "Not requested",
-        }.get(request_source, "Harbor")
+        }.get(request_source, "Launchplane")
         request_summary = escape(str(item.get("request_summary", "")).strip())
         status_summary = escape(str(item.get("status_summary", "")).strip())
         canonical_url = escape(str(item.get("canonical_url", "")).strip())
@@ -2193,9 +2197,9 @@ def _render_harbor_preview_index_page_html(
         backup_gate_recipe = str(promotion_action.get("backup_gate_recipe", "")).strip()
         if backup_gate_recipe:
             recipe_cards.append(
-                _render_harbor_action_recipe(
+                _render_launchplane_action_recipe(
                     title="Record prod backup gate",
-                    summary="Persist the exact backup authorization Harbor expects before trying to promote into prod.",
+                    summary="Persist the exact backup authorization Launchplane expects before trying to promote into prod.",
                     tone="warn",
                     script=backup_gate_recipe,
                     command_label="backup-gates write",
@@ -2205,9 +2209,9 @@ def _render_harbor_preview_index_page_html(
         resolve_recipe = str(promotion_action.get("resolve_recipe", "")).strip()
         if resolve_recipe:
             recipe_cards.append(
-                _render_harbor_action_recipe(
+                _render_launchplane_action_recipe(
                     title="Plan promotion request",
-                    summary="Resolve Harbor's typed promotion request from the current tenant evidence before execution.",
+                    summary="Resolve Launchplane's typed promotion request from the current tenant evidence before execution.",
                     tone=tone,
                     script=resolve_recipe,
                     command_label="promote resolve",
@@ -2217,7 +2221,7 @@ def _render_harbor_preview_index_page_html(
         execute_recipe = str(promotion_action.get("execute_recipe", "")).strip()
         if execute_recipe:
             recipe_cards.append(
-                _render_harbor_action_recipe(
+                _render_launchplane_action_recipe(
                     title="Execute promotion",
                     summary="Run the resolved promotion request once the typed payload looks correct.",
                     tone=tone,
@@ -2257,14 +2261,14 @@ def _render_harbor_preview_index_page_html(
                 f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
             )
         recipe_html = "".join(recipe_cards) or (
-            '<p class="action-empty">Harbor is not exposing a promotion recipe for the current tenant state yet.</p>'
+            '<p class="action-empty">Launchplane is not exposing a promotion recipe for the current tenant state yet.</p>'
         )
         return f"""
         <section class=\"promotion-stage\">
           <div class=\"promotion-stage-head\">
             <div>
               <div class=\"section-label\">Next promotion</div>
-              <h3>{escape(str(promotion_action.get('headline', 'Harbor cannot describe the next promotion yet.')))}</h3>
+              <h3>{escape(str(promotion_action.get('headline', 'Launchplane cannot describe the next promotion yet.')))}</h3>
               <p class=\"promotion-stage-copy\">{escape(str(promotion_action.get('summary', 'No promotion summary recorded.')))}</p>
             </div>
             <span class=\"tone-pill tone-{escape(tone)}\">{escape(str(promotion_action.get('status', 'unknown')).replace('_', ' '))}</span>
@@ -2277,7 +2281,7 @@ def _render_harbor_preview_index_page_html(
                 <div><dt>Testing source ref</dt><dd><code>{escape(str(promotion_action.get('source_git_ref', '')) or 'Unavailable')}</code></dd></div>
                 <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
                 <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
-                <div><dt>Harbor retains</dt><dd>{escape(str(promotion_action.get('retained_evidence', 'Unavailable')))}</dd></div>
+                <div><dt>Launchplane retains</dt><dd>{escape(str(promotion_action.get('retained_evidence', 'Unavailable')))}</dd></div>
               </dl>
               <p class=\"promotion-next-action\">{escape(str(promotion_action.get('next_action', 'No next action recorded.')))}</p>
             </div>
@@ -2312,7 +2316,7 @@ def _render_harbor_preview_index_page_html(
                             "</p>"
                         )
                     action_cards.append(
-                        _render_harbor_action_recipe(
+                        _render_launchplane_action_recipe(
                             title=str(action_payload.get("headline", f"Re-ship current {instance_name} artifact")),
                             summary=str(action_payload.get("summary", "")),
                             tone=str(action_payload.get("tone", "neutral")),
@@ -2338,7 +2342,7 @@ def _render_harbor_preview_index_page_html(
                 <article class=\"lane-action-note\">
                   <div class=\"section-label\">{escape(instance_name)} lane</div>
                   <h3>{escape(str(action_payload.get('headline', 'No lane action available.')))}</h3>
-                  <p>{escape(str(action_payload.get('summary', 'Harbor does not have enough evidence for a typed lane action yet.')))}</p>
+                  <p>{escape(str(action_payload.get('summary', 'Launchplane does not have enough evidence for a typed lane action yet.')))}</p>
                   {detail_link_html}
                 </article>
                 """
@@ -2360,9 +2364,9 @@ def _render_harbor_preview_index_page_html(
 
     tenant_stage_html = ""
     roster_label = "Preview queue"
-    roster_title = "Harbor-native review lanes"
+    roster_title = "Launchplane-native review lanes"
     roster_summary = (
-        "GitHub remains the PR and event source. Harbor owns the preview inventory, lifecycle, routing, and operator triage surface."
+        "GitHub remains the PR and event source. Launchplane owns the preview inventory, lifecycle, routing, and operator triage surface."
     )
     if isinstance(tenant_payload, dict):
         tenant_label = escape(str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant")
@@ -2415,7 +2419,7 @@ def _render_harbor_preview_index_page_html(
                   <div class=\"section-label\">Preview enablement</div>
                   <h3>Why each PR does or does not have a preview</h3>
                 </div>
-                <p class=\"tenant-enablement-copy\">Candidates, label-driven requests, Harbor-driven requests, and retained history now stay visible before the deeper queue.</p>
+                <p class=\"tenant-enablement-copy\">Candidates, label-driven requests, Launchplane-driven requests, and retained history now stay visible before the deeper queue.</p>
               </div>
               <div class=\"enablement-list\">{''.join(render_enablement_row(item) for item in visible_enablement_rows)}</div>
               {overflow_note}
@@ -2461,13 +2465,13 @@ def _render_harbor_preview_index_page_html(
         tenant_stage_copy = (
             "Main feeds testing. Tested artifacts promote into prod. Pull requests become opt-in preview environments instead of shared dev branches."
             if has_environment_evidence
-            else "Harbor has preview request evidence for this tenant, but it has not recorded current testing or prod lane evidence yet. Preview enablement is the first meaningful control surface until long-lived lane evidence arrives."
+            else "Launchplane has preview request evidence for this tenant, but it has not recorded current testing or prod lane evidence yet. Preview enablement is the first meaningful control surface until long-lived lane evidence arrives."
         )
-        tenant_brief_label = "Promotion path" if has_environment_evidence else "Current Harbor focus"
+        tenant_brief_label = "Promotion path" if has_environment_evidence else "Current Launchplane focus"
         tenant_brief_copy = (
             escape(str(promotion_summary.get("summary", "No promotion evidence recorded yet.")))
             if has_environment_evidence
-            else "Preview request state is available even before Harbor has current long-lived lane evidence for this tenant."
+            else "Preview request state is available even before Launchplane has current long-lived lane evidence for this tenant."
         )
         tenant_stage_html = f"""
         <section class=\"tenant-stage\">
@@ -2489,11 +2493,11 @@ def _render_harbor_preview_index_page_html(
         roster_label = "Preview roster"
         roster_title = "Pull request previews"
         roster_summary = (
-            "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Harbor shows deeper preview detail."
+            "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Launchplane shows deeper preview detail."
         )
 
     body_html = f"""
-    <div data-harbor-overview>
+    <div data-launchplane-overview>
       {tenant_stage_html}
       <section class=\"index-mast\">
         <div class=\"index-mast-grid\">
@@ -2520,14 +2524,14 @@ def _render_harbor_preview_index_page_html(
         <h2>Preview control stance</h2>
         <ul>
           <li>Stable lanes such as local, testing, and prod stay separate from preview traffic.</li>
-          <li>One Harbor preview identity maps to one anchor PR and rotates generations behind a stable route.</li>
-          <li>Cleanup, retention, and companion-policy evidence should be visible here before Harbor grows write-side UI.</li>
+          <li>One Launchplane preview identity maps to one anchor PR and rotates generations behind a stable route.</li>
+          <li>Cleanup, retention, and companion-policy evidence should be visible here before Launchplane grows write-side UI.</li>
         </ul>
       </section>
     </div>
     <script>
     (() => {{
-      const root = document.querySelector('[data-harbor-overview]');
+      const root = document.querySelector('[data-launchplane-overview]');
       if (!root) {{
         return;
       }}
@@ -3574,8 +3578,8 @@ def _render_harbor_preview_index_page_html(
     }
     """
 
-    return _render_harbor_shell_document(
-        page_title=f"Harbor preview index{' · ' + context_name if context_name else ''}",
+    return _render_launchplane_shell_document(
+        page_title=f"Launchplane preview index{' · ' + context_name if context_name else ''}",
         context_name=context_name,
         active_nav="overview",
         body_class="index-layout",
@@ -3585,7 +3589,7 @@ def _render_harbor_preview_index_page_html(
     )
 
 
-def _render_harbor_preview_policy_page_html(
+def _render_launchplane_preview_policy_page_html(
     payload: dict[str, object],
     *,
     nav_links: dict[str, str] | None = None,
@@ -3618,7 +3622,7 @@ def _render_harbor_preview_policy_page_html(
     <section class=\"policy-section\">
       <div class=\"section-label\">Fleet footprint</div>
       <h2>Context distribution</h2>
-      <p>When Harbor is showing more than one tenant context, this page should still reveal how the current preview fleet is distributed across those contexts.</p>
+      <p>When Launchplane is showing more than one tenant context, this page should still reveal how the current preview fleet is distributed across those contexts.</p>
       <table>
         <thead><tr><th>Context</th><th>Total</th><th>Active</th><th>Retained</th></tr></thead>
         <tbody>{''.join(context_distribution_rows)}</tbody>
@@ -3627,10 +3631,10 @@ def _render_harbor_preview_policy_page_html(
     """
     eligible_context_rows = "".join(
         f"<tr><td>{escape(repo)}</td><td>{escape(context)}</td></tr>"
-        for repo, context in sorted(HARBOR_TENANT_ANCHOR_CONTEXTS.items())
+        for repo, context in sorted(LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS.items())
     )
     companion_items = "".join(
-        f"<li><code>{escape(repo)}</code></li>" for repo in HARBOR_ALLOWED_COMPANION_REPOS
+        f"<li><code>{escape(repo)}</code></li>" for repo in LAUNCHPLANE_ALLOWED_COMPANION_REPOS
     )
     preview_label_example = escape("<context>/<anchor-repo>/pr-<number>")
     preview_route_example = escape("/previews/<context>/<anchor-repo>/pr-<number>")
@@ -3638,8 +3642,8 @@ def _render_harbor_preview_policy_page_html(
     body_html = f"""
     <section class=\"policy-mast\">
       <div class=\"section-label\">Read-only policy</div>
-      <h2>How Harbor decides what becomes a preview</h2>
-      <p>This page exposes the current preview contract as operator evidence. GitHub supplies PR events and identity; Harbor decides eligibility, route shape, baseline input defaults, and preview retention behavior.</p>
+      <h2>How Launchplane decides what becomes a preview</h2>
+      <p>This page exposes the current preview contract as operator evidence. GitHub supplies PR events and identity; Launchplane decides eligibility, route shape, baseline input defaults, and preview retention behavior.</p>
     </section>
 
     <section class=\"policy-grid\">
@@ -3656,7 +3660,7 @@ def _render_harbor_preview_policy_page_html(
       <article class=\"policy-card\">
         <div class=\"section-label\">Enablement</div>
         <h3>Preview request gate</h3>
-        <p>Harbor can enable a PR preview from the anchor PR label <code>{escape(HARBOR_PREVIEW_ENABLE_LABEL)}</code> or from an explicit Harbor-side request. Once requested, manifest-changing PR events can refresh the same preview identity.</p>
+        <p>Launchplane can enable a PR preview from the anchor PR label <code>{escape(LAUNCHPLANE_PREVIEW_ENABLE_LABEL)}</code> or from an explicit Launchplane-side request. Once requested, manifest-changing PR events can refresh the same preview identity.</p>
       </article>
     </section>
 
@@ -3665,7 +3669,7 @@ def _render_harbor_preview_policy_page_html(
     <section class=\"policy-section\">
       <div class=\"section-label\">Anchor policy</div>
       <h2>Eligible anchor repositories</h2>
-      <p>Harbor only anchors preview identities from tenant repositories that resolve to a known control-plane context.</p>
+      <p>Launchplane only anchors preview identities from tenant repositories that resolve to a known control-plane context.</p>
       <table>
         <thead><tr><th>Anchor repo</th><th>Context</th></tr></thead>
         <tbody>{eligible_context_rows}</tbody>
@@ -3676,12 +3680,12 @@ def _render_harbor_preview_policy_page_html(
       <article class=\"policy-card\">
         <div class=\"section-label\">Preview metadata</div>
         <h3>PR body contract</h3>
-        <p>Harbor reads one fenced metadata block from the anchor PR body using info string <code>{escape(HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING)}</code>. The default baseline channel is <code>{escape(DEFAULT_HARBOR_BASELINE_CHANNEL)}</code>.</p>
+        <p>Launchplane reads one fenced metadata block from the anchor PR body using info string <code>{escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}</code>. The default baseline channel is <code>{escape(DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL)}</code>.</p>
       </article>
       <article class=\"policy-card\">
         <div class=\"section-label\">Companions</div>
         <h3>Allowlisted companion repos</h3>
-        <p>Companion refs are explicit, PR-based, and allowlisted. Harbor does not accept raw branch-name or SHA overrides here.</p>
+        <p>Companion refs are explicit, PR-based, and allowlisted. Launchplane does not accept raw branch-name or SHA overrides here.</p>
         <ul class=\"policy-list\">{companion_items or '<li>None</li>'}</ul>
       </article>
     </section>
@@ -3690,7 +3694,7 @@ def _render_harbor_preview_policy_page_html(
       <article class=\"policy-card\">
         <div class=\"section-label\">Identity</div>
         <h3>Preview naming</h3>
-        <p>Human-readable preview labels follow <code>{preview_label_example}</code>. Harbor keeps one stable preview identity per anchor PR and rotates generations behind it.</p>
+        <p>Human-readable preview labels follow <code>{preview_label_example}</code>. Launchplane keeps one stable preview identity per anchor PR and rotates generations behind it.</p>
       </article>
       <article class=\"policy-card\">
         <div class=\"section-label\">Routing</div>
@@ -3705,7 +3709,7 @@ def _render_harbor_preview_policy_page_html(
       <ul class=\"policy-list\">
         <li>Stable long-lived lanes such as local, testing, and prod remain distinct from preview traffic.</li>
         <li>Destroyed previews remain visible as retained evidence instead of disappearing from the operator surface.</li>
-        <li>Harbor treats preview records and generation records as canonical control-plane evidence, not transient UI state.</li>
+        <li>Launchplane treats preview records and generation records as canonical control-plane evidence, not transient UI state.</li>
       </ul>
     </section>
     """
@@ -3809,8 +3813,8 @@ def _render_harbor_preview_policy_page_html(
     }
     """
 
-    return _render_harbor_shell_document(
-        page_title=f"Harbor preview policy{' · ' + context_name if context_name else ''}",
+    return _render_launchplane_shell_document(
+        page_title=f"Launchplane preview policy{' · ' + context_name if context_name else ''}",
         context_name=context_name,
         active_nav="policy",
         body_class="index-layout",
@@ -3820,7 +3824,7 @@ def _render_harbor_preview_policy_page_html(
     )
 
 
-def _render_harbor_promotion_status_page_html(
+def _render_launchplane_promotion_status_page_html(
     payload: dict[str, object],
     *,
     nav_links: dict[str, str] | None = None,
@@ -3828,7 +3832,7 @@ def _render_harbor_promotion_status_page_html(
     context_name = str(payload.get("context", "")).strip()
     path_label = str(payload.get("path_label", "")).strip() or f"{context_name}/testing-to-prod"
     tone = str(payload.get("tone", "neutral")).strip() or "neutral"
-    headline = escape(str(payload.get("headline", "Harbor cannot describe the promotion path yet.")))
+    headline = escape(str(payload.get("headline", "Launchplane cannot describe the promotion path yet.")))
     summary = escape(str(payload.get("summary", "No promotion summary recorded.")))
     next_action = escape(str(payload.get("next_action", "No next action recorded.")))
     retained_evidence = escape(str(payload.get("retained_evidence", "No retained evidence summary recorded.")))
@@ -3872,9 +3876,9 @@ def _render_harbor_promotion_status_page_html(
     backup_gate_recipe = str(payload.get("backup_gate_recipe", "")).strip()
     if backup_gate_recipe:
         recipe_cards.append(
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Record prod backup gate",
-                summary="Persist the exact backup authorization Harbor expects before trying to promote into prod.",
+                summary="Persist the exact backup authorization Launchplane expects before trying to promote into prod.",
                 tone="warn",
                 script=backup_gate_recipe,
                 command_label="backup-gates write",
@@ -3884,9 +3888,9 @@ def _render_harbor_promotion_status_page_html(
     resolve_recipe = str(payload.get("resolve_recipe", "")).strip()
     if resolve_recipe:
         recipe_cards.append(
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Plan promotion request",
-                summary="Resolve Harbor's typed promotion request from the current tenant evidence before execution.",
+                summary="Resolve Launchplane's typed promotion request from the current tenant evidence before execution.",
                 tone=tone,
                 script=resolve_recipe,
                 command_label="promote resolve",
@@ -3896,7 +3900,7 @@ def _render_harbor_promotion_status_page_html(
     execute_recipe = str(payload.get("execute_recipe", "")).strip()
     if execute_recipe:
         recipe_cards.append(
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Execute promotion",
                 summary="Run the resolved promotion request once the typed payload looks correct.",
                 tone=tone,
@@ -3906,7 +3910,7 @@ def _render_harbor_promotion_status_page_html(
             )
         )
     recipe_html = "".join(recipe_cards) or (
-        '<p class="table-empty">Harbor is not exposing a promotion recipe for the current tenant state yet.</p>'
+        '<p class="table-empty">Launchplane is not exposing a promotion recipe for the current tenant state yet.</p>'
     )
 
     def render_live_lane_card(title: str, lane_payload: dict[str, object] | None) -> str:
@@ -3915,7 +3919,7 @@ def _render_harbor_promotion_status_page_html(
             <article class=\"promotion-lane-card promotion-lane-card-empty\">
               <div class=\"section-label\">{escape(title)}</div>
               <h3>No lane evidence</h3>
-              <p>Harbor has not recorded current live inventory for this lane yet.</p>
+              <p>Launchplane has not recorded current live inventory for this lane yet.</p>
             </article>
             """
         return f"""
@@ -4002,7 +4006,7 @@ def _render_harbor_promotion_status_page_html(
           <div><dt>Testing source ref</dt><dd><code>{source_git_ref}</code></dd></div>
           <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
           <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
-          <div><dt>Harbor retains</dt><dd>{retained_evidence}</dd></div>
+          <div><dt>Launchplane retains</dt><dd>{retained_evidence}</dd></div>
         </dl>
       </article>
       <div class=\"promotion-lane-grid\">
@@ -4013,13 +4017,13 @@ def _render_harbor_promotion_status_page_html(
 
     <section class=\"promotion-detail-section\">
       <div class=\"section-label\">Evidence checks</div>
-      <h3>What Harbor is using to gate promotion</h3>
+      <h3>What Launchplane is using to gate promotion</h3>
       <div class=\"promotion-detail-check-grid\">{evidence_html}</div>
     </section>
 
     <section class=\"promotion-detail-section\">
       <div class=\"section-label\">Typed actions</div>
-      <h3>What Harbor can do next</h3>
+      <h3>What Launchplane can do next</h3>
       <div class=\"promotion-detail-recipes\">{recipe_html}</div>
     </section>
 
@@ -4239,8 +4243,8 @@ def _render_harbor_promotion_status_page_html(
     }
     """
 
-    return _render_harbor_shell_document(
-        page_title=f"Harbor promotion detail · {path_label}",
+    return _render_launchplane_shell_document(
+        page_title=f"Launchplane promotion detail · {path_label}",
         context_name=context_name,
         active_nav="detail",
         body_class="detail-layout",
@@ -4250,7 +4254,7 @@ def _render_harbor_promotion_status_page_html(
     )
 
 
-def _render_harbor_environment_status_page_html(
+def _render_launchplane_environment_status_page_html(
     payload: dict[str, object],
     *,
     action_payload: dict[str, object] | None = None,
@@ -4282,9 +4286,9 @@ def _render_harbor_environment_status_page_html(
 
     lane_title = f"{context_name}/{instance_name}" if context_name else instance_name
     role_summary = (
-        "Testing carries the integration artifact Harbor would promote next."
+        "Testing carries the integration artifact Launchplane would promote next."
         if instance_name == "testing"
-        else "Prod is the customer-facing lane Harbor protects and promotes into deliberately."
+        else "Prod is the customer-facing lane Launchplane protects and promotes into deliberately."
     )
     live_tone = _status_tone(str(live_payload.get("destination_health_status", "pending") or "pending"))
     deploy_status = str(live_payload.get("deploy_status", "pending") or "pending")
@@ -4310,7 +4314,7 @@ def _render_harbor_environment_status_page_html(
         <article class=\"detail-note detail-note-muted\">
           <div class=\"section-label\">Attached promotion</div>
           <h3>No live promotion record is attached to this lane inventory.</h3>
-          <p>Harbor can still show recent promotion history below, but the current environment inventory does not point at one canonical promotion record yet.</p>
+          <p>Launchplane can still show recent promotion history below, but the current environment inventory does not point at one canonical promotion record yet.</p>
         </article>
         """
 
@@ -4325,7 +4329,7 @@ def _render_harbor_environment_status_page_html(
         backup_gate_html = f"""
         <article class=\"detail-note\">
           <div class=\"section-label\">Authorized backup gate</div>
-          <h3>Harbor has a recorded backup gate for this lane.</h3>
+          <h3>Launchplane has a recorded backup gate for this lane.</h3>
           <dl class=\"detail-meta\">
             <div><dt>Record</dt><dd><code>{escape(str(authorized_backup_gate.get('record_id', '')) or 'Unavailable')}</code></dd></div>
             <div><dt>Status</dt><dd>{escape(str(authorized_backup_gate.get('status', 'unknown')) or 'unknown')}</dd></div>
@@ -4340,7 +4344,7 @@ def _render_harbor_environment_status_page_html(
         <article class=\"detail-note detail-note-muted\">
           <div class=\"section-label\">Authorized backup gate</div>
           <h3>No authorized backup gate is attached to this lane yet.</h3>
-          <p>This is normal for `testing` and is still a useful warning for `prod` when Harbor cannot prove the current lane from attached backup evidence alone.</p>
+          <p>This is normal for `testing` and is still a useful warning for `prod` when Launchplane cannot prove the current lane from attached backup evidence alone.</p>
         </article>
         """
 
@@ -4348,25 +4352,25 @@ def _render_harbor_environment_status_page_html(
     <article class=\"detail-note detail-note-muted\">
       <div class=\"section-label\">Lane action</div>
       <h3>No typed lane action is available.</h3>
-      <p>Harbor does not have enough environment evidence to build a re-ship recipe for this lane yet.</p>
+      <p>Launchplane does not have enough environment evidence to build a re-ship recipe for this lane yet.</p>
     </article>
     """
     if isinstance(action_payload, dict):
         if action_status == "actionable":
-            action_html = _render_harbor_action_recipe(
+            action_html = _render_launchplane_action_recipe(
                 title=str(action_payload.get("headline", f"Re-ship current {instance_name} artifact")),
                 summary=str(action_payload.get("summary", "")),
                 tone=str(action_payload.get("tone", "neutral")),
                 script=str(action_payload.get("recipe", "")),
                 command_label="ship resolve -> ship execute",
-                recipe_id=f"environment-detail-{_harbor_action_slug(lane_title)}-ship",
+                recipe_id=f"environment-detail-{_launchplane_action_slug(lane_title)}-ship",
             )
         else:
             action_html = f"""
             <article class=\"detail-note detail-note-muted\">
               <div class=\"section-label\">Lane action</div>
               <h3>{escape(str(action_payload.get('headline', 'No typed lane action is available.')))}</h3>
-              <p>{escape(str(action_payload.get('summary', 'Harbor does not have enough environment evidence to build a re-ship recipe for this lane yet.')))}</p>
+              <p>{escape(str(action_payload.get('summary', 'Launchplane does not have enough environment evidence to build a re-ship recipe for this lane yet.')))}</p>
             </article>
             """
 
@@ -4416,7 +4420,7 @@ def _render_harbor_environment_status_page_html(
             f"with deploy {escape(str(latest_deployment.get('deploy_status', 'unknown')) or 'unknown')} and health "
             f"{escape(str(latest_deployment.get('destination_health_status', 'unknown')) or 'unknown')}."
         )
-    latest_promotion_summary = "Harbor has not recorded a recent promotion into this lane yet."
+    latest_promotion_summary = "Launchplane has not recorded a recent promotion into this lane yet."
     if latest_promotion is not None:
         latest_promotion_summary = (
             f"Latest promotion moved <code>{escape(str(latest_promotion.get('artifact_id', '')) or 'Unavailable')}</code> "
@@ -4454,7 +4458,7 @@ def _render_harbor_environment_status_page_html(
       </article>
       <article class=\"detail-card\">
         <div class=\"section-label\">Recent changes</div>
-        <h3>What Harbor saw last</h3>
+        <h3>What Launchplane saw last</h3>
         <p>{latest_promotion_summary}</p>
         <p class=\"detail-secondary\">{latest_deployment_summary}</p>
       </article>
@@ -4704,8 +4708,8 @@ def _render_harbor_environment_status_page_html(
     }
     """
 
-    return _render_harbor_shell_document(
-        page_title=f"Harbor environment detail · {lane_title}",
+    return _render_launchplane_shell_document(
+        page_title=f"Launchplane environment detail · {lane_title}",
         context_name=context_name,
         active_nav="detail",
         body_class="detail-layout",
@@ -4715,7 +4719,7 @@ def _render_harbor_environment_status_page_html(
     )
 
 
-def _render_harbor_preview_status_page_html(
+def _render_launchplane_preview_status_page_html(
     payload: dict[str, object],
     *,
     nav_links: dict[str, str] | None = None,
@@ -4740,14 +4744,14 @@ def _render_harbor_preview_status_page_html(
         payload.get("latest_generation") if isinstance(payload.get("latest_generation"), dict) else {}
     )
 
-    preview_label = escape(str(preview.get("preview_label", "Harbor preview")))
+    preview_label = escape(str(preview.get("preview_label", "Launchplane preview")))
     context_name = escape(str(preview.get("context", "")))
     anchor_repo_name = escape(str(preview.get("anchor_repo", "")))
     anchor_pr_number = escape(str(preview.get("anchor_pr_number", "")))
     canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
     anchor_pr_url = escape(str(links.get("anchor_pr_url", "")))
     preview_state = str(preview.get("state", "unknown"))
-    status_summary = escape(str(health_summary.get("status_summary", "No Harbor preview summary available.")))
+    status_summary = escape(str(health_summary.get("status_summary", "No Launchplane preview summary available.")))
     next_action = escape(str(lifecycle_summary.get("next_action", "")))
     artifact_id = escape(str(trust_summary.get("artifact_id", "")))
     manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
@@ -4832,7 +4836,7 @@ def _render_harbor_preview_status_page_html(
         banner_tone = "neutral"
     elif _generation_in_progress(latest_generation_state):
         banner_label = "REPLACEMENT IN FLIGHT" if serving_generation_id else "FIRST GENERATION IN FLIGHT"
-        banner_note = "Current preview still serving" if serving_generation_id else "Harbor is preparing the first preview"
+        banner_note = "Current preview still serving" if serving_generation_id else "Launchplane is preparing the first preview"
         banner_tone = "warn"
     elif no_serving_preview:
         banner_label = "AVAILABILITY GAP"
@@ -4856,7 +4860,7 @@ def _render_harbor_preview_status_page_html(
 
     if preview_state.strip().lower() == "destroyed":
         callout_eyebrow = "Historical evidence"
-        callout_title = "This preview has already been destroyed. Harbor is retaining the record as evidence."
+        callout_title = "This preview has already been destroyed. Launchplane is retaining the record as evidence."
         callout_summary = status_summary
         callout_items = [
             ("Destroyed at", destroyed_at or "Unavailable"),
@@ -4866,7 +4870,7 @@ def _render_harbor_preview_status_page_html(
         callout_tone = "neutral"
     elif preview_state.strip().lower() == "paused":
         callout_eyebrow = "Paused state"
-        callout_title = "This preview is intentionally paused. Harbor is holding the current review evidence in place."
+        callout_title = "This preview is intentionally paused. Launchplane is holding the current review evidence in place."
         callout_summary = status_summary
         callout_items = [
             ("Paused at", paused_at or "Unavailable"),
@@ -4874,12 +4878,12 @@ def _render_harbor_preview_status_page_html(
                 "Serving now",
                 f"<code>{serving_generation_id or latest_generation_id or 'Unavailable'}</code>",
             ),
-            ("Resume behavior", "Blocked until Harbor resumes the preview."),
+            ("Resume behavior", "Blocked until Launchplane resumes the preview."),
         ]
         callout_tone = "warn"
     elif preview_state.strip().lower() == "teardown_pending":
         callout_eyebrow = "Scheduled cleanup"
-        callout_title = "This preview is queued for teardown. Harbor is keeping the current runtime available until cleanup completes."
+        callout_title = "This preview is queued for teardown. Launchplane is keeping the current runtime available until cleanup completes."
         callout_summary = summary_text
         callout_items = [
             ("Destroy after", destroy_after or "Unavailable"),
@@ -4892,25 +4896,25 @@ def _render_harbor_preview_status_page_html(
         callout_tone = "warn"
     elif not latest_generation:
         callout_eyebrow = "Startup pending"
-        callout_title = "Harbor has created this preview record, but the first generation has not been requested yet."
+        callout_title = "Launchplane has created this preview record, but the first generation has not been requested yet."
         callout_summary = summary_text
         callout_items = [
             ("Preview route", canonical_url or "Unavailable"),
             ("Generation status", "Not created yet"),
             (
                 "What happens next",
-                "Harbor needs the first generation request before this preview becomes live.",
+                "Launchplane needs the first generation request before this preview becomes live.",
             ),
         ]
         callout_tone = "neutral"
     elif _generation_in_progress(latest_generation_state):
         callout_eyebrow = "Replacement in flight"
         callout_title = (
-            "A replacement generation is in progress. Harbor is still serving the current preview."
+            "A replacement generation is in progress. Launchplane is still serving the current preview."
             if serving_generation_id
-            else "The first preview generation is in progress. Harbor is preparing this preview now."
+            else "The first preview generation is in progress. Launchplane is preparing this preview now."
         )
-        callout_summary = summary_text or "Harbor is advancing the latest generation toward a reviewable preview."
+        callout_summary = summary_text or "Launchplane is advancing the latest generation toward a reviewable preview."
         callout_items = [
             ("Current stage", escape(_status_label(latest_generation_state)) or "Unavailable"),
             (
@@ -4922,7 +4926,7 @@ def _render_harbor_preview_status_page_html(
         callout_tone = "warn"
     elif no_serving_preview:
         callout_eyebrow = "Availability gap"
-        callout_title = "Harbor has generation evidence for this preview, but nothing is serving yet."
+        callout_title = "Launchplane has generation evidence for this preview, but nothing is serving yet."
         callout_summary = summary_text
         callout_items = [
             ("Latest generation", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
@@ -4932,7 +4936,7 @@ def _render_harbor_preview_status_page_html(
         callout_tone = "bad"
     elif replacement_failed:
         callout_eyebrow = "Replacement status"
-        callout_title = "Latest replacement failed. Harbor is still serving the older preview."
+        callout_title = "Latest replacement failed. Launchplane is still serving the older preview."
         callout_summary = status_summary
         callout_items = [
             ("Serving now", f"<code>{serving_generation_id or 'Unavailable'}</code>"),
@@ -4941,12 +4945,12 @@ def _render_harbor_preview_status_page_html(
         ]
         callout_detail = (
             latest_failure_summary
-            or "Harbor recorded a failed replacement without an additional summary."
+            or "Launchplane recorded a failed replacement without an additional summary."
         )
         callout_tone = "bad"
     elif healthy_live_preview:
         callout_eyebrow = "Review is live"
-        callout_title = "This preview is live at the stable Harbor route and serving the latest requested generation."
+        callout_title = "This preview is live at the stable Launchplane route and serving the latest requested generation."
         callout_summary = summary_text
         callout_items = [
             ("Serving generation", f"<code>{serving_generation_id or 'Unavailable'}</code>"),
@@ -5064,7 +5068,7 @@ def _render_harbor_preview_status_page_html(
     if identity_bits:
         identity_html = f'<p class="identity-line">{"<span>&bull;</span>".join(identity_bits)}</p>'
 
-    action_slug = _harbor_action_slug(preview_label)
+    action_slug = _launchplane_action_slug(preview_label)
     raw_anchor_head_sha = str(input_summary.get("anchor", {}).get("head_sha", "")).strip() if isinstance(input_summary.get("anchor"), dict) else ""
     raw_baseline_release_tuple_id = str(input_summary.get("baseline_release_tuple_id", "")).strip()
     raw_source_map = [item for item in source_map if isinstance(item, dict)]
@@ -5087,15 +5091,15 @@ def _render_harbor_preview_status_page_html(
             "destroyed_at": "<utc-timestamp>",
             "destroy_reason": "operator_requested",
         }
-        destroy_script = _build_harbor_action_script(
+        destroy_script = _build_launchplane_action_script(
             command_name="destroy-preview",
-            file_payloads=(("ACTION_FILE", f"/tmp/harbor-{action_slug}-destroy-preview.json", destroy_payload),),
+            file_payloads=(("ACTION_FILE", f"/tmp/launchplane-{action_slug}-destroy-preview.json", destroy_payload),),
             command_args=("--input-file", '"$ACTION_FILE"'),
         )
         operator_actions.append(
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Destroy preview",
-                summary="Tear down this preview explicitly while retaining Harbor evidence for the record.",
+                summary="Tear down this preview explicitly while retaining Launchplane evidence for the record.",
                 tone="bad",
                 script=destroy_script,
                 command_label="destroy-preview",
@@ -5130,11 +5134,11 @@ def _render_harbor_preview_status_page_html(
             "verify_status": "pending",
             "overall_health_status": "pending",
         }
-        request_script = _build_harbor_action_script(
+        request_script = _build_launchplane_action_script(
             command_name="request-generation",
             file_payloads=(
-                ("PREVIEW_FILE", f"/tmp/harbor-{action_slug}-preview.json", request_generation_payload),
-                ("GENERATION_FILE", f"/tmp/harbor-{action_slug}-generation.json", generation_request_payload),
+                ("PREVIEW_FILE", f"/tmp/launchplane-{action_slug}-preview.json", request_generation_payload),
+                ("GENERATION_FILE", f"/tmp/launchplane-{action_slug}-generation.json", generation_request_payload),
             ),
             command_args=(
                 "--preview-input-file",
@@ -5145,9 +5149,9 @@ def _render_harbor_preview_status_page_html(
         )
         operator_actions.insert(
             0,
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Request replacement generation",
-                summary="Queue a fresh Harbor generation for this preview using the current record as the starting template.",
+                summary="Queue a fresh Launchplane generation for this preview using the current record as the starting template.",
                 tone="warn",
                 script=request_script,
                 command_label="request-generation",
@@ -5177,9 +5181,9 @@ def _render_harbor_preview_status_page_html(
             "verify_status": "pass",
             "overall_health_status": "pass",
         }
-        ready_script = _build_harbor_action_script(
+        ready_script = _build_launchplane_action_script(
             command_name="mark-generation-ready",
-            file_payloads=(("ACTION_FILE", f"/tmp/harbor-{action_slug}-mark-ready.json", ready_payload),),
+            file_payloads=(("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-ready.json", ready_payload),),
             command_args=("--input-file", '"$ACTION_FILE"'),
         )
         failed_payload = {
@@ -5206,14 +5210,14 @@ def _render_harbor_preview_status_page_html(
             "failure_stage": latest_failure_stage or "<failure-stage>",
             "failure_summary": latest_failure_summary or "<failure-summary>",
         }
-        failed_script = _build_harbor_action_script(
+        failed_script = _build_launchplane_action_script(
             command_name="mark-generation-failed",
-            file_payloads=(("ACTION_FILE", f"/tmp/harbor-{action_slug}-mark-failed.json", failed_payload),),
+            file_payloads=(("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-failed.json", failed_payload),),
             command_args=("--input-file", '"$ACTION_FILE"'),
         )
         operator_actions.insert(
             0,
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Mark latest generation failed",
                 summary="Record a failed in-flight generation while preserving any still-serving preview evidence.",
                 tone="bad",
@@ -5224,9 +5228,9 @@ def _render_harbor_preview_status_page_html(
         )
         operator_actions.insert(
             0,
-            _render_harbor_action_recipe(
+            _render_launchplane_action_recipe(
                 title="Mark latest generation ready",
-                summary="Advance the current in-flight generation into Harbor's ready/serving path once deploy and verify evidence are complete.",
+                summary="Advance the current in-flight generation into Launchplane's ready/serving path once deploy and verify evidence are complete.",
                 tone="good",
                 script=ready_script,
                 command_label="mark-generation-ready",
@@ -5239,8 +5243,8 @@ def _render_harbor_preview_status_page_html(
     operator_actions_section_html = f"""
     <section class=\"preview-detail-section\" id=\"operator-actions\">
       <div class=\"section-label\">Operator actions</div>
-      <h2>Write-side Harbor recipes</h2>
-      <p>Harbor still renders as a static operator surface here, so each action is shown as the exact shell recipe for this preview identity.</p>
+      <h2>Write-side Launchplane recipes</h2>
+      <p>Launchplane still renders as a static operator surface here, so each action is shown as the exact shell recipe for this preview identity.</p>
       <div class=\"action-stack\">{operator_actions_html}</div>
     </section>
     """
@@ -5277,7 +5281,7 @@ def _render_harbor_preview_status_page_html(
     <section class=\"preview-detail-section\">
       <div class=\"section-label\">Exact inputs</div>
       <h2>Serving manifest evidence</h2>
-      <p>Harbor keeps the exact repo-to-SHA map visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
+      <p>Launchplane keeps the exact repo-to-SHA map visible so reviewers can answer what code is running here without hidden branch assumptions.</p>
       <table>
         <thead><tr><th>Repo</th><th>SHA</th><th>Selection</th></tr></thead>
         <tbody>{source_map_rows or '<tr><td colspan="3">No source map recorded.</td></tr>'}</tbody>
@@ -5667,8 +5671,8 @@ def _render_harbor_preview_status_page_html(
     }
     """
 
-    return _render_harbor_shell_document(
-        page_title=f"{preview_label} · Harbor status",
+    return _render_launchplane_shell_document(
+        page_title=f"{preview_label} · Launchplane status",
         context_name=str(preview.get("context", "")),
         active_nav="detail",
         body_class="detail-layout",
@@ -5745,9 +5749,9 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
 
 def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: int) -> None:
     if not health_urls:
-        raise click.ClickException("At least one Harbor service health URL is required.")
+        raise click.ClickException("At least one Launchplane service health URL is required.")
     if timeout_seconds <= 0:
-        raise click.ClickException("Harbor service health timeout must be greater than zero seconds.")
+        raise click.ClickException("Launchplane service health timeout must be greater than zero seconds.")
     healthcheck_errors: list[str] = []
     for healthcheck_url in health_urls:
         try:
@@ -5756,20 +5760,32 @@ def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: i
         except click.ClickException as error:
             healthcheck_errors.append(str(error))
     raise click.ClickException(
-        "Harbor service health verification failed for all configured URLs:\n"
+        "Launchplane service health verification failed for all configured URLs:\n"
         + "\n".join(healthcheck_errors)
     )
 
 
-def _harbor_service_env_key_present(*, env_map: dict[str, str], env_key: str) -> bool:
+def _launchplane_service_env_key_present(*, env_map: dict[str, str], env_key: str) -> bool:
     return bool(env_map.get(env_key, "").strip())
 
 
-def _harbor_service_any_env_keys_present(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> bool:
-    return any(_harbor_service_env_key_present(env_map=env_map, env_key=env_key) for env_key in env_keys)
+def _launchplane_service_env_alias_value(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> str:
+    for env_key in env_keys:
+        configured_value = str(env_map.get(env_key, "")).strip()
+        if configured_value:
+            return configured_value
+    return ""
 
 
-def _build_harbor_service_target_preflight(
+def _launchplane_service_env_alias_present(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> bool:
+    return bool(_launchplane_service_env_alias_value(env_map=env_map, env_keys=env_keys))
+
+
+def _launchplane_service_any_env_keys_present(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> bool:
+    return any(_launchplane_service_env_key_present(env_map=env_map, env_key=env_key) for env_key in env_keys)
+
+
+def _build_launchplane_service_target_preflight(
     *,
     target_type: str,
     target_id: str,
@@ -5782,7 +5798,7 @@ def _build_harbor_service_target_preflight(
     custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
     compose_path = str(target_payload.get("composePath") or "").strip()
     compose_status = str(target_payload.get("composeStatus") or "").strip()
-    database_url = str(env_map.get("HARBOR_DATABASE_URL") or "").strip()
+    database_url = _launchplane_service_env_alias_value(env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS)
     database_scheme = ""
     database_host = ""
     if database_url:
@@ -5800,31 +5816,31 @@ def _build_harbor_service_target_preflight(
         "database_url_present": bool(database_url),
         "database_scheme": database_scheme,
         "database_host": database_host,
-        "master_encryption_key_present": _harbor_service_env_key_present(
+        "master_encryption_key_present": _launchplane_service_env_alias_present(
             env_map=env_map,
-            env_key="HARBOR_MASTER_ENCRYPTION_KEY",
+            env_keys=_MASTER_ENCRYPTION_KEY_ENV_KEYS,
         ),
-        "dokploy_host_present": _harbor_service_env_key_present(
+        "dokploy_host_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key="DOKPLOY_HOST",
         ),
-        "dokploy_token_present": _harbor_service_env_key_present(
+        "dokploy_token_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key="DOKPLOY_TOKEN",
         ),
-        "policy_configured": _harbor_service_any_env_keys_present(
+        "policy_configured": _launchplane_service_any_env_keys_present(
             env_map=env_map,
-            env_keys=_HARBOR_SERVICE_POLICY_ENV_KEYS,
+            env_keys=_LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS,
         ),
-        "target_ids_configured": _harbor_service_any_env_keys_present(
+        "target_ids_configured": _launchplane_service_any_env_keys_present(
             env_map=env_map,
-            env_keys=_HARBOR_SERVICE_TARGET_IDS_ENV_KEYS,
+            env_keys=_LAUNCHPLANE_SERVICE_TARGET_IDS_ENV_KEYS,
         ),
-        "runtime_environments_configured": _harbor_service_any_env_keys_present(
+        "runtime_environments_configured": _launchplane_service_any_env_keys_present(
             env_map=env_map,
-            env_keys=_HARBOR_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS,
+            env_keys=_LAUNCHPLANE_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS,
         ),
-        "docker_image_reference_present": _harbor_service_env_key_present(
+        "docker_image_reference_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key=ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
         ),
@@ -5843,34 +5859,38 @@ def _build_harbor_service_target_preflight(
             "Dokploy target uses an SSH git remote but has no customGitSSHKeyId configured."
         )
     if not runtime_contract["database_url_present"]:
-        blockers.append("Harbor service target is missing HARBOR_DATABASE_URL.")
+        blockers.append("Launchplane service target is missing LAUNCHPLANE_DATABASE_URL.")
     elif not database_scheme.startswith("postgresql"):
-        blockers.append("Harbor service target HARBOR_DATABASE_URL is not a PostgreSQL URL.")
+        blockers.append("Launchplane service target database URL is not a PostgreSQL URL.")
     elif not database_host:
-        blockers.append("Harbor service target HARBOR_DATABASE_URL is missing a database host.")
+        blockers.append("Launchplane service target database URL is missing a database host.")
 
-    for env_key in _HARBOR_SERVICE_REQUIRED_ENV_KEYS[1:]:
-        if not _harbor_service_env_key_present(env_map=env_map, env_key=env_key):
-            blockers.append(f"Harbor service target is missing {env_key}.")
+    if not runtime_contract["master_encryption_key_present"]:
+        blockers.append(
+            "Launchplane service target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
+        )
+    for env_key in _LAUNCHPLANE_SERVICE_REQUIRED_ENV_KEYS[2:]:
+        if not _launchplane_service_env_key_present(env_map=env_map, env_key=env_key):
+            blockers.append(f"Launchplane service target is missing {env_key}.")
 
     if not runtime_contract["policy_configured"]:
-        warnings.append(
-            "Harbor service target does not declare HARBOR_POLICY_* or HARBOR_POLICY_FILE in target env. "
-            "Startup will fall back to the repo example policy unless Dokploy mounts a real policy file separately."
+        blockers.append(
+            "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE. "
+            "Startup fails closed without an explicit policy input."
         )
     if not runtime_contract["target_ids_configured"]:
         warnings.append(
-            "Harbor service target does not declare Dokploy target-id catalog env/file inputs. "
+            "Launchplane service target does not declare Dokploy target-id catalog env/file inputs. "
             "Live route resolution depends on a separate mounted file or a future env update."
         )
     if not runtime_contract["runtime_environments_configured"]:
         warnings.append(
-            "Harbor service target does not declare runtime-environment catalog env/file inputs. "
+            "Launchplane service target does not declare runtime-environment catalog env/file inputs. "
             "Environment resolution depends on a separate mounted file or a future env update."
         )
     if not runtime_contract["docker_image_reference_present"]:
         warnings.append(
-            "Harbor service target does not currently define DOCKER_IMAGE_REFERENCE. "
+            "Launchplane service target does not currently define DOCKER_IMAGE_REFERENCE. "
             "The first deploy cannot capture a previous image reference for rollback."
         )
     normalized_compose_status = compose_status.lower()
@@ -5897,7 +5917,7 @@ def _build_harbor_service_target_preflight(
     }
 
 
-def _inspect_harbor_service_dokploy_target(
+def _inspect_launchplane_service_dokploy_target(
     *,
     host: str,
     token: str,
@@ -5910,7 +5930,7 @@ def _inspect_harbor_service_dokploy_target(
         target_type=target_type,
         target_id=target_id,
     )
-    preflight_payload = _build_harbor_service_target_preflight(
+    preflight_payload = _build_launchplane_service_target_preflight(
         target_type=target_type,
         target_id=target_id,
         target_payload=target_payload,
@@ -5918,12 +5938,12 @@ def _inspect_harbor_service_dokploy_target(
     return target_payload, preflight_payload
 
 
-def _harbor_service_target_preflight_error_message(*, preflight_payload: dict[str, object]) -> str:
+def _launchplane_service_target_preflight_error_message(*, preflight_payload: dict[str, object]) -> str:
     blockers = preflight_payload.get("blockers")
     if not isinstance(blockers, list) or not blockers:
-        return "Harbor service Dokploy target preflight failed."
+        return "Launchplane service Dokploy target preflight failed."
     rendered_blockers = "\n".join(f"- {str(blocker)}" for blocker in blockers)
-    return f"Harbor service Dokploy target preflight failed:\n{rendered_blockers}"
+    return f"Launchplane service Dokploy target preflight failed:\n{rendered_blockers}"
 
 
 def _apply_dokploy_image_reference(
@@ -5937,7 +5957,7 @@ def _apply_dokploy_image_reference(
 ) -> dict[str, object]:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
-        raise click.ClickException("Harbor service deploy requires a non-empty image reference.")
+        raise click.ClickException("Launchplane service deploy requires a non-empty image reference.")
     resolved_target_payload = target_payload or control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -6016,7 +6036,7 @@ def _trigger_and_wait_for_dokploy_target_deploy(
     no_cache: bool,
 ) -> dict[str, str]:
     if deploy_timeout_seconds <= 0:
-        raise click.ClickException("Harbor service deploy timeout must be greater than zero seconds.")
+        raise click.ClickException("Launchplane service deploy timeout must be greater than zero seconds.")
     latest_before = control_plane_dokploy.latest_deployment_for_target(
         host=host,
         token=token,
@@ -7108,7 +7128,7 @@ def _read_source_release_tuple_for_promotion_record(
         )
     except FileNotFoundError:
         raise click.ClickException(
-            "Promotion requires a current source release tuple before Harbor can mint the destination tuple. "
+            "Promotion requires a current source release tuple before Launchplane can mint the destination tuple. "
             f"Write or mint {promotion_record.context}/{promotion_record.from_instance} first."
         ) from None
     return control_plane_release_tuples.require_source_release_tuple_for_promotion(
@@ -7338,17 +7358,17 @@ def artifacts() -> None:
 
 @main.group()
 def service() -> None:
-    """Harbor service commands."""
+    """Launchplane service commands."""
 
 
 @main.group()
 def storage() -> None:
-    """Harbor storage commands."""
+    """Launchplane storage commands."""
 
 
 @main.group()
 def secrets() -> None:
-    """Harbor managed secret commands."""
+    """Launchplane managed secret commands."""
 
 
 @storage.command("import-core-records")
@@ -7357,9 +7377,9 @@ def secrets() -> None:
 )
 @click.option(
     "--database-url",
-    envvar="HARBOR_DATABASE_URL",
+    envvar=_DATABASE_URL_ENV_KEYS,
     required=True,
-    help="Postgres connection string for Harbor shared-service core records.",
+    help="Postgres connection string for Launchplane shared-service core records.",
 )
 def storage_import_core_records(state_dir: Path, database_url: str) -> None:
     filesystem_store = FilesystemRecordStore(state_dir=state_dir)
@@ -7372,15 +7392,15 @@ def storage_import_core_records(state_dir: Path, database_url: str) -> None:
 @secrets.command("import-bootstrap")
 @click.option(
     "--database-url",
-    envvar="HARBOR_DATABASE_URL",
+    envvar=_DATABASE_URL_ENV_KEYS,
     required=True,
-    help="Postgres connection string for Harbor managed secrets.",
+    help="Postgres connection string for Launchplane managed secrets.",
 )
 @click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path),
     default=None,
-    help="Optional Harbor repo root to scan for existing bootstrap secret sources.",
+    help="Optional Launchplane repo root to scan for existing bootstrap secret sources.",
 )
 @click.option("--actor", default="bootstrap", show_default=True)
 def secrets_import_bootstrap(database_url: str, control_plane_root: Path | None, actor: str) -> None:
@@ -7400,9 +7420,9 @@ def secrets_import_bootstrap(database_url: str, control_plane_root: Path | None,
 @secrets.command("put")
 @click.option(
     "--database-url",
-    envvar="HARBOR_DATABASE_URL",
+    envvar=_DATABASE_URL_ENV_KEYS,
     required=True,
-    help="Postgres connection string for Harbor managed secrets.",
+    help="Postgres connection string for Launchplane managed secrets.",
 )
 @click.option("--scope", type=click.Choice(["global", "context", "context_instance"]), required=True)
 @click.option("--integration", required=True)
@@ -7449,9 +7469,9 @@ def secrets_put(
 @secrets.command("list")
 @click.option(
     "--database-url",
-    envvar="HARBOR_DATABASE_URL",
+    envvar=_DATABASE_URL_ENV_KEYS,
     required=True,
-    help="Postgres connection string for Harbor managed secrets.",
+    help="Postgres connection string for Launchplane managed secrets.",
 )
 @click.option("--integration", default="")
 @click.option("--context", "context_name", default="")
@@ -7473,9 +7493,9 @@ def secrets_list(database_url: str, integration: str, context_name: str, instanc
 @secrets.command("show")
 @click.option(
     "--database-url",
-    envvar="HARBOR_DATABASE_URL",
+    envvar=_DATABASE_URL_ENV_KEYS,
     required=True,
-    help="Postgres connection string for Harbor managed secrets.",
+    help="Postgres connection string for Launchplane managed secrets.",
 )
 @click.option("--secret-id", required=True)
 def secrets_show(database_url: str, secret_id: str) -> None:
@@ -7496,15 +7516,15 @@ def secrets_show(database_url: str, secret_id: str) -> None:
 @click.option("--port", type=int, default=8080, show_default=True)
 @click.option(
     "--audience",
-    default="harbor.shinycomputers.com",
+    default="launchplane.shinycomputers.com",
     show_default=True,
-    help="Expected GitHub OIDC audience for Harbor service tokens.",
+    help="Expected GitHub OIDC audience for Launchplane service tokens.",
 )
 @click.option(
     "--database-url",
-    envvar="HARBOR_DATABASE_URL",
+    envvar=_DATABASE_URL_ENV_KEYS,
     default=None,
-    help="Postgres connection string for Harbor shared-service core records.",
+    help="Postgres connection string for Launchplane shared-service core records.",
 )
 def service_serve(
     state_dir: Path,
@@ -7514,7 +7534,7 @@ def service_serve(
     audience: str,
     database_url: str | None,
 ) -> None:
-    serve_harbor_service(
+    serve_launchplane_service(
         state_dir=state_dir,
         policy_file=policy_file,
         host=host,
@@ -7528,15 +7548,15 @@ def service_serve(
 @click.option(
     "--target-type",
     type=click.Choice(["compose", "application"]),
-    envvar="HARBOR_DOKPLOY_TARGET_TYPE",
+    envvar=_SERVICE_TARGET_TYPE_ENV_KEYS,
     required=True,
-    help="Dokploy target type for the live Harbor service.",
+    help="Dokploy target type for the live Launchplane service.",
 )
 @click.option(
     "--target-id",
-    envvar="HARBOR_DOKPLOY_TARGET_ID",
+    envvar=_SERVICE_TARGET_ID_ENV_KEYS,
     required=True,
-    help="Dokploy target id for the live Harbor service.",
+    help="Dokploy target id for the live Launchplane service.",
 )
 @click.option("--image-reference", required=True, help="Immutable image reference to deploy, usually repo@sha256:...")
 @click.option(
@@ -7544,7 +7564,7 @@ def service_serve(
     "health_urls",
     multiple=True,
     required=True,
-    help="Public Harbor health URL to verify after Dokploy rollout. Repeat for alternate URLs.",
+    help="Public Launchplane health URL to verify after Dokploy rollout. Repeat for alternate URLs.",
 )
 @click.option("--deploy-timeout-seconds", type=int, default=600, show_default=True)
 @click.option("--health-timeout-seconds", type=int, default=180, show_default=True)
@@ -7554,7 +7574,7 @@ def service_serve(
     "--control-plane-root",
     type=click.Path(path_type=Path),
     default=None,
-    help="Optional Harbor repo root used to resolve Dokploy credentials.",
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
 )
 def service_deploy_dokploy_image(
     target_type: str,
@@ -7567,9 +7587,9 @@ def service_deploy_dokploy_image(
     no_cache: bool,
     control_plane_root: Path | None,
 ) -> None:
-    harbor_root = control_plane_root or _control_plane_root()
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=harbor_root)
-    target_payload, preflight_payload = _inspect_harbor_service_dokploy_target(
+    launchplane_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    target_payload, preflight_payload = _inspect_launchplane_service_dokploy_target(
         host=host,
         token=token,
         target_type=target_type,
@@ -7577,7 +7597,7 @@ def service_deploy_dokploy_image(
     )
     if preflight_payload["blockers"]:
         raise click.ClickException(
-            _harbor_service_target_preflight_error_message(preflight_payload=preflight_payload)
+            _launchplane_service_target_preflight_error_message(preflight_payload=preflight_payload)
         )
     normalized_health_urls = tuple(url.strip() for url in health_urls if url.strip())
     apply_result = _apply_dokploy_image_reference(
@@ -7662,30 +7682,30 @@ def service_deploy_dokploy_image(
 @click.option(
     "--target-type",
     type=click.Choice(["compose", "application"]),
-    envvar="HARBOR_DOKPLOY_TARGET_TYPE",
+    envvar=_SERVICE_TARGET_TYPE_ENV_KEYS,
     required=True,
-    help="Dokploy target type for the live Harbor service.",
+    help="Dokploy target type for the live Launchplane service.",
 )
 @click.option(
     "--target-id",
-    envvar="HARBOR_DOKPLOY_TARGET_ID",
+    envvar=_SERVICE_TARGET_ID_ENV_KEYS,
     required=True,
-    help="Dokploy target id for the live Harbor service.",
+    help="Dokploy target id for the live Launchplane service.",
 )
 @click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path),
     default=None,
-    help="Optional Harbor repo root used to resolve Dokploy credentials.",
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
 )
 def service_inspect_dokploy_target(
     target_type: str,
     target_id: str,
     control_plane_root: Path | None,
 ) -> None:
-    harbor_root = control_plane_root or _control_plane_root()
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=harbor_root)
-    _, preflight_payload = _inspect_harbor_service_dokploy_target(
+    launchplane_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    _, preflight_payload = _inspect_launchplane_service_dokploy_target(
         host=host,
         token=token,
         target_type=target_type,
@@ -7694,7 +7714,7 @@ def service_inspect_dokploy_target(
     click.echo(json.dumps(preflight_payload, indent=2, sort_keys=True))
     if preflight_payload["blockers"]:
         raise click.ClickException(
-            _harbor_service_target_preflight_error_message(preflight_payload=preflight_payload)
+            _launchplane_service_target_preflight_error_message(preflight_payload=preflight_payload)
         )
 
 
@@ -8051,17 +8071,17 @@ def inventory_status(state_dir: Path, context_name: str, instance_name: str) -> 
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@main.group("harbor-previews")
-def harbor_previews() -> None:
-    """Harbor preview record and read-model commands."""
+@main.group("launchplane-previews")
+def launchplane_previews() -> None:
+    """Launchplane preview record and read-model commands."""
 
 
-@harbor_previews.command("write-preview")
+@launchplane_previews.command("write-preview")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_write_preview(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_preview(state_dir: Path, input_file: Path) -> None:
     request = PreviewMutationRequest.model_validate(_load_json_file(input_file))
     record = build_preview_record_from_request(
         control_plane_root=_control_plane_root(),
@@ -8072,12 +8092,12 @@ def harbor_previews_write_preview(state_dir: Path, input_file: Path) -> None:
     click.echo(record_path)
 
 
-@harbor_previews.command("write-generation")
+@launchplane_previews.command("write-generation")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_write_generation(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_generation(state_dir: Path, input_file: Path) -> None:
     request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
     record = build_preview_generation_record_from_request(
         record_store=_store(state_dir),
@@ -8087,18 +8107,18 @@ def harbor_previews_write_generation(state_dir: Path, input_file: Path) -> None:
     click.echo(record_path)
 
 
-@harbor_previews.command("write-enablement")
+@launchplane_previews.command("write-enablement")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_write_enablement(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_enablement(state_dir: Path, input_file: Path) -> None:
     record = PreviewEnablementRecord.model_validate(_load_json_file(input_file))
     record_path = _store(state_dir).write_preview_enablement_record(record)
     click.echo(record_path)
 
 
-@harbor_previews.command("request-generation")
+@launchplane_previews.command("request-generation")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -8108,7 +8128,7 @@ def harbor_previews_write_enablement(state_dir: Path, input_file: Path) -> None:
 @click.option(
     "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
 )
-def harbor_previews_request_generation(
+def launchplane_previews_request_generation(
     state_dir: Path,
     preview_input_file: Path,
     generation_input_file: Path,
@@ -8118,7 +8138,7 @@ def harbor_previews_request_generation(
     generation_request = PreviewGenerationMutationRequest.model_validate(
         _load_json_file(generation_input_file)
     )
-    result_payload = _apply_harbor_request_generation(
+    result_payload = _apply_launchplane_request_generation(
         control_plane_root=_control_plane_root(),
         record_store=record_store,
         preview_request=preview_request,
@@ -8127,7 +8147,7 @@ def harbor_previews_request_generation(
     click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("write-from-generation")
+@launchplane_previews.command("write-from-generation")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -8137,7 +8157,7 @@ def harbor_previews_request_generation(
 @click.option(
     "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
 )
-def harbor_previews_write_from_generation(
+def launchplane_previews_write_from_generation(
     state_dir: Path,
     preview_input_file: Path,
     generation_input_file: Path,
@@ -8147,7 +8167,7 @@ def harbor_previews_write_from_generation(
     generation_request = PreviewGenerationMutationRequest.model_validate(
         _load_json_file(generation_input_file)
     )
-    result_payload = _apply_harbor_generation_evidence(
+    result_payload = _apply_launchplane_generation_evidence(
         control_plane_root=_control_plane_root(),
         record_store=record_store,
         preview_request=preview_request,
@@ -8156,38 +8176,38 @@ def harbor_previews_write_from_generation(
     click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("write-destroyed")
+@launchplane_previews.command("write-destroyed")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_write_destroyed(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_write_destroyed(state_dir: Path, input_file: Path) -> None:
     record_store = _store(state_dir)
     request = PreviewDestroyMutationRequest.model_validate(_load_json_file(input_file))
-    result_payload = _apply_harbor_destroy_preview(
+    result_payload = _apply_launchplane_destroy_preview(
         record_store=record_store,
         request=request,
     )
     click.echo(json.dumps(result_payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("mark-generation-ready")
+@launchplane_previews.command("mark-generation-ready")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_mark_generation_ready(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_mark_generation_ready(state_dir: Path, input_file: Path) -> None:
     record_store = _store(state_dir)
     request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
     if not request.generation_id.strip():
         raise click.ClickException("Ready-generation transition requires generation_id.")
-    preview_record = _read_harbor_preview_or_fail(
+    preview_record = _read_launchplane_preview_or_fail(
         record_store=record_store,
         context_name=request.context,
         anchor_repo=request.anchor_repo,
         anchor_pr_number=request.anchor_pr_number,
     )
-    _read_harbor_generation_or_fail(
+    _read_launchplane_generation_or_fail(
         record_store=record_store,
         preview_id=preview_record.preview_id,
         generation_id=request.generation_id,
@@ -8216,23 +8236,23 @@ def harbor_previews_mark_generation_ready(state_dir: Path, input_file: Path) -> 
     )
 
 
-@harbor_previews.command("mark-generation-failed")
+@launchplane_previews.command("mark-generation-failed")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_mark_generation_failed(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_mark_generation_failed(state_dir: Path, input_file: Path) -> None:
     record_store = _store(state_dir)
     request = PreviewGenerationMutationRequest.model_validate(_load_json_file(input_file))
     if not request.generation_id.strip():
         raise click.ClickException("Failed-generation transition requires generation_id.")
-    preview_record = _read_harbor_preview_or_fail(
+    preview_record = _read_launchplane_preview_or_fail(
         record_store=record_store,
         context_name=request.context,
         anchor_repo=request.anchor_repo,
         anchor_pr_number=request.anchor_pr_number,
     )
-    _read_harbor_generation_or_fail(
+    _read_launchplane_generation_or_fail(
         record_store=record_store,
         preview_id=preview_record.preview_id,
         generation_id=request.generation_id,
@@ -8261,33 +8281,33 @@ def harbor_previews_mark_generation_failed(state_dir: Path, input_file: Path) ->
     )
 
 
-@harbor_previews.command("destroy-preview")
+@launchplane_previews.command("destroy-preview")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def harbor_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
+def launchplane_previews_destroy_preview(state_dir: Path, input_file: Path) -> None:
     record_store = _store(state_dir)
     request = PreviewDestroyMutationRequest.model_validate(_load_json_file(input_file))
-    result_payload = _apply_harbor_destroy_preview(
+    result_payload = _apply_launchplane_destroy_preview(
         record_store=record_store,
         request=request,
     )
     click.echo(result_payload["preview_path"])
 
 
-@harbor_previews.command("ingest-pr-event")
+@launchplane_previews.command("ingest-pr-event")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
-def harbor_previews_ingest_pr_event(
+def launchplane_previews_ingest_pr_event(
     state_dir: Path, input_file: Path, apply_intent: bool, deliver_feedback: bool
 ) -> None:
     event = GitHubPullRequestEvent.model_validate(_load_json_file(input_file))
-    payload = _ingest_harbor_pr_event_payload(
+    payload = _ingest_launchplane_pr_event_payload(
         state_dir=state_dir,
         event=event,
         apply_intent=apply_intent,
@@ -8296,7 +8316,7 @@ def harbor_previews_ingest_pr_event(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("ingest-github-webhook")
+@launchplane_previews.command("ingest-github-webhook")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -8307,7 +8327,7 @@ def harbor_previews_ingest_pr_event(
 @click.option("--allow-unsigned", is_flag=True, help="Explicit local/manual bypass for signature verification.")
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
-def harbor_previews_ingest_github_webhook(
+def launchplane_previews_ingest_github_webhook(
     state_dir: Path,
     input_file: Path,
     event_name: str,
@@ -8318,7 +8338,7 @@ def harbor_previews_ingest_github_webhook(
     deliver_feedback: bool,
 ) -> None:
     raw_payload_bytes, webhook_payload = _load_github_webhook_json_file(input_file)
-    payload = _ingest_harbor_github_webhook_payload(
+    payload = _ingest_launchplane_github_webhook_payload(
         state_dir=state_dir,
         event_name=event_name,
         raw_payload_bytes=raw_payload_bytes,
@@ -8553,7 +8573,7 @@ def _merge_github_webhook_capture_evidence(
     return merged_evidence
 
 
-@harbor_previews.command("build-github-webhook-replay-envelope")
+@launchplane_previews.command("build-github-webhook-replay-envelope")
 @click.option("--payload-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--http-capture-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--headers-file", type=click.Path(exists=True, path_type=Path))
@@ -8566,7 +8586,7 @@ def _merge_github_webhook_capture_evidence(
 @click.option("--capture-source", default="", help="Optional capture source label for replay metadata.")
 @click.option("--evidence-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--output-file", type=click.Path(path_type=Path))
-def harbor_previews_build_github_webhook_replay_envelope(
+def launchplane_previews_build_github_webhook_replay_envelope(
     payload_file: Path | None,
     http_capture_file: Path | None,
     headers_file: Path | None,
@@ -8654,14 +8674,14 @@ def harbor_previews_build_github_webhook_replay_envelope(
     click.echo(envelope_json)
 
 
-@harbor_previews.command("replay-github-webhook")
+@launchplane_previews.command("replay-github-webhook")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
-def harbor_previews_replay_github_webhook(
+def launchplane_previews_replay_github_webhook(
     state_dir: Path,
     input_file: Path,
     apply_intent: bool,
@@ -8675,7 +8695,7 @@ def harbor_previews_replay_github_webhook(
     resolved_delivery_id = envelope.resolved_delivery_id()
     resolved_delivery_source = envelope.resolved_delivery_source()
     raw_payload_bytes, webhook_payload = _load_github_webhook_replay_envelope(envelope)
-    payload = _ingest_harbor_github_webhook_payload(
+    payload = _ingest_launchplane_github_webhook_payload(
         state_dir=state_dir,
         event_name=resolved_event_name,
         raw_payload_bytes=raw_payload_bytes,
@@ -8699,7 +8719,7 @@ def harbor_previews_replay_github_webhook(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _ingest_harbor_pr_event_payload(
+def _ingest_launchplane_pr_event_payload(
     *,
     state_dir: Path,
     event: GitHubPullRequestEvent,
@@ -8722,17 +8742,17 @@ def _ingest_harbor_pr_event_payload(
         resolved_context = str(preview_payload.get("context", "")).strip()
     request_metadata_payload = payload.get("request_metadata")
     request_metadata = (
-        HarborPreviewRequestParseResult.model_validate(request_metadata_payload)
+        LaunchplanePreviewRequestParseResult.model_validate(request_metadata_payload)
         if isinstance(request_metadata_payload, dict)
-        else HarborPreviewRequestParseResult(status="missing")
+        else LaunchplanePreviewRequestParseResult(status="missing")
     )
     resolved_manifest_payload = payload.get("manifest")
     resolved_manifest = (
-        HarborResolvedPreviewManifest.model_validate(resolved_manifest_payload)
+        LaunchplaneResolvedPreviewManifest.model_validate(resolved_manifest_payload)
         if isinstance(resolved_manifest_payload, dict)
         else None
     )
-    enablement_record = _build_harbor_preview_enablement_record(
+    enablement_record = _build_launchplane_preview_enablement_record(
         context_name=resolved_context,
         event=event,
         request_metadata=request_metadata,
@@ -8744,7 +8764,7 @@ def _ingest_harbor_pr_event_payload(
         enablement_record.model_dump(mode="json") if enablement_record is not None else None
     )
     if apply_intent:
-        payload["apply"] = _apply_harbor_pr_event_intent(
+        payload["apply"] = _apply_launchplane_pr_event_intent(
             control_plane_root=control_plane_root,
             record_store=record_store,
             payload=payload,
@@ -8756,9 +8776,9 @@ def _ingest_harbor_pr_event_payload(
             event=event,
             action=action if isinstance(action, str) else "",
             preview=None,
-            request_metadata=HarborPreviewRequestParseResult.model_validate(request_metadata_payload),
+            request_metadata=LaunchplanePreviewRequestParseResult.model_validate(request_metadata_payload),
             resolved_manifest=(
-                HarborResolvedPreviewManifest.model_validate(payload["manifest"])
+                LaunchplaneResolvedPreviewManifest.model_validate(payload["manifest"])
                 if isinstance(payload.get("manifest"), dict)
                 else None
             ),
@@ -8770,7 +8790,7 @@ def _ingest_harbor_pr_event_payload(
         )
         feedback_payload = payload.get("feedback")
         if not isinstance(feedback_payload, dict):
-            raise click.ClickException("Harbor feedback payload is missing before delivery.")
+            raise click.ClickException("Launchplane feedback payload is missing before delivery.")
         payload["feedback_delivery"] = deliver_pull_request_feedback(
             control_plane_root=control_plane_root,
             record_store=record_store,
@@ -8781,7 +8801,7 @@ def _ingest_harbor_pr_event_payload(
     return payload
 
 
-def _ingest_harbor_github_webhook_payload(
+def _ingest_launchplane_github_webhook_payload(
     *,
     state_dir: Path,
     event_name: str,
@@ -8795,7 +8815,7 @@ def _ingest_harbor_github_webhook_payload(
     deliver_feedback: bool,
 ) -> dict[str, object]:
     control_plane_root = _control_plane_root()
-    signature_verification = _verify_harbor_github_webhook_signature(
+    signature_verification = _verify_launchplane_github_webhook_signature(
         control_plane_root=control_plane_root,
         event_name=event_name,
         webhook_payload=webhook_payload,
@@ -8807,7 +8827,7 @@ def _ingest_harbor_github_webhook_payload(
         event_name=event_name,
         webhook_payload=webhook_payload,
     )
-    payload = _ingest_harbor_pr_event_payload(
+    payload = _ingest_launchplane_pr_event_payload(
         state_dir=state_dir,
         event=event,
         apply_intent=apply_intent,
@@ -8855,7 +8875,7 @@ def _load_github_webhook_replay_envelope(
     return json.dumps(envelope.payload).encode("utf-8"), envelope.payload
 
 
-def _verify_harbor_github_webhook_signature(
+def _verify_launchplane_github_webhook_signature(
     *,
     control_plane_root: Path,
     event_name: str,
@@ -8871,21 +8891,21 @@ def _verify_harbor_github_webhook_signature(
             "reason": "allow_unsigned",
         }
 
-    context_name = _resolve_harbor_github_webhook_context(
+    context_name = _resolve_launchplane_github_webhook_context(
         event_name=event_name,
         webhook_payload=webhook_payload,
     )
     if not context_name:
         raise click.ClickException(
-            "GitHub webhook signature verification could not resolve a Harbor context from the raw payload."
+            "GitHub webhook signature verification could not resolve a Launchplane context from the raw payload."
         )
-    secret = resolve_harbor_github_webhook_secret(
+    secret = resolve_launchplane_github_webhook_secret(
         control_plane_root=control_plane_root,
         context_name=context_name,
     )
     if not secret:
         raise click.ClickException(
-            f"Runtime environments file is missing GITHUB_WEBHOOK_SECRET for Harbor context {context_name!r}."
+            f"Runtime environments file is missing GITHUB_WEBHOOK_SECRET for Launchplane context {context_name!r}."
         )
     verify_github_webhook_signature(
         payload_bytes=raw_payload_bytes,
@@ -8899,7 +8919,7 @@ def _verify_harbor_github_webhook_signature(
     }
 
 
-def _resolve_harbor_github_webhook_context(*, event_name: str, webhook_payload: dict[str, object]) -> str:
+def _resolve_launchplane_github_webhook_context(*, event_name: str, webhook_payload: dict[str, object]) -> str:
     if event_name.strip() != "pull_request":
         return ""
     repository_payload = webhook_payload.get("repository")
@@ -8908,15 +8928,15 @@ def _resolve_harbor_github_webhook_context(*, event_name: str, webhook_payload: 
     repo_name = repository_payload.get("name")
     if not isinstance(repo_name, str) or not repo_name.strip():
         return ""
-    return harbor_anchor_repo_context(repo=repo_name)
+    return launchplane_anchor_repo_context(repo=repo_name)
 
 
-@harbor_previews.command("list")
+@launchplane_previews.command("list")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--context", "context_name", default="")
-def harbor_previews_list(state_dir: Path, context_name: str) -> None:
+def launchplane_previews_list(state_dir: Path, context_name: str) -> None:
     payload = build_preview_inventory_payload(
         record_store=_store(state_dir),
         context_name=context_name,
@@ -8924,7 +8944,7 @@ def harbor_previews_list(state_dir: Path, context_name: str) -> None:
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("show-tenant")
+@launchplane_previews.command("show-tenant")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -8936,25 +8956,25 @@ def harbor_previews_list(state_dir: Path, context_name: str) -> None:
     default=None,
     help="Use an explicit release tuple catalog while resolving tenant preview recipes.",
 )
-def harbor_previews_show_tenant(
+def launchplane_previews_show_tenant(
     state_dir: Path,
     context_name: str,
     anchor_repo: str,
     release_tuples_file: Path | None,
 ) -> None:
-    with _harbor_release_tuples_file_override(release_tuples_file):
-        payload = _build_harbor_tenant_payload(
+    with _launchplane_release_tuples_file_override(release_tuples_file):
+        payload = _build_launchplane_tenant_payload(
             control_plane_root=_control_plane_root(),
             record_store=_store(state_dir),
             context_name=context_name,
             anchor_repo=anchor_repo,
         )
     if payload is None:
-        raise click.ClickException("No Harbor tenant environment evidence found for the requested scope.")
+        raise click.ClickException("No Launchplane tenant environment evidence found for the requested scope.")
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("render-index-page")
+@launchplane_previews.command("render-index-page")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -8966,7 +8986,7 @@ def harbor_previews_show_tenant(
     default=None,
     help="Use an explicit release tuple catalog while resolving tenant preview recipes.",
 )
-def harbor_previews_render_index_page(
+def launchplane_previews_render_index_page(
     state_dir: Path,
     context_name: str,
     output_file: Path | None,
@@ -8977,26 +8997,26 @@ def harbor_previews_render_index_page(
         record_store=record_store,
         context_name=context_name,
     )
-    with _harbor_release_tuples_file_override(release_tuples_file):
-        tenant_payload = _build_harbor_tenant_payload(
+    with _launchplane_release_tuples_file_override(release_tuples_file):
+        tenant_payload = _build_launchplane_tenant_payload(
             control_plane_root=_control_plane_root(),
             record_store=record_store,
             context_name=context_name,
         )
-    html_output = _render_harbor_preview_index_page_html(payload, tenant_payload=tenant_payload)
+    html_output = _render_launchplane_preview_index_page_html(payload, tenant_payload=tenant_payload)
     if output_file is not None:
         output_file.write_text(html_output, encoding="utf-8")
         return
     click.echo(html_output)
 
 
-@harbor_previews.command("render-policy-page")
+@launchplane_previews.command("render-policy-page")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--context", "context_name", default="")
 @click.option("--output-file", type=click.Path(path_type=Path))
-def harbor_previews_render_policy_page(
+def launchplane_previews_render_policy_page(
     state_dir: Path,
     context_name: str,
     output_file: Path | None,
@@ -9005,14 +9025,14 @@ def harbor_previews_render_policy_page(
         record_store=_store(state_dir),
         context_name=context_name,
     )
-    html_output = _render_harbor_preview_policy_page_html(payload)
+    html_output = _render_launchplane_preview_policy_page_html(payload)
     if output_file is not None:
         output_file.write_text(html_output, encoding="utf-8")
         return
     click.echo(html_output)
 
 
-@harbor_previews.command("render-site")
+@launchplane_previews.command("render-site")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -9024,13 +9044,13 @@ def harbor_previews_render_policy_page(
     default=None,
     help="Use an explicit release tuple catalog while resolving tenant preview recipes.",
 )
-def harbor_previews_render_site(
+def launchplane_previews_render_site(
     state_dir: Path,
     context_name: str,
     output_dir: Path,
     release_tuples_file: Path | None,
 ) -> None:
-    _write_harbor_site_bundle(
+    _write_launchplane_site_bundle(
         state_dir=state_dir,
         output_dir=output_dir,
         context_name=context_name,
@@ -9038,20 +9058,20 @@ def harbor_previews_render_site(
     )
 
 
-@harbor_previews.command("show")
+@launchplane_previews.command("show")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--context", "context_name", required=True)
 @click.option("--anchor-repo", required=True)
 @click.option("--pr-number", "anchor_pr_number", type=click.IntRange(min=1), required=True)
-def harbor_previews_show(
+def launchplane_previews_show(
     state_dir: Path,
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
 ) -> None:
-    payload = _require_harbor_preview_status_payload(
+    payload = _require_launchplane_preview_status_payload(
         state_dir=state_dir,
         context_name=context_name,
         anchor_repo=anchor_repo,
@@ -9060,7 +9080,7 @@ def harbor_previews_show(
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-@harbor_previews.command("render-status-page")
+@launchplane_previews.command("render-status-page")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
@@ -9068,34 +9088,34 @@ def harbor_previews_show(
 @click.option("--anchor-repo", required=True)
 @click.option("--pr-number", "anchor_pr_number", type=click.IntRange(min=1), required=True)
 @click.option("--output-file", type=click.Path(path_type=Path))
-def harbor_previews_render_status_page(
+def launchplane_previews_render_status_page(
     state_dir: Path,
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
     output_file: Path | None,
 ) -> None:
-    payload = _require_harbor_preview_status_payload(
+    payload = _require_launchplane_preview_status_payload(
         state_dir=state_dir,
         context_name=context_name,
         anchor_repo=anchor_repo,
         anchor_pr_number=anchor_pr_number,
     )
-    html_output = _render_harbor_preview_status_page_html(payload)
+    html_output = _render_launchplane_preview_status_page_html(payload)
     if output_file is not None:
         output_file.write_text(html_output, encoding="utf-8")
         return
     click.echo(html_output)
 
 
-@harbor_previews.command("history")
+@launchplane_previews.command("history")
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
 @click.option("--context", "context_name", required=True)
 @click.option("--anchor-repo", required=True)
 @click.option("--pr-number", "anchor_pr_number", type=click.IntRange(min=1), required=True)
-def harbor_previews_history(
+def launchplane_previews_history(
     state_dir: Path,
     context_name: str,
     anchor_repo: str,
@@ -9109,12 +9129,12 @@ def harbor_previews_history(
     )
     if payload is None:
         raise click.ClickException(
-            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
+            f"No Launchplane preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
         )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _read_harbor_preview_or_fail(
+def _read_launchplane_preview_or_fail(
     *,
     record_store: FilesystemRecordStore,
     context_name: str,
@@ -9129,12 +9149,12 @@ def _read_harbor_preview_or_fail(
     )
     if preview_record is None:
         raise click.ClickException(
-            f"No Harbor preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
+            f"No Launchplane preview found for {context_name}/{anchor_repo}/pr-{anchor_pr_number}."
         )
     return preview_record
 
 
-def _read_harbor_generation_or_fail(
+def _read_launchplane_generation_or_fail(
     *,
     record_store: FilesystemRecordStore,
     preview_id: str,
@@ -9145,18 +9165,18 @@ def _read_harbor_generation_or_fail(
         if generation_record.generation_id == generation_id:
             return generation_record
     raise click.ClickException(
-        f"No Harbor preview generation found for {preview_id} generation {generation_id}."
+        f"No Launchplane preview generation found for {preview_id} generation {generation_id}."
     )
 
 
-def _apply_harbor_request_generation(
+def _apply_launchplane_request_generation(
     *,
     control_plane_root: Path,
     record_store: FilesystemRecordStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
-    preview_record = _upsert_harbor_preview_from_request(
+    preview_record = _upsert_launchplane_preview_from_request(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=preview_request,
@@ -9179,27 +9199,27 @@ def _apply_harbor_request_generation(
     }
 
 
-def _upsert_harbor_preview_from_request(
+def _upsert_launchplane_preview_from_request(
     *,
     control_plane_root: Path,
     record_store: FilesystemRecordStore,
     request: PreviewMutationRequest,
 ) -> PreviewRecord:
-    return shared_upsert_harbor_preview_from_request(
+    return shared_upsert_launchplane_preview_from_request(
         control_plane_root_path=control_plane_root,
         record_store=record_store,
         request=request,
     )
 
 
-def _apply_harbor_generation_evidence(
+def _apply_launchplane_generation_evidence(
     *,
     control_plane_root: Path,
     record_store: FilesystemRecordStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
-    return shared_apply_harbor_generation_evidence(
+    return shared_apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root,
         record_store=record_store,
         preview_request=preview_request,
@@ -9207,18 +9227,18 @@ def _apply_harbor_generation_evidence(
     )
 
 
-def _apply_harbor_destroy_preview(
+def _apply_launchplane_destroy_preview(
     *,
     record_store: FilesystemRecordStore,
     request: PreviewDestroyMutationRequest,
 ) -> dict[str, object]:
-    return shared_apply_harbor_destroy_preview(
+    return shared_apply_launchplane_destroy_preview(
         record_store=record_store,
         request=request,
     )
 
 
-def _apply_harbor_pr_event_intent(
+def _apply_launchplane_pr_event_intent(
     *,
     control_plane_root: Path,
     record_store: FilesystemRecordStore,
@@ -9230,16 +9250,16 @@ def _apply_harbor_pr_event_intent(
             "applied": False,
             "reason": "no_mutation_intent",
         }
-    intent = HarborPullRequestMutationIntent.model_validate(mutation_payload)
+    intent = LaunchplanePullRequestMutationIntent.model_validate(mutation_payload)
     if intent.command == "request-generation":
         if intent.preview_request is None:
-            raise click.ClickException("Resolved Harbor PR-event request-generation intent is missing preview_request.")
+            raise click.ClickException("Resolved Launchplane PR-event request-generation intent is missing preview_request.")
         if intent.generation_request is None:
             return {
                 "applied": False,
                 "reason": "manifest_resolution_required",
             }
-        result_payload = _apply_harbor_request_generation(
+        result_payload = _apply_launchplane_request_generation(
             control_plane_root=control_plane_root,
             record_store=record_store,
             preview_request=intent.preview_request,
@@ -9251,8 +9271,8 @@ def _apply_harbor_pr_event_intent(
             "result": result_payload,
         }
     if intent.destroy_request is None:
-        raise click.ClickException("Resolved Harbor PR-event destroy intent is missing destroy_request.")
-    result_payload = _apply_harbor_destroy_preview(
+        raise click.ClickException("Resolved Launchplane PR-event destroy intent is missing destroy_request.")
+    result_payload = _apply_launchplane_destroy_preview(
         record_store=record_store,
         request=intent.destroy_request,
     )

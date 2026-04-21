@@ -19,4 +19,4 @@ ENV PATH="/app/.venv/bin:${PATH}"
 
 EXPOSE 8080
 
-CMD ["/app/scripts/start-harbor-service.sh"]
+CMD ["/app/scripts/start-launchplane-service.sh"]

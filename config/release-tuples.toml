@@ -3,7 +3,7 @@ schema_version = 1
 # Current runtime baseline captured from stable-lane control-plane evidence.
 # CM and OPW stable lanes were replaced with split-repo artifact tuples on
 # 2026-04-17 after testing ship and prod bootstrap/promotion completed through
-# control-plane. Pull requests now use Harbor previews instead of a long-lived
+# control-plane. Pull requests now use Launchplane previews instead of a long-lived
 # shared dev lane.
 
 [contexts.cm.channels.testing]

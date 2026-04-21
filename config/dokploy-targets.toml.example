@@ -1,7 +1,7 @@
 schema_version = 1
 
 # Stable target ids map only the shared testing and prod lanes.
-# PR previews stay outside this catalog because Harbor manages them as
+# PR previews stay outside this catalog because Launchplane manages them as
 # ephemeral per-PR stacks.
 
 [[targets]]

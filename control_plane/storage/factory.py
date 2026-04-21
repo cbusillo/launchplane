@@ -6,14 +6,17 @@ from pathlib import Path
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
-DATABASE_URL_ENV_VAR = "HARBOR_DATABASE_URL"
+DATABASE_URL_ENV_VARS = ("LAUNCHPLANE_DATABASE_URL",)
 
 
 def resolve_database_url(database_url: str | None = None) -> str | None:
     if database_url is not None and database_url.strip():
         return database_url.strip()
-    environment_value = os.environ.get(DATABASE_URL_ENV_VAR, "").strip()
-    return environment_value or None
+    for environment_key in DATABASE_URL_ENV_VARS:
+        environment_value = os.environ.get(environment_key, "").strip()
+        if environment_value:
+            return environment_value
+    return None
 
 
 def build_record_store(*, state_dir: Path, database_url: str | None = None) -> FilesystemRecordStore | PostgresRecordStore:

@@ -1,7 +1,7 @@
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example.com"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example.com"
 ODOO_MASTER_PASSWORD = "change_me"
 ODOO_DB_USER = "odoo"
 ODOO_DB_PASSWORD = "change_me"

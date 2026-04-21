@@ -20,18 +20,18 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
     PreviewSourceRecord,
 )
-from control_plane.contracts.preview_manifest import HarborResolvedPreviewManifest
+from control_plane.contracts.preview_manifest import LaunchplaneResolvedPreviewManifest
 from control_plane.contracts.preview_mutation_request import (
-    HarborPullRequestMutationIntent,
+    LaunchplanePullRequestMutationIntent,
     PreviewDestroyMutationRequest,
     PreviewGenerationIntentRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
 from control_plane.contracts.preview_request_metadata import (
-    HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING,
-    HarborPreviewRequestMetadata,
-    HarborPreviewRequestParseResult,
+    LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING,
+    LaunchplanePreviewRequestMetadata,
+    LaunchplanePreviewRequestParseResult,
 )
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
 from control_plane.contracts.promotion_record import ReleaseStatus
@@ -39,22 +39,22 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 RECENT_GENERATION_LIMIT = 3
-HARBOR_PREVIEW_BASE_URL_ENV_KEY = "HARBOR_PREVIEW_BASE_URL"
-HARBOR_PREVIEW_ENABLE_LABEL = "harbor-preview"
-HARBOR_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
-HARBOR_GITHUB_WEBHOOK_SECRET_ENV_KEY = "GITHUB_WEBHOOK_SECRET"
-DEFAULT_HARBOR_BASELINE_CHANNEL = "testing"
-HarborPullRequestAction = str
-HARBOR_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
+LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS = ("LAUNCHPLANE_PREVIEW_BASE_URL",)
+LAUNCHPLANE_PREVIEW_ENABLE_LABEL = "launchplane-preview"
+LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
+LAUNCHPLANE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "GITHUB_WEBHOOK_SECRET"
+DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL = "testing"
+LaunchplanePullRequestAction = str
+LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
     "tenant-cm": "cm",
     "tenant-opw": "opw",
 }
-HARBOR_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
-    rf"```{re.escape(HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
+LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
+    rf"```{re.escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     flags=re.IGNORECASE | re.DOTALL,
 )
 GITHUB_PULL_REQUEST_URL_PATTERN = re.compile(r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$")
-HARBOR_PR_FEEDBACK_COMMENT_MARKER = "<!-- harbor-control-plane:pr-feedback -->"
+LAUNCHPLANE_PR_FEEDBACK_COMMENT_MARKER = "<!-- launchplane-control-plane:pr-feedback -->"
 
 
 def find_preview_record(
@@ -75,31 +75,31 @@ def find_preview_record(
     return records[0]
 
 
-def harbor_preview_label_enabled(*, label_names: tuple[str, ...]) -> bool:
-    return HARBOR_PREVIEW_ENABLE_LABEL in {label_name.strip() for label_name in label_names}
+def launchplane_preview_label_enabled(*, label_names: tuple[str, ...]) -> bool:
+    return LAUNCHPLANE_PREVIEW_ENABLE_LABEL in {label_name.strip() for label_name in label_names}
 
 
-def harbor_anchor_repo_context(*, repo: str) -> str:
-    return HARBOR_TENANT_ANCHOR_CONTEXTS.get(repo.strip(), "")
+def launchplane_anchor_repo_context(*, repo: str) -> str:
+    return LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS.get(repo.strip(), "")
 
 
-def harbor_anchor_repo_eligible(*, repo: str) -> bool:
-    return bool(harbor_anchor_repo_context(repo=repo))
+def launchplane_anchor_repo_eligible(*, repo: str) -> bool:
+    return bool(launchplane_anchor_repo_context(repo=repo))
 
 
-def classify_pull_request_event_for_harbor(
+def classify_pull_request_event_for_launchplane(
     *,
     event: GitHubPullRequestEvent,
     preview: PreviewRecord | None,
-) -> HarborPullRequestAction:
-    preview_enabled = harbor_preview_label_enabled(label_names=event.label_names)
+) -> LaunchplanePullRequestAction:
+    preview_enabled = launchplane_preview_label_enabled(label_names=event.label_names)
     if event.action == "closed":
         if preview is not None and preview.state != "destroyed":
             return "destroy_preview"
         return "ignore"
 
     if preview is None:
-        if event.action == "labeled" and event.action_label == HARBOR_PREVIEW_ENABLE_LABEL:
+        if event.action == "labeled" and event.action_label == LAUNCHPLANE_PREVIEW_ENABLE_LABEL:
             return "enable_preview"
         if event.action in {"opened", "reopened"} and preview_enabled:
             return "enable_preview"
@@ -149,7 +149,7 @@ def build_pull_request_event_action_payload(
             "action": action,
             "anchor_repo_eligible": bool(resolved_context),
             "resolved_context": resolved_context,
-            "label_enabled": harbor_preview_label_enabled(label_names=event.label_names),
+            "label_enabled": launchplane_preview_label_enabled(label_names=event.label_names),
             "preview_exists": preview is not None,
             "context_resolution_required": preview is None and not resolved_context,
             "manifest_resolved": resolved_manifest is not None,
@@ -189,13 +189,13 @@ def adapt_github_webhook_pull_request_event(
     normalized_event_name = event_name.strip()
     if normalized_event_name != "pull_request":
         raise click.ClickException(
-            f"Harbor GitHub webhook adapter only supports event_name='pull_request', got {normalized_event_name!r}."
+            f"Launchplane GitHub webhook adapter only supports event_name='pull_request', got {normalized_event_name!r}."
         )
 
     action = _require_webhook_string(webhook_payload, "action")
     if action not in GitHubPullRequestEvent.model_fields["action"].annotation.__args__:
         raise click.ClickException(
-            f"Harbor does not support GitHub pull_request action {action!r}."
+            f"Launchplane does not support GitHub pull_request action {action!r}."
         )
 
     repository_payload = _require_webhook_mapping(webhook_payload, "repository")
@@ -231,7 +231,7 @@ def adapt_github_webhook_pull_request_event(
         raise click.ClickException(f"Invalid adapted GitHub pull request event: {exc}") from exc
 
 
-def resolve_harbor_github_webhook_secret(*, control_plane_root: Path, context_name: str) -> str:
+def resolve_launchplane_github_webhook_secret(*, control_plane_root: Path, context_name: str) -> str:
     try:
         context_values = control_plane_runtime_environments.resolve_runtime_context_values(
             control_plane_root=control_plane_root,
@@ -239,7 +239,7 @@ def resolve_harbor_github_webhook_secret(*, control_plane_root: Path, context_na
         )
     except click.ClickException:
         return ""
-    return context_values.get(HARBOR_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
+    return context_values.get(LAUNCHPLANE_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
 
 
 def verify_github_webhook_signature(*, payload_bytes: bytes, signature_header: str, secret: str) -> None:
@@ -269,10 +269,10 @@ def build_pull_request_feedback_payload(
     *,
     record_store: FilesystemRecordStore,
     event: GitHubPullRequestEvent,
-    action: HarborPullRequestAction,
+    action: LaunchplanePullRequestAction,
     preview: PreviewRecord | None,
-    request_metadata: HarborPreviewRequestParseResult,
-    resolved_manifest: HarborResolvedPreviewManifest | None,
+    request_metadata: LaunchplanePreviewRequestParseResult,
+    resolved_manifest: LaunchplaneResolvedPreviewManifest | None,
     apply_result: dict[str, object] | None = None,
 ) -> dict[str, object]:
     current_preview = find_preview_record(
@@ -426,7 +426,7 @@ def deliver_pull_request_feedback(
             "reason": "github_context_missing",
         }
 
-    github_token = resolve_harbor_github_token(
+    github_token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=effective_context,
     )
@@ -448,12 +448,12 @@ def deliver_pull_request_feedback(
         repo=github_reference["repo"],
         issue_number=github_reference["pr_number"],
         token=github_token,
-        marker=HARBOR_PR_FEEDBACK_COMMENT_MARKER,
+        marker=LAUNCHPLANE_PR_FEEDBACK_COMMENT_MARKER,
     )
     if existing_comment is not None:
         comment_id = existing_comment.get("id")
         if not isinstance(comment_id, int):
-            raise click.ClickException("Existing Harbor PR feedback comment is missing a numeric id.")
+            raise click.ClickException("Existing Launchplane PR feedback comment is missing a numeric id.")
         updated_comment = update_github_issue_comment(
             owner=github_reference["owner"],
             repo=github_reference["repo"],
@@ -515,7 +515,7 @@ def _feedback_preview_value(
 def _feedback_manifest_value(
     *,
     preview_status_payload: dict[str, object] | None,
-    resolved_manifest: HarborResolvedPreviewManifest | None,
+    resolved_manifest: LaunchplaneResolvedPreviewManifest | None,
     key: str,
 ) -> str:
     if preview_status_payload is not None:
@@ -549,7 +549,7 @@ def _feedback_source_summary(
     *,
     preview_status_payload: dict[str, object] | None,
     event: GitHubPullRequestEvent,
-    request_metadata: HarborPreviewRequestParseResult,
+    request_metadata: LaunchplanePreviewRequestParseResult,
 ) -> dict[str, object]:
     if preview_status_payload is not None:
         input_summary = preview_status_payload.get("input_summary")
@@ -586,13 +586,13 @@ def _feedback_source_summary(
 
 def _feedback_status_summary(
     *,
-    action: HarborPullRequestAction,
+    action: LaunchplanePullRequestAction,
     preview_state: str,
     apply_state: str,
     apply_reason: str,
-    request_metadata: HarborPreviewRequestParseResult,
+    request_metadata: LaunchplanePreviewRequestParseResult,
     source_summary: dict[str, object],
-    resolved_manifest: HarborResolvedPreviewManifest | None,
+    resolved_manifest: LaunchplaneResolvedPreviewManifest | None,
 ) -> tuple[str, str, str]:
     anchor = source_summary.get("anchor")
     repo = anchor.get("repo", "") if isinstance(anchor, dict) else ""
@@ -602,56 +602,56 @@ def _feedback_status_summary(
     if preview_state == "destroyed":
         return (
             "preview_destroyed",
-            f"Harbor preview closed for {anchor_ref}.",
-            "The stored Harbor preview was destroyed and its retained evidence remains available.",
+            f"Launchplane preview closed for {anchor_ref}.",
+            "The stored Launchplane preview was destroyed and its retained evidence remains available.",
         )
     if apply_state == "applied":
         return (
             "preview_updated",
-            f"Harbor preview updated for {anchor_ref}.",
-            "The reviewer-facing preview record now reflects the latest exact Harbor inputs.",
+            f"Launchplane preview updated for {anchor_ref}.",
+            "The reviewer-facing preview record now reflects the latest exact Launchplane inputs.",
         )
     if apply_state == "noop" and apply_reason == "manifest_resolution_required":
         if request_metadata.status == "invalid":
             return (
                 "preview_unresolved",
-                f"Harbor could not apply a preview for {anchor_ref}.",
-                "The Harbor preview request metadata is invalid, so Harbor kept the event fail-closed instead of guessing build inputs.",
+                f"Launchplane could not apply a preview for {anchor_ref}.",
+                "The Launchplane preview request metadata is invalid, so Launchplane kept the event fail-closed instead of guessing build inputs.",
             )
         companions = source_summary.get("companions")
         if isinstance(companions, list) and companions:
             return (
                 "preview_unresolved",
-                f"Harbor could not apply a preview for {anchor_ref}.",
-                "Harbor could not prove the exact companion pull request head SHA, so the preview path stayed an explicit no-op.",
+                f"Launchplane could not apply a preview for {anchor_ref}.",
+                "Launchplane could not prove the exact companion pull request head SHA, so the preview path stayed an explicit no-op.",
             )
         return (
             "preview_unresolved",
-            f"Harbor could not apply a preview for {anchor_ref}.",
-            "Harbor could not resolve the exact preview manifest, so the preview path stayed an explicit no-op.",
+            f"Launchplane could not apply a preview for {anchor_ref}.",
+            "Launchplane could not resolve the exact preview manifest, so the preview path stayed an explicit no-op.",
         )
     if action == "ignore":
         return (
             "no_action",
-            f"Harbor took no preview action for {anchor_ref}.",
-            "This pull request event did not meet the current Harbor trigger and eligibility rules.",
+            f"Launchplane took no preview action for {anchor_ref}.",
+            "This pull request event did not meet the current Launchplane trigger and eligibility rules.",
         )
     if request_metadata.status == "invalid":
         return (
             "preview_unresolved",
-            f"Harbor could not resolve preview inputs for {anchor_ref}.",
-            "The Harbor preview request metadata is invalid, so Harbor did not produce preview build truth from it.",
+            f"Launchplane could not resolve preview inputs for {anchor_ref}.",
+            "The Launchplane preview request metadata is invalid, so Launchplane did not produce preview build truth from it.",
         )
     if resolved_manifest is not None:
         return (
             "preview_resolved",
-            f"Harbor resolved preview inputs for {anchor_ref}.",
-            "The exact preview manifest is ready, but this run did not apply the Harbor mutation helpers.",
+            f"Launchplane resolved preview inputs for {anchor_ref}.",
+            "The exact preview manifest is ready, but this run did not apply the Launchplane mutation helpers.",
         )
     return (
         "preview_unresolved",
-        f"Harbor could not resolve preview inputs for {anchor_ref}.",
-        "Harbor kept the event fail-closed because it could not prove the exact preview inputs yet.",
+        f"Launchplane could not resolve preview inputs for {anchor_ref}.",
+        "Launchplane kept the event fail-closed because it could not prove the exact preview inputs yet.",
     )
 
 
@@ -673,7 +673,7 @@ def _render_pull_request_feedback_markdown(
     apply_state: str,
     apply_reason: str,
 ) -> str:
-    lines = [HARBOR_PR_FEEDBACK_COMMENT_MARKER, "", headline, "", detail, ""]
+    lines = [LAUNCHPLANE_PR_FEEDBACK_COMMENT_MARKER, "", headline, "", detail, ""]
     if canonical_url:
         lines.append(f"- Preview URL: {canonical_url}")
     if preview_label:
@@ -710,7 +710,7 @@ def _render_pull_request_feedback_markdown(
         lines.append(f"- Companion inputs: {companion_summary}")
 
     if apply_state == "applied":
-        lines.append("- Apply outcome: Harbor updated stored preview state.")
+        lines.append("- Apply outcome: Launchplane updated stored preview state.")
     elif apply_state == "noop":
         if apply_reason:
             lines.append(f"- Apply outcome: no-op (`{apply_reason}`)")
@@ -920,8 +920,8 @@ def resolve_pull_request_event_decision(
     *,
     record_store: FilesystemRecordStore,
     event: GitHubPullRequestEvent,
-) -> tuple[HarborPullRequestAction, str, PreviewRecord | None]:
-    resolved_context = harbor_anchor_repo_context(repo=event.repo)
+) -> tuple[LaunchplanePullRequestAction, str, PreviewRecord | None]:
+    resolved_context = launchplane_anchor_repo_context(repo=event.repo)
     preview = find_preview_record(
         record_store=record_store,
         context_name="",
@@ -931,19 +931,19 @@ def resolve_pull_request_event_decision(
     if preview is None and not resolved_context:
         action = "ignore"
     else:
-        action = classify_pull_request_event_for_harbor(event=event, preview=preview)
+        action = classify_pull_request_event_for_launchplane(event=event, preview=preview)
     return action, resolved_context, preview
 
 
 def build_pull_request_event_mutation_intent(
     *,
     event: GitHubPullRequestEvent,
-    action: HarborPullRequestAction,
+    action: LaunchplanePullRequestAction,
     resolved_context: str,
     preview: PreviewRecord | None,
-    request_metadata: HarborPreviewRequestParseResult,
-    resolved_manifest: HarborResolvedPreviewManifest | None,
-) -> HarborPullRequestMutationIntent | None:
+    request_metadata: LaunchplanePreviewRequestParseResult,
+    resolved_manifest: LaunchplaneResolvedPreviewManifest | None,
+) -> LaunchplanePullRequestMutationIntent | None:
     effective_context = preview.context if preview is not None else resolved_context
     if action in {"enable_preview", "refresh_preview"}:
         if not effective_context:
@@ -973,7 +973,7 @@ def build_pull_request_event_mutation_intent(
                 source_map=resolved_manifest.source_map,
                 companion_summaries=resolved_manifest.companion_summaries,
             )
-            return HarborPullRequestMutationIntent(
+            return LaunchplanePullRequestMutationIntent(
                 command="request-generation",
                 preview_request=preview_request,
                 generation_request=generation_request,
@@ -988,14 +988,14 @@ def build_pull_request_event_mutation_intent(
             requested_reason=_pull_request_event_generation_reason(action=action),
             requested_at=occurred_at,
         )
-        return HarborPullRequestMutationIntent(
+        return LaunchplanePullRequestMutationIntent(
             command="request-generation",
             manifest_resolution_required=True,
             preview_request=preview_request,
             generation_request_seed=generation_request_seed,
         )
     if action == "destroy_preview" and preview is not None:
-        return HarborPullRequestMutationIntent(
+        return LaunchplanePullRequestMutationIntent(
             command="destroy-preview",
             destroy_request=PreviewDestroyMutationRequest(
                 context=preview.context,
@@ -1008,23 +1008,23 @@ def build_pull_request_event_mutation_intent(
     return None
 
 
-def parse_preview_request_metadata(*, pr_body: str) -> HarborPreviewRequestParseResult:
+def parse_preview_request_metadata(*, pr_body: str) -> LaunchplanePreviewRequestParseResult:
     if not pr_body.strip():
-        return HarborPreviewRequestParseResult(status="missing")
-    block_matches = [match.group("body") for match in HARBOR_PREVIEW_REQUEST_BLOCK_PATTERN.finditer(pr_body)]
+        return LaunchplanePreviewRequestParseResult(status="missing")
+    block_matches = [match.group("body") for match in LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN.finditer(pr_body)]
     if not block_matches:
-        return HarborPreviewRequestParseResult(status="missing")
+        return LaunchplanePreviewRequestParseResult(status="missing")
     if len(block_matches) > 1:
-        return HarborPreviewRequestParseResult(
+        return LaunchplanePreviewRequestParseResult(
             status="invalid",
-            error="Harbor preview request metadata must use exactly one fenced block.",
+            error="Launchplane preview request metadata must use exactly one fenced block.",
         )
     try:
         payload = tomllib.loads(block_matches[0])
-        metadata = HarborPreviewRequestMetadata.model_validate(payload)
+        metadata = LaunchplanePreviewRequestMetadata.model_validate(payload)
     except (tomllib.TOMLDecodeError, ValidationError, ValueError) as exc:
-        return HarborPreviewRequestParseResult(status="invalid", error=str(exc))
-    return HarborPreviewRequestParseResult(status="valid", metadata=metadata)
+        return LaunchplanePreviewRequestParseResult(status="invalid", error=str(exc))
+    return LaunchplanePreviewRequestParseResult(status="valid", metadata=metadata)
 
 
 def resolve_pull_request_event_manifest(
@@ -1033,9 +1033,9 @@ def resolve_pull_request_event_manifest(
     event: GitHubPullRequestEvent,
     resolved_context: str,
     preview: PreviewRecord | None,
-    request_metadata: HarborPreviewRequestParseResult,
+    request_metadata: LaunchplanePreviewRequestParseResult,
     companion_summaries_snapshot: tuple[PreviewPullRequestSummary, ...] = (),
-) -> HarborResolvedPreviewManifest | None:
+) -> LaunchplaneResolvedPreviewManifest | None:
     effective_context = preview.context if preview is not None else resolved_context
     if not effective_context:
         return None
@@ -1070,7 +1070,7 @@ def resolve_pull_request_event_manifest(
             ],
         ]
     )
-    return HarborResolvedPreviewManifest(
+    return LaunchplaneResolvedPreviewManifest(
         context=effective_context,
         baseline_channel=metadata.baseline_channel,
         baseline_release_tuple_id=release_tuple.tuple_id,
@@ -1103,17 +1103,17 @@ def generate_preview_manifest_fingerprint(
         ],
     }
     normalized_payload = json.dumps(fingerprint_payload, separators=(",", ":"), sort_keys=True)
-    return f"harbor-manifest-{hashlib.sha256(normalized_payload.encode('utf-8')).hexdigest()[:16]}"
+    return f"launchplane-manifest-{hashlib.sha256(normalized_payload.encode('utf-8')).hexdigest()[:16]}"
 
 
 def _resolved_preview_request_metadata(
-    *, request_metadata: HarborPreviewRequestParseResult
-) -> HarborPreviewRequestMetadata | None:
+    *, request_metadata: LaunchplanePreviewRequestParseResult
+) -> LaunchplanePreviewRequestMetadata | None:
     if request_metadata.status == "invalid":
         return None
     if request_metadata.metadata is not None:
         return request_metadata.metadata
-    return HarborPreviewRequestMetadata(baseline_channel=DEFAULT_HARBOR_BASELINE_CHANNEL)
+    return LaunchplanePreviewRequestMetadata(baseline_channel=DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL)
 
 
 def _resolve_companion_sources(
@@ -1121,7 +1121,7 @@ def _resolve_companion_sources(
     control_plane_root: Path,
     context_name: str,
     anchor_pr_url: str,
-    metadata: HarborPreviewRequestMetadata,
+    metadata: LaunchplanePreviewRequestMetadata,
     companion_summaries_snapshot: tuple[PreviewPullRequestSummary, ...] = (),
 ) -> tuple[tuple[PreviewSourceRecord, ...] | None, tuple[PreviewPullRequestSummary, ...] | None]:
     if not metadata.companions:
@@ -1151,7 +1151,7 @@ def _resolve_companion_sources(
         return tuple(sources), tuple(summaries)
 
     github_owner = github_pr_owner(pr_url=anchor_pr_url)
-    github_token = resolve_harbor_github_token(
+    github_token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
         context_name=context_name,
     )
@@ -1187,7 +1187,7 @@ def _resolve_companion_sources(
     return tuple(sources), tuple(summaries)
 
 
-def resolve_harbor_github_token(*, control_plane_root: Path, context_name: str) -> str:
+def resolve_launchplane_github_token(*, control_plane_root: Path, context_name: str) -> str:
     try:
         context_values = control_plane_runtime_environments.resolve_runtime_context_values(
             control_plane_root=control_plane_root,
@@ -1195,7 +1195,7 @@ def resolve_harbor_github_token(*, control_plane_root: Path, context_name: str) 
         )
     except click.ClickException:
         return ""
-    return context_values.get(HARBOR_GITHUB_TOKEN_ENV_KEY, "").strip()
+    return context_values.get(LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY, "").strip()
 
 
 def fetch_github_pull_request_head(*, owner: str, repo: str, pr_number: int, token: str) -> tuple[str, str]:
@@ -1230,7 +1230,7 @@ def _pull_request_event_timestamp(*, event: GitHubPullRequestEvent) -> str:
     return event.occurred_at.strip() or utc_now_timestamp()
 
 
-def _pull_request_event_generation_reason(*, action: HarborPullRequestAction) -> str:
+def _pull_request_event_generation_reason(*, action: LaunchplanePullRequestAction) -> str:
     return f"github_pr_event_{action}"
 
 
@@ -1258,15 +1258,22 @@ def generate_preview_generation_id(*, preview_id: str, sequence: int) -> str:
     return f"{preview_id}-generation-{sequence:04d}"
 
 
-def resolve_harbor_preview_base_url(*, control_plane_root: Path, context_name: str) -> str:
+def resolve_launchplane_preview_base_url(*, control_plane_root: Path, context_name: str) -> str:
     context_values = control_plane_runtime_environments.resolve_runtime_context_values(
         control_plane_root=control_plane_root,
         context_name=context_name,
     )
-    preview_base_url = context_values.get(HARBOR_PREVIEW_BASE_URL_ENV_KEY, "").strip()
+    preview_base_url = ""
+    preview_base_url_env_key = LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS[0]
+    for environment_key in LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS:
+        configured_value = context_values.get(environment_key, "").strip()
+        if configured_value:
+            preview_base_url = configured_value
+            preview_base_url_env_key = environment_key
+            break
     if not preview_base_url:
         raise click.ClickException(
-            f"Runtime environments file is missing {HARBOR_PREVIEW_BASE_URL_ENV_KEY} for {context_name!r}."
+            f"Runtime environments file is missing {' or '.join(LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS)} for {context_name!r}."
         )
     return preview_base_url.rstrip("/")
 
@@ -1429,7 +1436,7 @@ def build_preview_record_from_request(
     )
     if not resolved_created_at:
         raise click.ClickException(
-            "Preview mutation requires created_at when no existing Harbor preview is stored."
+            "Preview mutation requires created_at when no existing Launchplane preview is stored."
         )
     resolved_updated_at = request.updated_at.strip() or resolved_created_at
     resolved_eligible_at = request.eligible_at.strip() or (
@@ -1449,7 +1456,7 @@ def build_preview_record_from_request(
     )
     preview_base_url = ""
     if not resolved_canonical_url:
-        preview_base_url = resolve_harbor_preview_base_url(
+        preview_base_url = resolve_launchplane_preview_base_url(
             control_plane_root=control_plane_root,
             context_name=request.context,
         )
@@ -1489,7 +1496,7 @@ def build_preview_generation_record_from_request(
     )
     if preview is None:
         raise click.ClickException(
-            f"No Harbor preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
+            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
         )
 
     existing_generations = record_store.list_preview_generation_records(preview_id=preview.preview_id)
@@ -1908,7 +1915,7 @@ def _status_summary(
         return "Serving the latest requested generation."
     if latest_generation.state == "failed":
         return "Serving the last healthy generation while the latest replacement failed."
-    return "Serving a prior generation while Harbor prepares a replacement."
+    return "Serving a prior generation while Launchplane prepares a replacement."
 
 
 def _next_action(
@@ -1918,17 +1925,17 @@ def _next_action(
     latest_generation: PreviewGenerationRecord | None,
 ) -> str:
     if preview.state == "destroyed":
-        return "No runtime action remains; Harbor is retaining historical evidence only."
+        return "No runtime action remains; Launchplane is retaining historical evidence only."
     if preview.state == "teardown_pending":
-        return "Harbor will destroy runtime resources after the current teardown window."
+        return "Launchplane will destroy runtime resources after the current teardown window."
     if preview.state == "paused":
-        return "Harbor will keep current evidence but will not start new generations until resumed."
+        return "Launchplane will keep current evidence but will not start new generations until resumed."
     if latest_generation is None:
-        return "Harbor is waiting to create the first generation for this preview."
+        return "Launchplane is waiting to create the first generation for this preview."
     if latest_generation.state in {"resolving", "building", "deploying", "verifying"}:
-        return f"Harbor is progressing generation {latest_generation.generation_id} toward readiness."
+        return f"Launchplane is progressing generation {latest_generation.generation_id} toward readiness."
     if latest_generation.state == "failed" and serving_generation is not None:
-        return "Harbor is retaining the prior serving generation because the latest replacement failed."
+        return "Launchplane is retaining the prior serving generation because the latest replacement failed."
     if preview.destroy_after:
-        return "Harbor will keep this preview until the current destroy-after deadline or a lifecycle event replaces it."
-    return "Harbor is serving the current preview state."
+        return "Launchplane will keep this preview until the current destroy-after deadline or a lifecycle event replaces it."
+    return "Launchplane is serving the current preview state."

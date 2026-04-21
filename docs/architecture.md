@@ -8,16 +8,16 @@ title: Architecture
 - Make artifact identity and promotion records first-class control-plane data.
 - Own promotion, deploy, and preview orchestration behind explicit contracts.
 
-This repo is the current Odoo implementation of the Harbor operator surface.
+This repo is the current Odoo implementation of the Launchplane operator surface.
 The contracts documented here now need to serve two jobs at once: describe the
 implemented Odoo control-plane behavior that exists today, and describe the
-target Harbor boundary that future cross-product work should aim at. Harbor is
-still implemented inside `harbor` today, but the target shape is a
-long-running Harbor service rather than a permanently repo-local CLI.
+target Launchplane boundary that future cross-product work should aim at. Launchplane is
+still implemented inside `launchplane` today, but the target shape is a
+long-running Launchplane service rather than a permanently repo-local CLI.
 
 ## Repo Boundary
 
-`harbor` owns:
+`launchplane` owns:
 
 - artifact manifests
 - release tuple catalogs
@@ -29,7 +29,7 @@ long-running Harbor service rather than a permanently repo-local CLI.
 - deploy orchestration
 - backup and restore control-plane workflows
 - control-plane-owned operator secrets for deploy/runtime orchestration
-- Harbor preview and generation records
+- Launchplane preview and generation records
 
 Code and local-DX repos own:
 
@@ -41,40 +41,40 @@ Code and local-DX repos own:
 GitHub owns the engineering workflow around this system: issues, branches,
 pull requests, labels, checks, PR comments, releases, and CI execution.
 
-This repository is not the generic Harbor product boundary today. It is the
-Odoo-specific control plane that currently contains Harbor preview and
+This repository is not the generic Launchplane product boundary today. It is the
+Odoo-specific control plane that currently contains Launchplane preview and
 promotion behavior.
 
-## Target Harbor Shape
+## Target Launchplane Shape
 
-- Harbor should become a long-running control-plane service, expected to live
-  behind a stable address such as `harbor.shinycomputers.com`.
-- Harbor should expose authenticated service ingress for runtime evidence,
+- Launchplane should become a long-running control-plane service, expected to live
+  behind a stable address such as `launchplane.shinycomputers.com`.
+- Launchplane should expose authenticated service ingress for runtime evidence,
   operator actions, and eventually driver-triggered orchestration.
 - GitHub Actions OIDC should be the default machine-to-machine authentication
-  boundary for product workflows talking to Harbor.
-- Harbor should authorize workflow callers from GitHub-issued identity claims
+  boundary for product workflows talking to Launchplane.
+- Launchplane should authorize workflow callers from GitHub-issued identity claims
   such as repository, workflow, ref, environment, and event context, rather
   than from copied long-lived static tokens.
-- Harbor core should own durable records, operator read models, auditability,
+- Launchplane core should own durable records, operator read models, auditability,
   and shared orchestration contracts.
-- Product-specific runtime logic should live behind Harbor-owned drivers,
+- Product-specific runtime logic should live behind Launchplane-owned drivers,
   starting with Odoo and VeriReel, instead of being duplicated as near-identical
   scripts across many client repos.
-- Repo-specific variation should enter Harbor as thin repo extensions,
+- Repo-specific variation should enter Launchplane as thin repo extensions,
   declarative config, or small driver inputs, not as a full second copy of the
   same operational workflow in every product repo.
 
-## Harbor Shape Today
+## Launchplane Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
-- Harbor currently lives inside `harbor`; there is no separate
-  extracted Harbor repo or package contract yet.
+- Launchplane currently lives inside `launchplane`; there is no separate
+  extracted Launchplane repo or package contract yet.
 - The CLI and file-backed state directory remain the current implementation
   surface, but they should be treated as temporary local scaffolding around the
-  target Harbor service boundary rather than as the final cross-product ingress
+  target Launchplane service boundary rather than as the final cross-product ingress
   contract.
-- PR previews are Harbor-managed preview identities backed by separate preview
+- PR previews are Launchplane-managed preview identities backed by separate preview
   generations and ephemeral preview runtime state, not extra long-lived Dokploy
   lanes.
 - The tracked Dokploy route catalog is therefore limited to stable tenant lanes
@@ -83,19 +83,19 @@ promotion behavior.
   is reusable across products, but Odoo-specific runtime behavior remains
   explicit in the Odoo workflow code and deploy evidence.
 
-## Harbor Core And Drivers
+## Launchplane Core And Drivers
 
-Harbor should converge on three layers:
+Launchplane should converge on three layers:
 
 ```text
-Harbor core
+Launchplane core
   - API and operator UI
   - GitHub OIDC authentication and authorization
   - durable records and audit log
   - read models and operator views
   - shared orchestration engine
 
-Harbor drivers
+Launchplane drivers
   - odoo driver
   - verireel driver
   - future product drivers
@@ -106,9 +106,9 @@ Repo extensions
   - small hooks only when genuinely needed
 ```
 
-The intent is to keep common operational behavior centralized in Harbor while
+The intent is to keep common operational behavior centralized in Launchplane while
 still leaving room for product-specific execution differences. A driver lives
-in Harbor. A repo extension only supplies the minimum extra information a
+in Launchplane. A repo extension only supplies the minimum extra information a
 specific repo needs.
 
 The first concrete HTTP/OIDC/API shape for that boundary is defined in
@@ -116,17 +116,17 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 
 ## Ingress And Trust
 
-- The canonical Harbor ingress should be authenticated HTTP, not repo-to-repo
+- The canonical Launchplane ingress should be authenticated HTTP, not repo-to-repo
   shelling into a CLI as the long-term contract.
-- GitHub Actions workflows should authenticate with Harbor using OIDC-issued
+- GitHub Actions workflows should authenticate with Launchplane using OIDC-issued
   identity from GitHub.
-- Harbor should map those claims to allowed products, contexts, actions, and
+- Launchplane should map those claims to allowed products, contexts, actions, and
   environments. Example: a VeriReel preview workflow may be allowed to write
   preview evidence for `verireel-testing`, while a promotion workflow may be
   allowed to write promotion evidence for production lanes.
-- Human/operator access in Harbor may still use a separate auth layer, but
+- Human/operator access in Launchplane may still use a separate auth layer, but
   machine evidence ingress should trust workflow identity first.
-- The stable cross-product contract is the typed Harbor API payload, not the
+- The stable cross-product contract is the typed Launchplane API payload, not the
   particular client used to submit it.
 
 ## Current Contract
@@ -141,9 +141,9 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
   paths.
 - The tracked Dokploy route catalog is limited to stable remote lanes
-  (`testing`, `prod`). Pull-request previews flow through Harbor preview
+  (`testing`, `prod`). Pull-request previews flow through Launchplane preview
   records instead of tracked Dokploy lane entries.
-- Harbor baseline release tuples belong here as explicit control-plane data.
+- Launchplane baseline release tuples belong here as explicit control-plane data.
   Tuple entries carry exact repo SHAs for preview-manifest resolution, not
   floating branch names.
 - Successful waited `ship` executions for long-lived lanes mint current release
@@ -164,7 +164,7 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   a control-plane-owned Dokploy schedule workflow, so deploy execution no
   longer shells back into another repo at runtime.
 - That post-deploy path is also the first real candidate for an eventual Odoo
-  driver seam in Harbor: it is a product-specific runtime call pattern already
+  driver seam in Launchplane: it is a product-specific runtime call pattern already
   owned end to end by this control plane, without forcing broader runtime
   abstraction ahead of evidence.
 - Deployment records persist post-deploy update evidence as first-class
@@ -173,16 +173,16 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   successful waited `ship`/`promote` flows, so this repo owns both append-only
   deploy history and the replace-in-place current-state view.
 - That same inventory view can now also be refreshed from stored external
-  promotion evidence when Harbor has both a promotion record and explicit
+  promotion evidence when Launchplane has both a promotion record and explicit
   linked deployment record, which keeps second-product onboarding evidence-
-  first instead of forcing Harbor to own runtime execution on day one.
-- Harbor preview records now support the same posture for preview runtime: the
+  first instead of forcing Launchplane to own runtime execution on day one.
+- Launchplane preview records now support the same posture for preview runtime: the
   live preview route can be supplied as explicit evidence, and preview plus
   generation state can be refreshed from external workflow results without
-  requiring Harbor to provision the preview itself first.
-- Harbor now has the matching cleanup-evidence path too, so an external product
+  requiring Launchplane to provision the preview itself first.
+- Launchplane now has the matching cleanup-evidence path too, so an external product
   can report confirmed preview teardown into the same durable preview identity
-  without Harbor claiming it executed that teardown itself.
+  without Launchplane claiming it executed that teardown itself.
 - Ship execution prefers immutable artifact image references at runtime by
   syncing `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy whenever a stored
   artifact manifest is available.
@@ -209,15 +209,15 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 ## Implementation Posture
 
 - Persist records to a local state directory today.
-- Keep storage pluggable, but start with file-backed JSON while Harbor still
+- Keep storage pluggable, but start with file-backed JSON while Launchplane still
   lives inside this repo.
 - Treat the current CLI and local JSON layout as implementation scaffolding,
   not as the final communication contract for external products.
-- New cross-product integrations should target the future Harbor service
+- New cross-product integrations should target the future Launchplane service
   boundary in design, even if a temporary local adapter is still required
   during migration.
-- Harbor now also has Postgres-backed shared-service storage and managed
+- Launchplane now also has Postgres-backed shared-service storage and managed
   secrets, but it does not yet have a formal schema migration system.
-- Until that migration story exists, schema changes for DB-backed Harbor state
+- Until that migration story exists, schema changes for DB-backed Launchplane state
   should remain additive and backward-compatible so deploy rollback can safely
-  return to the previous Harbor image.
+  return to the previous Launchplane image.
