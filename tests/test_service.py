@@ -60,6 +60,7 @@ def _invoke_app(
     path: str,
     payload: dict[str, object] | None = None,
     authorization: str = "Bearer valid-token",
+    headers: dict[str, str] | None = None,
 ):
     body_bytes = json.dumps(payload).encode("utf-8") if payload is not None else b""
     environ = {
@@ -69,6 +70,8 @@ def _invoke_app(
         "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
     }
+    for header_name, header_value in (headers or {}).items():
+        environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured: dict[str, object] = {}
 
     def start_response(status: str, headers: list[tuple[str, str]]) -> None:
@@ -302,6 +305,179 @@ class HarborServiceTests(unittest.TestCase):
             self.assertEqual(deployment.resolved_target.target_id, "compose-123")
             self.assertEqual(inventory.deployment_record_id, deployment.record_id)
             self.assertEqual(inventory.promotion_record_id, "")
+
+    def test_deployment_endpoint_replays_idempotent_write(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo",
+                "deployment": {
+                    "record_id": "deployment-20260420T153000Z-opw-testing",
+                    "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                    "context": "opw",
+                    "instance": "testing",
+                    "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                    "deploy": {
+                        "target_name": "opw-testing",
+                        "target_type": "compose",
+                        "deploy_mode": "dokploy-compose-api",
+                        "deployment_id": "delegated-compose-ship",
+                        "status": "pass",
+                        "started_at": "2026-04-20T15:30:00Z",
+                        "finished_at": "2026-04-20T15:32:10Z",
+                    },
+                    "post_deploy_update": {
+                        "attempted": True,
+                        "status": "pass",
+                        "detail": "Update completed.",
+                    },
+                    "destination_health": {
+                        "verified": True,
+                        "urls": ["https://testing.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pass",
+                    },
+                },
+            }
+
+            first_status_code, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/deployments",
+                payload=request_payload,
+                headers={"Idempotency-Key": "deployment-opw-testing-123"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/deployments",
+                payload=request_payload,
+                headers={"Idempotency-Key": "deployment-opw-testing-123"},
+            )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 202)
+            self.assertEqual(first_payload["records"], second_payload["records"])
+            self.assertTrue(second_payload["replayed"])
+            self.assertEqual(second_payload["original_trace_id"], first_payload["trace_id"])
+
+    def test_deployment_endpoint_rejects_idempotency_key_reuse_for_different_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = HarborAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_harbor_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/deploy-testing.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            first_request_payload = {
+                "product": "odoo",
+                "deployment": {
+                    "record_id": "deployment-20260420T153000Z-opw-testing",
+                    "artifact_identity": {"artifact_id": "artifact-20260420-a1b2c3d4"},
+                    "context": "opw",
+                    "instance": "testing",
+                    "source_git_ref": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                    "deploy": {
+                        "target_name": "opw-testing",
+                        "target_type": "compose",
+                        "deploy_mode": "dokploy-compose-api",
+                        "deployment_id": "delegated-compose-ship",
+                        "status": "pass",
+                        "started_at": "2026-04-20T15:30:00Z",
+                        "finished_at": "2026-04-20T15:32:10Z",
+                    },
+                    "post_deploy_update": {
+                        "attempted": True,
+                        "status": "pass",
+                        "detail": "Update completed.",
+                    },
+                    "destination_health": {
+                        "verified": True,
+                        "urls": ["https://testing.example.com/web/health"],
+                        "timeout_seconds": 45,
+                        "status": "pass",
+                    },
+                },
+            }
+            second_request_payload = json.loads(json.dumps(first_request_payload))
+            second_request_payload["deployment"]["record_id"] = "deployment-20260420T153100Z-opw-testing"
+            second_request_payload["deployment"]["artifact_identity"]["artifact_id"] = "artifact-20260420-e5f6g7h8"
+
+            first_status_code, _ = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/deployments",
+                payload=first_request_payload,
+                headers={"Idempotency-Key": "deployment-opw-testing-123"},
+            )
+            second_status_code, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/deployments",
+                payload=second_request_payload,
+                headers={"Idempotency-Key": "deployment-opw-testing-123"},
+            )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 409)
+            self.assertEqual(second_payload["error"]["code"], "idempotency_key_reused")
 
     def test_promotion_endpoint_writes_record_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

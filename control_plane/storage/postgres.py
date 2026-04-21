@@ -11,6 +11,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -154,6 +156,29 @@ class HarborReleaseTupleRow(Base):
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
     minted_at: Mapped[str] = mapped_column(String, nullable=False)
     provenance: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class HarborIdempotencyRow(Base):
+    __tablename__ = "harbor_idempotency_records"
+    __table_args__ = (
+        Index(
+            "harbor_idempotency_scope_route_key_idx",
+            "scope",
+            "route_path",
+            "idempotency_key",
+            unique=True,
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    route_path: Mapped[str] = mapped_column(String, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String, nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(String, nullable=False)
+    response_status_code: Mapped[int] = mapped_column(Integer, nullable=False)
+    response_trace_id: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -357,6 +382,40 @@ class PostgresRecordStore:
             order_by=(HarborBackupGateRow.created_at.desc(), HarborBackupGateRow.record_id.desc()),
             limit=limit,
         )
+
+    def write_idempotency_record(self, record: HarborIdempotencyRecord) -> None:
+        self._write_row(
+            HarborIdempotencyRow(
+                record_id=record.record_id,
+                scope=record.scope,
+                route_path=record.route_path,
+                idempotency_key=record.idempotency_key,
+                request_fingerprint=record.request_fingerprint,
+                response_status_code=record.response_status_code,
+                response_trace_id=record.response_trace_id,
+                recorded_at=record.recorded_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> HarborIdempotencyRecord | None:
+        record_id = build_harbor_idempotency_record_id(
+            scope=scope,
+            route_path=route_path,
+            idempotency_key=idempotency_key,
+        )
+        statement = select(HarborIdempotencyRow).where(HarborIdempotencyRow.record_id == record_id).limit(1)
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            return self._read_payload(model_type=HarborIdempotencyRecord, payload=row.payload)
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self._write_row(

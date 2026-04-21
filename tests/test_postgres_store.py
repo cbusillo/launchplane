@@ -9,6 +9,8 @@ from control_plane.cli import main
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -211,6 +213,40 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_idempotency_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "harbor.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            record = HarborIdempotencyRecord(
+                record_id=build_harbor_idempotency_record_id(
+                    scope="every/verireel|workflow|repo:every/verireel:pull_request",
+                    route_path="/v1/evidence/previews/generations",
+                    idempotency_key="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
+                ),
+                scope="every/verireel|workflow|repo:every/verireel:pull_request",
+                route_path="/v1/evidence/previews/generations",
+                idempotency_key="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
+                request_fingerprint="fingerprint-123",
+                response_status_code=202,
+                response_trace_id="harbor_req_123",
+                recorded_at="2026-04-21T01:00:00Z",
+                response_payload={"status": "accepted", "records": {"preview_id": "preview-35"}},
+            )
+
+            store.write_idempotency_record(record)
+            loaded = store.read_idempotency_record(
+                scope=record.scope,
+                route_path=record.route_path,
+                idempotency_key=record.idempotency_key,
+            )
+
+            self.assertIsNotNone(loaded)
+            assert loaded is not None
+            self.assertEqual(loaded.request_fingerprint, "fingerprint-123")
+            self.assertEqual(loaded.response_payload["records"]["preview_id"], "preview-35")
+
     def test_storage_import_core_records_command_reports_counts(self) -> None:
         runner = CliRunner()
         postgres_store = Mock()

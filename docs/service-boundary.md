@@ -163,6 +163,7 @@ event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
 allowed actions:
+  - deployment.write
   - promotion.write
 ```
 
@@ -227,6 +228,21 @@ Recommended first headers:
 - `Authorization: Bearer <github_oidc_token>`
 - `Content-Type: application/json`
 - `Idempotency-Key: <stable-retry-key>`
+
+The current Harbor service implementation now honors `Idempotency-Key` for all
+write routes. Harbor replays the first successful accepted response when the
+same authenticated workflow scope retries the same route with the same key and
+the same request fingerprint. Harbor rejects reuse of the same key for a
+different payload on the same route.
+
+Current VeriReel key shapes:
+
+- preview generation: `preview-generation:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
+- preview destroy: `preview-destroyed:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
+- testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
+- prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
+- prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
+- VeriReel testing deploy driver: `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 
 Recommended first success shape:
 
