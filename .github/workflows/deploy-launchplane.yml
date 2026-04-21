@@ -130,6 +130,9 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
           tags: |
             ${{ steps.prep.outputs.image_repository }}:main
             ${{ steps.prep.outputs.image_repository }}:sha-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
