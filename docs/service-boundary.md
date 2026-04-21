@@ -271,6 +271,8 @@ Current VeriReel key shapes:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel prod deploy driver:
   `verireel-prod-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel prod promotion driver:
+  `verireel-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>:<backup_record_id>:<promotion_record_id>:<expected_build_revision>:<expected_build_tag>`
 
 Recommended first success shape:
 
