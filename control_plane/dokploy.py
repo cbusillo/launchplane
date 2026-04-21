@@ -490,11 +490,19 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     host = environment_values.get("DOKPLOY_HOST", "").strip()
     token = environment_values.get("DOKPLOY_TOKEN", "").strip()
     if not host or not token:
+        bootstrap_environment_values = read_control_plane_bootstrap_environment_values(
+            control_plane_root=control_plane_root
+        )
+        if not host:
+            host = bootstrap_environment_values.get("DOKPLOY_HOST", "").strip()
+        if not token:
+            token = bootstrap_environment_values.get("DOKPLOY_TOKEN", "").strip()
+    if not host or not token:
         external_env_file = resolve_launchplane_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
         raise click.ClickException(
             "Missing DOKPLOY_HOST or DOKPLOY_TOKEN for control-plane Dokploy execution. "
             "Configure Launchplane-managed Dokploy secrets in the shared store, "
-            f"or use {CONTROL_PLANE_ENV_FILE_ENV_VAR}/{external_env_file} only as bootstrap input before import."
+            f"or use {CONTROL_PLANE_ENV_FILE_ENV_VAR} or {external_env_file} only as bootstrap input before import."
         )
     return host, token
 

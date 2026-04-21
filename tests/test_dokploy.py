@@ -644,6 +644,25 @@ target_id = "compose-456"
         self.assertEqual(host, "https://dokploy.control-plane.example")
         self.assertEqual(token, "control-plane-token")
 
+    def test_read_dokploy_config_falls_back_to_process_environment_bootstrap(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            xdg_config_home = control_plane_root / "xdg"
+
+            with patch.dict(
+                os.environ,
+                {
+                    "DOKPLOY_HOST": "https://dokploy.process.example",
+                    "DOKPLOY_TOKEN": "process-token",
+                    "XDG_CONFIG_HOME": str(xdg_config_home),
+                },
+                clear=True,
+            ):
+                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+
+        self.assertEqual(host, "https://dokploy.process.example")
+        self.assertEqual(token, "process-token")
+
     def test_read_dokploy_config_supports_explicit_control_plane_env_file(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
