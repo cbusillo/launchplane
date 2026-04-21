@@ -116,11 +116,23 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.prep.outputs.should_build == 'true'
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        env:
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          DEFAULT_GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          registry_username="${GHCR_USERNAME:-${GITHUB_ACTOR}}"
+          registry_password="${GHCR_TOKEN:-${DEFAULT_GITHUB_TOKEN}}"
+
+          if [ -z "$registry_password" ]; then
+            echo "Missing GHCR_TOKEN secret and GitHub token fallback." >&2
+            exit 1
+          fi
+
+          printf '%s' "$registry_password" | docker login ghcr.io --username "$registry_username" --password-stdin
 
       - name: Build and push Launchplane image
         if: steps.prep.outputs.should_build == 'true'
