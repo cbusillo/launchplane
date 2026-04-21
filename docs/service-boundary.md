@@ -233,6 +233,11 @@ The first preview driver cut stays intentionally narrow: Launchplane owns previe
 runtime refresh and teardown, while VeriReel still owns image build/publish,
 browser verification, and the follow-up preview evidence write.
 
+The remaining VeriReel prod rollback tail is intentionally not yet folded into
+that driver list. It needs a privileged runtime contract for Proxmox access,
+not only another HTTP route. The current proposed execution model and decision
+points are captured in [`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
+
 Do not generalize the full driver surface before a few product-specific routes
 have proven the shape.
 

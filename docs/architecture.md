@@ -64,6 +64,10 @@ promotion behavior.
 - Repo-specific variation should enter Launchplane as thin repo extensions,
   declarative config, or small driver inputs, not as a full second copy of the
   same operational workflow in every product repo.
+- When a product-specific operation needs materially different network reach or
+  host-local authority, Launchplane should prefer a narrow delegated worker
+  contract over teaching the main API host to absorb every privileged runtime
+  concern directly.
 
 ## Launchplane Shape Today
 
