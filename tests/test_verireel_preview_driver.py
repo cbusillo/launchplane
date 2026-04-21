@@ -1,7 +1,10 @@
 import subprocess
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
 
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
+from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
@@ -21,6 +24,15 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         self.assertIn('rm -f "$temp_script" "$temp_runner" || true', command)
 
         parse_result = subprocess.run(["sh", "-n", "-c", command], check=False)
+        self.assertEqual(parse_result.returncode, 0)
+
+    def test_preview_database_admin_module_source_is_valid_javascript(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            module_path = Path(temporary_directory_name) / "preview-db-admin.mjs"
+            module_path.write_text(_preview_database_admin_module_source(), encoding="utf-8")
+
+            parse_result = subprocess.run(["node", "--check", str(module_path)], check=False)
+
         self.assertEqual(parse_result.returncode, 0)
 
 
