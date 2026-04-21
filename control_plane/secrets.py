@@ -305,15 +305,20 @@ def _import_runtime_environment_scope(
 ) -> dict[str, int]:
     imported = 0
     unchanged = 0
+    skipped_empty = 0
     for key_name, raw_value in values.items():
         if not _runtime_environment_key_is_secret(key_name):
+            continue
+        plaintext_value = str(raw_value).strip()
+        if not plaintext_value:
+            skipped_empty += 1
             continue
         result = write_secret_value(
             record_store=record_store,
             scope=scope,
             integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
             name=key_name,
-            plaintext_value=str(raw_value),
+            plaintext_value=plaintext_value,
             binding_key=key_name,
             context_name=context_name,
             instance_name=instance_name,
@@ -325,7 +330,7 @@ def _import_runtime_environment_scope(
             unchanged += 1
         else:
             imported += 1
-    return {"imported": imported, "unchanged": unchanged}
+    return {"imported": imported, "unchanged": unchanged, "skipped_empty": skipped_empty}
 
 
 def import_bootstrap_secrets(
@@ -339,7 +344,7 @@ def import_bootstrap_secrets(
 
     summary: dict[str, object] = {
         "dokploy": {"imported": 0, "unchanged": 0},
-        "runtime_environment": {"imported": 0, "unchanged": 0},
+        "runtime_environment": {"imported": 0, "unchanged": 0, "skipped_empty": 0},
     }
     environment_values = control_plane_dokploy.read_control_plane_bootstrap_environment_values(
         control_plane_root=control_plane_root
@@ -377,6 +382,7 @@ def import_bootstrap_secrets(
     assert isinstance(runtime_summary, dict)
     runtime_summary["imported"] = int(runtime_summary["imported"]) + shared_summary["imported"]
     runtime_summary["unchanged"] = int(runtime_summary["unchanged"]) + shared_summary["unchanged"]
+    runtime_summary["skipped_empty"] = int(runtime_summary["skipped_empty"]) + shared_summary["skipped_empty"]
     for context_name, context_definition in definition.contexts.items():
         context_summary = _import_runtime_environment_scope(
             record_store=record_store,
@@ -387,6 +393,7 @@ def import_bootstrap_secrets(
         )
         runtime_summary["imported"] = int(runtime_summary["imported"]) + context_summary["imported"]
         runtime_summary["unchanged"] = int(runtime_summary["unchanged"]) + context_summary["unchanged"]
+        runtime_summary["skipped_empty"] = int(runtime_summary["skipped_empty"]) + context_summary["skipped_empty"]
         for instance_name, instance_definition in context_definition.instances.items():
             instance_summary = _import_runtime_environment_scope(
                 record_store=record_store,
@@ -398,6 +405,7 @@ def import_bootstrap_secrets(
             )
             runtime_summary["imported"] = int(runtime_summary["imported"]) + instance_summary["imported"]
             runtime_summary["unchanged"] = int(runtime_summary["unchanged"]) + instance_summary["unchanged"]
+            runtime_summary["skipped_empty"] = int(runtime_summary["skipped_empty"]) + instance_summary["skipped_empty"]
     return summary
 
 
