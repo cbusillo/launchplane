@@ -665,6 +665,20 @@ target_id = "compose-456"
 
 
 class HarborServiceDeployTests(unittest.TestCase):
+    @staticmethod
+    def _target_payload(*, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123") -> dict[str, object]:
+        return {
+            "name": "harbor",
+            "appName": "compose-harbor",
+            "sourceType": "git",
+            "customGitUrl": "git@github.com:example/harbor.git",
+            "customGitBranch": "main",
+            "customGitSSHKeyId": custom_git_ssh_key_id,
+            "composePath": "./docker-compose.yml",
+            "composeStatus": "done",
+            "env": env_text,
+        }
+
     def test_render_dokploy_env_text_with_overrides_updates_and_removes_keys(self) -> None:
         rendered = control_plane_dokploy.render_dokploy_env_text_with_overrides(
             "KEEP=1\nREMOVE=old\n",
@@ -684,7 +698,18 @@ class HarborServiceDeployTests(unittest.TestCase):
             return_value=("https://dokploy.example.com", "token-123"),
         ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"},
+            return_value=self._target_payload(
+                env_text=(
+                    "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"
+                    "HARBOR_DATABASE_URL=postgresql+psycopg://harbor:test@db.internal:5432/harbor\n"
+                    "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                    "DOKPLOY_HOST=https://dokploy.example.com\n"
+                    "DOKPLOY_TOKEN=token-123\n"
+                    "HARBOR_POLICY_B64=dGVzdA==\n"
+                    "HARBOR_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
+                    "HARBOR_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
+                ),
+            ),
         ), patch(
             "control_plane.dokploy.update_dokploy_target_env",
             side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
@@ -725,6 +750,8 @@ class HarborServiceDeployTests(unittest.TestCase):
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["previous_image_reference"], "ghcr.io/every/harbor@sha256:old")
         self.assertEqual(payload["deployment_result"], "deployment=deploy-new status=done")
+        self.assertEqual(payload["preflight"]["runtime_contract"]["database_host"], "db.internal")
+        self.assertTrue(payload["preflight"]["custom_git_ssh_key_configured"])
 
     def test_service_deploy_dokploy_image_rolls_back_when_health_verification_fails(self) -> None:
         runner = CliRunner()
@@ -737,8 +764,30 @@ class HarborServiceDeployTests(unittest.TestCase):
         ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
             side_effect=[
-                {"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"},
-                {"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:new\n"},
+                self._target_payload(
+                    env_text=(
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:old\n"
+                        "HARBOR_DATABASE_URL=postgresql+psycopg://harbor:test@db.internal:5432/harbor\n"
+                        "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                        "DOKPLOY_HOST=https://dokploy.example.com\n"
+                        "DOKPLOY_TOKEN=token-123\n"
+                        "HARBOR_POLICY_B64=dGVzdA==\n"
+                        "HARBOR_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
+                        "HARBOR_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
+                    ),
+                ),
+                self._target_payload(
+                    env_text=(
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/harbor@sha256:new\n"
+                        "HARBOR_DATABASE_URL=postgresql+psycopg://harbor:test@db.internal:5432/harbor\n"
+                        "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                        "DOKPLOY_HOST=https://dokploy.example.com\n"
+                        "DOKPLOY_TOKEN=token-123\n"
+                        "HARBOR_POLICY_B64=dGVzdA==\n"
+                        "HARBOR_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
+                        "HARBOR_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
+                    ),
+                ),
             ],
         ), patch(
             "control_plane.dokploy.update_dokploy_target_env",
@@ -791,6 +840,85 @@ class HarborServiceDeployTests(unittest.TestCase):
         payload = json.loads(payload_text) if payload_text else {}
         self.assertEqual(payload.get("status"), "failed")
         self.assertEqual(payload.get("rollback", {}).get("status"), "ok")
+
+    def test_service_inspect_dokploy_target_fails_closed_on_missing_runtime_contract(self) -> None:
+        runner = CliRunner()
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value=self._target_payload(
+                env_text="DOCKER_IMAGE_REFERENCE=ghcr.io/example/harbor@sha256:old\n",
+                custom_git_ssh_key_id="",
+            ),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "inspect-dokploy-target",
+                    "--target-type",
+                    "compose",
+                    "--target-id",
+                    "compose-123",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        payload_text = result.output.split("Error:", 1)[0].strip()
+        payload = json.loads(payload_text) if payload_text else {}
+        self.assertIn(
+            "Dokploy target uses an SSH git remote but has no customGitSSHKeyId configured.",
+            payload.get("blockers", []),
+        )
+        self.assertIn(
+            "Harbor service target is missing HARBOR_DATABASE_URL.",
+            payload.get("blockers", []),
+        )
+        self.assertIn("Harbor service Dokploy target preflight failed", result.output)
+
+    def test_service_deploy_dokploy_image_stops_before_env_change_when_preflight_fails(self) -> None:
+        runner = CliRunner()
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value=self._target_payload(
+                env_text=(
+                    "HARBOR_MASTER_ENCRYPTION_KEY=test-key\n"
+                    "DOKPLOY_HOST=https://dokploy.example.com\n"
+                    "DOKPLOY_TOKEN=token-123\n"
+                ),
+            ),
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+        ) as update_target_env, patch(
+            "control_plane.dokploy.trigger_deployment",
+        ) as trigger_deployment:
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "deploy-dokploy-image",
+                    "--target-type",
+                    "compose",
+                    "--target-id",
+                    "compose-123",
+                    "--image-reference",
+                    "ghcr.io/example/harbor@sha256:new",
+                    "--health-url",
+                    "https://harbor.example.com/v1/health",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0, msg=result.output)
+        update_target_env.assert_not_called()
+        trigger_deployment.assert_not_called()
+        self.assertIn("Harbor service target is missing HARBOR_DATABASE_URL.", result.output)
 
 
 if __name__ == "__main__":

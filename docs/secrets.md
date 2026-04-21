@@ -63,6 +63,12 @@ title: Secrets
 - Missing Dokploy credentials are a hard error, not a silent fallback.
 - Missing `HARBOR_MASTER_ENCRYPTION_KEY` is a hard error when Harbor needs to
   read or write DB-backed managed secrets.
+- The live Harbor Dokploy target should expose `HARBOR_DATABASE_URL`,
+  `HARBOR_MASTER_ENCRYPTION_KEY`, `DOKPLOY_HOST`, and `DOKPLOY_TOKEN` through
+  target env or an equivalent mounted runtime contract.
+- Use `uv run harbor service inspect-dokploy-target ...` to verify that the
+  live Harbor target has the required secret-backed contract without printing
+  plaintext secret values.
 
 ## Local Runtime Contract
 
@@ -88,4 +94,9 @@ cp config/runtime-environments.toml.example \
 cp .env.example "${XDG_CONFIG_HOME:-$HOME/.config}/harbor/dokploy.env"
 export HARBOR_MASTER_ENCRYPTION_KEY="replace-me"
 uv run harbor secrets import-bootstrap --database-url "$HARBOR_DATABASE_URL"
+uv run harbor secrets list --database-url "$HARBOR_DATABASE_URL" --integration dokploy
 ```
+
+After bootstrap import succeeds, verify Harbor can resolve the managed secret
+status you expect before removing older operator-local bootstrap files such as
+`~/.config/harbor/dokploy.env`.
