@@ -6174,11 +6174,16 @@ def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
 
 
 def _load_runtime_environment_values(*, context_name: str, instance_name: str) -> dict[str, str]:
-    return control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=_control_plane_root(),
-        context_name=context_name,
-        instance_name=instance_name,
-    )
+    try:
+        return control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=_control_plane_root(),
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    except click.ClickException as error:
+        if str(error).startswith("Missing control-plane runtime environments file."):
+            return {}
+        raise
 
 
 def _require_dokploy_target_definition(
