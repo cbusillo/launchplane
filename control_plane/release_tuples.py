@@ -11,6 +11,8 @@ import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.storage.factory import resolve_database_url
+from control_plane.storage.postgres import PostgresRecordStore
 
 RELEASE_TUPLES_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_RELEASE_TUPLES_FILE"
 DEFAULT_RELEASE_TUPLES_FILE = "config/release-tuples.toml"
@@ -230,17 +232,26 @@ def resolve_release_tuples_file(control_plane_root: Path) -> Path:
 
 
 def load_release_tuple_catalog(*, control_plane_root: Path) -> ReleaseTupleCatalog:
+    configured_file = os.environ.get(RELEASE_TUPLES_FILE_ENV_VAR, "").strip()
+    if configured_file:
+        return _load_release_tuple_catalog_from_file(resolve_release_tuples_file(control_plane_root))
+
+    file_catalog = _load_optional_release_tuple_catalog_from_file(control_plane_root=control_plane_root)
+    database_url = resolve_database_url()
+    if database_url:
+        database_catalog = _load_optional_release_tuple_catalog_from_database(database_url=database_url)
+        if database_catalog is not None and file_catalog is not None:
+            return _merge_release_tuple_catalogs(base_catalog=file_catalog, overlay_catalog=database_catalog)
+        if database_catalog is not None:
+            return database_catalog
+    if file_catalog is not None:
+        return file_catalog
+
     tuples_file = resolve_release_tuples_file(control_plane_root)
-    if not tuples_file.exists():
-        raise click.ClickException(
-            "Missing control-plane release tuples file. "
-            f"Create {tuples_file} or point {RELEASE_TUPLES_FILE_ENV_VAR} at an alternate file."
-        )
-    try:
-        payload = tomllib.loads(tuples_file.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise click.ClickException(f"Invalid release tuples file {tuples_file}: {error}") from error
-    return _parse_release_tuple_catalog(payload, source_file=tuples_file)
+    raise click.ClickException(
+        "Missing control-plane release tuples file. "
+        f"Create {tuples_file} or point {RELEASE_TUPLES_FILE_ENV_VAR} at an alternate file."
+    )
 
 
 def resolve_release_tuple(
@@ -315,6 +326,105 @@ def _parse_release_tuple_catalog(
             channels[normalized_channel_name] = ReleaseTupleDefinition(tuple_id=tuple_id, repo_shas=repo_shas)
         contexts[context_name] = ReleaseTupleContextDefinition(channels=channels)
     return ReleaseTupleCatalog(schema_version=schema_version, contexts=contexts)
+
+
+def _load_release_tuple_catalog_from_file(tuples_file: Path) -> ReleaseTupleCatalog:
+    if not tuples_file.exists():
+        raise click.ClickException(
+            "Missing control-plane release tuples file. "
+            f"Create {tuples_file} or point {RELEASE_TUPLES_FILE_ENV_VAR} at an alternate file."
+        )
+    try:
+        payload = tomllib.loads(tuples_file.read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise click.ClickException(f"Invalid release tuples file {tuples_file}: {error}") from error
+    return _parse_release_tuple_catalog(payload, source_file=tuples_file)
+
+
+def _load_optional_release_tuple_catalog_from_file(*, control_plane_root: Path) -> ReleaseTupleCatalog | None:
+    tuples_file = resolve_release_tuples_file(control_plane_root)
+    if not tuples_file.exists():
+        return None
+    return _load_release_tuple_catalog_from_file(tuples_file)
+
+
+def _load_optional_release_tuple_catalog_from_database(*, database_url: str) -> ReleaseTupleCatalog | None:
+    record_store: PostgresRecordStore | None = None
+    try:
+        record_store = PostgresRecordStore(database_url=database_url)
+        record_store.ensure_schema()
+        records = record_store.list_release_tuple_records()
+    except Exception as error:
+        raise click.ClickException(f"Could not load release tuples from Launchplane Postgres storage: {error}") from error
+    finally:
+        try:
+            if record_store is not None:
+                record_store.close()
+        except Exception:
+            pass
+    if not records:
+        return None
+    return build_release_tuple_catalog_from_records(records, source_label="Launchplane Postgres storage")
+
+
+def build_release_tuple_catalog_from_records(
+    records: tuple[ReleaseTupleRecord, ...],
+    *,
+    source_label: str = "Launchplane release tuple records",
+) -> ReleaseTupleCatalog:
+    merged_contexts: dict[str, dict[str, ReleaseTupleDefinition]] = {}
+    seen_tuple_ids: set[str] = set()
+    for record in sorted(records, key=lambda item: (item.context, item.channel)):
+        normalized_channel_name = _require_stable_release_tuple_channel(
+            record.channel,
+            scope=f"{source_label} record {record.tuple_id}",
+        )
+        if record.tuple_id in seen_tuple_ids:
+            raise click.ClickException(f"Duplicate release tuple id {record.tuple_id!r} found in {source_label}.")
+        seen_tuple_ids.add(record.tuple_id)
+        context_channels = merged_contexts.setdefault(record.context, {})
+        context_channels[normalized_channel_name] = ReleaseTupleDefinition(
+            tuple_id=record.tuple_id,
+            repo_shas=dict(record.repo_shas),
+        )
+    return _build_release_tuple_catalog_from_context_map(merged_contexts)
+
+
+def _merge_release_tuple_catalogs(
+    *,
+    base_catalog: ReleaseTupleCatalog,
+    overlay_catalog: ReleaseTupleCatalog,
+) -> ReleaseTupleCatalog:
+    merged_contexts: dict[str, dict[str, ReleaseTupleDefinition]] = {
+        context_name: dict(context_definition.channels)
+        for context_name, context_definition in base_catalog.contexts.items()
+    }
+    for context_name, context_definition in overlay_catalog.contexts.items():
+        merged_contexts.setdefault(context_name, {}).update(context_definition.channels)
+    return _build_release_tuple_catalog_from_context_map(merged_contexts)
+
+
+def _build_release_tuple_catalog_from_context_map(
+    context_map: dict[str, dict[str, ReleaseTupleDefinition]],
+) -> ReleaseTupleCatalog:
+    seen_tuple_ids: set[str] = set()
+    contexts: dict[str, ReleaseTupleContextDefinition] = {}
+    for context_name, channels_map in sorted(context_map.items()):
+        channels: dict[str, ReleaseTupleDefinition] = {}
+        for channel_name, release_tuple in sorted(channels_map.items()):
+            normalized_channel_name = _require_stable_release_tuple_channel(
+                channel_name,
+                scope=f"release tuple catalog merge for context {context_name}",
+            )
+            if release_tuple.tuple_id in seen_tuple_ids:
+                raise click.ClickException(f"Duplicate release tuple id {release_tuple.tuple_id!r} found while merging catalogs.")
+            seen_tuple_ids.add(release_tuple.tuple_id)
+            channels[normalized_channel_name] = ReleaseTupleDefinition(
+                tuple_id=release_tuple.tuple_id,
+                repo_shas=dict(release_tuple.repo_shas),
+            )
+        contexts[context_name] = ReleaseTupleContextDefinition(channels=channels)
+    return ReleaseTupleCatalog(schema_version=1, contexts=contexts)
 
 
 def _read_required_int(source: dict[str, object], key: str, *, scope: str) -> int:
