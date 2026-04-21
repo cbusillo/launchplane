@@ -11,6 +11,7 @@ from urllib.error import HTTPError, URLError
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PromotionRecord, RollbackExecutionEvidence
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -90,6 +91,16 @@ class VeriReelProdRollbackResult(BaseModel):
     rollback_started_at: str = ""
     rollback_finished_at: str = ""
     error_message: str = ""
+
+
+WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"
+WORKER_RUNTIME_ENV_KEYS = (
+    WORKER_COMMAND_ENV_VAR,
+    "VERIREEL_PROD_PROXMOX_HOST",
+    "VERIREEL_PROD_PROXMOX_USER",
+    "VERIREEL_PROD_CT_ID",
+    "VERIREEL_PROD_GATE_LOCAL",
+)
 
 
 def _read_promotion_record(
@@ -253,31 +264,72 @@ def _write_promotion_rollback_state(
     record_store.write_promotion_record(updated_record)
 
 
-def _worker_command() -> list[str]:
-    raw_value = os.environ.get("LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND", "").strip()
+def _resolve_worker_runtime_environment(
+    *,
+    control_plane_root: Path,
+    request: VeriReelProdRollbackWorkerRequest,
+) -> dict[str, str]:
+    try:
+        resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=request.context,
+            instance_name=request.instance,
+        )
+    except click.ClickException:
+        return {}
+    return {
+        key: value
+        for key, value in resolved_values.items()
+        if key in WORKER_RUNTIME_ENV_KEYS and str(value).strip()
+    }
+
+
+def _worker_environment(
+    *,
+    control_plane_root: Path,
+    request: VeriReelProdRollbackWorkerRequest,
+) -> dict[str, str]:
+    environment = dict(os.environ)
+    environment.update(
+        _resolve_worker_runtime_environment(
+            control_plane_root=control_plane_root,
+            request=request,
+        )
+    )
+    return environment
+
+
+def _worker_command(*, environment: dict[str, str]) -> list[str]:
+    raw_value = environment.get(WORKER_COMMAND_ENV_VAR, "").strip()
     if not raw_value:
         raise click.ClickException(
-            "Missing LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND for VeriReel prod rollback execution."
+            f"Missing {WORKER_COMMAND_ENV_VAR} for VeriReel prod rollback execution."
         )
     command = shlex.split(raw_value)
     if not command:
         raise click.ClickException(
-            "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND did not resolve to an executable command."
+            f"{WORKER_COMMAND_ENV_VAR} did not resolve to an executable command."
         )
     return command
 
 
 def _run_delegated_worker(
     *,
+    control_plane_root: Path,
     request: VeriReelProdRollbackWorkerRequest,
 ) -> VeriReelProdRollbackWorkerResult:
+    worker_environment = _worker_environment(
+        control_plane_root=control_plane_root,
+        request=request,
+    )
     completed = subprocess.run(
-        _worker_command(),
+        _worker_command(environment=worker_environment),
         input=request.model_dump_json(),
         text=True,
         capture_output=True,
         timeout=max(request.timeout_seconds, 1),
         check=False,
+        env=worker_environment,
     )
     stdout = completed.stdout.strip()
     if not stdout:
@@ -384,17 +436,42 @@ def execute_verireel_prod_rollback(
             error_message=error_message,
         )
 
-    worker_result = _run_delegated_worker(
-        request=VeriReelProdRollbackWorkerRequest(
-            context=request.context,
-            instance=request.instance,
+    try:
+        worker_result = _run_delegated_worker(
+            control_plane_root=control_plane_root,
+            request=VeriReelProdRollbackWorkerRequest(
+                context=request.context,
+                instance=request.instance,
+                promotion_record_id=request.promotion_record_id,
+                backup_record_id=request.backup_record_id,
+                snapshot_name=snapshot_name,
+                start_after_rollback=request.start_after_rollback,
+                timeout_seconds=request.rollout_timeout_seconds,
+            ),
+        )
+    except click.ClickException as exc:
+        error_message = str(exc)
+        _write_promotion_rollback_state(
+            record_store=record_store,
+            promotion_record=promotion_record,
+            request=request,
+            snapshot_name=snapshot_name,
+            rollback_status="fail",
+            rollback_health_status="skipped",
+            rollback_started_at="",
+            rollback_finished_at="",
+            detail=error_message,
+            health_result=None,
+        )
+        return VeriReelProdRollbackResult(
             promotion_record_id=request.promotion_record_id,
             backup_record_id=request.backup_record_id,
             snapshot_name=snapshot_name,
-            start_after_rollback=request.start_after_rollback,
-            timeout_seconds=request.rollout_timeout_seconds,
+            rollback_status="fail",
+            rollback_health_status="skipped",
+            error_message=error_message,
         )
-    )
+
     if worker_result.status != "pass":
         detail = worker_result.detail or "VeriReel prod rollback worker reported failure."
         _write_promotion_rollback_state(

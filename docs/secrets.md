@@ -33,6 +33,11 @@ title: Secrets
 - Launchplane preview routing now uses a dedicated `LAUNCHPLANE_PREVIEW_BASE_URL`
   runtime-environment value instead of piggybacking on ordinary live-instance
   web base URLs.
+- VeriReel prod rollback worker dispatch now resolves
+  `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
+  `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
+  `VERIREEL_PROD_CT_ID` from the `verireel/prod` runtime-environment contract,
+  with managed-secret overlays still available for secret-looking keys.
 - If you need a non-default secret file location, set
   `ODOO_CONTROL_PLANE_ENV_FILE` to an alternate untracked env file path.
 - If you need a non-default runtime environments file location, set

@@ -35,3 +35,9 @@ ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-testing-client-id"
 
 [contexts.cm.instances.prod.env]
 ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-prod-client-id"
+
+[contexts.verireel.instances.prod.env]
+LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND = "uv run python -m control_plane.workflows.verireel_prod_rollback_worker"
+VERIREEL_PROD_PROXMOX_HOST = "proxmox.example.com"
+VERIREEL_PROD_PROXMOX_USER = "root"
+VERIREEL_PROD_CT_ID = "200"
