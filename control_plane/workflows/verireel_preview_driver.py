@@ -605,8 +605,10 @@ def _preview_database_admin_module_source() -> str:
     return "".join(
         (
             '#!/usr/bin/env node\n',
-            'import { Client } from "pg";\n',
+            'import { createRequire } from "node:module";\n',
             'import { pathToFileURL } from "node:url";\n',
+            'const require = createRequire(`${process.cwd()}/package.json`);\n',
+            'const { Client } = require("pg");\n',
             'function quoteIdentifier(value) { return "\\\"" + String(value).split("\\\"").join("\\\"\\\"") + "\\\""; }\n',
             'function quoteLiteral(value) { return "\'" + String(value).split("\'").join("\'\'") + "\'"; }\n',
             'function parseArgs(argv) {\n',
