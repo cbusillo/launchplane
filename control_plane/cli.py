@@ -22,6 +22,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
@@ -7387,6 +7388,111 @@ def storage_import_core_records(state_dir: Path, database_url: str) -> None:
     postgres_store.ensure_schema()
     counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
     click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
+
+
+@storage.command("import-dokploy-target-ids")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Dokploy target-id overrides.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root to scan for the current Dokploy target-id catalog.",
+)
+def storage_import_dokploy_target_ids(database_url: str, control_plane_root: Path | None) -> None:
+    resolved_control_plane_root = control_plane_root or _control_plane_root()
+    source_file_path = control_plane_dokploy.resolve_control_plane_dokploy_source_file(resolved_control_plane_root)
+    target_ids_file_path = control_plane_dokploy.resolve_control_plane_dokploy_target_ids_file(
+        resolved_control_plane_root,
+        source_file_path=source_file_path,
+    )
+    target_id_catalog = control_plane_dokploy.load_dokploy_target_id_catalog(target_ids_file_path)
+    control_plane_dokploy.load_dokploy_source_of_truth(
+        source_file_path,
+        target_id_catalog=target_id_catalog,
+    )
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    imported_count = 0
+    imported_at = utc_now_timestamp()
+    try:
+        for target in target_id_catalog.targets:
+            postgres_store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=target.context,
+                    instance=target.instance,
+                    target_id=target.target_id,
+                    updated_at=imported_at,
+                    source_label=f"import:{target_ids_file_path}",
+                )
+            )
+            imported_count += 1
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": imported_count,
+                "source_file": str(target_ids_file_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@storage.command("import-runtime-environments")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime environment records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root to scan for the current runtime environments catalog.",
+)
+def storage_import_runtime_environments(database_url: str, control_plane_root: Path | None) -> None:
+    resolved_control_plane_root = control_plane_root or _control_plane_root()
+    definition = control_plane_runtime_environments.load_runtime_environment_definition(
+        control_plane_root=resolved_control_plane_root
+    )
+    environments_file = control_plane_runtime_environments.resolve_runtime_environments_file(resolved_control_plane_root)
+    source_label = f"import:{environments_file}" if environments_file is not None else "import:runtime-environments"
+    records = control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        definition,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label,
+    )
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    imported_count = 0
+    try:
+        for record in records:
+            postgres_store.write_runtime_environment_record(record)
+            imported_count += 1
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": imported_count,
+                "source_file": str(environments_file) if environments_file is not None else "",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @secrets.command("import-bootstrap")

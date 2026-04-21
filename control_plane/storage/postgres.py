@@ -10,6 +10,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
@@ -17,6 +18,7 @@ from control_plane.contracts.preview_generation_record import PreviewGenerationR
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord, SecretVersion
 from control_plane.storage.filesystem import FilesystemRecordStore
 
@@ -156,6 +158,28 @@ class LaunchplaneReleaseTupleRow(Base):
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
     minted_at: Mapped[str] = mapped_column(String, nullable=False)
     provenance: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneDokployTargetIdRow(Base):
+    __tablename__ = "launchplane_dokploy_target_ids"
+    __table_args__ = (Index("launchplane_dokploy_target_ids_updated_idx", desc("updated_at")),)
+
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    target_id: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRuntimeEnvironmentRow(Base):
+    __tablename__ = "launchplane_runtime_environments"
+    __table_args__ = (Index("launchplane_runtime_environments_updated_idx", desc("updated_at")),)
+
+    scope: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -649,6 +673,56 @@ class PostgresRecordStore:
             model_type=ReleaseTupleRecord,
             orm_model=LaunchplaneReleaseTupleRow,
             order_by=(LaunchplaneReleaseTupleRow.context.asc(), LaunchplaneReleaseTupleRow.channel.asc()),
+        )
+
+    def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
+        self._write_row(
+            LaunchplaneDokployTargetIdRow(
+                context=record.context,
+                instance=record.instance,
+                target_id=record.target_id,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_dokploy_target_id_record(self, *, context_name: str, instance_name: str) -> DokployTargetIdRecord:
+        return self._read_model(
+            model_type=DokployTargetIdRecord,
+            orm_model=LaunchplaneDokployTargetIdRow,
+            filters=(
+                LaunchplaneDokployTargetIdRow.context == context_name,
+                LaunchplaneDokployTargetIdRow.instance == instance_name,
+            ),
+        )
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        return self._list_models(
+            model_type=DokployTargetIdRecord,
+            orm_model=LaunchplaneDokployTargetIdRow,
+            order_by=(LaunchplaneDokployTargetIdRow.context.asc(), LaunchplaneDokployTargetIdRow.instance.asc()),
+        )
+
+    def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
+        self._write_row(
+            LaunchplaneRuntimeEnvironmentRow(
+                scope=record.scope,
+                context=record.context,
+                instance=record.instance,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_runtime_environment_records(self) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return self._list_models(
+            model_type=RuntimeEnvironmentRecord,
+            orm_model=LaunchplaneRuntimeEnvironmentRow,
+            order_by=(
+                LaunchplaneRuntimeEnvironmentRow.scope.asc(),
+                LaunchplaneRuntimeEnvironmentRow.context.asc(),
+                LaunchplaneRuntimeEnvironmentRow.instance.asc(),
+            ),
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:

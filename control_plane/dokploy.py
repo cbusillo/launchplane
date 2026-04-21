@@ -15,6 +15,9 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.storage.factory import resolve_database_url
+from control_plane.storage.postgres import PostgresRecordStore
 
 DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS = 600
 DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS = 180
@@ -163,12 +166,11 @@ class DokployTargetIdCatalog(BaseModel):
 def load_dokploy_source_of_truth(
     source_file_path: Path,
     *,
-    target_ids_file_path: Path | None = None,
+    target_id_catalog: DokployTargetIdCatalog | None = None,
 ) -> DokploySourceOfTruth:
     try:
         payload = tomllib.loads(source_file_path.read_text(encoding="utf-8"))
-        if target_ids_file_path is not None:
-            target_id_catalog = load_dokploy_target_id_catalog(target_ids_file_path)
+        if target_id_catalog is not None:
             payload = _apply_dokploy_target_id_catalog(payload, target_id_catalog=target_id_catalog)
         return DokploySourceOfTruth.model_validate(payload)
     except FileNotFoundError as error:
@@ -351,10 +353,69 @@ def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> D
         source_file_path=source_file_path,
     )
     configured_target_ids_file = os.environ.get(CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR, "").strip()
-    should_load_target_ids = bool(configured_target_ids_file) or target_ids_file_path.exists()
+    target_id_catalog: DokployTargetIdCatalog | None = None
+    if configured_target_ids_file:
+        target_id_catalog = load_dokploy_target_id_catalog(target_ids_file_path)
+    else:
+        file_catalog = load_dokploy_target_id_catalog(target_ids_file_path) if target_ids_file_path.exists() else None
+        database_catalog = _load_optional_dokploy_target_id_catalog_from_database()
+        if database_catalog is not None and file_catalog is not None:
+            target_id_catalog = _merge_dokploy_target_id_catalogs(base_catalog=file_catalog, overlay_catalog=database_catalog)
+        elif database_catalog is not None:
+            target_id_catalog = database_catalog
+        else:
+            target_id_catalog = file_catalog
     return load_dokploy_source_of_truth(
         source_file_path,
-        target_ids_file_path=target_ids_file_path if should_load_target_ids else None,
+        target_id_catalog=target_id_catalog,
+    )
+
+
+def build_dokploy_target_id_catalog_from_records(
+    records: tuple[DokployTargetIdRecord, ...],
+) -> DokployTargetIdCatalog:
+    targets = tuple(
+        DokployTargetIdOverride(context=record.context, instance=record.instance, target_id=record.target_id)
+        for record in sorted(records, key=lambda item: (item.context, item.instance))
+    )
+    return DokployTargetIdCatalog(schema_version=1, targets=targets)
+
+
+def _load_optional_dokploy_target_id_catalog_from_database() -> DokployTargetIdCatalog | None:
+    database_url = resolve_database_url()
+    if not database_url:
+        return None
+    record_store: PostgresRecordStore | None = None
+    try:
+        record_store = PostgresRecordStore(database_url=database_url)
+        record_store.ensure_schema()
+        records = record_store.list_dokploy_target_id_records()
+    except Exception as error:
+        raise click.ClickException(f"Could not load Dokploy target-id overrides from Launchplane Postgres storage: {error}") from error
+    finally:
+        try:
+            if record_store is not None:
+                record_store.close()
+        except Exception:
+            pass
+    if not records:
+        return None
+    return build_dokploy_target_id_catalog_from_records(records)
+
+
+def _merge_dokploy_target_id_catalogs(
+    *,
+    base_catalog: DokployTargetIdCatalog,
+    overlay_catalog: DokployTargetIdCatalog,
+) -> DokployTargetIdCatalog:
+    merged_routes: dict[tuple[str, str], DokployTargetIdOverride] = {
+        (target.context, target.instance): target for target in base_catalog.targets
+    }
+    for target in overlay_catalog.targets:
+        merged_routes[(target.context, target.instance)] = target
+    return DokployTargetIdCatalog(
+        schema_version=max(base_catalog.schema_version, overlay_catalog.schema_version),
+        targets=tuple(merged_routes[key] for key in sorted(merged_routes)),
     )
 
 

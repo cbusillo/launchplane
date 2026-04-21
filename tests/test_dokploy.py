@@ -10,6 +10,12 @@ from click.testing import CliRunner
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.cli import main
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.storage.postgres import PostgresRecordStore
+
+
+def _sqlite_database_url(database_path: Path) -> str:
+    return f"sqlite+pysqlite:///{database_path}"
 
 
 class DokployConfigTests(unittest.TestCase):
@@ -221,6 +227,189 @@ target_id = "compose-123"
 
         self.assertEqual(len(source_of_truth.targets), 1)
         self.assertEqual(source_of_truth.targets[0].target_id, "compose-123")
+
+    def test_read_control_plane_dokploy_source_of_truth_merges_postgres_target_ids_over_file_catalog(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            source_file = control_plane_root / "config" / "dokploy.toml"
+            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_type = "compose"
+
+[[targets]]
+context = "cm"
+instance = "testing"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+            target_ids_file.write_text(
+                """
+schema_version = 1
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-file"
+""".strip(),
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="opw",
+                    instance="prod",
+                    target_id="compose-db",
+                    updated_at="2026-04-21T19:00:00Z",
+                    source_label="import:test",
+                )
+            )
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="cm",
+                    instance="testing",
+                    target_id="compose-cm-db",
+                    updated_at="2026-04-21T19:00:00Z",
+                    source_label="import:test",
+                )
+            )
+            store.close()
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                    control_plane_root=control_plane_root
+                )
+
+        self.assertEqual([(target.context, target.instance, target.target_id) for target in source_of_truth.targets], [("opw", "prod", "compose-db"), ("cm", "testing", "compose-cm-db")])
+
+    def test_read_control_plane_dokploy_source_of_truth_explicit_target_id_catalog_wins_over_postgres(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            source_file = control_plane_root / "config" / "dokploy.toml"
+            explicit_target_ids_file = control_plane_root / "tmp" / "dokploy-targets.toml"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            explicit_target_ids_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+            explicit_target_ids_file.write_text(
+                """
+schema_version = 1
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-file"
+""".strip(),
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="opw",
+                    instance="prod",
+                    target_id="compose-db",
+                    updated_at="2026-04-21T19:00:00Z",
+                    source_label="import:test",
+                )
+            )
+            store.close()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR: str(explicit_target_ids_file),
+                },
+                clear=True,
+            ):
+                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                    control_plane_root=control_plane_root
+                )
+
+        self.assertEqual(source_of_truth.targets[0].target_id, "compose-file")
+
+    def test_storage_import_dokploy_target_ids_writes_records_to_postgres(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            source_file = control_plane_root / "config" / "dokploy.toml"
+            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
+            source_file.parent.mkdir(parents=True, exist_ok=True)
+            source_file.write_text(
+                """
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_type = "compose"
+
+[[targets]]
+context = "cm"
+instance = "testing"
+target_type = "compose"
+""".strip(),
+                encoding="utf-8",
+            )
+            target_ids_file.write_text(
+                """
+schema_version = 1
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+
+[[targets]]
+context = "cm"
+instance = "testing"
+target_id = "compose-456"
+""".strip(),
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "storage",
+                    "import-dokploy-target-ids",
+                    "--database-url",
+                    database_url,
+                    "--control-plane-root",
+                    str(control_plane_root),
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            listed_records = store.list_dokploy_target_id_records()
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual([(record.context, record.instance, record.target_id) for record in listed_records], [("cm", "testing", "compose-456"), ("opw", "prod", "compose-123")])
 
     def test_read_control_plane_dokploy_source_of_truth_prefers_explicit_source_file(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
