@@ -18,6 +18,8 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
         )
 
         self.assertIn("PREVIEW_DB_ARGS_BASE64=", command)
+        self.assertIn('/tmp/.preview-db-admin-', command)
+        self.assertIn('/tmp/.preview-db-admin-runner-', command)
         self.assertIn('node "$temp_runner" "$temp_script"', command)
         self.assertIn('base64 -d > "$temp_script"', command)
         self.assertIn('base64 -d > "$temp_runner"', command)

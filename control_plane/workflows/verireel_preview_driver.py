@@ -686,8 +686,8 @@ def _preview_database_admin_runner_source() -> str:
 
 def _build_preview_database_command(*, action: Literal["ensure", "drop"], admin_database_url: str, database_name: str, role_name: str, password: str = "") -> str:
     suffix = secrets.token_hex(6)
-    temp_script = f".preview-db-admin-{suffix}.mjs"
-    temp_runner = f".preview-db-admin-runner-{suffix}.mjs"
+    temp_script = f"/tmp/.preview-db-admin-{suffix}.mjs"
+    temp_runner = f"/tmp/.preview-db-admin-runner-{suffix}.mjs"
     module_source = _preview_database_admin_module_source().encode("utf-8")
     runner_source = _preview_database_admin_runner_source().encode("utf-8")
     module_b64 = base64.b64encode(module_source).decode("ascii")
