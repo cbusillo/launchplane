@@ -341,7 +341,9 @@ def import_bootstrap_secrets(
         "dokploy": {"imported": 0, "unchanged": 0},
         "runtime_environment": {"imported": 0, "unchanged": 0},
     }
-    environment_values = control_plane_dokploy.read_control_plane_environment_values(control_plane_root=control_plane_root)
+    environment_values = control_plane_dokploy.read_control_plane_bootstrap_environment_values(
+        control_plane_root=control_plane_root
+    )
     for secret_name, binding_key in (("host", "DOKPLOY_HOST"), ("token", "DOKPLOY_TOKEN")):
         value = environment_values.get(binding_key, "").strip()
         if not value:

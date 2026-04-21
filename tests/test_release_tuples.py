@@ -9,6 +9,11 @@ from unittest.mock import patch
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.storage.postgres import PostgresRecordStore
+
+
+def _sqlite_database_url(database_path: Path) -> str:
+    return f"sqlite+pysqlite:///{database_path}"
 
 
 class ReleaseTupleTests(unittest.TestCase):
@@ -85,6 +90,97 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 )
 
         self.assertEqual(release_tuple.tuple_id, "cm-prod-2026-04-13")
+
+    def test_load_release_tuple_catalog_merges_postgres_records_over_file_catalog(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            tuples_file = control_plane_root / "config" / "release-tuples.toml"
+            tuples_file.parent.mkdir(parents=True, exist_ok=True)
+            tuples_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.channels.testing]
+tuple_id = "opw-testing-file"
+
+[contexts.opw.channels.testing.repo_shas]
+tenant-opw = "1111111111111111111111111111111111111111"
+
+[contexts.opw.channels.prod]
+tuple_id = "opw-prod-file"
+
+[contexts.opw.channels.prod.repo_shas]
+tenant-opw = "2222222222222222222222222222222222222222"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_release_tuple_record(
+                ReleaseTupleRecord(
+                    tuple_id="opw-testing-db",
+                    context="opw",
+                    channel="testing",
+                    artifact_id="artifact-testing",
+                    repo_shas={"tenant-opw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                    provenance="ship",
+                    minted_at="2026-04-21T18:00:00Z",
+                )
+            )
+            store.close()
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                catalog = control_plane_release_tuples.load_release_tuple_catalog(control_plane_root=control_plane_root)
+
+        self.assertEqual(catalog.contexts["opw"].channels["testing"].tuple_id, "opw-testing-db")
+        self.assertEqual(catalog.contexts["opw"].channels["prod"].tuple_id, "opw-prod-file")
+
+    def test_load_release_tuple_catalog_explicit_file_override_wins_over_postgres(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            custom_file = control_plane_root / "custom-tuples.toml"
+            custom_file.write_text(
+                """
+schema_version = 1
+
+[contexts.cm.channels.testing]
+tuple_id = "cm-testing-file"
+
+[contexts.cm.channels.testing.repo_shas]
+tenant-cm = "3333333333333333333333333333333333333333"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_release_tuple_record(
+                ReleaseTupleRecord(
+                    tuple_id="cm-testing-db",
+                    context="cm",
+                    channel="testing",
+                    artifact_id="artifact-testing",
+                    repo_shas={"tenant-cm": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                    provenance="ship",
+                    minted_at="2026-04-21T18:00:00Z",
+                )
+            )
+            store.close()
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR: str(custom_file),
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                },
+                clear=True,
+            ):
+                catalog = control_plane_release_tuples.load_release_tuple_catalog(control_plane_root=control_plane_root)
+
+        self.assertEqual(catalog.contexts["cm"].channels["testing"].tuple_id, "cm-testing-file")
 
     def test_resolve_release_tuple_fails_closed_when_channel_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

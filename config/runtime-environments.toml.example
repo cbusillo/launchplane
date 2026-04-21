@@ -2,6 +2,8 @@ schema_version = 1
 
 [shared_env]
 LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example.com"
+# Optional global Dokploy execution-mode override for managed routes.
+# DOKPLOY_SHIP_MODE = "auto"
 ODOO_MASTER_PASSWORD = "change_me"
 ODOO_DB_USER = "odoo"
 ODOO_DB_PASSWORD = "change_me"
@@ -35,3 +37,9 @@ ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-testing-client-id"
 
 [contexts.cm.instances.prod.env]
 ENV_OVERRIDE_AUTHENTIK__CLIENT_ID = "cm-prod-client-id"
+
+[contexts.verireel.instances.prod.env]
+LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND = "uv run python -m control_plane.workflows.verireel_prod_rollback_worker"
+VERIREEL_PROD_PROXMOX_HOST = "proxmox.example.com"
+VERIREEL_PROD_PROXMOX_USER = "root"
+VERIREEL_PROD_CT_ID = "200"

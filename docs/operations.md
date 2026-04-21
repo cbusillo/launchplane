@@ -78,11 +78,21 @@ repo/workflow values before using it.
 Current implementation scope:
 
 - `GET /v1/health`
+- `POST /v1/evidence/backup-gates`
 - `POST /v1/evidence/deployments`
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/prod-deploy`
+- `POST /v1/drivers/verireel/prod-promotion`
+- `POST /v1/drivers/verireel/prod-rollback`
+
+VeriReel prod rollback now has a dedicated Launchplane route, but the
+privileged Proxmox path is still intended to stay behind a narrow delegated
+worker contract rather than being absorbed into the main API host. That runtime
+posture is documented in
+[`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
@@ -154,9 +164,22 @@ uv run launchplane service inspect-dokploy-target \
 
 That command reports only non-secret metadata and fails closed when the live
 Launchplane target is missing critical runtime pieces such as `LAUNCHPLANE_DATABASE_URL`,
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, or a Dokploy
-SSH key for a private `git@github.com:...` compose source. The GitHub deploy
-workflow now runs that same preflight before it builds or deploys a new image.
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, Launchplane-managed Dokploy secret bindings,
+or a Dokploy SSH key for a private `git@github.com:...` compose source. The
+GitHub deploy workflow now runs that same preflight before it builds or deploys
+a new image.
+
+The intended live service contract is now bootstrap-only target env plus
+DB-backed Launchplane records:
+
+- keep bootstrap/process inputs such as `LAUNCHPLANE_DATABASE_URL`,
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, and policy selectors on the service
+  target
+- move Dokploy credentials into Launchplane-managed secret records
+- move per-context runtime values, ship-mode overrides, preview base URLs, and
+  product-specific worker config into Launchplane runtime-environment records
+- use target-id records in the shared store when possible instead of relying on
+  env-carried target-id catalogs
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:
@@ -172,10 +195,11 @@ Current derived-state behavior:
   that `context/instance`
 - accepted promotion evidence refreshes destination inventory when the
   promotion record includes valid `deployment_record_id` linkage
-- Launchplane can also execute the first explicit driver action directly:
-  `POST /v1/drivers/verireel/testing-deploy` triggers the shared testing deploy,
-  writes an initial deployment record, and returns deploy timing/status for the
-  caller to thread into later evidence reporting.
+- Launchplane can now execute the first explicit VeriReel driver actions
+  directly: `POST /v1/drivers/verireel/testing-deploy` and
+  `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
+  deploys, write initial deployment records, and return deploy timing/status for
+  the caller to thread into later verification or promotion evidence.
 
 ## Core Rules
 

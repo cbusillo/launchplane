@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
@@ -22,6 +23,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord, SecretVersion
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -93,6 +95,33 @@ def _inventory_record() -> EnvironmentInventory:
         ),
         updated_at="2026-04-20T15:33:00Z",
         deployment_record_id="deployment-20260420T153000Z-opw-testing",
+    )
+
+
+def _dokploy_target_id_record(*, context: str = "opw", instance: str = "prod", target_id: str = "compose-123") -> DokployTargetIdRecord:
+    return DokployTargetIdRecord(
+        context=context,
+        instance=instance,
+        target_id=target_id,
+        updated_at="2026-04-21T18:30:00Z",
+        source_label="import:test",
+    )
+
+
+def _runtime_environment_record(
+    *,
+    scope: str = "instance",
+    context: str = "opw",
+    instance: str = "local",
+    env: dict[str, str | int | float | bool] | None = None,
+) -> RuntimeEnvironmentRecord:
+    return RuntimeEnvironmentRecord(
+        scope=scope,
+        context=context if scope != "global" else "",
+        instance=instance if scope == "instance" else "",
+        env=env or {"ODOO_DB_PASSWORD": "local-secret"},
+        updated_at="2026-04-21T18:30:00Z",
+        source_label="import:test",
     )
 
 
@@ -343,6 +372,45 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 "preview-verireel-testing-verireel-pr-102",
                 "preview-verireel-testing-verireel-pr-103",
             ],
+        )
+
+    def test_write_and_list_dokploy_target_id_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(context="opw", instance="prod", target_id="compose-123")
+            )
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(context="cm", instance="testing", target_id="compose-456")
+            )
+            loaded_record = store.read_dokploy_target_id_record(context_name="opw", instance_name="prod")
+            listed_records = store.list_dokploy_target_id_records()
+            store.close()
+
+        self.assertEqual(loaded_record.target_id, "compose-123")
+        self.assertEqual([(record.context, record.instance) for record in listed_records], [("cm", "testing"), ("opw", "prod")])
+
+    def test_write_and_list_runtime_environment_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_runtime_environment_record(
+                _runtime_environment_record(scope="global", env={"ODOO_MASTER_PASSWORD": "shared-master"})
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(scope="instance", context="opw", instance="local", env={"ODOO_DB_PASSWORD": "local-secret"})
+            )
+            listed_records = store.list_runtime_environment_records()
+            store.close()
+
+        self.assertEqual(
+            [(record.scope, record.context, record.instance) for record in listed_records],
+            [("global", "", ""), ("instance", "opw", "local")],
         )
 
     def test_secret_records_round_trip_and_find_latest(self) -> None:

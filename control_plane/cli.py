@@ -22,6 +22,7 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
@@ -109,12 +110,6 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
 )
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
-_LAUNCHPLANE_SERVICE_REQUIRED_ENV_KEYS = (
-    "LAUNCHPLANE_DATABASE_URL",
-    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY",
-    "DOKPLOY_HOST",
-    "DOKPLOY_TOKEN",
-)
 _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_TOML",
     "LAUNCHPLANE_POLICY_B64",
@@ -5785,6 +5780,46 @@ def _launchplane_service_any_env_keys_present(*, env_map: dict[str, str], env_ke
     return any(_launchplane_service_env_key_present(env_map=env_map, env_key=env_key) for env_key in env_keys)
 
 
+def _launchplane_managed_store_status(*, database_url: str) -> dict[str, object]:
+    if not database_url.strip():
+        return {"inspectable": False, "error": "", "dokploy_secret_bindings": {}, "runtime_environment_record_count": 0, "dokploy_target_id_record_count": 0}
+    record_store: PostgresRecordStore | None = None
+    try:
+        record_store = PostgresRecordStore(database_url=database_url)
+        record_store.ensure_schema()
+        dokploy_bindings = {
+            binding.binding_key: binding
+            for binding in record_store.list_secret_bindings(integration="dokploy", limit=None)
+            if binding.status == control_plane_secrets.SECRET_STATUS_CONFIGURED
+        }
+        runtime_environment_records = record_store.list_runtime_environment_records()
+        dokploy_target_id_records = record_store.list_dokploy_target_id_records()
+        return {
+            "inspectable": True,
+            "error": "",
+            "dokploy_secret_bindings": {
+                "DOKPLOY_HOST": "DOKPLOY_HOST" in dokploy_bindings,
+                "DOKPLOY_TOKEN": "DOKPLOY_TOKEN" in dokploy_bindings,
+            },
+            "runtime_environment_record_count": len(runtime_environment_records),
+            "dokploy_target_id_record_count": len(dokploy_target_id_records),
+        }
+    except Exception as error:
+        return {
+            "inspectable": False,
+            "error": str(error),
+            "dokploy_secret_bindings": {},
+            "runtime_environment_record_count": 0,
+            "dokploy_target_id_record_count": 0,
+        }
+    finally:
+        if record_store is not None:
+            try:
+                record_store.close()
+            except Exception:
+                pass
+
+
 def _build_launchplane_service_target_preflight(
     *,
     target_type: str,
@@ -5805,6 +5840,9 @@ def _build_launchplane_service_target_preflight(
         parsed_database_url = urlsplit(database_url)
         database_scheme = parsed_database_url.scheme.strip().lower()
         database_host = (parsed_database_url.hostname or "").strip()
+    managed_store_status = _launchplane_managed_store_status(database_url=database_url)
+    managed_secret_bindings = managed_store_status.get("dokploy_secret_bindings", {})
+    assert isinstance(managed_secret_bindings, dict)
 
     git_access_mode = ""
     if custom_git_url.startswith("git@"):
@@ -5816,6 +5854,8 @@ def _build_launchplane_service_target_preflight(
         "database_url_present": bool(database_url),
         "database_scheme": database_scheme,
         "database_host": database_host,
+        "managed_store_inspectable": bool(managed_store_status.get("inspectable")),
+        "managed_store_error": str(managed_store_status.get("error") or ""),
         "master_encryption_key_present": _launchplane_service_env_alias_present(
             env_map=env_map,
             env_keys=_MASTER_ENCRYPTION_KEY_ENV_KEYS,
@@ -5828,18 +5868,30 @@ def _build_launchplane_service_target_preflight(
             env_map=env_map,
             env_key="DOKPLOY_TOKEN",
         ),
+        "dokploy_managed_host_present": bool(managed_secret_bindings.get("DOKPLOY_HOST")),
+        "dokploy_managed_token_present": bool(managed_secret_bindings.get("DOKPLOY_TOKEN")),
         "policy_configured": _launchplane_service_any_env_keys_present(
             env_map=env_map,
             env_keys=_LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS,
         ),
-        "target_ids_configured": _launchplane_service_any_env_keys_present(
+        "target_ids_env_configured": _launchplane_service_any_env_keys_present(
             env_map=env_map,
             env_keys=_LAUNCHPLANE_SERVICE_TARGET_IDS_ENV_KEYS,
         ),
-        "runtime_environments_configured": _launchplane_service_any_env_keys_present(
+        "target_ids_record_count": int(managed_store_status.get("dokploy_target_id_record_count") or 0),
+        "target_ids_configured": _launchplane_service_any_env_keys_present(
+            env_map=env_map,
+            env_keys=_LAUNCHPLANE_SERVICE_TARGET_IDS_ENV_KEYS,
+        ) or int(managed_store_status.get("dokploy_target_id_record_count") or 0) > 0,
+        "runtime_environments_env_configured": _launchplane_service_any_env_keys_present(
             env_map=env_map,
             env_keys=_LAUNCHPLANE_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS,
         ),
+        "runtime_environment_record_count": int(managed_store_status.get("runtime_environment_record_count") or 0),
+        "runtime_environments_configured": _launchplane_service_any_env_keys_present(
+            env_map=env_map,
+            env_keys=_LAUNCHPLANE_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS,
+        ) or int(managed_store_status.get("runtime_environment_record_count") or 0) > 0,
         "docker_image_reference_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key=ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
@@ -5869,9 +5921,26 @@ def _build_launchplane_service_target_preflight(
         blockers.append(
             "Launchplane service target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
         )
-    for env_key in _LAUNCHPLANE_SERVICE_REQUIRED_ENV_KEYS[2:]:
-        if not _launchplane_service_env_key_present(env_map=env_map, env_key=env_key):
-            blockers.append(f"Launchplane service target is missing {env_key}.")
+    if not runtime_contract["dokploy_host_present"] and not runtime_contract["dokploy_managed_host_present"]:
+        if runtime_contract["managed_store_inspectable"]:
+            blockers.append(
+                "Launchplane service runtime store is missing managed Dokploy binding DOKPLOY_HOST."
+            )
+        else:
+            warnings.append(
+                "Launchplane service target does not expose DOKPLOY_HOST in target env and managed-store inspection was unavailable. "
+                "Confirm the shared store has a configured DOKPLOY_HOST binding before removing legacy bootstrap artifacts."
+            )
+    if not runtime_contract["dokploy_token_present"] and not runtime_contract["dokploy_managed_token_present"]:
+        if runtime_contract["managed_store_inspectable"]:
+            blockers.append(
+                "Launchplane service runtime store is missing managed Dokploy binding DOKPLOY_TOKEN."
+            )
+        else:
+            warnings.append(
+                "Launchplane service target does not expose DOKPLOY_TOKEN in target env and managed-store inspection was unavailable. "
+                "Confirm the shared store has a configured DOKPLOY_TOKEN binding before removing legacy bootstrap artifacts."
+            )
 
     if not runtime_contract["policy_configured"]:
         blockers.append(
@@ -5880,13 +5949,13 @@ def _build_launchplane_service_target_preflight(
         )
     if not runtime_contract["target_ids_configured"]:
         warnings.append(
-            "Launchplane service target does not declare Dokploy target-id catalog env/file inputs. "
-            "Live route resolution depends on a separate mounted file or a future env update."
+            "Launchplane service target does not declare Dokploy target-id env/file inputs and no DB-backed target-id records were confirmed. "
+            "Live route resolution depends on a separate mounted file or a missing store import."
         )
     if not runtime_contract["runtime_environments_configured"]:
         warnings.append(
-            "Launchplane service target does not declare runtime-environment catalog env/file inputs. "
-            "Environment resolution depends on a separate mounted file or a future env update."
+            "Launchplane service target does not declare runtime-environment env/file inputs and no DB-backed runtime-environment records were confirmed. "
+            "Environment resolution depends on a separate mounted file or a missing store import."
         )
     if not runtime_contract["docker_image_reference_present"]:
         warnings.append(
@@ -6104,10 +6173,17 @@ def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
     return f"dokploy-{configured_ship_mode}-api"
 
 
-def _load_control_plane_environment_values() -> dict[str, str]:
-    return control_plane_dokploy.read_control_plane_environment_values(
-        control_plane_root=_control_plane_root(),
-    )
+def _load_runtime_environment_values(*, context_name: str, instance_name: str) -> dict[str, str]:
+    try:
+        return control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=_control_plane_root(),
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    except click.ClickException as error:
+        if str(error).startswith("Missing control-plane runtime environments file."):
+            return {}
+        raise
 
 
 def _require_dokploy_target_definition(
@@ -6163,7 +6239,10 @@ def _resolve_native_ship_request(
         operation_name="Ship",
     )
 
-    environment_values = _load_control_plane_environment_values()
+    environment_values = _load_runtime_environment_values(
+        context_name=context_name,
+        instance_name=instance_name,
+    )
     resolved_source_git_ref = (
         source_git_ref.strip()
         or target_definition.source_git_ref.strip()
@@ -6300,7 +6379,10 @@ def _resolve_native_promotion_request(
         operation_name="Promotion destination",
     )
 
-    environment_values = _load_control_plane_environment_values()
+    environment_values = _load_runtime_environment_values(
+        context_name=context_name,
+        instance_name=to_instance_name,
+    )
     resolved_source_git_ref = (
         source_git_ref.strip()
         or source_target_definition.source_git_ref.strip()
@@ -7387,6 +7469,111 @@ def storage_import_core_records(state_dir: Path, database_url: str) -> None:
     postgres_store.ensure_schema()
     counts = postgres_store.import_core_records_from_filesystem(filesystem_store)
     click.echo(json.dumps({"status": "ok", "counts": counts}, indent=2, sort_keys=True))
+
+
+@storage.command("import-dokploy-target-ids")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Dokploy target-id overrides.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root to scan for the current Dokploy target-id catalog.",
+)
+def storage_import_dokploy_target_ids(database_url: str, control_plane_root: Path | None) -> None:
+    resolved_control_plane_root = control_plane_root or _control_plane_root()
+    source_file_path = control_plane_dokploy.resolve_control_plane_dokploy_source_file(resolved_control_plane_root)
+    target_ids_file_path = control_plane_dokploy.resolve_control_plane_dokploy_target_ids_file(
+        resolved_control_plane_root,
+        source_file_path=source_file_path,
+    )
+    target_id_catalog = control_plane_dokploy.load_dokploy_target_id_catalog(target_ids_file_path)
+    control_plane_dokploy.load_dokploy_source_of_truth(
+        source_file_path,
+        target_id_catalog=target_id_catalog,
+    )
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    imported_count = 0
+    imported_at = utc_now_timestamp()
+    try:
+        for target in target_id_catalog.targets:
+            postgres_store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context=target.context,
+                    instance=target.instance,
+                    target_id=target.target_id,
+                    updated_at=imported_at,
+                    source_label=f"import:{target_ids_file_path}",
+                )
+            )
+            imported_count += 1
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": imported_count,
+                "source_file": str(target_ids_file_path),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@storage.command("import-runtime-environments")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime environment records.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root to scan for the current runtime environments catalog.",
+)
+def storage_import_runtime_environments(database_url: str, control_plane_root: Path | None) -> None:
+    resolved_control_plane_root = control_plane_root or _control_plane_root()
+    definition = control_plane_runtime_environments.load_runtime_environment_definition(
+        control_plane_root=resolved_control_plane_root
+    )
+    environments_file = control_plane_runtime_environments.resolve_runtime_environments_file(resolved_control_plane_root)
+    source_label = f"import:{environments_file}" if environments_file is not None else "import:runtime-environments"
+    records = control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        definition,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label,
+    )
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    imported_count = 0
+    try:
+        for record in records:
+            postgres_store.write_runtime_environment_record(record)
+            imported_count += 1
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": imported_count,
+                "source_file": str(environments_file) if environments_file is not None else "",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @secrets.command("import-bootstrap")

@@ -11,6 +11,11 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.storage.postgres import PostgresRecordStore
+
+
+def _sqlite_database_url(database_path: Path) -> str:
+    return f"sqlite+pysqlite:///{database_path}"
 
 
 class RuntimeEnvironmentTests(unittest.TestCase):
@@ -189,6 +194,174 @@ ODOO_DB_PASSWORD = "local-secret"
 
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
         self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "local-secret")
+
+    def test_load_runtime_environment_definition_merges_postgres_records_over_file_definition(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_MASTER_PASSWORD = "shared-master"
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "file-secret"
+
+[contexts.cm.instances.testing.env]
+ODOO_DB_PASSWORD = "cm-file-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+                control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ODOO_MASTER_PASSWORD": "db-master"},
+                    contexts={
+                        "opw": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "local": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"ODOO_DB_PASSWORD": "db-secret"}
+                                )
+                            },
+                        )
+                    },
+                ),
+                updated_at="2026-04-21T19:00:00Z",
+                source_label="import:test",
+            ):
+                store.write_runtime_environment_record(record)
+            store.close()
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="opw",
+                    instance_name="local",
+                )
+                cm_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="cm",
+                    instance_name="testing",
+                )
+
+        self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "db-master")
+        self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "db-secret")
+        self.assertEqual(cm_values["ODOO_DB_PASSWORD"], "cm-file-secret")
+
+    def test_load_runtime_environment_definition_explicit_file_override_wins_over_postgres(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            custom_file = control_plane_root / "custom-runtime-environments.toml"
+            custom_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_MASTER_PASSWORD = "file-master"
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "file-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+                control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ODOO_MASTER_PASSWORD": "db-master"},
+                    contexts={
+                        "opw": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "local": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"ODOO_DB_PASSWORD": "db-secret"}
+                                )
+                            },
+                        )
+                    },
+                ),
+                updated_at="2026-04-21T19:00:00Z",
+                source_label="import:test",
+            ):
+                store.write_runtime_environment_record(record)
+            store.close()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_runtime_environments.RUNTIME_ENVIRONMENTS_FILE_ENV_VAR: str(custom_file),
+                },
+                clear=True,
+            ):
+                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="opw",
+                    instance_name="local",
+                )
+
+        self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "file-master")
+        self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "file-secret")
+
+    def test_storage_import_runtime_environments_writes_records_to_postgres(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            environments_file = control_plane_root / "config" / "runtime-environments.toml"
+            environments_file.parent.mkdir(parents=True, exist_ok=True)
+            environments_file.write_text(
+                """
+schema_version = 1
+
+[shared_env]
+ODOO_MASTER_PASSWORD = "shared-master"
+
+[contexts.opw.shared_env]
+ENV_OVERRIDE_DISABLE_CRON = true
+
+[contexts.opw.instances.local.env]
+ODOO_DB_PASSWORD = "local-secret"
+""".strip()
+                + "\n",
+                encoding="utf-8",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "storage",
+                    "import-runtime-environments",
+                    "--database-url",
+                    database_url,
+                    "--control-plane-root",
+                    str(control_plane_root),
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            listed_records = store.list_runtime_environment_records()
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["count"], 3)
+        self.assertEqual(
+            [(record.scope, record.context, record.instance) for record in listed_records],
+            [("context", "opw", ""), ("global", "", ""), ("instance", "opw", "local")],
+        )
 
     def test_environments_resolve_command_emits_json_payload(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

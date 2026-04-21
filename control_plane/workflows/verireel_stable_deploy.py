@@ -7,6 +7,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
@@ -14,31 +15,34 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import build_deployment_record, generate_deployment_record_id, utc_now_timestamp
 
 
-class VeriReelTestingDeployRequest(BaseModel):
+StableInstanceName = Literal["testing", "prod"]
+
+
+class VeriReelStableDeployRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     context: str = "verireel"
-    instance: str = "testing"
+    instance: StableInstanceName = "testing"
     artifact_id: str
     source_git_ref: str
     timeout_seconds: int | None = Field(default=None, ge=1)
     no_cache: bool = False
 
     @model_validator(mode="after")
-    def _validate_request(self) -> "VeriReelTestingDeployRequest":
+    def _validate_request(self) -> "VeriReelStableDeployRequest":
         if self.context != "verireel":
-            raise ValueError("VeriReel testing deploy requires context 'verireel'.")
-        if self.instance != "testing":
-            raise ValueError("VeriReel testing deploy requires instance 'testing'.")
+            raise ValueError("VeriReel stable deploy requires context 'verireel'.")
+        if self.instance not in {"testing", "prod"}:
+            raise ValueError("VeriReel stable deploy requires instance 'testing' or 'prod'.")
         if not self.artifact_id.strip():
-            raise ValueError("VeriReel testing deploy requires artifact_id.")
+            raise ValueError("VeriReel stable deploy requires artifact_id.")
         if not self.source_git_ref.strip():
-            raise ValueError("VeriReel testing deploy requires source_git_ref.")
+            raise ValueError("VeriReel stable deploy requires source_git_ref.")
         return self
 
 
-class VeriReelTestingDeployResult(BaseModel):
+class VeriReelStableDeployResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     deployment_record_id: str
@@ -57,13 +61,20 @@ def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
     return f"dokploy-{configured_ship_mode}-api"
 
 
-def _fallback_ship_request(request: VeriReelTestingDeployRequest) -> ShipRequest:
+def _default_target_name_for_instance(instance_name: StableInstanceName) -> str:
+    return {
+        "testing": "ver-testing-app",
+        "prod": "ver-prod-app",
+    }[instance_name]
+
+
+def _fallback_ship_request(request: VeriReelStableDeployRequest) -> ShipRequest:
     return ShipRequest(
         artifact_id=request.artifact_id,
         context=request.context,
         instance=request.instance,
         source_git_ref=request.source_git_ref,
-        target_name="ver-testing-app",
+        target_name=_default_target_name_for_instance(request.instance),
         target_type="application",
         deploy_mode="dokploy-application-api",
         wait=True,
@@ -77,7 +88,7 @@ def _fallback_ship_request(request: VeriReelTestingDeployRequest) -> ShipRequest
 def _resolve_ship_request(
     *,
     control_plane_root: Path,
-    request: VeriReelTestingDeployRequest,
+    request: VeriReelStableDeployRequest,
 ) -> tuple[ShipRequest, ResolvedTargetEvidence, int]:
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
@@ -92,8 +103,10 @@ def _resolve_ship_request(
             f"No Dokploy target definition found for {request.context}/{request.instance}."
         )
 
-    environment_values = control_plane_dokploy.read_control_plane_environment_values(
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
+        context_name=request.context,
+        instance_name=request.instance,
     )
     deploy_mode = _resolve_deploy_mode(
         configured_ship_mode=control_plane_dokploy.resolve_dokploy_ship_mode(
@@ -108,7 +121,7 @@ def _resolve_ship_request(
         context=request.context,
         instance=request.instance,
         source_git_ref=request.source_git_ref,
-        target_name=target_definition.target_name.strip() or f"{request.context}-{request.instance}",
+        target_name=target_definition.target_name.strip() or _default_target_name_for_instance(request.instance),
         target_type=target_definition.target_type,
         deploy_mode=deploy_mode,
         wait=True,
@@ -160,12 +173,12 @@ def _execute_dokploy_deploy(
     )
 
 
-def execute_verireel_testing_deploy(
+def execute_verireel_stable_deploy(
     *,
     control_plane_root: Path,
     record_store: FilesystemRecordStore,
-    request: VeriReelTestingDeployRequest,
-) -> VeriReelTestingDeployResult:
+    request: VeriReelStableDeployRequest,
+) -> VeriReelStableDeployResult:
     record_id = generate_deployment_record_id(
         context_name=request.context,
         instance_name=request.instance,
@@ -190,7 +203,7 @@ def execute_verireel_testing_deploy(
                 finished_at=finished_at,
             )
         )
-        return VeriReelTestingDeployResult(
+        return VeriReelStableDeployResult(
             deployment_record_id=record_id,
             deploy_status="fail",
             deploy_started_at=started_at,
@@ -233,7 +246,7 @@ def execute_verireel_testing_deploy(
                 resolved_target=resolved_target,
             )
         )
-        return VeriReelTestingDeployResult(
+        return VeriReelStableDeployResult(
             deployment_record_id=record_id,
             deploy_status="fail",
             deploy_started_at=started_at,
@@ -256,7 +269,7 @@ def execute_verireel_testing_deploy(
             resolved_target=resolved_target,
         )
     )
-    return VeriReelTestingDeployResult(
+    return VeriReelStableDeployResult(
         deployment_record_id=record_id,
         deploy_status="pass",
         deploy_started_at=started_at,

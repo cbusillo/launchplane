@@ -69,6 +69,25 @@ class PostDeployUpdateEvidence(BaseModel):
         return self
 
 
+class RollbackExecutionEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempted: bool = False
+    status: ReleaseStatus = "skipped"
+    detail: str = ""
+    snapshot_name: str = ""
+    started_at: str = ""
+    finished_at: str = ""
+
+    @model_validator(mode="after")
+    def _validate_attempted_rollback(self) -> "RollbackExecutionEvidence":
+        if not self.attempted and self.status != "skipped":
+            raise ValueError("non-attempted rollback must use skipped status")
+        if self.attempted and self.status not in {"pending", "pass", "fail"}:
+            raise ValueError("attempted rollback must use pending/pass/fail status")
+        return self
+
+
 class PromotionRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,6 +104,8 @@ class PromotionRecord(BaseModel):
     deploy: DeploymentEvidence
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
+    rollback: RollbackExecutionEvidence = Field(default_factory=RollbackExecutionEvidence)
+    rollback_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 
     @model_validator(mode="after")
     def _validate_promotion_path(self) -> "PromotionRecord":

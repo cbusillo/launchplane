@@ -26,6 +26,10 @@ Treat this file as the launch checklist for every Codex session in
 - Keep cross-repo boundaries explicit; do not move release ownership back into
   tenant, shared-addon, or local-DX repos.
 - Never commit secrets or operator-local overrides.
+- Prefer Launchplane-owned runtime-environment records and managed secret
+  records over ad hoc service-host env for product/runtime configuration.
+- Treat service-host env as bootstrap-only unless a repo doc explicitly calls
+  out a narrower temporary compatibility fallback.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
   operator explicitly asks for a time-boxed mitigation.
@@ -64,6 +68,7 @@ Treat this file as the launch checklist for every Codex session in
 - Architecture: `docs/architecture.md`
 - Operations: `docs/operations.md`
 - Records: `docs/records.md`
+- Secrets: `docs/secrets.md`
 - Python style: `docs/style/python.md`
 - Testing style: `docs/style/testing.md`
 - Coding standards: `docs/policies/coding-standards.md`

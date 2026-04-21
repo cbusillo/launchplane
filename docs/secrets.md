@@ -14,25 +14,27 @@ title: Secrets
   backend when `LAUNCHPLANE_DATABASE_URL` is configured.
 - Managed secret values are encrypted before Launchplane stores them; the master key
   stays outside the database in `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
-- Keep existing bootstrap values in the current process environment or in an
-  external Launchplane config file such as
-  `${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/dokploy.env` until they have been
-  imported into Launchplane-managed secret records.
+- Keep existing bootstrap values only long enough to import them into
+  Launchplane-managed secret records, using the current process environment or
+  an external bootstrap file such as
+  `${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/dokploy.env`.
 - Local runtime environment truth should live outside the repo checkout, such
   as `${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/runtime-environments.toml`.
 - Live Dokploy `target_id` values belong in the control-plane repo's untracked
   `config/dokploy-targets.toml`.
-- `DOKPLOY_HOST` and `DOKPLOY_TOKEN` may also be provided through the current
-  process environment.
 - Launchplane can import the current `DOKPLOY_HOST` / `DOKPLOY_TOKEN` values with
   `uv run launchplane secrets import-bootstrap --database-url ...` so the first
   shared-service bring-up does not require manual secret re-entry.
-- Optional ship-mode overrides such as `DOKPLOY_SHIP_MODE` and
-  `DOKPLOY_SHIP_MODE_<CONTEXT>_<INSTANCE>` are also read from the same
-  control-plane env surface.
+- Optional ship-mode overrides such as `DOKPLOY_SHIP_MODE` now belong in
+  runtime-environment records instead of the service host env surface.
 - Launchplane preview routing now uses a dedicated `LAUNCHPLANE_PREVIEW_BASE_URL`
   runtime-environment value instead of piggybacking on ordinary live-instance
   web base URLs.
+- VeriReel prod rollback worker dispatch now resolves
+  `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
+  `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
+  `VERIREEL_PROD_CT_ID` from the `verireel/prod` runtime-environment contract,
+  with managed-secret overlays still available for secret-looking keys.
 - If you need a non-default secret file location, set
   `ODOO_CONTROL_PLANE_ENV_FILE` to an alternate untracked env file path.
 - If you need a non-default runtime environments file location, set
@@ -51,6 +53,28 @@ title: Secrets
 - Secret status surfaces return metadata only. Launchplane does not expose routine
   plaintext read commands or service endpoints.
 
+## Bootstrap-Only Env
+
+- Treat these as bootstrap/process concerns, not product runtime truth:
+  - `LAUNCHPLANE_DATABASE_URL`
+  - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
+  - policy/bootstrap selectors such as `LAUNCHPLANE_POLICY_*`
+  - operator override selectors such as `ODOO_CONTROL_PLANE_ENV_FILE`,
+    `ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE`,
+    `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE`, and
+    `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE`
+- Treat these as DB-backed Launchplane-owned data instead of live service-host
+  env once the shared store is available:
+  - `DOKPLOY_HOST`
+  - `DOKPLOY_TOKEN`
+  - `DOKPLOY_SHIP_MODE`
+  - per-context/runtime values such as `LAUNCHPLANE_PREVIEW_BASE_URL`,
+    `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, and tenant/product env keys
+  - rollback worker values such as
+    `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
+    `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
+    `VERIREEL_PROD_CT_ID`
+
 ## Rules
 
 - Do not keep real secret files in the repo checkout.
@@ -63,9 +87,10 @@ title: Secrets
 - Missing Dokploy credentials are a hard error, not a silent fallback.
 - Missing `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` is a hard error when Launchplane needs to
   read or write DB-backed managed secrets.
-- The live Launchplane Dokploy target should expose `LAUNCHPLANE_DATABASE_URL`,
-  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, `DOKPLOY_HOST`, and `DOKPLOY_TOKEN` through
-  target env or an equivalent mounted runtime contract.
+- The live Launchplane Dokploy target should expose bootstrap env such as
+  `LAUNCHPLANE_DATABASE_URL` and `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, while
+  Dokploy credentials and runtime/product values should resolve from
+  Launchplane-managed records instead of target env.
 - Use `uv run launchplane service inspect-dokploy-target ...` to verify that the
   live Launchplane target has the required secret-backed contract without printing
   plaintext secret values.

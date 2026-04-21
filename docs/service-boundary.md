@@ -26,18 +26,25 @@ The first service slice is now implemented locally in this repo:
 - CLI: `uv run launchplane service serve`
 - health route: `GET /v1/health`
 - authenticated evidence routes:
+  - `POST /v1/evidence/backup-gates`
   - `POST /v1/evidence/deployments`
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
-- first driver route:
+- product driver routes:
   - `POST /v1/drivers/verireel/testing-deploy`
+  - `POST /v1/drivers/verireel/prod-deploy`
+  - `POST /v1/drivers/verireel/prod-promotion`
+  - `POST /v1/drivers/verireel/prod-rollback`
+  - `POST /v1/drivers/verireel/preview-refresh`
+  - `POST /v1/drivers/verireel/preview-destroy`
 
-That slice now covers the first documented evidence surface end to end plus the
-first explicit Launchplane-owned driver action. Launchplane can verify GitHub OIDC,
-authorize workflow identity claims, accept deployment/promotion/preview
-lifecycle evidence over HTTP, and execute the VeriReel shared testing deploy as
-an authenticated Launchplane route.
+That slice now covers the first documented evidence surface end to end plus
+the current VeriReel-specific driver routes. Launchplane can verify GitHub
+OIDC, authorize workflow identity claims, accept
+deployment/promotion/preview lifecycle evidence over HTTP, and execute the
+current VeriReel deploy, promotion, and preview mutations as authenticated
+Launchplane routes.
 
 ## First Host Assumption
 
@@ -76,8 +83,9 @@ temporary repo or local CLI name.
 
 ## Authorization Model
 
-Launchplane should authorize machine callers from workflow identity claims, not from
-human repo-admin status and not from copied long-lived service tokens.
+Launchplane should authorize machine callers from workflow identity claims,
+not from human repo-admin status and not from copied long-lived service
+tokens.
 
 The first policy model should be allow-list based and fail closed.
 
@@ -165,6 +173,10 @@ event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
 allowed actions:
+  - backup_gate.write
+  - verireel_prod_deploy.execute
+  - verireel_prod_promotion.execute
+  - verireel_prod_rollback.execute
   - deployment.write
   - promotion.write
 ```
@@ -180,6 +192,7 @@ writes, not on every possible operator action.
 ### Evidence ingress endpoints
 
 - `POST /v1/evidence/deployments`
+- `POST /v1/evidence/backup-gates`
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
@@ -198,9 +211,10 @@ writes, not on every possible operator action.
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the
-current Launchplane record nouns without forcing them to infer state from workflow
-logs or host-local files. Secret status reads return metadata only: Launchplane does
-not expose plaintext secret retrieval through the service boundary.
+current Launchplane record nouns without forcing them to infer state from
+workflow logs or host-local files. Secret status reads return metadata only:
+Launchplane does not expose plaintext secret retrieval through the service
+boundary.
 
 ### Driver execution endpoints
 
@@ -212,12 +226,21 @@ These use the same authn/authz boundary as evidence ingress:
 The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/prod-deploy`
+- `POST /v1/drivers/verireel/prod-promotion`
+- `POST /v1/drivers/verireel/prod-rollback`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
 
 The first preview driver cut stays intentionally narrow: Launchplane owns preview
 runtime refresh and teardown, while VeriReel still owns image build/publish,
 browser verification, and the follow-up preview evidence write.
+
+VeriReel prod rollback now has a dedicated Launchplane driver route, but it
+still depends on a privileged delegated-worker runtime contract for Proxmox
+access rather than folding that authority into the main API host. The runtime
+posture and remaining decisions are captured in
+[`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
 
 Do not generalize the full driver surface before a few product-specific routes
 have proven the shape.
@@ -227,7 +250,8 @@ have proven the shape.
 - Requests and responses are JSON.
 - Evidence endpoints should be idempotent from Launchplane's perspective when the
   same product/workflow submits the same stable identity twice.
-- Launchplane should support an explicit idempotency key header for workflow retries.
+- Launchplane should support an explicit idempotency key header for workflow
+  retries.
 - Launchplane should return durable record identifiers, not local file paths.
 - Launchplane should include a request or trace id in every response.
 
@@ -237,22 +261,29 @@ Recommended first headers:
 - `Content-Type: application/json`
 - `Idempotency-Key: <stable-retry-key>`
 
-The current Launchplane service implementation now honors `Idempotency-Key` for all
-write routes. Launchplane replays the first successful accepted response when the
-same authenticated workflow scope retries the same route with the same key and
-the same request fingerprint. Launchplane rejects reuse of the same key for a
-different payload on the same route.
+The current Launchplane service implementation now honors `Idempotency-Key`
+for all write routes. Launchplane replays the first successful accepted
+response when the same authenticated workflow scope retries the same route
+with the same key and the same request fingerprint. Launchplane rejects reuse
+of the same key for a different payload on the same route.
 
 Current VeriReel key shapes:
 
 - preview generation: `preview-generation:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
 - preview destroy: `preview-destroyed:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
-- VeriReel preview refresh driver: `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
-- VeriReel preview destroy driver: `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
+- VeriReel preview refresh driver:
+  `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
+- VeriReel preview destroy driver:
+  `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
-- VeriReel testing deploy driver: `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel testing deploy driver:
+  `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel prod deploy driver:
+  `verireel-prod-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel prod promotion driver:
+  `verireel-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>:<backup_record_id>:<promotion_record_id>:<expected_build_revision>:<expected_build_tag>`
 
 Recommended first success shape:
 
