@@ -128,6 +128,7 @@ event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
 allowed actions:
+  - verireel_preview_refresh.execute
   - preview_generation.write
 ```
 
@@ -140,6 +141,7 @@ event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
 allowed actions:
+  - verireel_preview_destroy.execute
   - preview_destroyed.write
 ```
 
@@ -207,9 +209,15 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/...`
 - `POST /v1/drivers/verireel/...`
 
-The first explicit driver route now in service is:
+The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/preview-refresh`
+- `POST /v1/drivers/verireel/preview-destroy`
+
+The first preview driver cut stays intentionally narrow: Harbor owns preview
+runtime refresh and teardown, while VeriReel still owns image build/publish,
+browser verification, and the follow-up preview evidence write.
 
 Do not generalize the full driver surface before a few product-specific routes
 have proven the shape.
@@ -239,6 +247,8 @@ Current VeriReel key shapes:
 
 - preview generation: `preview-generation:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
 - preview destroy: `preview-destroyed:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
+- VeriReel preview refresh driver: `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
+- VeriReel preview destroy driver: `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
