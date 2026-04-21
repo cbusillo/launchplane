@@ -164,9 +164,22 @@ uv run launchplane service inspect-dokploy-target \
 
 That command reports only non-secret metadata and fails closed when the live
 Launchplane target is missing critical runtime pieces such as `LAUNCHPLANE_DATABASE_URL`,
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, or a Dokploy
-SSH key for a private `git@github.com:...` compose source. The GitHub deploy
-workflow now runs that same preflight before it builds or deploys a new image.
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, Launchplane-managed Dokploy secret bindings,
+or a Dokploy SSH key for a private `git@github.com:...` compose source. The
+GitHub deploy workflow now runs that same preflight before it builds or deploys
+a new image.
+
+The intended live service contract is now bootstrap-only target env plus
+DB-backed Launchplane records:
+
+- keep bootstrap/process inputs such as `LAUNCHPLANE_DATABASE_URL`,
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, and policy selectors on the service
+  target
+- move Dokploy credentials into Launchplane-managed secret records
+- move per-context runtime values, ship-mode overrides, preview base URLs, and
+  product-specific worker config into Launchplane runtime-environment records
+- use target-id records in the shared store when possible instead of relying on
+  env-carried target-id catalogs
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:

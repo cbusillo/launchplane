@@ -7,6 +7,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
@@ -102,8 +103,10 @@ def _resolve_ship_request(
             f"No Dokploy target definition found for {request.context}/{request.instance}."
         )
 
-    environment_values = control_plane_dokploy.read_control_plane_environment_values(
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
+        context_name=request.context,
+        instance_name=request.instance,
     )
     deploy_mode = _resolve_deploy_mode(
         configured_ship_mode=control_plane_dokploy.resolve_dokploy_ship_mode(

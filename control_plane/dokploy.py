@@ -293,7 +293,7 @@ def resolve_ship_healthcheck_urls(
     return tuple(f"{base_url}{healthcheck_path}" for base_url in base_urls)
 
 
-def load_runtime_environment_values(
+def load_bootstrap_environment_values(
     *,
     default_env_file: Path | None = None,
     env_file: Path | None = None,
@@ -307,9 +307,28 @@ def load_runtime_environment_values(
     return environment_values
 
 
+def load_operator_environment_values(
+    *,
+    default_env_file: Path | None = None,
+    env_file: Path | None = None,
+) -> dict[str, str]:
+    environment_values: dict[str, str] = {}
+    selected_env_file = env_file if env_file is not None else default_env_file
+    if selected_env_file is not None and selected_env_file.exists():
+        environment_values.update(_parse_env_file(selected_env_file))
+    return environment_values
+
+
+def read_control_plane_bootstrap_environment_values(*, control_plane_root: Path) -> dict[str, str]:
+    control_plane_env_file = resolve_control_plane_env_file(control_plane_root)
+    return load_bootstrap_environment_values(default_env_file=control_plane_env_file)
+
+
 def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[str, str]:
     control_plane_env_file = resolve_control_plane_env_file(control_plane_root)
-    environment_values = load_runtime_environment_values(default_env_file=control_plane_env_file)
+    environment_values: dict[str, str] = {}
+    if resolve_database_url() is None:
+        environment_values = load_operator_environment_values(default_env_file=control_plane_env_file)
     return control_plane_secrets.overlay_dokploy_environment_values(environment_values=environment_values)
 
 
@@ -474,8 +493,8 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
         external_env_file = resolve_launchplane_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
         raise click.ClickException(
             "Missing DOKPLOY_HOST or DOKPLOY_TOKEN for control-plane Dokploy execution. "
-            f"Define them in the current process environment, set {CONTROL_PLANE_ENV_FILE_ENV_VAR}, "
-            f"or create {external_env_file}."
+            "Configure Launchplane-managed Dokploy secrets in the shared store, "
+            f"or use {CONTROL_PLANE_ENV_FILE_ENV_VAR}/{external_env_file} only as bootstrap input before import."
         )
     return host, token
 

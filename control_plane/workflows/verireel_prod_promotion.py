@@ -10,6 +10,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import (
@@ -336,8 +337,10 @@ def _resolve_rollout_base_urls(
         raise click.ClickException(
             f"No Dokploy target definition found for {request.context}/{request.to_instance}."
         )
-    environment_values = control_plane_dokploy.read_control_plane_environment_values(
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
+        context_name=request.context,
+        instance_name=request.to_instance,
     )
     base_urls = control_plane_dokploy.resolve_healthcheck_base_urls(
         target_definition=target_definition,

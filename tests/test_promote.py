@@ -10,6 +10,7 @@ import click
 from click.testing import CliRunner
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.cli import (
     _resolve_dokploy_target,
     _resolve_native_promotion_request,
@@ -2872,20 +2873,22 @@ deploy_timeout_seconds = 7200
 healthcheck_timeout_seconds = 55
 """,
             )
-            control_plane_env_file = repo_root / "control-plane.env"
-            control_plane_env_file.write_text(
-                "\n".join(
-                    (
-                        "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=prod.example.com",
-                        "DOKPLOY_SHIP_MODE=auto",
-                    )
-                ),
+            runtime_environments_file = repo_root / "runtime-environments.toml"
+            runtime_environments_file.write_text(
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "prod.example.com"
+DOKPLOY_SHIP_MODE = "auto"
+""".strip()
+                + "\n",
                 encoding="utf-8",
             )
 
             with patch.dict(os.environ, {
                 control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
-                control_plane_dokploy.CONTROL_PLANE_ENV_FILE_ENV_VAR: str(control_plane_env_file),
+                control_plane_runtime_environments.RUNTIME_ENVIRONMENTS_FILE_ENV_VAR: str(runtime_environments_file),
             }):
                 ship_request = _resolve_native_ship_request(
                     context_name="opw",
