@@ -21,7 +21,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyResult,
     VeriReelPreviewRefreshResult,
 )
-from control_plane.workflows.verireel_testing_deploy import VeriReelTestingDeployResult
+from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 
 
 class _StubVerifier:
@@ -760,8 +760,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_verireel_testing_deploy",
-                return_value=VeriReelTestingDeployResult(
+                "control_plane.service.execute_verireel_stable_deploy",
+                return_value=VeriReelStableDeployResult(
                     deployment_record_id="deployment-verireel-testing-run-12345-attempt-1",
                     deploy_status="pass",
                     deploy_started_at="2026-04-20T18:20:00Z",
@@ -834,6 +834,126 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "product": "verireel",
                     "deploy": {
+                        "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                        "source_git_ref": "abcdef1234567890",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_prod_deploy_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_prod_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_stable_deploy",
+                return_value=VeriReelStableDeployResult(
+                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-20T19:20:00Z",
+                    deploy_finished_at="2026-04-20T19:21:15Z",
+                    target_name="ver-prod-app",
+                    target_type="application",
+                    target_id="prod-app-123",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-deploy",
+                    payload={
+                        "product": "verireel",
+                        "deploy": {
+                            "instance": "prod",
+                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"deployment_record_id": "deployment-verireel-prod-run-12345-attempt-1"},
+            )
+            self.assertEqual(payload["result"]["deploy_status"], "pass")
+            self.assertEqual(payload["result"]["target_id"], "prod-app-123")
+            execute_mock.assert_called_once()
+
+    def test_verireel_prod_deploy_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["promotion.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/prod-deploy",
+                payload={
+                    "product": "verireel",
+                    "deploy": {
+                        "instance": "prod",
                         "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
                         "source_git_ref": "abcdef1234567890",
                     },

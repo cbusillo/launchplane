@@ -9,9 +9,9 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.verireel_testing_deploy import (
-    VeriReelTestingDeployRequest,
-    execute_verireel_testing_deploy,
+from control_plane.workflows.verireel_stable_deploy import (
+    VeriReelStableDeployRequest,
+    execute_verireel_stable_deploy,
 )
 
 
@@ -21,7 +21,7 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
-            request = VeriReelTestingDeployRequest(
+            request = VeriReelStableDeployRequest(
                 artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
                 source_git_ref="abcdef1234567890",
             )
@@ -39,16 +39,16 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.workflows.verireel_testing_deploy.generate_deployment_record_id",
+                "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
                 return_value="deployment-verireel-testing-run-12345-attempt-1",
             ), patch(
-                "control_plane.workflows.verireel_testing_deploy.utc_now_timestamp",
+                "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
                 side_effect=[
                     "2026-04-20T18:20:00Z",
                     "2026-04-20T18:21:15Z",
                 ],
             ), patch(
-                "control_plane.workflows.verireel_testing_deploy._resolve_ship_request",
+                "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
                 return_value=(
                     ship_request,
                     ResolvedTargetEvidence(
@@ -59,9 +59,9 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                     300,
                 ),
             ), patch(
-                "control_plane.workflows.verireel_testing_deploy._execute_dokploy_deploy"
+                "control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy"
             ):
-                result = execute_verireel_testing_deploy(
+                result = execute_verireel_stable_deploy(
                     control_plane_root=root,
                     record_store=store,
                     request=request,
@@ -81,7 +81,7 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             state_dir = root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
-            request = VeriReelTestingDeployRequest(
+            request = VeriReelStableDeployRequest(
                 artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
                 source_git_ref="abcdef1234567890",
             )
@@ -99,16 +99,16 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.workflows.verireel_testing_deploy.generate_deployment_record_id",
+                "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
                 return_value="deployment-verireel-testing-run-12345-attempt-1",
             ), patch(
-                "control_plane.workflows.verireel_testing_deploy.utc_now_timestamp",
+                "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
                 side_effect=[
                     "2026-04-20T18:20:00Z",
                     "2026-04-20T18:21:15Z",
                 ],
             ), patch(
-                "control_plane.workflows.verireel_testing_deploy._resolve_ship_request",
+                "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
                 return_value=(
                     ship_request,
                     ResolvedTargetEvidence(
@@ -119,10 +119,10 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                     300,
                 ),
             ), patch(
-                "control_plane.workflows.verireel_testing_deploy._execute_dokploy_deploy",
+                "control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy",
                 side_effect=click.ClickException("deploy failed"),
             ):
-                result = execute_verireel_testing_deploy(
+                result = execute_verireel_stable_deploy(
                     control_plane_root=root,
                     record_store=store,
                     request=request,

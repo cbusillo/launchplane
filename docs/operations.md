@@ -83,6 +83,7 @@ Current implementation scope:
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/prod-deploy`
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
@@ -172,10 +173,11 @@ Current derived-state behavior:
   that `context/instance`
 - accepted promotion evidence refreshes destination inventory when the
   promotion record includes valid `deployment_record_id` linkage
-- Launchplane can also execute the first explicit driver action directly:
-  `POST /v1/drivers/verireel/testing-deploy` triggers the shared testing deploy,
-  writes an initial deployment record, and returns deploy timing/status for the
-  caller to thread into later evidence reporting.
+- Launchplane can now execute the first explicit VeriReel driver actions
+  directly: `POST /v1/drivers/verireel/testing-deploy` and
+  `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
+  deploys, write initial deployment records, and return deploy timing/status for
+  the caller to thread into later verification or promotion evidence.
 
 ## Core Rules
 

@@ -33,9 +33,9 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
-from control_plane.workflows.verireel_testing_deploy import (
-    VeriReelTestingDeployRequest,
-    execute_verireel_testing_deploy,
+from control_plane.workflows.verireel_stable_deploy import (
+    VeriReelStableDeployRequest,
+    execute_verireel_stable_deploy,
 )
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
@@ -115,12 +115,30 @@ class VeriReelTestingDeployEnvelope(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
-    deploy: VeriReelTestingDeployRequest
+    deploy: VeriReelStableDeployRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelTestingDeployEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel testing deploy requires product 'verireel'.")
+        if self.deploy.instance != "testing":
+            raise ValueError("VeriReel testing deploy requires instance 'testing'.")
+        return self
+
+
+class VeriReelProdDeployEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    deploy: VeriReelStableDeployRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelProdDeployEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel prod deploy requires product 'verireel'.")
+        if self.deploy.instance != "prod":
+            raise ValueError("VeriReel prod deploy requires instance 'prod'.")
         return self
 
 
@@ -460,6 +478,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/testing-deploy",
+        "/v1/drivers/verireel/prod-deploy",
     }
 
     def app(
@@ -874,7 +893,47 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                driver_result = execute_verireel_testing_deploy(
+                driver_result = execute_verireel_stable_deploy(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.deploy,
+                )
+                result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/verireel/prod-deploy":
+                request = VeriReelProdDeployEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_prod_deploy.execute",
+                    product=request.product,
+                    context=request.deploy.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel prod deploy driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
                     request=request.deploy,

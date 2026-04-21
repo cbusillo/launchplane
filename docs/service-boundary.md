@@ -76,8 +76,9 @@ temporary repo or local CLI name.
 
 ## Authorization Model
 
-Launchplane should authorize machine callers from workflow identity claims, not from
-human repo-admin status and not from copied long-lived service tokens.
+Launchplane should authorize machine callers from workflow identity claims,
+not from human repo-admin status and not from copied long-lived service
+tokens.
 
 The first policy model should be allow-list based and fail closed.
 
@@ -165,6 +166,7 @@ event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
 allowed actions:
+  - verireel_prod_deploy.execute
   - deployment.write
   - promotion.write
 ```
@@ -198,9 +200,10 @@ writes, not on every possible operator action.
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the
-current Launchplane record nouns without forcing them to infer state from workflow
-logs or host-local files. Secret status reads return metadata only: Launchplane does
-not expose plaintext secret retrieval through the service boundary.
+current Launchplane record nouns without forcing them to infer state from
+workflow logs or host-local files. Secret status reads return metadata only:
+Launchplane does not expose plaintext secret retrieval through the service
+boundary.
 
 ### Driver execution endpoints
 
@@ -212,6 +215,7 @@ These use the same authn/authz boundary as evidence ingress:
 The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/prod-deploy`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
 
@@ -227,7 +231,8 @@ have proven the shape.
 - Requests and responses are JSON.
 - Evidence endpoints should be idempotent from Launchplane's perspective when the
   same product/workflow submits the same stable identity twice.
-- Launchplane should support an explicit idempotency key header for workflow retries.
+- Launchplane should support an explicit idempotency key header for workflow
+  retries.
 - Launchplane should return durable record identifiers, not local file paths.
 - Launchplane should include a request or trace id in every response.
 
@@ -237,22 +242,27 @@ Recommended first headers:
 - `Content-Type: application/json`
 - `Idempotency-Key: <stable-retry-key>`
 
-The current Launchplane service implementation now honors `Idempotency-Key` for all
-write routes. Launchplane replays the first successful accepted response when the
-same authenticated workflow scope retries the same route with the same key and
-the same request fingerprint. Launchplane rejects reuse of the same key for a
-different payload on the same route.
+The current Launchplane service implementation now honors `Idempotency-Key`
+for all write routes. Launchplane replays the first successful accepted
+response when the same authenticated workflow scope retries the same route
+with the same key and the same request fingerprint. Launchplane rejects reuse
+of the same key for a different payload on the same route.
 
 Current VeriReel key shapes:
 
 - preview generation: `preview-generation:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
 - preview destroy: `preview-destroyed:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
-- VeriReel preview refresh driver: `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
-- VeriReel preview destroy driver: `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
+- VeriReel preview refresh driver:
+  `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
+- VeriReel preview destroy driver:
+  `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
-- VeriReel testing deploy driver: `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel testing deploy driver:
+  `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel prod deploy driver:
+  `verireel-prod-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 
 Recommended first success shape:
 
