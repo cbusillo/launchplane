@@ -8,6 +8,7 @@ import time
 from json import JSONDecodeError
 from pathlib import Path
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 
 import click
@@ -106,6 +107,28 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
     "ODOO_ADDON_REPOSITORIES",
     "OPENUPGRADE_ADDON_REPOSITORY",
 )
+_HARBOR_SERVICE_REQUIRED_ENV_KEYS = (
+    "HARBOR_DATABASE_URL",
+    "HARBOR_MASTER_ENCRYPTION_KEY",
+    "DOKPLOY_HOST",
+    "DOKPLOY_TOKEN",
+)
+_HARBOR_SERVICE_POLICY_ENV_KEYS = (
+    "HARBOR_POLICY_TOML",
+    "HARBOR_POLICY_B64",
+    "HARBOR_POLICY_FILE",
+)
+_HARBOR_SERVICE_TARGET_IDS_ENV_KEYS = (
+    "HARBOR_DOKPLOY_TARGET_IDS_TOML",
+    "HARBOR_DOKPLOY_TARGET_IDS_B64",
+    "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE",
+)
+_HARBOR_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS = (
+    "HARBOR_RUNTIME_ENVIRONMENTS_TOML",
+    "HARBOR_RUNTIME_ENVIRONMENTS_B64",
+    "ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE",
+)
+_SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
 @contextmanager
@@ -5738,6 +5761,171 @@ def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: i
     )
 
 
+def _harbor_service_env_key_present(*, env_map: dict[str, str], env_key: str) -> bool:
+    return bool(env_map.get(env_key, "").strip())
+
+
+def _harbor_service_any_env_keys_present(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> bool:
+    return any(_harbor_service_env_key_present(env_map=env_map, env_key=env_key) for env_key in env_keys)
+
+
+def _build_harbor_service_target_preflight(
+    *,
+    target_type: str,
+    target_id: str,
+    target_payload: dict[str, object],
+) -> dict[str, object]:
+    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    source_type = str(target_payload.get("sourceType") or "").strip()
+    custom_git_url = str(target_payload.get("customGitUrl") or "").strip()
+    custom_git_branch = str(target_payload.get("customGitBranch") or "").strip()
+    custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
+    compose_path = str(target_payload.get("composePath") or "").strip()
+    compose_status = str(target_payload.get("composeStatus") or "").strip()
+    database_url = str(env_map.get("HARBOR_DATABASE_URL") or "").strip()
+    database_scheme = ""
+    database_host = ""
+    if database_url:
+        parsed_database_url = urlsplit(database_url)
+        database_scheme = parsed_database_url.scheme.strip().lower()
+        database_host = (parsed_database_url.hostname or "").strip()
+
+    git_access_mode = ""
+    if custom_git_url.startswith("git@"):
+        git_access_mode = "ssh"
+    elif custom_git_url.startswith("https://") or custom_git_url.startswith("http://"):
+        git_access_mode = "https"
+
+    runtime_contract = {
+        "database_url_present": bool(database_url),
+        "database_scheme": database_scheme,
+        "database_host": database_host,
+        "master_encryption_key_present": _harbor_service_env_key_present(
+            env_map=env_map,
+            env_key="HARBOR_MASTER_ENCRYPTION_KEY",
+        ),
+        "dokploy_host_present": _harbor_service_env_key_present(
+            env_map=env_map,
+            env_key="DOKPLOY_HOST",
+        ),
+        "dokploy_token_present": _harbor_service_env_key_present(
+            env_map=env_map,
+            env_key="DOKPLOY_TOKEN",
+        ),
+        "policy_configured": _harbor_service_any_env_keys_present(
+            env_map=env_map,
+            env_keys=_HARBOR_SERVICE_POLICY_ENV_KEYS,
+        ),
+        "target_ids_configured": _harbor_service_any_env_keys_present(
+            env_map=env_map,
+            env_keys=_HARBOR_SERVICE_TARGET_IDS_ENV_KEYS,
+        ),
+        "runtime_environments_configured": _harbor_service_any_env_keys_present(
+            env_map=env_map,
+            env_keys=_HARBOR_SERVICE_RUNTIME_ENVIRONMENT_ENV_KEYS,
+        ),
+        "docker_image_reference_present": _harbor_service_env_key_present(
+            env_map=env_map,
+            env_key=ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
+        ),
+    }
+
+    blockers: list[str] = []
+    warnings: list[str] = []
+    if target_type == "compose" and not compose_path:
+        blockers.append("Dokploy compose target is missing composePath.")
+    if source_type == "git" and not custom_git_url:
+        blockers.append("Dokploy target uses sourceType=git but is missing customGitUrl.")
+    if source_type == "git" and not custom_git_branch:
+        blockers.append("Dokploy target uses sourceType=git but is missing customGitBranch.")
+    if git_access_mode == "ssh" and not custom_git_ssh_key_id:
+        blockers.append(
+            "Dokploy target uses an SSH git remote but has no customGitSSHKeyId configured."
+        )
+    if not runtime_contract["database_url_present"]:
+        blockers.append("Harbor service target is missing HARBOR_DATABASE_URL.")
+    elif not database_scheme.startswith("postgresql"):
+        blockers.append("Harbor service target HARBOR_DATABASE_URL is not a PostgreSQL URL.")
+    elif not database_host:
+        blockers.append("Harbor service target HARBOR_DATABASE_URL is missing a database host.")
+
+    for env_key in _HARBOR_SERVICE_REQUIRED_ENV_KEYS[1:]:
+        if not _harbor_service_env_key_present(env_map=env_map, env_key=env_key):
+            blockers.append(f"Harbor service target is missing {env_key}.")
+
+    if not runtime_contract["policy_configured"]:
+        warnings.append(
+            "Harbor service target does not declare HARBOR_POLICY_* or HARBOR_POLICY_FILE in target env. "
+            "Startup will fall back to the repo example policy unless Dokploy mounts a real policy file separately."
+        )
+    if not runtime_contract["target_ids_configured"]:
+        warnings.append(
+            "Harbor service target does not declare Dokploy target-id catalog env/file inputs. "
+            "Live route resolution depends on a separate mounted file or a future env update."
+        )
+    if not runtime_contract["runtime_environments_configured"]:
+        warnings.append(
+            "Harbor service target does not declare runtime-environment catalog env/file inputs. "
+            "Environment resolution depends on a separate mounted file or a future env update."
+        )
+    if not runtime_contract["docker_image_reference_present"]:
+        warnings.append(
+            "Harbor service target does not currently define DOCKER_IMAGE_REFERENCE. "
+            "The first deploy cannot capture a previous image reference for rollback."
+        )
+    normalized_compose_status = compose_status.lower()
+    if normalized_compose_status and normalized_compose_status not in _SUCCESSFUL_DOKPLOY_STATUSES:
+        warnings.append(
+            f"Dokploy target currently reports composeStatus={compose_status!r}; investigate the live target before replacing it."
+        )
+
+    return {
+        "target_id": target_id,
+        "target_type": target_type,
+        "target_name": str(target_payload.get("name") or "").strip(),
+        "app_name": str(target_payload.get("appName") or "").strip(),
+        "compose_status": compose_status,
+        "source_type": source_type,
+        "custom_git_url": custom_git_url,
+        "custom_git_branch": custom_git_branch,
+        "custom_git_ssh_key_configured": bool(custom_git_ssh_key_id),
+        "git_access_mode": git_access_mode,
+        "compose_path": compose_path,
+        "runtime_contract": runtime_contract,
+        "blockers": blockers,
+        "warnings": warnings,
+    }
+
+
+def _inspect_harbor_service_dokploy_target(
+    *,
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+) -> tuple[dict[str, object], dict[str, object]]:
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    preflight_payload = _build_harbor_service_target_preflight(
+        target_type=target_type,
+        target_id=target_id,
+        target_payload=target_payload,
+    )
+    return target_payload, preflight_payload
+
+
+def _harbor_service_target_preflight_error_message(*, preflight_payload: dict[str, object]) -> str:
+    blockers = preflight_payload.get("blockers")
+    if not isinstance(blockers, list) or not blockers:
+        return "Harbor service Dokploy target preflight failed."
+    rendered_blockers = "\n".join(f"- {str(blocker)}" for blocker in blockers)
+    return f"Harbor service Dokploy target preflight failed:\n{rendered_blockers}"
+
+
 def _apply_dokploy_image_reference(
     *,
     host: str,
@@ -5745,17 +5933,18 @@ def _apply_dokploy_image_reference(
     target_type: str,
     target_id: str,
     image_reference: str,
+    target_payload: dict[str, object] | None = None,
 ) -> dict[str, object]:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
         raise click.ClickException("Harbor service deploy requires a non-empty image reference.")
-    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+    resolved_target_payload = target_payload or control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
         target_type=target_type,
         target_id=target_id,
     )
-    raw_env_text = str(target_payload.get("env") or "")
+    raw_env_text = str(resolved_target_payload.get("env") or "")
     env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
     previous_value_present = ARTIFACT_IMAGE_REFERENCE_ENV_KEY in env_map
     previous_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
@@ -5769,7 +5958,7 @@ def _apply_dokploy_image_reference(
             token=token,
             target_type=target_type,
             target_id=target_id,
-            target_payload=target_payload,
+            target_payload=resolved_target_payload,
             env_text=updated_env_text,
         )
     return {
@@ -7380,6 +7569,16 @@ def service_deploy_dokploy_image(
 ) -> None:
     harbor_root = control_plane_root or _control_plane_root()
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=harbor_root)
+    target_payload, preflight_payload = _inspect_harbor_service_dokploy_target(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    if preflight_payload["blockers"]:
+        raise click.ClickException(
+            _harbor_service_target_preflight_error_message(preflight_payload=preflight_payload)
+        )
     normalized_health_urls = tuple(url.strip() for url in health_urls if url.strip())
     apply_result = _apply_dokploy_image_reference(
         host=host,
@@ -7387,12 +7586,14 @@ def service_deploy_dokploy_image(
         target_type=target_type,
         target_id=target_id,
         image_reference=image_reference,
+        target_payload=target_payload,
     )
     payload: dict[str, object] = {
         "status": "pending",
         "target_type": target_type,
         "target_id": target_id,
         "image_reference": image_reference,
+        "preflight": preflight_payload,
         "health_urls": list(normalized_health_urls),
         "deploy_timeout_seconds": deploy_timeout_seconds,
         "health_timeout_seconds": health_timeout_seconds,
@@ -7455,6 +7656,46 @@ def service_deploy_dokploy_image(
         payload["rollback"] = rollback_payload
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         raise click.ClickException(str(error)) from error
+
+
+@service.command("inspect-dokploy-target")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar="HARBOR_DOKPLOY_TARGET_TYPE",
+    required=True,
+    help="Dokploy target type for the live Harbor service.",
+)
+@click.option(
+    "--target-id",
+    envvar="HARBOR_DOKPLOY_TARGET_ID",
+    required=True,
+    help="Dokploy target id for the live Harbor service.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Harbor repo root used to resolve Dokploy credentials.",
+)
+def service_inspect_dokploy_target(
+    target_type: str,
+    target_id: str,
+    control_plane_root: Path | None,
+) -> None:
+    harbor_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=harbor_root)
+    _, preflight_payload = _inspect_harbor_service_dokploy_target(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    click.echo(json.dumps(preflight_payload, indent=2, sort_keys=True))
+    if preflight_payload["blockers"]:
+        raise click.ClickException(
+            _harbor_service_target_preflight_error_message(preflight_payload=preflight_payload)
+        )
 
 
 @artifacts.command("write")

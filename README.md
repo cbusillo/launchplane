@@ -1,6 +1,6 @@
 # harbor
 
-Private Odoo control-plane repo for release records, environment operations,
+Odoo control-plane repo for release records, environment operations,
 Harbor preview state, and promotion orchestration.
 
 ## Purpose
@@ -145,9 +145,47 @@ Configure these GitHub settings before enabling it:
   - optional `HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `HARBOR_IMAGE_REPOSITORY`
 
+`HARBOR_DEPLOY_HEALTH_URLS` must point at Harbor URLs that GitHub-hosted
+runners can reach, typically the public `https://.../v1/health` endpoint.
+
+Before a real Dokploy deploy, Harbor now exposes a sanitized preflight check:
+
+```bash
+uv run harbor service inspect-dokploy-target \
+  --target-type compose \
+  --target-id "$HARBOR_DOKPLOY_TARGET_ID"
+```
+
+That preflight fails closed when the live Harbor target is missing critical
+runtime contract pieces such as:
+
+- `HARBOR_DATABASE_URL`
+- `HARBOR_MASTER_ENCRYPTION_KEY`
+- `DOKPLOY_HOST`
+- `DOKPLOY_TOKEN`
+- a Dokploy SSH key for private `git@github.com:...` compose sources
+
+It also reports warnings when the live target lacks a policy input, target-id
+catalog input, runtime-environment catalog input, or an existing
+`DOCKER_IMAGE_REFERENCE` rollback baseline.
+
+The deploy path still depends on two Dokploy-side prerequisites that Harbor can
+document but cannot fully validate through the current Dokploy API surface:
+
+- Dokploy must have a working saved registry credential for the Harbor GHCR
+  image repository.
+- The dedicated Postgres service referenced by `HARBOR_DATABASE_URL` must
+  already be deployed and reachable on the Dokploy network before Harbor is
+  redeployed.
+
 Manual `workflow_dispatch` may also deploy an explicit prior image reference,
 which acts as the first operator rollback path while Harbor still has only one
 real Dokploy-hosted service instance.
+
+## Public Readiness
+
+The repo is not ready to flip public blindly yet. The current gap list and the
+cleanup needed before that move live in [docs/public-readiness.md](docs/public-readiness.md).
 
 ## Docs
 
@@ -156,3 +194,4 @@ real Dokploy-hosted service instance.
 - [docs/service-boundary.md](docs/service-boundary.md)
 - [docs/operations.md](docs/operations.md)
 - [docs/records.md](docs/records.md)
+- [docs/public-readiness.md](docs/public-readiness.md)

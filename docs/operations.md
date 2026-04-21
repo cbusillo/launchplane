@@ -126,9 +126,36 @@ Required GitHub configuration for that workflow:
   - optional `HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `HARBOR_IMAGE_REPOSITORY`
 
+`HARBOR_DEPLOY_HEALTH_URLS` must resolve from GitHub-hosted runners. Use the
+public Harbor `GET /v1/health` endpoint rather than an internal-only Dokploy
+network hostname.
+
 The Dokploy-hosted Harbor target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and
 roll back to the prior digest when verification fails.
+
+Before a real Harbor deploy, run the sanitized preflight check against the live
+Dokploy target:
+
+```bash
+uv run harbor service inspect-dokploy-target \
+  --target-type compose \
+  --target-id "$HARBOR_DOKPLOY_TARGET_ID"
+```
+
+That command reports only non-secret metadata and fails closed when the live
+Harbor target is missing critical runtime pieces such as `HARBOR_DATABASE_URL`,
+`HARBOR_MASTER_ENCRYPTION_KEY`, `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, or a Dokploy
+SSH key for a private `git@github.com:...` compose source. The GitHub deploy
+workflow now runs that same preflight before it builds or deploys a new image.
+
+Two deployment prerequisites remain Dokploy-side operational contracts rather
+than Harbor CLI validations:
+
+- Dokploy must already have a working saved registry credential that can pull
+  Harbor's GHCR image.
+- The Postgres service referenced by `HARBOR_DATABASE_URL` must already be
+  deployed and reachable on the Dokploy network before Harbor is redeployed.
 
 Current derived-state behavior:
 
