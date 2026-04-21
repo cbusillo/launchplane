@@ -601,6 +601,36 @@ def _run_application_command(
     )
 
 
+def _run_application_command_with_retries(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    schedule_name: str,
+    command: str,
+    timeout_seconds: int,
+    attempts: int = 4,
+    retry_delay_seconds: float = 5.0,
+) -> None:
+    if attempts < 1:
+        raise ValueError("attempts must be at least 1")
+    for attempt in range(1, attempts + 1):
+        try:
+            _run_application_command(
+                host=host,
+                token=token,
+                application_id=application_id,
+                schedule_name=schedule_name,
+                command=command,
+                timeout_seconds=timeout_seconds,
+            )
+            return
+        except click.ClickException:
+            if attempt >= attempts:
+                raise
+            time.sleep(retry_delay_seconds)
+
+
 def _preview_database_admin_module_source() -> str:
     return "".join(
         (
@@ -877,7 +907,7 @@ def execute_verireel_preview_refresh(
             timeout_seconds=request.timeout_seconds,
         )
         migration_started = True
-        _run_application_command(
+        _run_application_command_with_retries(
             host=host,
             token=token,
             application_id=application_id,
@@ -885,7 +915,7 @@ def execute_verireel_preview_refresh(
             command="npx prisma migrate deploy --config prisma.config.ts",
             timeout_seconds=request.timeout_seconds,
         )
-        _run_application_command(
+        _run_application_command_with_retries(
             host=host,
             token=token,
             application_id=application_id,
