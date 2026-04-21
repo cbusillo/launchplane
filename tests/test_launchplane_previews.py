@@ -28,7 +28,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.harbor import (
+from control_plane.workflows.launchplane import (
     apply_generation_failed_transition,
     apply_generation_ready_transition,
     apply_generation_requested_transition,
@@ -38,14 +38,14 @@ from control_plane.workflows.harbor import (
     build_preview_label,
     build_preview_record,
     build_preview_route_path,
-    classify_pull_request_event_for_harbor,
-    harbor_anchor_repo_context,
-    harbor_anchor_repo_eligible,
+    classify_pull_request_event_for_launchplane,
+    launchplane_anchor_repo_context,
+    launchplane_anchor_repo_eligible,
     generate_preview_generation_id,
     generate_preview_id,
-    harbor_preview_label_enabled,
+    launchplane_preview_label_enabled,
     parse_preview_request_metadata,
-    resolve_harbor_preview_base_url,
+    resolve_launchplane_preview_base_url,
 )
 
 
@@ -57,12 +57,12 @@ def _preview_record(
     anchor_pr_number: int = 123,
     anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
     preview_label: str = "opw/tenant-opw/pr-123",
-    canonical_url: str = "https://harbor.example/previews/opw/tenant-opw/pr-123",
+    canonical_url: str = "https://launchplane.example/previews/opw/tenant-opw/pr-123",
     state: str = "active",
     active_generation_id: str = "hgen_01jabc_1",
     serving_generation_id: str = "hgen_01jabc_1",
     latest_generation_id: str = "hgen_01jabc_1",
-    latest_manifest_fingerprint: str = "harbor-manifest-001",
+    latest_manifest_fingerprint: str = "launchplane-manifest-001",
     created_at: str = "2026-04-13T12:00:00Z",
     updated_at: str = "2026-04-13T12:14:00Z",
     eligible_at: str = "2026-04-13T12:00:00Z",
@@ -234,7 +234,7 @@ def _backup_gate_record(
     status: str = "pass",
     evidence: dict[str, str] | None = None,
 ) -> BackupGateRecord:
-    resolved_evidence = evidence if evidence is not None else {"snapshot": "s3://harbor/opw/prod/2026-04-14"}
+    resolved_evidence = evidence if evidence is not None else {"snapshot": "s3://launchplane/opw/prod/2026-04-14"}
     return BackupGateRecord(
         record_id=record_id,
         context=context,
@@ -319,8 +319,8 @@ def _write_runtime_environments_file(control_plane_root: Path) -> None:
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
-GITHUB_WEBHOOK_SECRET = "harbor-webhook-secret"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
+GITHUB_WEBHOOK_SECRET = "launchplane-webhook-secret"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
@@ -340,7 +340,7 @@ def _github_pull_request_webhook_payload(
     pr_number: int = 123,
     pr_url: str = "https://github.com/every/tenant-opw/pull/123",
     body: str = (
-        "```harbor-preview\n"
+        "```launchplane-preview\n"
         "schema_version = 1\n"
         'baseline_channel = "testing"\n'
         "```\n"
@@ -349,12 +349,12 @@ def _github_pull_request_webhook_payload(
     merged: bool = False,
     head_sha: str = "aaaa1111",
     labels: list[dict[str, str]] | None = None,
-    action_label: str = "harbor-preview",
+    action_label: str = "launchplane-preview",
     created_at: str = "2026-04-13T12:00:00Z",
     updated_at: str = "2026-04-13T12:15:00Z",
     closed_at: str = "2026-04-13T12:17:00Z",
 ) -> dict[str, object]:
-    resolved_labels = labels if labels is not None else [{"name": "harbor-preview"}]
+    resolved_labels = labels if labels is not None else [{"name": "launchplane-preview"}]
     payload: dict[str, object] = {
         "action": action,
         "number": pr_number,
@@ -377,7 +377,7 @@ def _github_pull_request_webhook_payload(
     return payload
 
 
-def _github_webhook_signature(payload: dict[str, object], secret: str = "harbor-webhook-secret") -> str:
+def _github_webhook_signature(payload: dict[str, object], secret: str = "launchplane-webhook-secret") -> str:
     payload_bytes = json.dumps(payload).encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
@@ -408,8 +408,8 @@ def _github_webhook_replay_envelope(
     }
 
 
-class HarborPreviewReadModelTests(unittest.TestCase):
-    def test_harbor_preview_identity_helpers_are_deterministic(self) -> None:
+class LaunchplanePreviewReadModelTests(unittest.TestCase):
+    def test_launchplane_preview_identity_helpers_are_deterministic(self) -> None:
         self.assertEqual(
             build_preview_label(
                 context_name="opw",
@@ -443,12 +443,12 @@ class HarborPreviewReadModelTests(unittest.TestCase):
         )
         self.assertEqual(
             build_preview_canonical_url(
-                preview_base_url="https://harbor.example",
+                preview_base_url="https://launchplane.example",
                 context_name="opw",
                 anchor_repo="tenant-opw",
                 anchor_pr_number=123,
             ),
-            "https://harbor.example/previews/opw/tenant-opw/pr-123",
+            "https://launchplane.example/previews/opw/tenant-opw/pr-123",
         )
 
     def test_build_preview_record_reuses_stable_identity_for_same_anchor(self) -> None:
@@ -459,7 +459,7 @@ class HarborPreviewReadModelTests(unittest.TestCase):
             anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
             created_at="2026-04-13T12:00:00Z",
             updated_at="2026-04-13T12:10:00Z",
-            preview_base_url="https://harbor.example",
+            preview_base_url="https://launchplane.example",
             state="active",
         )
         reopened_record = build_preview_record(
@@ -469,7 +469,7 @@ class HarborPreviewReadModelTests(unittest.TestCase):
             anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
             created_at="2026-04-14T09:00:00Z",
             updated_at="2026-04-14T09:05:00Z",
-            preview_base_url="https://harbor.example",
+            preview_base_url="https://launchplane.example",
             state="pending",
         )
 
@@ -477,7 +477,7 @@ class HarborPreviewReadModelTests(unittest.TestCase):
         self.assertEqual(first_record.preview_label, reopened_record.preview_label)
         self.assertEqual(first_record.canonical_url, reopened_record.canonical_url)
 
-    def test_resolve_harbor_preview_base_url_reads_context_runtime_values(self) -> None:
+    def test_resolve_launchplane_preview_base_url_reads_context_runtime_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
@@ -487,7 +487,7 @@ class HarborPreviewReadModelTests(unittest.TestCase):
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
@@ -499,14 +499,14 @@ ODOO_DB_PASSWORD = "local-secret"
                 encoding="utf-8",
             )
 
-            resolved_base_url = resolve_harbor_preview_base_url(
+            resolved_base_url = resolve_launchplane_preview_base_url(
                 control_plane_root=control_plane_root,
                 context_name="opw",
             )
 
-        self.assertEqual(resolved_base_url, "https://harbor.example")
+        self.assertEqual(resolved_base_url, "https://launchplane.example")
 
-    def test_resolve_harbor_preview_base_url_fails_closed_when_missing(self) -> None:
+    def test_resolve_launchplane_preview_base_url_fails_closed_when_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
@@ -522,8 +522,8 @@ ODOO_DB_PASSWORD = "local-secret"
                 encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(Exception, "HARBOR_PREVIEW_BASE_URL"):
-                resolve_harbor_preview_base_url(
+            with self.assertRaisesRegex(Exception, "LAUNCHPLANE_PREVIEW_BASE_URL"):
+                resolve_launchplane_preview_base_url(
                     control_plane_root=control_plane_root,
                     context_name="opw",
                 )
@@ -535,7 +535,7 @@ ODOO_DB_PASSWORD = "local-secret"
             state="failed",
             requested_reason="manifest_changed",
             requested_at="2026-04-13T12:10:00Z",
-            resolved_manifest_fingerprint="harbor-manifest-002",
+            resolved_manifest_fingerprint="launchplane-manifest-002",
             anchor_repo="tenant-opw",
             anchor_pr_number=123,
             anchor_pr_url="https://github.com/every/tenant-opw/pull/123",
@@ -567,7 +567,7 @@ ODOO_DB_PASSWORD = "local-secret"
             "hgen_01jabc_2",
             sequence=2,
             state="building",
-            manifest_fingerprint="harbor-manifest-002",
+            manifest_fingerprint="launchplane-manifest-002",
             artifact_id="artifact-opw-124",
             ready_at="",
         )
@@ -593,7 +593,7 @@ ODOO_DB_PASSWORD = "local-secret"
             "hgen_01jabc_2",
             sequence=2,
             state="ready",
-            manifest_fingerprint="harbor-manifest-002",
+            manifest_fingerprint="launchplane-manifest-002",
             artifact_id="artifact-opw-124",
         )
 
@@ -618,7 +618,7 @@ ODOO_DB_PASSWORD = "local-secret"
             "hgen_01jabc_2",
             sequence=2,
             state="failed",
-            manifest_fingerprint="harbor-manifest-002",
+            manifest_fingerprint="launchplane-manifest-002",
             artifact_id="artifact-opw-124",
             failed_at="2026-04-13T12:16:00Z",
         )
@@ -653,19 +653,19 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
         self.assertEqual(transitioned.destroy_reason, "merged_after_grace_window")
 
-    def test_harbor_preview_label_enabled_matches_configured_label(self) -> None:
-        self.assertTrue(harbor_preview_label_enabled(label_names=("bug", "harbor-preview")))
-        self.assertFalse(harbor_preview_label_enabled(label_names=("bug", "needs-review")))
+    def test_launchplane_preview_label_enabled_matches_configured_label(self) -> None:
+        self.assertTrue(launchplane_preview_label_enabled(label_names=("bug", "launchplane-preview")))
+        self.assertFalse(launchplane_preview_label_enabled(label_names=("bug", "needs-review")))
 
-    def test_harbor_anchor_repo_resolution_accepts_tenant_repos_only(self) -> None:
-        self.assertEqual(harbor_anchor_repo_context(repo="tenant-opw"), "opw")
-        self.assertEqual(harbor_anchor_repo_context(repo="tenant-cm"), "cm")
-        self.assertTrue(harbor_anchor_repo_eligible(repo="tenant-opw"))
-        self.assertTrue(harbor_anchor_repo_eligible(repo="tenant-cm"))
-        self.assertFalse(harbor_anchor_repo_eligible(repo="shared-addons"))
-        self.assertFalse(harbor_anchor_repo_eligible(repo="control-plane"))
+    def test_launchplane_anchor_repo_resolution_accepts_tenant_repos_only(self) -> None:
+        self.assertEqual(launchplane_anchor_repo_context(repo="tenant-opw"), "opw")
+        self.assertEqual(launchplane_anchor_repo_context(repo="tenant-cm"), "cm")
+        self.assertTrue(launchplane_anchor_repo_eligible(repo="tenant-opw"))
+        self.assertTrue(launchplane_anchor_repo_eligible(repo="tenant-cm"))
+        self.assertFalse(launchplane_anchor_repo_eligible(repo="shared-addons"))
+        self.assertFalse(launchplane_anchor_repo_eligible(repo="control-plane"))
 
-    def test_classify_pull_request_event_for_harbor_enables_preview_when_label_added(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_enables_preview_when_label_added(self) -> None:
         event = GitHubPullRequestEvent(
             action="labeled",
             repo="tenant-opw",
@@ -673,15 +673,15 @@ ODOO_DB_PASSWORD = "local-secret"
             pr_url="https://github.com/every/tenant-opw/pull/123",
             state="open",
             head_sha="aaaa1111",
-            label_names=("harbor-preview",),
-            action_label="harbor-preview",
+            label_names=("launchplane-preview",),
+            action_label="launchplane-preview",
         )
 
-        action = classify_pull_request_event_for_harbor(event=event, preview=None)
+        action = classify_pull_request_event_for_launchplane(event=event, preview=None)
 
         self.assertEqual(action, "enable_preview")
 
-    def test_classify_pull_request_event_for_harbor_refreshes_enabled_preview_on_sync(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_refreshes_enabled_preview_on_sync(self) -> None:
         event = GitHubPullRequestEvent(
             action="synchronize",
             repo="tenant-opw",
@@ -689,17 +689,17 @@ ODOO_DB_PASSWORD = "local-secret"
             pr_url="https://github.com/every/tenant-opw/pull/123",
             state="open",
             head_sha="bbbb2222",
-            label_names=("harbor-preview",),
+            label_names=("launchplane-preview",),
         )
 
-        action = classify_pull_request_event_for_harbor(
+        action = classify_pull_request_event_for_launchplane(
             event=event,
             preview=_preview_record(state="active"),
         )
 
         self.assertEqual(action, "refresh_preview")
 
-    def test_classify_pull_request_event_for_harbor_destroys_preview_on_close(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_destroys_preview_on_close(self) -> None:
         event = GitHubPullRequestEvent(
             action="closed",
             repo="tenant-opw",
@@ -708,17 +708,17 @@ ODOO_DB_PASSWORD = "local-secret"
             state="closed",
             merged=False,
             head_sha="bbbb2222",
-            label_names=("harbor-preview",),
+            label_names=("launchplane-preview",),
         )
 
-        action = classify_pull_request_event_for_harbor(
+        action = classify_pull_request_event_for_launchplane(
             event=event,
             preview=_preview_record(state="active"),
         )
 
         self.assertEqual(action, "destroy_preview")
 
-    def test_classify_pull_request_event_for_harbor_reenables_destroyed_preview_on_reopen(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_reenables_destroyed_preview_on_reopen(self) -> None:
         event = GitHubPullRequestEvent(
             action="reopened",
             repo="tenant-opw",
@@ -726,17 +726,17 @@ ODOO_DB_PASSWORD = "local-secret"
             pr_url="https://github.com/every/tenant-opw/pull/123",
             state="open",
             head_sha="cccc3333",
-            label_names=("harbor-preview",),
+            label_names=("launchplane-preview",),
         )
 
-        action = classify_pull_request_event_for_harbor(
+        action = classify_pull_request_event_for_launchplane(
             event=event,
             preview=_preview_record(state="destroyed"),
         )
 
         self.assertEqual(action, "enable_preview")
 
-    def test_classify_pull_request_event_for_harbor_ignores_unlabeled_open_pr(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_ignores_unlabeled_open_pr(self) -> None:
         event = GitHubPullRequestEvent(
             action="opened",
             repo="tenant-opw",
@@ -747,15 +747,15 @@ ODOO_DB_PASSWORD = "local-secret"
             label_names=("bug",),
         )
 
-        action = classify_pull_request_event_for_harbor(event=event, preview=None)
+        action = classify_pull_request_event_for_launchplane(event=event, preview=None)
 
         self.assertEqual(action, "ignore")
 
-    def test_parse_preview_request_metadata_reads_harbor_fenced_block(self) -> None:
+    def test_parse_preview_request_metadata_reads_launchplane_fenced_block(self) -> None:
         result = parse_preview_request_metadata(
             pr_body=(
                 "Some intro text\n\n"
-                "```harbor-preview\n"
+                "```launchplane-preview\n"
                 "schema_version = 1\n"
                 "\n"
                 "[[companions]]\n"
@@ -772,8 +772,8 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(result.metadata.companions[0].repo, "shared-addons")
         self.assertEqual(result.metadata.companions[0].pr_number, 456)
 
-    def test_parse_preview_request_metadata_is_missing_without_harbor_block(self) -> None:
-        result = parse_preview_request_metadata(pr_body="Regular PR body without Harbor metadata.")
+    def test_parse_preview_request_metadata_is_missing_without_launchplane_block(self) -> None:
+        result = parse_preview_request_metadata(pr_body="Regular PR body without Launchplane metadata.")
 
         self.assertEqual(result.status, "missing")
         self.assertIsNone(result.metadata)
@@ -781,7 +781,7 @@ ODOO_DB_PASSWORD = "local-secret"
     def test_parse_preview_request_metadata_fails_closed_for_invalid_companion_repo(self) -> None:
         result = parse_preview_request_metadata(
             pr_body=(
-                "```harbor-preview\n"
+                "```launchplane-preview\n"
                 "schema_version = 1\n"
                 "\n"
                 "[[companions]]\n"
@@ -804,7 +804,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -813,7 +813,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     "hgen_01jabc_2",
                     sequence=2,
                     state="deploying",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     deploy_status="pending",
                     verify_status="pending",
@@ -832,7 +832,7 @@ ODOO_DB_PASSWORD = "local-secret"
                 "hgen_01jabc_1",
             ])
 
-    def test_harbor_previews_show_active_preview(self) -> None:
+    def test_launchplane_previews_show_active_preview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -843,7 +843,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -851,7 +851,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show",
                     "--state-dir",
                     str(state_dir),
@@ -874,7 +874,7 @@ ODOO_DB_PASSWORD = "local-secret"
                 "Serving the latest requested generation.",
             )
 
-    def test_harbor_previews_show_surfaces_first_page_summary_fields(self) -> None:
+    def test_launchplane_previews_show_surfaces_first_page_summary_fields(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -892,7 +892,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -900,7 +900,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show",
                     "--state-dir",
                     str(state_dir),
@@ -917,28 +917,28 @@ ODOO_DB_PASSWORD = "local-secret"
             payload = json.loads(result.output)
             self.assertEqual(
                 payload["preview"]["canonical_url"],
-                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+                "https://launchplane.example/previews/opw/tenant-opw/pr-123",
             )
             self.assertEqual(payload["preview"]["preview_label"], "opw/tenant-opw/pr-123")
             self.assertEqual(payload["trust_summary"]["artifact_id"], "artifact-opw-123")
             self.assertEqual(
                 payload["trust_summary"]["manifest_fingerprint"],
-                "harbor-manifest-001",
+                "launchplane-manifest-001",
             )
             self.assertEqual(
                 payload["lifecycle_summary"]["next_action"],
-                "Harbor will keep this preview until the current destroy-after deadline or a lifecycle event replaces it.",
+                "Launchplane will keep this preview until the current destroy-after deadline or a lifecycle event replaces it.",
             )
             self.assertEqual(
                 payload["input_summary"]["source_map"][0]["repo"],
                 "tenant-opw",
             )
 
-    def test_harbor_previews_render_status_page_writes_html_summary(self) -> None:
+    def test_launchplane_previews_render_status_page_writes_html_summary(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -953,7 +953,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -961,7 +961,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -978,30 +978,30 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Harbor control plane", rendered_html)
+            self.assertIn("Launchplane control plane", rendered_html)
             self.assertIn("Preview detail", rendered_html)
             self.assertIn('class="preview-detail-mast"', rendered_html)
             self.assertIn("Current preview evidence", rendered_html)
             self.assertIn('class="preview-detail-grid"', rendered_html)
             self.assertIn("tenant-opw PR 123", rendered_html)
             self.assertIn("opw/tenant-opw/pr-123", rendered_html)
-            self.assertIn("https://harbor.example/previews/opw/tenant-opw/pr-123", rendered_html)
+            self.assertIn("https://launchplane.example/previews/opw/tenant-opw/pr-123", rendered_html)
             self.assertIn("artifact-opw-123", rendered_html)
-            self.assertIn("harbor-manifest-001", rendered_html)
+            self.assertIn("launchplane-manifest-001", rendered_html)
             self.assertIn("Serving the latest requested generation.", rendered_html)
-            self.assertIn("Write-side Harbor recipes", rendered_html)
+            self.assertIn("Write-side Launchplane recipes", rendered_html)
             self.assertIn("request-generation", rendered_html)
             self.assertIn("destroy-preview", rendered_html)
             self.assertIn('id="operator-actions"', rendered_html)
             self.assertIn(
-                "This preview is live at the stable Harbor route and serving the latest requested generation.",
+                "This preview is live at the stable Launchplane route and serving the latest requested generation.",
                 rendered_html,
             )
             self.assertIn("Raw payload JSON", rendered_html)
             self.assertIn("Open preview URL", rendered_html)
             self.assertIn("serving / latest", rendered_html)
 
-    def test_harbor_previews_show_tenant_surfaces_environment_and_preview_lanes(self) -> None:
+    def test_launchplane_previews_show_tenant_surfaces_environment_and_preview_lanes(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1041,7 +1041,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     preview_id="hpr_live",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-live",
+                    manifest_fingerprint="launchplane-manifest-live",
                     artifact_id="artifact-live",
                 )
             )
@@ -1051,7 +1051,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     anchor_pr_number=124,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     preview_label="opw/tenant-opw/pr-124",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-124",
                     state="pending",
                     active_generation_id="",
                     serving_generation_id="",
@@ -1065,7 +1065,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                 )
             )
             store.write_preview_enablement_record(
@@ -1078,34 +1078,34 @@ ODOO_DB_PASSWORD = "local-secret"
             )
             store.write_preview_record(
                 _preview_record(
-                    preview_id="hpr_harbor",
+                    preview_id="hpr_launchplane",
                     anchor_pr_number=126,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/126",
                     preview_label="opw/tenant-opw/pr-126",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-126",
-                    active_generation_id="hgen_harbor_1",
-                    serving_generation_id="hgen_harbor_1",
-                    latest_generation_id="hgen_harbor_1",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-126",
+                    active_generation_id="hgen_launchplane_1",
+                    serving_generation_id="hgen_launchplane_1",
+                    latest_generation_id="hgen_launchplane_1",
                     updated_at="2026-04-14T11:18:00Z",
                 )
             )
             store.write_preview_generation_record(
                 _generation_record(
-                    "hgen_harbor_1",
-                    preview_id="hpr_harbor",
+                    "hgen_launchplane_1",
+                    preview_id="hpr_launchplane",
                     anchor_pr_number=126,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/126",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-harbor",
-                    artifact_id="artifact-harbor",
+                    manifest_fingerprint="launchplane-manifest-launchplane",
+                    artifact_id="artifact-launchplane",
                 ).model_copy(update={"requested_reason": "operator_requested_refresh"})
             )
 
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show-tenant",
                     "--state-dir",
                     str(state_dir),
@@ -1152,10 +1152,10 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(enablement_by_pr[124]["request_source"], "github_label")
             self.assertEqual(enablement_by_pr[124]["action"]["status"], "existing_preview")
             self.assertEqual(enablement_by_pr[126]["state"], "running")
-            self.assertEqual(enablement_by_pr[126]["request_source"], "harbor")
+            self.assertEqual(enablement_by_pr[126]["request_source"], "launchplane")
             self.assertEqual(enablement_by_pr[126]["action"]["status"], "existing_preview")
 
-    def test_harbor_previews_ingest_pr_event_persists_preview_enablement_record(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_persists_preview_enablement_record(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1168,7 +1168,7 @@ ODOO_DB_PASSWORD = "local-secret"
                         "pr_number": 125,
                         "pr_url": "https://github.com/every/tenant-opw/pull/125",
                         "occurred_at": "2026-04-14T11:16:00Z",
-                        "pr_body": "Regular PR body without Harbor metadata.",
+                        "pr_body": "Regular PR body without Launchplane metadata.",
                         "state": "open",
                         "merged": False,
                         "head_sha": "bbbb2222",
@@ -1182,7 +1182,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "ingest-pr-event",
                     "--state-dir",
                     str(state_dir),
@@ -1203,7 +1203,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(record.request_metadata_baseline_channel, "")
             self.assertEqual(record.request_metadata_companions, ())
 
-    def test_harbor_previews_write_enablement_persists_typed_record(self) -> None:
+    def test_launchplane_previews_write_enablement_persists_typed_record(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1216,7 +1216,7 @@ ODOO_DB_PASSWORD = "local-secret"
                         anchor_head_sha="eeee5555",
                         label_enabled=True,
                         action="labeled",
-                        action_label="harbor-preview",
+                        action_label="launchplane-preview",
                         request_metadata_status="valid",
                         request_metadata_baseline_channel="testing",
                     ).model_dump(mode="json")
@@ -1227,7 +1227,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "write-enablement",
                     "--state-dir",
                     str(state_dir),
@@ -1245,7 +1245,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(record.request_metadata_status, "valid")
             self.assertEqual(record.request_metadata_baseline_channel, "testing")
 
-    def test_harbor_previews_ingest_pr_event_persists_valid_preview_metadata_snapshot(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_persists_valid_preview_metadata_snapshot(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1259,7 +1259,7 @@ ODOO_DB_PASSWORD = "local-secret"
                         "pr_url": "https://github.com/every/tenant-opw/pull/126",
                         "occurred_at": "2026-04-14T11:18:00Z",
                         "pr_body": (
-                            "```harbor-preview\n"
+                            "```launchplane-preview\n"
                             'baseline_channel = "testing"\n'
                             "[[companions]]\n"
                             'repo = "shared-addons"\n'
@@ -1269,8 +1269,8 @@ ODOO_DB_PASSWORD = "local-secret"
                         "state": "open",
                         "merged": False,
                         "head_sha": "cccc3333",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -1279,7 +1279,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "ingest-pr-event",
                     "--state-dir",
                     str(state_dir),
@@ -1296,7 +1296,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(record.request_metadata_companions[0].repo, "shared-addons")
             self.assertEqual(record.request_metadata_companions[0].pr_number, 456)
 
-    def test_harbor_previews_show_tenant_uses_valid_metadata_snapshot_for_enablement_actions(self) -> None:
+    def test_launchplane_previews_show_tenant_uses_valid_metadata_snapshot_for_enablement_actions(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1308,7 +1308,7 @@ ODOO_DB_PASSWORD = "local-secret"
                     anchor_head_sha="dddd4444",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                 )
@@ -1317,7 +1317,7 @@ ODOO_DB_PASSWORD = "local-secret"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show-tenant",
                     "--state-dir",
                     str(state_dir),
@@ -1334,7 +1334,7 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(enablement_by_pr[129]["request_metadata_status"], "valid")
             self.assertEqual(enablement_by_pr[129]["action"]["status"], "actionable")
 
-    def test_harbor_previews_render_site_release_tuples_file_resolves_enablement_recipe(self) -> None:
+    def test_launchplane_previews_render_site_release_tuples_file_resolves_enablement_recipe(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
@@ -1363,7 +1363,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_head_sha="dddd4444",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                 )
@@ -1372,7 +1372,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-site",
                     "--state-dir",
                     str(state_dir),
@@ -1392,11 +1392,11 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertNotIn("&lt;resolved-baseline-tuple-id&gt;", index_html)
             self.assertNotIn("&lt;resolved-manifest-fingerprint&gt;", index_html)
 
-    def test_harbor_previews_render_index_page_leads_with_tenant_environment_when_scoped(self) -> None:
+    def test_launchplane_previews_render_index_page_leads_with_tenant_environment_when_scoped(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            output_file = Path(temporary_directory_name) / "launchplane-index.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_environment_inventory(
                 _environment_inventory(
@@ -1433,7 +1433,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     preview_id="hpr_live",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-live",
+                    manifest_fingerprint="launchplane-manifest-live",
                     artifact_id="artifact-live",
                 )
             )
@@ -1443,7 +1443,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                     updated_at="2026-04-14T11:16:00Z",
                 )
             )
@@ -1472,7 +1472,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-index-page",
                     "--state-dir",
                     str(state_dir),
@@ -1501,19 +1501,19 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertNotIn("backup-gates write", rendered_html)
             self.assertIn("Why each PR does or does not have a preview", rendered_html)
             self.assertIn("Eligible tenant PR. No preview request is active yet.", rendered_html)
-            self.assertIn("GitHub label harbor-preview requested a preview, but Harbor has not created the preview record yet.", rendered_html)
-            self.assertIn("Request Harbor preview", rendered_html)
-            self.assertIn("Show Harbor request recipe", rendered_html)
+            self.assertIn("GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet.", rendered_html)
+            self.assertIn("Request Launchplane preview", rendered_html)
+            self.assertIn("Show Launchplane request recipe", rendered_html)
             self.assertIn("request-generation", rendered_html)
             self.assertIn("artifact-testing", rendered_html)
             self.assertIn("artifact-prod", rendered_html)
             self.assertIn("Pull request previews", rendered_html)
 
-    def test_harbor_previews_render_index_page_surfaces_backup_gate_recipe_when_promotion_blocked(self) -> None:
+    def test_launchplane_previews_render_index_page_surfaces_backup_gate_recipe_when_promotion_blocked(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            output_file = Path(temporary_directory_name) / "launchplane-index.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_environment_inventory(
                 _environment_inventory(
@@ -1538,7 +1538,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-index-page",
                     "--state-dir",
                     str(state_dir),
@@ -1551,15 +1551,15 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("A newer testing artifact exists, but Harbor cannot promote it yet.", rendered_html)
+            self.assertIn("A newer testing artifact exists, but Launchplane cannot promote it yet.", rendered_html)
             self.assertIn("backup-gates write", rendered_html)
             self.assertNotIn("promote resolve", rendered_html)
 
-    def test_harbor_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(self) -> None:
+    def test_launchplane_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            output_file = Path(temporary_directory_name) / "launchplane-index.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_enablement_record(
                 _preview_enablement_record(
@@ -1568,7 +1568,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_head_sha="eeee5555",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                 )
@@ -1577,7 +1577,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-index-page",
                     "--state-dir",
                     str(state_dir),
@@ -1592,15 +1592,15 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn("Preview enablement is the first meaningful control surface", rendered_html)
             self.assertIn("Why each PR does or does not have a preview", rendered_html)
-            self.assertIn("Materialize requested Harbor preview", rendered_html)
+            self.assertIn("Materialize requested Launchplane preview", rendered_html)
             self.assertNotIn("Rebuild long-lived lanes", rendered_html)
-            self.assertNotIn("Harbor cannot plan the next promotion yet.", rendered_html)
+            self.assertNotIn("Launchplane cannot plan the next promotion yet.", rendered_html)
 
-    def test_harbor_previews_render_index_page_marks_missing_lane_action_evidence(self) -> None:
+    def test_launchplane_previews_render_index_page_marks_missing_lane_action_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            output_file = Path(temporary_directory_name) / "launchplane-index.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_environment_inventory(
                 _environment_inventory(
@@ -1615,7 +1615,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-index-page",
                     "--state-dir",
                     str(state_dir),
@@ -1630,7 +1630,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn("Prod has no actionable ship evidence yet.", rendered_html)
 
-    def test_harbor_previews_show_tenant_marks_in_sync_promotion_state(self) -> None:
+    def test_launchplane_previews_show_tenant_marks_in_sync_promotion_state(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1671,7 +1671,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show-tenant",
                     "--state-dir",
                     str(state_dir),
@@ -1694,18 +1694,18 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 "backup-opw-prod-20260414T111500Z",
             )
 
-    def test_harbor_previews_render_index_page_writes_preview_dashboard(self) -> None:
+    def test_launchplane_previews_render_index_page_writes_preview_dashboard(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-index.html"
+            output_file = Path(temporary_directory_name) / "launchplane-index.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
                     preview_id="hpr_live",
                     anchor_pr_number=123,
                     preview_label="opw/tenant-opw/pr-123",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-123",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-123",
                     active_generation_id="hgen_live_1",
                     serving_generation_id="hgen_live_1",
                     latest_generation_id="hgen_live_1",
@@ -1717,7 +1717,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     preview_id="hpr_live",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-live",
+                    manifest_fingerprint="launchplane-manifest-live",
                     artifact_id="artifact-live",
                 )
             )
@@ -1727,12 +1727,12 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=124,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     preview_label="opw/tenant-opw/pr-124",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-124",
                     state="failed",
                     active_generation_id="hgen_fail_2",
                     serving_generation_id="hgen_fail_1",
                     latest_generation_id="hgen_fail_2",
-                    latest_manifest_fingerprint="harbor-manifest-fail",
+                    latest_manifest_fingerprint="launchplane-manifest-fail",
                 )
             )
             store.write_preview_generation_record(
@@ -1743,7 +1743,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-prev",
+                    manifest_fingerprint="launchplane-manifest-prev",
                     artifact_id="artifact-prev",
                 )
             )
@@ -1755,7 +1755,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     sequence=2,
                     state="failed",
-                    manifest_fingerprint="harbor-manifest-fail",
+                    manifest_fingerprint="launchplane-manifest-fail",
                     artifact_id="artifact-fail",
                     deploy_status="fail",
                     verify_status="skipped",
@@ -1772,7 +1772,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=125,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
                     preview_label="opw/tenant-opw/pr-125",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-125",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-125",
                     state="destroyed",
                     active_generation_id="",
                     serving_generation_id="",
@@ -1789,7 +1789,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/125",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-dead",
+                    manifest_fingerprint="launchplane-manifest-dead",
                     artifact_id="artifact-dead",
                 )
             )
@@ -1797,7 +1797,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-index-page",
                     "--state-dir",
                     str(state_dir),
@@ -1810,7 +1810,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Harbor control plane", rendered_html)
+            self.assertIn("Launchplane control plane", rendered_html)
             self.assertIn("Pull request previews", rendered_html)
             self.assertIn("Fleet focus", rendered_html)
             self.assertIn("Reviewable now", rendered_html)
@@ -1826,11 +1826,11 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("opw/tenant-opw/pr-124", rendered_html)
             self.assertIn("opw/tenant-opw/pr-125", rendered_html)
 
-    def test_harbor_previews_render_index_page_surfaces_scope_controls_for_multi_context_inventory(self) -> None:
+    def test_launchplane_previews_render_index_page_surfaces_scope_controls_for_multi_context_inventory(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-index-all.html"
+            output_file = Path(temporary_directory_name) / "launchplane-index-all.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -1839,7 +1839,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_repo="tenant-opw",
                     anchor_pr_number=123,
                     preview_label="opw/tenant-opw/pr-123",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-123",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-123",
                     active_generation_id="hgen_opw_1",
                     serving_generation_id="hgen_opw_1",
                     latest_generation_id="hgen_opw_1",
@@ -1853,7 +1853,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=123,
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-opw",
+                    manifest_fingerprint="launchplane-manifest-opw",
                     artifact_id="artifact-opw",
                 )
             )
@@ -1864,7 +1864,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_repo="tenant-cm",
                     anchor_pr_number=88,
                     preview_label="cm/tenant-cm/pr-88",
-                    canonical_url="https://harbor.example/previews/cm/tenant-cm/pr-88",
+                    canonical_url="https://launchplane.example/previews/cm/tenant-cm/pr-88",
                     active_generation_id="hgen_cm_1",
                     serving_generation_id="hgen_cm_1",
                     latest_generation_id="hgen_cm_1",
@@ -1878,7 +1878,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=88,
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-cm",
+                    manifest_fingerprint="launchplane-manifest-cm",
                     artifact_id="artifact-cm",
                 )
             )
@@ -1886,7 +1886,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-index-page",
                     "--state-dir",
                     str(state_dir),
@@ -1903,11 +1903,11 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn('data-scope-control="repo:tenant-cm"', rendered_html)
             self.assertIn('data-scopes="all context:cm repo:tenant-cm"', rendered_html)
 
-    def test_harbor_previews_render_policy_page_writes_contract_summary(self) -> None:
+    def test_launchplane_previews_render_policy_page_writes_contract_summary(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-policy.html"
+            output_file = Path(temporary_directory_name) / "launchplane-policy.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -1924,7 +1924,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     preview_id="hpr_live",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-live",
+                    manifest_fingerprint="launchplane-manifest-live",
                     artifact_id="artifact-live",
                 )
             )
@@ -1932,7 +1932,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-policy-page",
                     "--state-dir",
                     str(state_dir),
@@ -1945,19 +1945,19 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Harbor control plane", rendered_html)
-            self.assertIn("How Harbor decides what becomes a preview", rendered_html)
-            self.assertIn("harbor-preview", rendered_html)
+            self.assertIn("Launchplane control plane", rendered_html)
+            self.assertIn("How Launchplane decides what becomes a preview", rendered_html)
+            self.assertIn("launchplane-preview", rendered_html)
             self.assertIn("shared-addons", rendered_html)
             self.assertIn("tenant-opw", rendered_html)
             self.assertIn("tenant-cm", rendered_html)
             self.assertIn("testing", rendered_html)
 
-    def test_harbor_previews_render_policy_page_shows_context_distribution_for_multi_context_inventory(self) -> None:
+    def test_launchplane_previews_render_policy_page_shows_context_distribution_for_multi_context_inventory(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-policy-all.html"
+            output_file = Path(temporary_directory_name) / "launchplane-policy-all.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -1978,7 +1978,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=123,
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-opw",
+                    manifest_fingerprint="launchplane-manifest-opw",
                     artifact_id="artifact-opw",
                 )
             )
@@ -2002,7 +2002,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=88,
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-cm",
+                    manifest_fingerprint="launchplane-manifest-cm",
                     artifact_id="artifact-cm",
                 )
             )
@@ -2010,7 +2010,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-policy-page",
                     "--state-dir",
                     str(state_dir),
@@ -2027,7 +2027,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("<td>opw</td>", rendered_html)
             self.assertIn(">cm</a></td>", rendered_html)
 
-    def test_harbor_previews_render_site_writes_linked_bundle(self) -> None:
+    def test_launchplane_previews_render_site_writes_linked_bundle(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2048,7 +2048,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     preview_id="hpr_live",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-live",
+                    manifest_fingerprint="launchplane-manifest-live",
                     artifact_id="artifact-live",
                 )
             )
@@ -2056,7 +2056,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-site",
                     "--state-dir",
                     str(state_dir),
@@ -2084,7 +2084,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn('href="../../../policy.html"', detail_html)
             self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', policy_html)
 
-    def test_harbor_previews_render_site_enablement_row_links_to_existing_preview_detail(self) -> None:
+    def test_launchplane_previews_render_site_enablement_row_links_to_existing_preview_detail(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2096,7 +2096,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_number=124,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     preview_label="opw/tenant-opw/pr-124",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-124",
                     state="pending",
                     active_generation_id="",
                     serving_generation_id="",
@@ -2110,14 +2110,14 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                 )
             )
 
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-site",
                     "--state-dir",
                     str(state_dir),
@@ -2135,7 +2135,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 index_html,
             )
 
-    def test_harbor_previews_render_site_writes_environment_detail_pages_and_links_from_overview(self) -> None:
+    def test_launchplane_previews_render_site_writes_environment_detail_pages_and_links_from_overview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2177,7 +2177,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-site",
                     "--state-dir",
                     str(state_dir),
@@ -2209,7 +2209,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("Recent promotions into this lane", prod_detail_html)
             self.assertIn("promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", prod_detail_html)
 
-    def test_harbor_previews_render_site_environment_detail_marks_partial_evidence_cleanly(self) -> None:
+    def test_launchplane_previews_render_site_environment_detail_marks_partial_evidence_cleanly(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2228,7 +2228,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-site",
                     "--state-dir",
                     str(state_dir),
@@ -2249,7 +2249,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("No deployment history recorded for this lane yet.", testing_detail_html)
             self.assertIn("No promotion history recorded into this lane yet.", testing_detail_html)
 
-    def test_harbor_previews_render_site_writes_promotion_detail_page_and_link_from_overview(self) -> None:
+    def test_launchplane_previews_render_site_writes_promotion_detail_page_and_link_from_overview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2291,7 +2291,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-site",
                     "--state-dir",
                     str(state_dir),
@@ -2318,11 +2318,11 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("Recent prod backup authorization", promotion_detail_html)
             self.assertIn("promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", promotion_detail_html)
 
-    def test_harbor_previews_render_status_page_calls_out_failed_latest_replacement(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_failed_latest_replacement(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2330,7 +2330,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     active_generation_id="hgen_01jabc_2",
                     serving_generation_id="hgen_01jabc_1",
                     latest_generation_id="hgen_01jabc_2",
-                    latest_manifest_fingerprint="harbor-manifest-002",
+                    latest_manifest_fingerprint="launchplane-manifest-002",
                 )
             )
             store.write_preview_generation_record(
@@ -2338,7 +2338,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2347,7 +2347,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_2",
                     sequence=2,
                     state="failed",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     deploy_status="fail",
                     verify_status="skipped",
@@ -2362,7 +2362,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2379,16 +2379,16 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Latest replacement failed. Harbor is still serving the older preview.", rendered_html)
+            self.assertIn("Latest replacement failed. Launchplane is still serving the older preview.", rendered_html)
             self.assertIn("Replacement generation failed during deploy.", rendered_html)
             self.assertIn("hgen_01jabc_1", rendered_html)
             self.assertIn("hgen_01jabc_2", rendered_html)
 
-    def test_harbor_previews_render_status_page_preserves_destroyed_preview_evidence(self) -> None:
+    def test_launchplane_previews_render_status_page_preserves_destroyed_preview_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2405,7 +2405,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2413,7 +2413,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2431,7 +2431,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn(
-                "This preview has already been destroyed. Harbor is retaining the record as evidence.",
+                "This preview has already been destroyed. Launchplane is retaining the record as evidence.",
                 rendered_html,
             )
             self.assertIn("merged_after_grace_window", rendered_html)
@@ -2442,15 +2442,15 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("Retained preview URL", rendered_html)
             self.assertNotIn("Open preview URL", rendered_html)
             self.assertNotIn(
-                "Latest replacement failed. Harbor is still serving the older preview.",
+                "Latest replacement failed. Launchplane is still serving the older preview.",
                 rendered_html,
             )
 
-    def test_harbor_previews_render_status_page_calls_out_paused_preview_state(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_paused_preview_state(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2466,7 +2466,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2474,7 +2474,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2492,22 +2492,22 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn(
-                "This preview is intentionally paused. Harbor is holding the current review evidence in place.",
+                "This preview is intentionally paused. Launchplane is holding the current review evidence in place.",
                 rendered_html,
             )
             self.assertIn("2026-04-14T16:20:00Z", rendered_html)
-            self.assertIn("Blocked until Harbor resumes the preview.", rendered_html)
+            self.assertIn("Blocked until Launchplane resumes the preview.", rendered_html)
             self.assertIn("Open preview URL", rendered_html)
             self.assertNotIn(
-                "This preview has already been destroyed. Harbor is retaining the record as evidence.",
+                "This preview has already been destroyed. Launchplane is retaining the record as evidence.",
                 rendered_html,
             )
 
-    def test_harbor_previews_render_status_page_calls_out_teardown_pending_state(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_teardown_pending_state(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2523,7 +2523,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2531,7 +2531,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2549,7 +2549,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn(
-                "This preview is queued for teardown. Harbor is keeping the current runtime available until cleanup completes.",
+                "This preview is queued for teardown. Launchplane is keeping the current runtime available until cleanup completes.",
                 rendered_html,
             )
             self.assertIn("2026-04-15T18:00:00Z", rendered_html)
@@ -2560,15 +2560,15 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("Preview teardown pending", rendered_html)
             self.assertIn("Open preview URL", rendered_html)
             self.assertNotIn(
-                "This preview is intentionally paused. Harbor is holding the current review evidence in place.",
+                "This preview is intentionally paused. Launchplane is holding the current review evidence in place.",
                 rendered_html,
             )
 
-    def test_harbor_previews_render_status_page_calls_out_in_progress_replacement(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_in_progress_replacement(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2583,7 +2583,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2592,7 +2592,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_2",
                     sequence=2,
                     state="deploying",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     deploy_status="pending",
                     verify_status="pending",
@@ -2604,7 +2604,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2622,7 +2622,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn(
-                "A replacement generation is in progress. Harbor is still serving the current preview.",
+                "A replacement generation is in progress. Launchplane is still serving the current preview.",
                 rendered_html,
             )
             self.assertIn("Current stage", rendered_html)
@@ -2633,15 +2633,15 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("mark-generation-ready", rendered_html)
             self.assertIn("mark-generation-failed", rendered_html)
             self.assertNotIn(
-                "Latest replacement failed. Harbor is still serving the older preview.",
+                "Latest replacement failed. Launchplane is still serving the older preview.",
                 rendered_html,
             )
 
-    def test_harbor_previews_render_status_page_calls_out_no_generation_yet(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_no_generation_yet(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2656,7 +2656,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2674,7 +2674,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn(
-                "Harbor has created this preview record, but the first generation has not been requested yet.",
+                "Launchplane has created this preview record, but the first generation has not been requested yet.",
                 rendered_html,
             )
             self.assertIn("Preview route (not live yet)", rendered_html)
@@ -2683,11 +2683,11 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("Not created yet", rendered_html)
             self.assertNotIn("Open preview URL", rendered_html)
 
-    def test_harbor_previews_render_status_page_calls_out_no_serving_preview(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_no_serving_preview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
-            output_file = Path(temporary_directory_name) / "harbor-status.html"
+            output_file = Path(temporary_directory_name) / "launchplane-status.html"
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
                 _preview_record(
@@ -2702,7 +2702,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2710,7 +2710,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "render-status-page",
                     "--state-dir",
                     str(state_dir),
@@ -2728,7 +2728,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
             self.assertIn(
-                "Harbor has generation evidence for this preview, but nothing is serving yet.",
+                "Launchplane has generation evidence for this preview, but nothing is serving yet.",
                 rendered_html,
             )
             self.assertIn("Preview route (not serving yet)", rendered_html)
@@ -2738,7 +2738,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("hgen_01jabc_1", rendered_html)
             self.assertNotIn("Open preview URL", rendered_html)
 
-    def test_harbor_previews_show_failed_latest_keeps_serving_generation(self) -> None:
+    def test_launchplane_previews_show_failed_latest_keeps_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2749,7 +2749,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     active_generation_id="hgen_01jabc_2",
                     serving_generation_id="hgen_01jabc_1",
                     latest_generation_id="hgen_01jabc_2",
-                    latest_manifest_fingerprint="harbor-manifest-002",
+                    latest_manifest_fingerprint="launchplane-manifest-002",
                 )
             )
             store.write_preview_generation_record(
@@ -2757,7 +2757,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2766,7 +2766,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_2",
                     sequence=2,
                     state="failed",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     deploy_status="fail",
                     verify_status="skipped",
@@ -2781,7 +2781,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show",
                     "--state-dir",
                     str(state_dir),
@@ -2803,7 +2803,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             self.assertIn("latest replacement failed", payload["health_summary"]["status_summary"])
             self.assertEqual(payload["recent_generations"][0]["generation_id"], "hgen_01jabc_2")
 
-    def test_harbor_previews_show_destroyed_preview_retains_evidence(self) -> None:
+    def test_launchplane_previews_show_destroyed_preview_retains_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2823,7 +2823,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -2831,7 +2831,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "show",
                     "--state-dir",
                     str(state_dir),
@@ -2855,7 +2855,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             )
             self.assertIn("destroyed", payload["health_summary"]["status_summary"].lower())
 
-    def test_harbor_previews_write_preview_creates_record_from_request(self) -> None:
+    def test_launchplane_previews_write_preview_creates_record_from_request(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -2867,7 +2867,7 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
@@ -2894,7 +2894,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "write-preview",
                         "--state-dir",
                         str(state_dir),
@@ -2910,10 +2910,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(record.preview_label, "opw/tenant-opw/pr-123")
             self.assertEqual(
                 record.canonical_url,
-                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+                "https://launchplane.example/previews/opw/tenant-opw/pr-123",
             )
 
-    def test_harbor_previews_write_preview_reuses_existing_identity_and_created_at(self) -> None:
+    def test_launchplane_previews_write_preview_reuses_existing_identity_and_created_at(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -2925,7 +2925,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
@@ -2960,7 +2960,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "write-preview",
                         "--state-dir",
                         str(state_dir),
@@ -2976,7 +2976,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(record.updated_at, "2026-04-13T12:30:00Z")
             self.assertEqual(record.state, "paused")
 
-    def test_harbor_previews_write_preview_fails_closed_when_base_url_missing(self) -> None:
+    def test_launchplane_previews_write_preview_fails_closed_when_base_url_missing(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3012,7 +3012,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "write-preview",
                         "--state-dir",
                         str(state_dir),
@@ -3022,9 +3022,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 )
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("HARBOR_PREVIEW_BASE_URL", result.output)
+            self.assertIn("LAUNCHPLANE_PREVIEW_BASE_URL", result.output)
 
-    def test_harbor_previews_write_preview_accepts_explicit_canonical_url_without_base_url(self) -> None:
+    def test_launchplane_previews_write_preview_accepts_explicit_canonical_url_without_base_url(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3049,7 +3049,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "write-preview",
                         "--state-dir",
                         str(state_dir),
@@ -3065,7 +3065,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(record.canonical_url, "https://pr-123.ver-preview.shinycomputers.com")
             self.assertEqual(record.state, "active")
 
-    def test_harbor_previews_write_generation_assigns_next_sequence(self) -> None:
+    def test_launchplane_previews_write_generation_assigns_next_sequence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3078,7 +3078,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -3094,7 +3094,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "state": "building",
                         "requested_reason": "manifest_changed",
                         "requested_at": "2026-04-13T12:20:00Z",
-                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                        "resolved_manifest_fingerprint": "launchplane-manifest-002",
                     }
                 ),
                 encoding="utf-8",
@@ -3103,7 +3103,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "write-generation",
                     "--state-dir",
                     str(state_dir),
@@ -3118,7 +3118,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(record.state, "building")
             self.assertEqual(record.anchor_summary.head_sha, "aaaa2222")
 
-    def test_harbor_previews_write_generation_fails_when_preview_missing(self) -> None:
+    def test_launchplane_previews_write_generation_fails_when_preview_missing(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3135,7 +3135,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "state": "building",
                         "requested_reason": "initial_create",
                         "requested_at": "2026-04-13T12:20:00Z",
-                        "resolved_manifest_fingerprint": "harbor-manifest-001",
+                        "resolved_manifest_fingerprint": "launchplane-manifest-001",
                     }
                 ),
                 encoding="utf-8",
@@ -3144,7 +3144,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "write-generation",
                     "--state-dir",
                     str(state_dir),
@@ -3154,9 +3154,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("No Harbor preview found", result.output)
+            self.assertIn("No Launchplane preview found", result.output)
 
-    def test_harbor_previews_request_generation_updates_preview_and_generation_together(self) -> None:
+    def test_launchplane_previews_request_generation_updates_preview_and_generation_together(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3168,7 +3168,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
@@ -3192,7 +3192,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -3221,7 +3221,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "state": "building",
                         "requested_reason": "manifest_changed",
                         "requested_at": "2026-04-13T12:20:00Z",
-                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                        "resolved_manifest_fingerprint": "launchplane-manifest-002",
                     }
                 ),
                 encoding="utf-8",
@@ -3231,7 +3231,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "request-generation",
                         "--state-dir",
                         str(state_dir),
@@ -3250,7 +3250,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "hgen_01jabc_1")
             self.assertEqual(generation.sequence, 2)
 
-    def test_harbor_previews_write_from_generation_accepts_external_preview_evidence(self) -> None:
+    def test_launchplane_previews_write_from_generation_accepts_external_preview_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3299,7 +3299,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "write-from-generation",
                         "--state-dir",
                         str(state_dir),
@@ -3329,7 +3329,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(generation.sequence, 1)
             self.assertEqual(generation.artifact_id, "artifact-verireel-pr-123")
 
-    def test_harbor_previews_mark_generation_ready_cuts_over_serving_generation(self) -> None:
+    def test_launchplane_previews_mark_generation_ready_cuts_over_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3350,7 +3350,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -3360,7 +3360,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=2,
                     state="deploying",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     ready_at="",
                 )
@@ -3379,7 +3379,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "requested_reason": "manifest_changed",
                         "requested_at": "2026-04-13T12:20:00Z",
                         "ready_at": "2026-04-13T12:25:00Z",
-                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                        "resolved_manifest_fingerprint": "launchplane-manifest-002",
                         "artifact_id": "artifact-opw-124",
                     }
                 ),
@@ -3389,7 +3389,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "mark-generation-ready",
                     "--state-dir",
                     str(state_dir),
@@ -3404,7 +3404,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "hpr_01jabc-generation-0002")
             self.assertEqual(preview.active_generation_id, "hpr_01jabc-generation-0002")
 
-    def test_harbor_previews_mark_generation_failed_keeps_existing_serving_generation(self) -> None:
+    def test_launchplane_previews_mark_generation_failed_keeps_existing_serving_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3425,7 +3425,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -3435,7 +3435,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=2,
                     state="deploying",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     ready_at="",
                 )
@@ -3454,7 +3454,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "requested_reason": "manifest_changed",
                         "requested_at": "2026-04-13T12:20:00Z",
                         "failed_at": "2026-04-13T12:24:00Z",
-                        "resolved_manifest_fingerprint": "harbor-manifest-002",
+                        "resolved_manifest_fingerprint": "launchplane-manifest-002",
                         "artifact_id": "artifact-opw-124",
                         "failure_stage": "deploying",
                         "failure_summary": "Replacement generation failed during deploy.",
@@ -3466,7 +3466,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "mark-generation-failed",
                     "--state-dir",
                     str(state_dir),
@@ -3481,7 +3481,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "hgen_01jabc_1")
             self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
 
-    def test_harbor_previews_destroy_preview_clears_runtime_links(self) -> None:
+    def test_launchplane_previews_destroy_preview_clears_runtime_links(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3513,7 +3513,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "destroy-preview",
                     "--state-dir",
                     str(state_dir),
@@ -3529,7 +3529,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "")
             self.assertEqual(preview.latest_generation_id, "hpr_01jabc-generation-0002")
 
-    def test_harbor_previews_write_destroyed_ingests_external_cleanup_evidence(self) -> None:
+    def test_launchplane_previews_write_destroyed_ingests_external_cleanup_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3566,7 +3566,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "write-destroyed",
                     "--state-dir",
                     str(state_dir),
@@ -3588,7 +3588,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "")
             self.assertEqual(preview.latest_generation_id, "preview-verireel-pr-123-generation-0003")
 
-    def test_harbor_previews_ingest_pr_event_enables_preview_when_label_added(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_enables_preview_when_label_added(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3604,15 +3604,15 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "pr_body": (
-                            "```harbor-preview\n"
+                            "```launchplane-preview\n"
                             "schema_version = 1\n"
                             'baseline_channel = "testing"\n'
                             "```\n"
                         ),
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -3622,7 +3622,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -3657,7 +3657,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["manifest"]["baseline_release_tuple_id"], "opw-testing-2026-04-13")
             self.assertIsNone(payload["preview"])
 
-    def test_harbor_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3671,7 +3671,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-existing",
+                    manifest_fingerprint="launchplane-manifest-existing",
                     artifact_id="artifact-existing",
                     deploy_status="pass",
                     verify_status="pass",
@@ -3687,10 +3687,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:16:00Z",
-                        "pr_body": "No Harbor metadata yet.",
+                        "pr_body": "No Launchplane metadata yet.",
                         "state": "open",
                         "head_sha": "bbbb2222",
-                        "label_names": ["harbor-preview"],
+                        "label_names": ["launchplane-preview"],
                     }
                 ),
                 encoding="utf-8",
@@ -3700,7 +3700,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -3734,7 +3734,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
             self.assertIn("Next action:", payload["feedback"]["comment_markdown"])
 
-    def test_harbor_previews_ingest_pr_event_keeps_companion_requests_unresolved(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_keeps_companion_requests_unresolved(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3750,7 +3750,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "pr_body": (
-                            "```harbor-preview\n"
+                            "```launchplane-preview\n"
                             "schema_version = 1\n"
                             "\n"
                             "[[companions]]\n"
@@ -3760,8 +3760,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         ),
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -3771,7 +3771,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -3787,7 +3787,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(payload["mutation"]["manifest_resolution_required"])
             self.assertIn("generation_request_seed", payload["mutation"])
 
-    def test_harbor_previews_ingest_pr_event_resolves_allowlisted_companion_when_lookup_succeeds(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_resolves_allowlisted_companion_when_lookup_succeeds(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3803,7 +3803,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "pr_body": (
-                            "```harbor-preview\n"
+                            "```launchplane-preview\n"
                             "schema_version = 1\n"
                             "\n"
                             "[[companions]]\n"
@@ -3813,8 +3813,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         ),
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -3822,9 +3822,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch("control_plane.workflows.harbor.resolve_harbor_github_token", return_value="token"),
+                patch("control_plane.workflows.launchplane.resolve_launchplane_github_token", return_value="token"),
                 patch(
-                    "control_plane.workflows.harbor.fetch_github_pull_request_head",
+                    "control_plane.workflows.launchplane.fetch_github_pull_request_head",
                     return_value=(
                         "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
                         "https://github.com/every/shared-addons/pull/456",
@@ -3834,7 +3834,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -3865,7 +3865,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
             )
 
-    def test_harbor_previews_show_tenant_uses_companion_sha_snapshot_for_enablement_recipe(
+    def test_launchplane_previews_show_tenant_uses_companion_sha_snapshot_for_enablement_recipe(
         self,
     ) -> None:
         runner = CliRunner()
@@ -3881,7 +3881,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     anchor_head_sha="dddd4444",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                     request_metadata_companions=(
@@ -3901,14 +3901,14 @@ ENV_OVERRIDE_DISABLE_CRON = true
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
                 patch(
-                    "control_plane.workflows.harbor.fetch_github_pull_request_head",
+                    "control_plane.workflows.launchplane.fetch_github_pull_request_head",
                     side_effect=AssertionError("unexpected live companion lookup"),
                 ),
             ):
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "show-tenant",
                         "--state-dir",
                         str(state_dir),
@@ -3931,7 +3931,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "shared-addons",
             )
 
-    def test_harbor_previews_show_tenant_blocks_unresolved_companion_enablement_recipe(
+    def test_launchplane_previews_show_tenant_blocks_unresolved_companion_enablement_recipe(
         self,
     ) -> None:
         runner = CliRunner()
@@ -3947,7 +3947,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     anchor_head_sha="eeee5555",
                     label_enabled=True,
                     action="labeled",
-                    action_label="harbor-preview",
+                    action_label="launchplane-preview",
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                     request_metadata_companions=(
@@ -3959,14 +3959,14 @@ ENV_OVERRIDE_DISABLE_CRON = true
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
                 patch(
-                    "control_plane.workflows.harbor.fetch_github_pull_request_head",
+                    "control_plane.workflows.launchplane.fetch_github_pull_request_head",
                     side_effect=AssertionError("unexpected live companion lookup"),
                 ),
             ):
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "show-tenant",
                         "--state-dir",
                         str(state_dir),
@@ -3985,7 +3985,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(action["recipe"], "")
             self.assertIn("Companion PR snapshots", action["headline"])
 
-    def test_harbor_previews_ingest_pr_event_apply_writes_preview_and_generation(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_apply_writes_preview_and_generation(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4003,8 +4003,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -4014,7 +4014,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4031,14 +4031,14 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["feedback"]["status"], "preview_updated")
             self.assertEqual(
                 payload["feedback"]["canonical_url"],
-                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+                "https://launchplane.example/previews/opw/tenant-opw/pr-123",
             )
             self.assertEqual(
                 payload["feedback"]["manifest_fingerprint"],
                 payload["manifest"]["resolved_manifest_fingerprint"],
             )
             self.assertIn(
-                "https://harbor.example/previews/opw/tenant-opw/pr-123",
+                "https://launchplane.example/previews/opw/tenant-opw/pr-123",
                 payload["feedback"]["comment_markdown"],
             )
             self.assertIn(
@@ -4052,7 +4052,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.active_generation_id, generation.generation_id)
             self.assertEqual(generation.resolved_manifest_fingerprint, payload["manifest"]["resolved_manifest_fingerprint"])
 
-    def test_harbor_previews_ingest_pr_event_apply_reports_noop_when_manifest_unresolved(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_apply_reports_noop_when_manifest_unresolved(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4069,7 +4069,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "pr_body": (
-                            "```harbor-preview\n"
+                            "```launchplane-preview\n"
                             "schema_version = 1\n"
                             "\n"
                             "[[companions]]\n"
@@ -4079,8 +4079,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         ),
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -4090,7 +4090,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4111,7 +4111,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             store = FilesystemRecordStore(state_dir=state_dir)
             self.assertEqual(store.list_preview_records(), ())
 
-    def test_harbor_previews_ingest_pr_event_emits_destroy_intent_for_closed_preview(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_emits_destroy_intent_for_closed_preview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4129,11 +4129,11 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_number": 123,
                         "pr_url": "https://github.com/every/tenant-opw/pull/123",
                         "occurred_at": "2026-04-13T12:17:00Z",
-                        "pr_body": "No Harbor metadata needed for close.",
+                        "pr_body": "No Launchplane metadata needed for close.",
                         "state": "closed",
                         "merged": True,
                         "head_sha": "cccc3333",
-                        "label_names": ["harbor-preview"],
+                        "label_names": ["launchplane-preview"],
                     }
                 ),
                 encoding="utf-8",
@@ -4143,7 +4143,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4162,7 +4162,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "pull_request_merged",
             )
 
-    def test_harbor_previews_ingest_pr_event_apply_destroys_preview(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_apply_destroys_preview(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4183,7 +4183,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "state": "closed",
                         "merged": False,
                         "head_sha": "cccc3333",
-                        "label_names": ["harbor-preview"],
+                        "label_names": ["launchplane-preview"],
                     }
                 ),
                 encoding="utf-8",
@@ -4193,7 +4193,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4210,7 +4210,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.state, "destroyed")
             self.assertEqual(preview.destroy_reason, "pull_request_closed")
 
-    def test_harbor_previews_ingest_pr_event_delivers_feedback_by_creating_comment(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_delivers_feedback_by_creating_comment(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4228,8 +4228,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -4237,10 +4237,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch("control_plane.workflows.harbor.resolve_harbor_github_token", return_value="token"),
-                patch("control_plane.workflows.harbor.find_github_issue_comment_by_marker", return_value=None),
+                patch("control_plane.workflows.launchplane.resolve_launchplane_github_token", return_value="token"),
+                patch("control_plane.workflows.launchplane.find_github_issue_comment_by_marker", return_value=None),
                 patch(
-                    "control_plane.workflows.harbor.create_github_issue_comment",
+                    "control_plane.workflows.launchplane.create_github_issue_comment",
                     return_value={
                         "id": 987,
                         "html_url": "https://github.com/every/tenant-opw/pull/123#issuecomment-987",
@@ -4250,7 +4250,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4265,10 +4265,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(payload["feedback_delivery"]["delivered"])
             self.assertEqual(payload["feedback_delivery"]["action"], "created_comment")
             create_kwargs = create_comment.call_args.kwargs
-            self.assertIn("harbor-control-plane:pr-feedback", create_kwargs["body"])
-            self.assertIn("Harbor resolved preview inputs", create_kwargs["body"])
+            self.assertIn("launchplane-control-plane:pr-feedback", create_kwargs["body"])
+            self.assertIn("Launchplane resolved preview inputs", create_kwargs["body"])
 
-    def test_harbor_previews_ingest_pr_event_delivers_feedback_by_updating_existing_comment(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_delivers_feedback_by_updating_existing_comment(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4286,8 +4286,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -4295,13 +4295,13 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch("control_plane.workflows.harbor.resolve_harbor_github_token", return_value="token"),
+                patch("control_plane.workflows.launchplane.resolve_launchplane_github_token", return_value="token"),
                 patch(
-                    "control_plane.workflows.harbor.find_github_issue_comment_by_marker",
-                    return_value={"id": 321, "body": "<!-- harbor-control-plane:pr-feedback -->\nold"},
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
+                    return_value={"id": 321, "body": "<!-- launchplane-control-plane:pr-feedback -->\nold"},
                 ),
                 patch(
-                    "control_plane.workflows.harbor.update_github_issue_comment",
+                    "control_plane.workflows.launchplane.update_github_issue_comment",
                     return_value={
                         "id": 321,
                         "html_url": "https://github.com/every/tenant-opw/pull/123#issuecomment-321",
@@ -4311,7 +4311,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4327,9 +4327,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["feedback_delivery"]["action"], "updated_comment")
             self.assertEqual(payload["feedback_delivery"]["comment_id"], 321)
             update_kwargs = update_comment.call_args.kwargs
-            self.assertIn("harbor-control-plane:pr-feedback", update_kwargs["body"])
+            self.assertIn("launchplane-control-plane:pr-feedback", update_kwargs["body"])
 
-    def test_harbor_previews_ingest_pr_event_feedback_delivery_fails_closed_without_token(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_feedback_delivery_fails_closed_without_token(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4347,8 +4347,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "occurred_at": "2026-04-13T12:15:00Z",
                         "state": "open",
                         "head_sha": "aaaa1111",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -4358,7 +4358,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -4373,7 +4373,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertFalse(payload["feedback_delivery"]["delivered"])
             self.assertEqual(payload["feedback_delivery"]["reason"], "github_token_missing")
 
-    def test_harbor_previews_ingest_github_webhook_adapts_pull_request_event_and_reuses_apply_flow(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_adapts_pull_request_event_and_reuses_apply_flow(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4388,7 +4388,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -4408,12 +4408,12 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["decision"]["action"], "enable_preview")
             self.assertTrue(payload["apply"]["applied"])
             self.assertEqual(payload["feedback"]["status"], "preview_updated")
-            self.assertEqual(payload["event"]["action_label"], "harbor-preview")
+            self.assertEqual(payload["event"]["action_label"], "launchplane-preview")
             self.assertEqual(payload["event"]["occurred_at"], "2026-04-13T12:15:00Z")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "gh-delivery-123")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "github-webhook")
 
-    def test_harbor_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4427,7 +4427,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 action="closed",
                 state="closed",
                 merged=True,
-                labels=[{"name": "harbor-preview"}],
+                labels=[{"name": "launchplane-preview"}],
             )
             input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
 
@@ -4435,7 +4435,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -4458,7 +4458,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "pull_request_merged",
             )
 
-    def test_harbor_previews_ingest_github_webhook_fails_closed_for_unsupported_event_name(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_fails_closed_for_unsupported_event_name(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4470,7 +4470,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "ingest-github-webhook",
                     "--input-file",
                     str(input_file),
@@ -4483,7 +4483,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("event_name='pull_request'", result.output)
 
-    def test_harbor_previews_ingest_github_webhook_fails_closed_for_malformed_payload(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_fails_closed_for_malformed_payload(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4494,7 +4494,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "ingest-github-webhook",
                     "--input-file",
                     str(input_file),
@@ -4505,7 +4505,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("requires string field 'name'", result.output)
 
-    def test_harbor_previews_ingest_github_webhook_rejects_invalid_signature(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_rejects_invalid_signature(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4519,7 +4519,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-github-webhook",
                         "--input-file",
                         str(input_file),
@@ -4531,7 +4531,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("signature verification failed", result.output)
 
-    def test_harbor_previews_ingest_github_webhook_allows_explicit_unsigned_bypass(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_allows_explicit_unsigned_bypass(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4546,7 +4546,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -4561,7 +4561,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["webhook"]["signature_verification"]["mode"], "bypass")
             self.assertFalse(payload["webhook"]["signature_verification"]["verified"])
 
-    def test_harbor_previews_replay_github_webhook_reuses_verified_webhook_flow(self) -> None:
+    def test_launchplane_previews_replay_github_webhook_reuses_verified_webhook_flow(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4587,7 +4587,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "replay-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -4608,7 +4608,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "replay-456")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "local-capture")
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_emits_minimal_envelope(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_emits_minimal_envelope(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             payload_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4618,7 +4618,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -4634,7 +4634,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(envelope["payload_text"], json.dumps(webhook_payload))
             self.assertNotIn("capture", envelope)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_round_trips_into_replay(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_round_trips_into_replay(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4672,7 +4672,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             build_result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -4706,7 +4706,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 replay_result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "replay-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -4727,7 +4727,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "local-http-capture",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_non_string_headers(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_string_headers(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             payload_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4744,7 +4744,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -4757,7 +4757,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("map header names to string values", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_redacts_sensitive_headers_file_values(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_redacts_sensitive_headers_file_values(
         self,
     ) -> None:
         runner = CliRunner()
@@ -4775,9 +4775,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "CF-Connecting-IP": "203.0.113.43",
                         "Proxy-Authorization": "Basic c2VjcmV0",
                         "True-Client-IP": "203.0.113.44",
-                        "Forwarded": "for=203.0.113.43;proto=https;host=harbor.example",
+                        "Forwarded": "for=203.0.113.43;proto=https;host=launchplane.example",
                         "X-Forwarded-For": "203.0.113.43",
-                        "X-Forwarded-Host": "harbor.example",
+                        "X-Forwarded-Host": "launchplane.example",
                         "X-Real-IP": "203.0.113.45",
                         "X-GitHub-Event": "pull_request",
                         "X-GitHub-Delivery": "redacted-headers-123",
@@ -4790,7 +4790,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -4851,7 +4851,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "1.1 proxy.example",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_accepts_http_capture_file(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_accepts_http_capture_file(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4867,7 +4867,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         f"X-Hub-Signature-256: {signature_256}",
@@ -4886,7 +4886,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             build_result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -4916,7 +4916,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 replay_result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "replay-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -4937,7 +4937,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "POST /github/webhook HTTP/1.1",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_correlation_headers_file_values(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_correlation_headers_file_values(
         self,
     ) -> None:
         runner = CliRunner()
@@ -4962,7 +4962,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -4987,7 +4987,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "trace-123",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_distributed_tracing_headers_file_values(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_distributed_tracing_headers_file_values(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5012,7 +5012,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -5037,7 +5037,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_vendor_tracing_headers_file_values(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_vendor_tracing_headers_file_values(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5062,7 +5062,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--payload-file",
                     str(payload_file),
@@ -5087,7 +5087,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "1234567890123456789",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_observational_http_capture_headers(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_observational_http_capture_headers(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5105,7 +5105,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "Via: 1.1 proxy.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-via-123",
@@ -5122,7 +5122,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             build_result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5144,7 +5144,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 replay_result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "replay-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -5161,7 +5161,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "1.1 proxy.example",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_http_capture_correlation_headers(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_http_capture_correlation_headers(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5171,7 +5171,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "CF-Ray: 8d2f4bb7c9d7abcd-SJC",
                         "X-Amzn-Trace-Id: Root=1-abcdef01-23456789abcdef0123456789",
                         "X-Request-Id: trace-123",
@@ -5187,7 +5187,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5210,7 +5210,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "trace-123",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_http_capture_distributed_tracing_headers(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_http_capture_distributed_tracing_headers(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5220,7 +5220,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "traceparent: 00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00",
                         "tracestate: rojo=00f067aa0ba902b7,congo=t61rcWkgMzE",
                         "b3: 4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
@@ -5236,7 +5236,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5259,7 +5259,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-0",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_preserves_http_capture_vendor_tracing_headers(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_preserves_http_capture_vendor_tracing_headers(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5269,7 +5269,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "sentry-trace: 4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-1",
                         "x-cloud-trace-context: 105445aa7843bc8bf206b12000100000/1;o=1",
                         "x-datadog-trace-id: 1234567890123456789",
@@ -5285,7 +5285,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5308,7 +5308,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "1234567890123456789",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_cache_control(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_http_capture_cache_control(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5318,7 +5318,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         "Cache-Control: no-cache",
@@ -5332,7 +5332,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5346,7 +5346,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_redacts_sensitive_http_capture_headers(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_redacts_sensitive_http_capture_headers(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5356,14 +5356,14 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "Authorization: Bearer super-secret-token",
                         "baggage: userId=123,tenant=cm,debug=true",
                         "Cookie: session=secret-cookie",
                         "CF-Connecting-IP: 203.0.113.43",
                         "Proxy-Authorization: Basic c2VjcmV0",
                         "True-Client-IP: 203.0.113.44",
-                        "Forwarded: for=203.0.113.43;proto=https;host=harbor.example",
+                        "Forwarded: for=203.0.113.43;proto=https;host=launchplane.example",
                         "X-Forwarded-For: 203.0.113.43",
                         "X-Forwarded-Proto: https",
                         "X-Real-IP: 203.0.113.45",
@@ -5380,7 +5380,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5439,7 +5439,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "1.1 proxy.example",
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_upgrade(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_http_capture_upgrade(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5449,7 +5449,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         "Upgrade: websocket",
@@ -5463,7 +5463,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5477,7 +5477,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_te(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_http_capture_te(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5487,7 +5487,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         "TE: trailers",
@@ -5501,7 +5501,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5515,7 +5515,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_keep_alive(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_http_capture_keep_alive(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5525,7 +5525,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         "Keep-Alive: timeout=5, max=1000",
@@ -5539,7 +5539,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5553,7 +5553,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_http_capture_proxy_connection(
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_http_capture_proxy_connection(
         self,
     ) -> None:
         runner = CliRunner()
@@ -5563,7 +5563,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "\n".join(
                     [
                         "POST /github/webhook HTTP/1.1",
-                        "Host: harbor.example",
+                        "Host: launchplane.example",
                         "X-GitHub-Event: pull_request",
                         "X-GitHub-Delivery: http-capture-123",
                         "Proxy-Connection: keep-alive",
@@ -5577,7 +5577,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5591,7 +5591,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_request_evidence(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_request_evidence(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5622,7 +5622,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5635,7 +5635,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("request_line conflicts", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_mismatched_http_capture_content_length(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_mismatched_http_capture_content_length(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5656,7 +5656,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5667,7 +5667,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Length does not match", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_non_integer_http_capture_content_length(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_integer_http_capture_content_length(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5688,7 +5688,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5699,7 +5699,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Length header must be an integer", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_non_json_http_capture_content_type(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_json_http_capture_content_type(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5720,7 +5720,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5731,7 +5731,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Type must be JSON", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_method_override(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_method_override(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5752,7 +5752,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5763,7 +5763,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("X-HTTP-Method-Override must not conflict", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_unsupported_transfer_encoding(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_unsupported_transfer_encoding(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5784,7 +5784,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5795,7 +5795,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Transfer-Encoding is unsupported", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_unsupported_content_encoding(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_unsupported_content_encoding(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5816,7 +5816,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5827,7 +5827,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Encoding is unsupported", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_trailer_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_trailer_declarations(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5848,7 +5848,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5859,7 +5859,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Trailer declarations are unsupported", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_expect_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_expect_declarations(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5880,7 +5880,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5891,7 +5891,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Expect declarations are unsupported", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_connection_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_connection_declarations(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5912,7 +5912,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5923,7 +5923,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Connection declarations are unsupported", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_pragma_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_pragma_declarations(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5944,7 +5944,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5955,7 +5955,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Pragma declarations are unsupported", result.output)
 
-    def test_harbor_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5967,7 +5967,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "build-github-webhook-replay-envelope",
                     "--http-capture-file",
                     str(http_capture_file),
@@ -5978,7 +5978,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("must start with a POST request line", result.output)
 
-    def test_harbor_previews_replay_github_webhook_accepts_richer_capture_shape(self) -> None:
+    def test_launchplane_previews_replay_github_webhook_accepts_richer_capture_shape(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -6020,7 +6020,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "replay-github-webhook",
                         "--state-dir",
                         str(state_dir),
@@ -6048,7 +6048,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "fixtures/github/replay-789.json",
             )
 
-    def test_harbor_previews_replay_github_webhook_fails_closed_for_conflicting_capture_headers(self) -> None:
+    def test_launchplane_previews_replay_github_webhook_fails_closed_for_conflicting_capture_headers(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook-replay.json"
@@ -6070,7 +6070,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "replay-github-webhook",
                     "--input-file",
                     str(input_file),
@@ -6080,7 +6080,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("conflicts with capture header X-GitHub-Event", result.output)
 
-    def test_harbor_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(self) -> None:
+    def test_launchplane_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook-replay.json"
@@ -6097,7 +6097,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "replay-github-webhook",
                     "--input-file",
                     str(input_file),
@@ -6107,7 +6107,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("requires payload_text", result.output)
 
-    def test_harbor_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_ignores_infra_or_companion_repos(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -6123,7 +6123,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "pr_url": "https://github.com/every/shared-addons/pull/456",
                         "occurred_at": "2026-04-13T12:18:00Z",
                         "pr_body": (
-                            "```harbor-preview\n"
+                            "```launchplane-preview\n"
                             "schema_version = 1\n"
                             "\n"
                             "[[companions]]\n"
@@ -6133,8 +6133,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         ),
                         "state": "open",
                         "head_sha": "bbbb2222",
-                        "label_names": ["harbor-preview"],
-                        "action_label": "harbor-preview",
+                        "label_names": ["launchplane-preview"],
+                        "action_label": "launchplane-preview",
                     }
                 ),
                 encoding="utf-8",
@@ -6144,7 +6144,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result = runner.invoke(
                     main,
                     [
-                        "harbor-previews",
+                        "launchplane-previews",
                         "ingest-pr-event",
                         "--state-dir",
                         str(state_dir),
@@ -6161,7 +6161,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["request_metadata"]["status"], "invalid")
             self.assertIsNone(payload["mutation"])
 
-    def test_harbor_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
+    def test_launchplane_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -6178,7 +6178,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     preview_id="hpr_01jabc",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -6188,12 +6188,12 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     anchor_pr_number=124,
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     preview_label="opw/tenant-opw/pr-124",
-                    canonical_url="https://harbor.example/previews/opw/tenant-opw/pr-124",
+                    canonical_url="https://launchplane.example/previews/opw/tenant-opw/pr-124",
                     state="destroyed",
                     active_generation_id="",
                     serving_generation_id="",
                     latest_generation_id="hgen_01jxyz_1",
-                    latest_manifest_fingerprint="harbor-manifest-099",
+                    latest_manifest_fingerprint="launchplane-manifest-099",
                     updated_at="2026-04-13T12:18:00Z",
                     destroyed_at="2026-04-13T12:18:00Z",
                     destroy_reason="closed_without_merge",
@@ -6207,7 +6207,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     anchor_pr_url="https://github.com/every/tenant-opw/pull/124",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-099",
+                    manifest_fingerprint="launchplane-manifest-099",
                     artifact_id="artifact-opw-124",
                 )
             )
@@ -6219,7 +6219,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     anchor_pr_number=10,
                     anchor_pr_url="https://github.com/every/tenant-cm/pull/10",
                     preview_label="cm/tenant-cm/pr-10",
-                    canonical_url="https://harbor.example/previews/cm/tenant-cm/pr-10",
+                    canonical_url="https://launchplane.example/previews/cm/tenant-cm/pr-10",
                     updated_at="2026-04-13T12:19:00Z",
                 )
             )
@@ -6233,7 +6233,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     anchor_head_sha="cccc3333",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-cm-001",
+                    manifest_fingerprint="launchplane-manifest-cm-001",
                     artifact_id="artifact-cm-010",
                 )
             )
@@ -6241,7 +6241,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "list",
                     "--state-dir",
                     str(state_dir),
@@ -6261,7 +6261,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["previews"][0]["artifact_id"], "artifact-opw-124")
             self.assertIn("destroyed", payload["previews"][0]["status_summary"].lower())
 
-    def test_harbor_previews_history_marks_latest_and_serving_generations(self) -> None:
+    def test_launchplane_previews_history_marks_latest_and_serving_generations(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -6272,7 +6272,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     active_generation_id="hgen_01jabc_2",
                     serving_generation_id="hgen_01jabc_1",
                     latest_generation_id="hgen_01jabc_2",
-                    latest_manifest_fingerprint="harbor-manifest-002",
+                    latest_manifest_fingerprint="launchplane-manifest-002",
                 )
             )
             store.write_preview_generation_record(
@@ -6280,7 +6280,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     "hgen_01jabc_1",
                     sequence=1,
                     state="ready",
-                    manifest_fingerprint="harbor-manifest-001",
+                    manifest_fingerprint="launchplane-manifest-001",
                     artifact_id="artifact-opw-123",
                 )
             )
@@ -6289,7 +6289,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     "hgen_01jabc_2",
                     sequence=2,
                     state="failed",
-                    manifest_fingerprint="harbor-manifest-002",
+                    manifest_fingerprint="launchplane-manifest-002",
                     artifact_id="artifact-opw-124",
                     deploy_status="fail",
                     verify_status="skipped",
@@ -6304,7 +6304,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             result = runner.invoke(
                 main,
                 [
-                    "harbor-previews",
+                    "launchplane-previews",
                     "history",
                     "--state-dir",
                     str(state_dir),

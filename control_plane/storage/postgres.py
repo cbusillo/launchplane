@@ -11,8 +11,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -30,10 +30,10 @@ class Base(DeclarativeBase):
     pass
 
 
-class HarborBackupGateRow(Base):
-    __tablename__ = "harbor_backup_gates"
+class LaunchplaneBackupGateRow(Base):
+    __tablename__ = "launchplane_backup_gates"
     __table_args__ = (
-        Index("harbor_backup_gates_context_instance_idx", "context", "instance", desc("created_at")),
+        Index("launchplane_backup_gates_context_instance_idx", "context", "instance", desc("created_at")),
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -44,11 +44,11 @@ class HarborBackupGateRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborDeploymentRow(Base):
-    __tablename__ = "harbor_deployments"
+class LaunchplaneDeploymentRow(Base):
+    __tablename__ = "launchplane_deployments"
     __table_args__ = (
         Index(
-            "harbor_deployments_context_instance_idx",
+            "launchplane_deployments_context_instance_idx",
             "context",
             "instance",
             desc("deploy_finished_at"),
@@ -66,11 +66,11 @@ class HarborDeploymentRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborPromotionRow(Base):
-    __tablename__ = "harbor_promotions"
+class LaunchplanePromotionRow(Base):
+    __tablename__ = "launchplane_promotions"
     __table_args__ = (
         Index(
-            "harbor_promotions_context_path_idx",
+            "launchplane_promotions_context_path_idx",
             "context",
             "from_instance",
             "to_instance",
@@ -89,9 +89,9 @@ class HarborPromotionRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborInventoryRow(Base):
-    __tablename__ = "harbor_inventory"
-    __table_args__ = (Index("harbor_inventory_updated_idx", desc("updated_at")),)
+class LaunchplaneInventoryRow(Base):
+    __tablename__ = "launchplane_inventory"
+    __table_args__ = (Index("launchplane_inventory_updated_idx", desc("updated_at")),)
 
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
@@ -104,11 +104,11 @@ class HarborInventoryRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborPreviewRow(Base):
-    __tablename__ = "harbor_preview_records"
+class LaunchplanePreviewRow(Base):
+    __tablename__ = "launchplane_preview_records"
     __table_args__ = (
         Index(
-            "harbor_preview_records_lookup_idx",
+            "launchplane_preview_records_lookup_idx",
             "context",
             "anchor_repo",
             "anchor_pr_number",
@@ -125,11 +125,11 @@ class HarborPreviewRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborPreviewGenerationRow(Base):
-    __tablename__ = "harbor_preview_generations"
+class LaunchplanePreviewGenerationRow(Base):
+    __tablename__ = "launchplane_preview_generations"
     __table_args__ = (
         Index(
-            "harbor_preview_generations_preview_idx",
+            "launchplane_preview_generations_preview_idx",
             "preview_id",
             desc("sequence"),
             desc("requested_at"),
@@ -146,9 +146,9 @@ class HarborPreviewGenerationRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborReleaseTupleRow(Base):
-    __tablename__ = "harbor_release_tuples"
-    __table_args__ = (Index("harbor_release_tuples_minted_idx", desc("minted_at")),)
+class LaunchplaneReleaseTupleRow(Base):
+    __tablename__ = "launchplane_release_tuples"
+    __table_args__ = (Index("launchplane_release_tuples_minted_idx", desc("minted_at")),)
 
     context: Mapped[str] = mapped_column(String, primary_key=True)
     channel: Mapped[str] = mapped_column(String, primary_key=True)
@@ -159,11 +159,11 @@ class HarborReleaseTupleRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborIdempotencyRow(Base):
-    __tablename__ = "harbor_idempotency_records"
+class LaunchplaneIdempotencyRow(Base):
+    __tablename__ = "launchplane_idempotency_records"
     __table_args__ = (
         Index(
-            "harbor_idempotency_scope_route_key_idx",
+            "launchplane_idempotency_scope_route_key_idx",
             "scope",
             "route_path",
             "idempotency_key",
@@ -182,11 +182,11 @@ class HarborIdempotencyRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborSecretRow(Base):
-    __tablename__ = "harbor_secrets"
+class LaunchplaneSecretRow(Base):
+    __tablename__ = "launchplane_secrets"
     __table_args__ = (
         Index(
-            "harbor_secrets_scope_name_idx",
+            "launchplane_secrets_scope_name_idx",
             "scope",
             "integration",
             "name",
@@ -194,7 +194,7 @@ class HarborSecretRow(Base):
             "instance",
             unique=True,
         ),
-        Index("harbor_secrets_lookup_idx", "integration", "context", "instance", desc("updated_at")),
+        Index("launchplane_secrets_lookup_idx", "integration", "context", "instance", desc("updated_at")),
     )
 
     secret_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -209,10 +209,10 @@ class HarborSecretRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborSecretVersionRow(Base):
-    __tablename__ = "harbor_secret_versions"
+class LaunchplaneSecretVersionRow(Base):
+    __tablename__ = "launchplane_secret_versions"
     __table_args__ = (
-        Index("harbor_secret_versions_secret_idx", "secret_id", desc("created_at")),
+        Index("launchplane_secret_versions_secret_idx", "secret_id", desc("created_at")),
     )
 
     version_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -221,11 +221,11 @@ class HarborSecretVersionRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborSecretBindingRow(Base):
-    __tablename__ = "harbor_secret_bindings"
+class LaunchplaneSecretBindingRow(Base):
+    __tablename__ = "launchplane_secret_bindings"
     __table_args__ = (
         Index(
-            "harbor_secret_bindings_lookup_idx",
+            "launchplane_secret_bindings_lookup_idx",
             "integration",
             "context",
             "instance",
@@ -245,10 +245,10 @@ class HarborSecretBindingRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
-class HarborSecretAuditEventRow(Base):
-    __tablename__ = "harbor_secret_audit_events"
+class LaunchplaneSecretAuditEventRow(Base):
+    __tablename__ = "launchplane_secret_audit_events"
     __table_args__ = (
-        Index("harbor_secret_audit_events_secret_idx", "secret_id", desc("recorded_at")),
+        Index("launchplane_secret_audit_events_secret_idx", "secret_id", desc("recorded_at")),
     )
 
     event_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -322,7 +322,7 @@ class PostgresRecordStore:
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
-                raise FileNotFoundError(f"No Harbor record found in {orm_model.__tablename__} for {tuple(filters)!r}")
+                raise FileNotFoundError(f"No Launchplane record found in {orm_model.__tablename__} for {tuple(filters)!r}")
             return self._read_payload(model_type=model_type, payload=getattr(row, "payload"))
 
     def _list_models(
@@ -346,7 +346,7 @@ class PostgresRecordStore:
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> None:
         self._write_row(
-            HarborBackupGateRow(
+            LaunchplaneBackupGateRow(
                 record_id=record.record_id,
                 context=record.context,
                 instance=record.instance,
@@ -359,8 +359,8 @@ class PostgresRecordStore:
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord:
         return self._read_model(
             model_type=BackupGateRecord,
-            orm_model=HarborBackupGateRow,
-            filters=(HarborBackupGateRow.record_id == record_id,),
+            orm_model=LaunchplaneBackupGateRow,
+            filters=(LaunchplaneBackupGateRow.record_id == record_id,),
         )
 
     def list_backup_gate_records(
@@ -372,20 +372,20 @@ class PostgresRecordStore:
     ) -> tuple[BackupGateRecord, ...]:
         filters: list[object] = []
         if context_name:
-            filters.append(HarborBackupGateRow.context == context_name)
+            filters.append(LaunchplaneBackupGateRow.context == context_name)
         if instance_name:
-            filters.append(HarborBackupGateRow.instance == instance_name)
+            filters.append(LaunchplaneBackupGateRow.instance == instance_name)
         return self._list_models(
             model_type=BackupGateRecord,
-            orm_model=HarborBackupGateRow,
+            orm_model=LaunchplaneBackupGateRow,
             filters=filters,
-            order_by=(HarborBackupGateRow.created_at.desc(), HarborBackupGateRow.record_id.desc()),
+            order_by=(LaunchplaneBackupGateRow.created_at.desc(), LaunchplaneBackupGateRow.record_id.desc()),
             limit=limit,
         )
 
-    def write_idempotency_record(self, record: HarborIdempotencyRecord) -> None:
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> None:
         self._write_row(
-            HarborIdempotencyRow(
+            LaunchplaneIdempotencyRow(
                 record_id=record.record_id,
                 scope=record.scope,
                 route_path=record.route_path,
@@ -404,22 +404,22 @@ class PostgresRecordStore:
         scope: str,
         route_path: str,
         idempotency_key: str,
-    ) -> HarborIdempotencyRecord | None:
-        record_id = build_harbor_idempotency_record_id(
+    ) -> LaunchplaneIdempotencyRecord | None:
+        record_id = build_launchplane_idempotency_record_id(
             scope=scope,
             route_path=route_path,
             idempotency_key=idempotency_key,
         )
-        statement = select(HarborIdempotencyRow).where(HarborIdempotencyRow.record_id == record_id).limit(1)
+        statement = select(LaunchplaneIdempotencyRow).where(LaunchplaneIdempotencyRow.record_id == record_id).limit(1)
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
                 return None
-            return self._read_payload(model_type=HarborIdempotencyRecord, payload=row.payload)
+            return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self._write_row(
-            HarborDeploymentRow(
+            LaunchplaneDeploymentRow(
                 record_id=record.record_id,
                 context=record.context,
                 instance=record.instance,
@@ -434,8 +434,8 @@ class PostgresRecordStore:
     def read_deployment_record(self, record_id: str) -> DeploymentRecord:
         return self._read_model(
             model_type=DeploymentRecord,
-            orm_model=HarborDeploymentRow,
-            filters=(HarborDeploymentRow.record_id == record_id,),
+            orm_model=LaunchplaneDeploymentRow,
+            filters=(LaunchplaneDeploymentRow.record_id == record_id,),
         )
 
     def list_deployment_records(
@@ -447,24 +447,24 @@ class PostgresRecordStore:
     ) -> tuple[DeploymentRecord, ...]:
         filters: list[object] = []
         if context_name:
-            filters.append(HarborDeploymentRow.context == context_name)
+            filters.append(LaunchplaneDeploymentRow.context == context_name)
         if instance_name:
-            filters.append(HarborDeploymentRow.instance == instance_name)
+            filters.append(LaunchplaneDeploymentRow.instance == instance_name)
         return self._list_models(
             model_type=DeploymentRecord,
-            orm_model=HarborDeploymentRow,
+            orm_model=LaunchplaneDeploymentRow,
             filters=filters,
             order_by=(
-                HarborDeploymentRow.deploy_finished_at.desc(),
-                HarborDeploymentRow.deploy_started_at.desc(),
-                HarborDeploymentRow.record_id.desc(),
+                LaunchplaneDeploymentRow.deploy_finished_at.desc(),
+                LaunchplaneDeploymentRow.deploy_started_at.desc(),
+                LaunchplaneDeploymentRow.record_id.desc(),
             ),
             limit=limit,
         )
 
     def write_promotion_record(self, record: PromotionRecord) -> None:
         self._write_row(
-            HarborPromotionRow(
+            LaunchplanePromotionRow(
                 record_id=record.record_id,
                 context=record.context,
                 from_instance=record.from_instance,
@@ -479,8 +479,8 @@ class PostgresRecordStore:
     def read_promotion_record(self, record_id: str) -> PromotionRecord:
         return self._read_model(
             model_type=PromotionRecord,
-            orm_model=HarborPromotionRow,
-            filters=(HarborPromotionRow.record_id == record_id,),
+            orm_model=LaunchplanePromotionRow,
+            filters=(LaunchplanePromotionRow.record_id == record_id,),
         )
 
     def list_promotion_records(
@@ -493,26 +493,26 @@ class PostgresRecordStore:
     ) -> tuple[PromotionRecord, ...]:
         filters: list[object] = []
         if context_name:
-            filters.append(HarborPromotionRow.context == context_name)
+            filters.append(LaunchplanePromotionRow.context == context_name)
         if from_instance_name:
-            filters.append(HarborPromotionRow.from_instance == from_instance_name)
+            filters.append(LaunchplanePromotionRow.from_instance == from_instance_name)
         if to_instance_name:
-            filters.append(HarborPromotionRow.to_instance == to_instance_name)
+            filters.append(LaunchplanePromotionRow.to_instance == to_instance_name)
         return self._list_models(
             model_type=PromotionRecord,
-            orm_model=HarborPromotionRow,
+            orm_model=LaunchplanePromotionRow,
             filters=filters,
             order_by=(
-                HarborPromotionRow.deploy_finished_at.desc(),
-                HarborPromotionRow.deploy_started_at.desc(),
-                HarborPromotionRow.record_id.desc(),
+                LaunchplanePromotionRow.deploy_finished_at.desc(),
+                LaunchplanePromotionRow.deploy_started_at.desc(),
+                LaunchplanePromotionRow.record_id.desc(),
             ),
             limit=limit,
         )
 
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self._write_row(
-            HarborInventoryRow(
+            LaunchplaneInventoryRow(
                 context=record.context,
                 instance=record.instance,
                 artifact_id=_artifact_id_from_model(record),
@@ -528,20 +528,20 @@ class PostgresRecordStore:
     def read_environment_inventory(self, *, context_name: str, instance_name: str) -> EnvironmentInventory:
         return self._read_model(
             model_type=EnvironmentInventory,
-            orm_model=HarborInventoryRow,
-            filters=(HarborInventoryRow.context == context_name, HarborInventoryRow.instance == instance_name),
+            orm_model=LaunchplaneInventoryRow,
+            filters=(LaunchplaneInventoryRow.context == context_name, LaunchplaneInventoryRow.instance == instance_name),
         )
 
     def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
         return self._list_models(
             model_type=EnvironmentInventory,
-            orm_model=HarborInventoryRow,
-            order_by=(HarborInventoryRow.context.asc(), HarborInventoryRow.instance.asc()),
+            orm_model=LaunchplaneInventoryRow,
+            order_by=(LaunchplaneInventoryRow.context.asc(), LaunchplaneInventoryRow.instance.asc()),
         )
 
     def write_preview_record(self, record: PreviewRecord) -> None:
         self._write_row(
-            HarborPreviewRow(
+            LaunchplanePreviewRow(
                 preview_id=record.preview_id,
                 context=record.context,
                 anchor_repo=record.anchor_repo,
@@ -555,8 +555,8 @@ class PostgresRecordStore:
     def read_preview_record(self, preview_id: str) -> PreviewRecord:
         return self._read_model(
             model_type=PreviewRecord,
-            orm_model=HarborPreviewRow,
-            filters=(HarborPreviewRow.preview_id == preview_id,),
+            orm_model=LaunchplanePreviewRow,
+            filters=(LaunchplanePreviewRow.preview_id == preview_id,),
         )
 
     def list_preview_records(
@@ -569,22 +569,22 @@ class PostgresRecordStore:
     ) -> tuple[PreviewRecord, ...]:
         filters: list[object] = []
         if context_name:
-            filters.append(HarborPreviewRow.context == context_name)
+            filters.append(LaunchplanePreviewRow.context == context_name)
         if anchor_repo:
-            filters.append(HarborPreviewRow.anchor_repo == anchor_repo)
+            filters.append(LaunchplanePreviewRow.anchor_repo == anchor_repo)
         if anchor_pr_number is not None:
-            filters.append(HarborPreviewRow.anchor_pr_number == anchor_pr_number)
+            filters.append(LaunchplanePreviewRow.anchor_pr_number == anchor_pr_number)
         return self._list_models(
             model_type=PreviewRecord,
-            orm_model=HarborPreviewRow,
+            orm_model=LaunchplanePreviewRow,
             filters=filters,
-            order_by=(HarborPreviewRow.updated_at.desc(), HarborPreviewRow.preview_id.desc()),
+            order_by=(LaunchplanePreviewRow.updated_at.desc(), LaunchplanePreviewRow.preview_id.desc()),
             limit=limit,
         )
 
     def write_preview_generation_record(self, record: PreviewGenerationRecord) -> None:
         self._write_row(
-            HarborPreviewGenerationRow(
+            LaunchplanePreviewGenerationRow(
                 generation_id=record.generation_id,
                 preview_id=record.preview_id,
                 sequence=record.sequence,
@@ -599,8 +599,8 @@ class PostgresRecordStore:
     def read_preview_generation_record(self, generation_id: str) -> PreviewGenerationRecord:
         return self._read_model(
             model_type=PreviewGenerationRecord,
-            orm_model=HarborPreviewGenerationRow,
-            filters=(HarborPreviewGenerationRow.generation_id == generation_id,),
+            orm_model=LaunchplanePreviewGenerationRow,
+            filters=(LaunchplanePreviewGenerationRow.generation_id == generation_id,),
         )
 
     def list_preview_generation_records(
@@ -611,22 +611,22 @@ class PostgresRecordStore:
     ) -> tuple[PreviewGenerationRecord, ...]:
         filters: list[object] = []
         if preview_id:
-            filters.append(HarborPreviewGenerationRow.preview_id == preview_id)
+            filters.append(LaunchplanePreviewGenerationRow.preview_id == preview_id)
         return self._list_models(
             model_type=PreviewGenerationRecord,
-            orm_model=HarborPreviewGenerationRow,
+            orm_model=LaunchplanePreviewGenerationRow,
             filters=filters,
             order_by=(
-                HarborPreviewGenerationRow.sequence.desc(),
-                HarborPreviewGenerationRow.requested_at.desc(),
-                HarborPreviewGenerationRow.generation_id.desc(),
+                LaunchplanePreviewGenerationRow.sequence.desc(),
+                LaunchplanePreviewGenerationRow.requested_at.desc(),
+                LaunchplanePreviewGenerationRow.generation_id.desc(),
             ),
             limit=limit,
         )
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> None:
         self._write_row(
-            HarborReleaseTupleRow(
+            LaunchplaneReleaseTupleRow(
                 context=record.context,
                 channel=record.channel,
                 tuple_id=record.tuple_id,
@@ -640,20 +640,20 @@ class PostgresRecordStore:
     def read_release_tuple_record(self, *, context_name: str, channel_name: str) -> ReleaseTupleRecord:
         return self._read_model(
             model_type=ReleaseTupleRecord,
-            orm_model=HarborReleaseTupleRow,
-            filters=(HarborReleaseTupleRow.context == context_name, HarborReleaseTupleRow.channel == channel_name),
+            orm_model=LaunchplaneReleaseTupleRow,
+            filters=(LaunchplaneReleaseTupleRow.context == context_name, LaunchplaneReleaseTupleRow.channel == channel_name),
         )
 
     def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]:
         return self._list_models(
             model_type=ReleaseTupleRecord,
-            orm_model=HarborReleaseTupleRow,
-            order_by=(HarborReleaseTupleRow.context.asc(), HarborReleaseTupleRow.channel.asc()),
+            orm_model=LaunchplaneReleaseTupleRow,
+            order_by=(LaunchplaneReleaseTupleRow.context.asc(), LaunchplaneReleaseTupleRow.channel.asc()),
         )
 
     def write_secret_record(self, record: SecretRecord) -> None:
         self._write_row(
-            HarborSecretRow(
+            LaunchplaneSecretRow(
                 secret_id=record.secret_id,
                 scope=record.scope,
                 integration=record.integration,
@@ -670,8 +670,8 @@ class PostgresRecordStore:
     def read_secret_record(self, secret_id: str) -> SecretRecord:
         return self._read_model(
             model_type=SecretRecord,
-            orm_model=HarborSecretRow,
-            filters=(HarborSecretRow.secret_id == secret_id,),
+            orm_model=LaunchplaneSecretRow,
+            filters=(LaunchplaneSecretRow.secret_id == secret_id,),
         )
 
     def find_secret_record(
@@ -685,15 +685,15 @@ class PostgresRecordStore:
     ) -> SecretRecord | None:
         records = self._list_models(
             model_type=SecretRecord,
-            orm_model=HarborSecretRow,
+            orm_model=LaunchplaneSecretRow,
             filters=(
-                HarborSecretRow.scope == scope,
-                HarborSecretRow.integration == integration,
-                HarborSecretRow.name == name,
-                HarborSecretRow.context == context,
-                HarborSecretRow.instance == instance,
+                LaunchplaneSecretRow.scope == scope,
+                LaunchplaneSecretRow.integration == integration,
+                LaunchplaneSecretRow.name == name,
+                LaunchplaneSecretRow.context == context,
+                LaunchplaneSecretRow.instance == instance,
             ),
-            order_by=(HarborSecretRow.updated_at.desc(), HarborSecretRow.secret_id.desc()),
+            order_by=(LaunchplaneSecretRow.updated_at.desc(), LaunchplaneSecretRow.secret_id.desc()),
             limit=1,
         )
         return records[0] if records else None
@@ -708,22 +708,22 @@ class PostgresRecordStore:
     ) -> tuple[SecretRecord, ...]:
         filters: list[object] = []
         if integration:
-            filters.append(HarborSecretRow.integration == integration)
+            filters.append(LaunchplaneSecretRow.integration == integration)
         if context_name:
-            filters.append(HarborSecretRow.context == context_name)
+            filters.append(LaunchplaneSecretRow.context == context_name)
         if instance_name:
-            filters.append(HarborSecretRow.instance == instance_name)
+            filters.append(LaunchplaneSecretRow.instance == instance_name)
         return self._list_models(
             model_type=SecretRecord,
-            orm_model=HarborSecretRow,
+            orm_model=LaunchplaneSecretRow,
             filters=filters,
-            order_by=(HarborSecretRow.updated_at.desc(), HarborSecretRow.secret_id.desc()),
+            order_by=(LaunchplaneSecretRow.updated_at.desc(), LaunchplaneSecretRow.secret_id.desc()),
             limit=limit,
         )
 
     def write_secret_version(self, version: SecretVersion) -> None:
         self._write_row(
-            HarborSecretVersionRow(
+            LaunchplaneSecretVersionRow(
                 version_id=version.version_id,
                 secret_id=version.secret_id,
                 created_at=version.created_at,
@@ -734,21 +734,21 @@ class PostgresRecordStore:
     def read_secret_version(self, version_id: str) -> SecretVersion:
         return self._read_model(
             model_type=SecretVersion,
-            orm_model=HarborSecretVersionRow,
-            filters=(HarborSecretVersionRow.version_id == version_id,),
+            orm_model=LaunchplaneSecretVersionRow,
+            filters=(LaunchplaneSecretVersionRow.version_id == version_id,),
         )
 
     def list_secret_versions(self, *, secret_id: str) -> tuple[SecretVersion, ...]:
         return self._list_models(
             model_type=SecretVersion,
-            orm_model=HarborSecretVersionRow,
-            filters=(HarborSecretVersionRow.secret_id == secret_id,),
-            order_by=(HarborSecretVersionRow.created_at.desc(), HarborSecretVersionRow.version_id.desc()),
+            orm_model=LaunchplaneSecretVersionRow,
+            filters=(LaunchplaneSecretVersionRow.secret_id == secret_id,),
+            order_by=(LaunchplaneSecretVersionRow.created_at.desc(), LaunchplaneSecretVersionRow.version_id.desc()),
         )
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
         self._write_row(
-            HarborSecretBindingRow(
+            LaunchplaneSecretBindingRow(
                 binding_id=binding.binding_id,
                 secret_id=binding.secret_id,
                 integration=binding.integration,
@@ -771,22 +771,22 @@ class PostgresRecordStore:
     ) -> tuple[SecretBinding, ...]:
         filters: list[object] = []
         if integration:
-            filters.append(HarborSecretBindingRow.integration == integration)
+            filters.append(LaunchplaneSecretBindingRow.integration == integration)
         if context_name:
-            filters.append(HarborSecretBindingRow.context == context_name)
+            filters.append(LaunchplaneSecretBindingRow.context == context_name)
         if instance_name:
-            filters.append(HarborSecretBindingRow.instance == instance_name)
+            filters.append(LaunchplaneSecretBindingRow.instance == instance_name)
         return self._list_models(
             model_type=SecretBinding,
-            orm_model=HarborSecretBindingRow,
+            orm_model=LaunchplaneSecretBindingRow,
             filters=filters,
-            order_by=(HarborSecretBindingRow.updated_at.desc(), HarborSecretBindingRow.binding_id.desc()),
+            order_by=(LaunchplaneSecretBindingRow.updated_at.desc(), LaunchplaneSecretBindingRow.binding_id.desc()),
             limit=limit,
         )
 
     def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
         self._write_row(
-            HarborSecretAuditEventRow(
+            LaunchplaneSecretAuditEventRow(
                 event_id=event.event_id,
                 secret_id=event.secret_id,
                 event_type=event.event_type,
@@ -798,9 +798,9 @@ class PostgresRecordStore:
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
         return self._list_models(
             model_type=SecretAuditEvent,
-            orm_model=HarborSecretAuditEventRow,
-            filters=(HarborSecretAuditEventRow.secret_id == secret_id,),
-            order_by=(HarborSecretAuditEventRow.recorded_at.desc(), HarborSecretAuditEventRow.event_id.desc()),
+            orm_model=LaunchplaneSecretAuditEventRow,
+            filters=(LaunchplaneSecretAuditEventRow.secret_id == secret_id,),
+            order_by=(LaunchplaneSecretAuditEventRow.recorded_at.desc(), LaunchplaneSecretAuditEventRow.event_id.desc()),
         )
 
     def import_core_records_from_filesystem(self, filesystem_store: FilesystemRecordStore) -> dict[str, int]:

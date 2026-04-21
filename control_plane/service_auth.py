@@ -119,7 +119,7 @@ class GitHubActionsPolicyRule(BaseModel):
         return True
 
 
-class HarborAuthzPolicy(BaseModel):
+class LaunchplaneAuthzPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
@@ -132,7 +132,7 @@ class HarborAuthzPolicy(BaseModel):
         )
 
 
-def load_authz_policy(policy_file: Path) -> HarborAuthzPolicy:
+def load_authz_policy(policy_file: Path) -> LaunchplaneAuthzPolicy:
     with policy_file.open("rb") as handle:
         payload = tomllib.load(handle)
-    return HarborAuthzPolicy.model_validate(payload)
+    return LaunchplaneAuthzPolicy.model_validate(payload)

@@ -134,7 +134,7 @@ ODOO_DB_PASSWORD = "testing-secret"
 schema_version = 1
 
 [shared_env]
-HARBOR_PREVIEW_BASE_URL = "https://harbor.example"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 ODOO_MASTER_PASSWORD = "shared-master"
 
 [contexts.opw.shared_env]
@@ -149,16 +149,16 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 context_name="opw",
             )
 
-        self.assertEqual(resolved_values["HARBOR_PREVIEW_BASE_URL"], "https://harbor.example")
+        self.assertEqual(resolved_values["LAUNCHPLANE_PREVIEW_BASE_URL"], "https://launchplane.example")
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
         self.assertEqual(resolved_values["ENV_OVERRIDE_DISABLE_CRON"], "True")
 
-    def test_resolve_runtime_environment_values_uses_external_harbor_config_dir_when_repo_file_missing(self) -> None:
+    def test_resolve_runtime_environment_values_uses_external_launchplane_config_dir_when_repo_file_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name) / "repo"
             control_plane_root.mkdir(parents=True, exist_ok=True)
             xdg_config_home = Path(temporary_directory_name) / "xdg"
-            environments_file = xdg_config_home / "harbor" / "runtime-environments.toml"
+            environments_file = xdg_config_home / "launchplane" / "runtime-environments.toml"
             environments_file.parent.mkdir(parents=True, exist_ok=True)
             environments_file.write_text(
                 """

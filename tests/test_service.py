@@ -13,8 +13,8 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord, PreviewPullRequestSummary
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, PromotionRecord
-from control_plane.service import create_harbor_service_app
-from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, HarborAuthzPolicy
+from control_plane.service import create_launchplane_service_app
+from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, LaunchplaneAuthzPolicy
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_preview_driver import (
@@ -104,7 +104,7 @@ class GitHubOidcVerifierTests(unittest.TestCase):
         }
         with patch("control_plane.service_auth.jwt.decode", return_value=claims) as decode_mock:
             verifier = GitHubOidcVerifier(
-                audience="harbor.shinycomputers.com",
+                audience="launchplane.shinycomputers.com",
                 jwk_client=mock_jwk_client,
             )
             identity = verifier.verify("header.payload.signature")
@@ -114,7 +114,7 @@ class GitHubOidcVerifierTests(unittest.TestCase):
             "header.payload.signature",
             "signing-key",
             algorithms=["RS256"],
-            audience="harbor.shinycomputers.com",
+            audience="launchplane.shinycomputers.com",
             issuer="https://token.actions.githubusercontent.com",
         )
         self.assertEqual(identity.repository, "every/verireel")
@@ -128,7 +128,7 @@ class GitHubOidcVerifierTests(unittest.TestCase):
                 "@refs/heads/code/2026-04-21-preview-validation-pr"
             ),
         )
-        policy = HarborAuthzPolicy.model_validate(
+        policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_actions": [
                     {
@@ -155,13 +155,13 @@ class GitHubOidcVerifierTests(unittest.TestCase):
         )
 
 
-class HarborServiceTests(unittest.TestCase):
+class LaunchplaneServiceTests(unittest.TestCase):
     def test_health_endpoint_reports_storage_backend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=HarborAuthzPolicy.model_validate({"github_actions": []}),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
             )
 
@@ -175,7 +175,7 @@ class HarborServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -191,7 +191,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -250,7 +250,7 @@ class HarborServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -266,7 +266,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -348,7 +348,7 @@ class HarborServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -364,7 +364,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -434,7 +434,7 @@ class HarborServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -450,7 +450,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -544,7 +544,7 @@ class HarborServiceTests(unittest.TestCase):
                     ),
                 )
             )
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -560,7 +560,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -592,7 +592,7 @@ class HarborServiceTests(unittest.TestCase):
                         "backup_gate": {
                             "required": True,
                             "status": "pass",
-                            "evidence": {"recorded_by": "harbor-service"},
+                            "evidence": {"recorded_by": "launchplane-service"},
                         },
                         "deploy": {
                             "target_name": "opw-prod",
@@ -660,7 +660,7 @@ class HarborServiceTests(unittest.TestCase):
                     latest_generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
                 )
             )
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -676,7 +676,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -729,7 +729,7 @@ class HarborServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -745,7 +745,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(
                     _identity(
@@ -797,7 +797,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_verireel_testing_deploy_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -813,7 +813,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -846,7 +846,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_verireel_preview_refresh_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -862,7 +862,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -907,7 +907,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_verireel_preview_refresh_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -923,7 +923,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -953,7 +953,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_verireel_preview_destroy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -969,7 +969,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -1016,7 +1016,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_verireel_preview_destroy_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1032,7 +1032,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -1090,7 +1090,7 @@ class HarborServiceTests(unittest.TestCase):
                     ),
                 )
             )
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1105,7 +1105,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -1228,7 +1228,7 @@ class HarborServiceTests(unittest.TestCase):
                     deployment_record_id="deployment-20260420T153000Z-verireel-testing",
                 )
             )
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1243,7 +1243,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -1277,12 +1277,12 @@ class HarborServiceTests(unittest.TestCase):
     def test_secret_status_endpoints_return_operator_read_models(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            database_url = f"sqlite+pysqlite:///{root / 'harbor.sqlite3'}"
+            database_url = f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             with patch.dict(
                 os.environ,
-                {control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
                 clear=True,
             ):
                 control_plane_secrets.write_secret_value(
@@ -1305,7 +1305,7 @@ class HarborServiceTests(unittest.TestCase):
                     actor="test",
                 )
             store.close()
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1320,7 +1320,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -1331,8 +1331,8 @@ class HarborServiceTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "HARBOR_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
                 },
                 clear=True,
             ):
@@ -1357,7 +1357,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_preview_generation_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1373,7 +1373,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -1413,7 +1413,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_deployment_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1429,7 +1429,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -1470,7 +1470,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_promotion_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1486,7 +1486,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(
                     _identity(
@@ -1528,7 +1528,7 @@ class HarborServiceTests(unittest.TestCase):
     def test_preview_destroyed_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            policy = HarborAuthzPolicy.model_validate(
+            policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
                         {
@@ -1544,7 +1544,7 @@ class HarborServiceTests(unittest.TestCase):
                     ]
                 }
             )
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
@@ -1573,10 +1573,10 @@ class HarborServiceTests(unittest.TestCase):
     def test_preview_generation_endpoint_requires_bearer_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            app = create_harbor_service_app(
+            app = create_launchplane_service_app(
                 state_dir=root / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=HarborAuthzPolicy(github_actions=()),
+                authz_policy=LaunchplaneAuthzPolicy(github_actions=()),
                 control_plane_root_path=root,
             )
 

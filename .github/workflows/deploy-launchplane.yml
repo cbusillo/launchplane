@@ -1,4 +1,4 @@
-name: Deploy Harbor
+name: Deploy Launchplane
 
 on:
   workflow_run:
@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       git_ref:
-        description: Git ref to build when deploying a new Harbor image.
+        description: Git ref to build when deploying a new Launchplane image.
         required: false
         type: string
       image_reference:
@@ -23,7 +23,7 @@ permissions:
   packages: write
 
 concurrency:
-  group: harbor-deploy
+  group: launchplane-deploy
   cancel-in-progress: false
 
 jobs:
@@ -38,12 +38,12 @@ jobs:
     env:
       DOKPLOY_HOST: ${{ secrets.DOKPLOY_HOST }}
       DOKPLOY_TOKEN: ${{ secrets.DOKPLOY_TOKEN }}
-      HARBOR_DOKPLOY_TARGET_ID: ${{ vars.HARBOR_DOKPLOY_TARGET_ID }}
-      HARBOR_DOKPLOY_TARGET_TYPE: ${{ vars.HARBOR_DOKPLOY_TARGET_TYPE }}
-      HARBOR_DEPLOY_HEALTH_URLS: ${{ vars.HARBOR_DEPLOY_HEALTH_URLS }}
-      HARBOR_DOKPLOY_DEPLOY_TIMEOUT_SECONDS: ${{ vars.HARBOR_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}
-      HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS: ${{ vars.HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS }}
-      HARBOR_IMAGE_REPOSITORY: ${{ vars.HARBOR_IMAGE_REPOSITORY }}
+      LAUNCHPLANE_DOKPLOY_TARGET_ID: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_ID }}
+      LAUNCHPLANE_DOKPLOY_TARGET_TYPE: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_TYPE }}
+      LAUNCHPLANE_DEPLOY_HEALTH_URLS: ${{ vars.LAUNCHPLANE_DEPLOY_HEALTH_URLS }}
+      LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS: ${{ vars.LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}
+      LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS: ${{ vars.LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS }}
+      LAUNCHPLANE_IMAGE_REPOSITORY: ${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}
     steps:
       - name: Resolve deploy inputs
         id: prep
@@ -59,7 +59,7 @@ jobs:
             checkout_ref="${{ github.sha }}"
           fi
 
-          image_repository="${HARBOR_IMAGE_REPOSITORY}"
+          image_repository="${LAUNCHPLANE_IMAGE_REPOSITORY}"
           if [ -z "$image_repository" ]; then
             image_repository="ghcr.io/${GITHUB_REPOSITORY,,}"
           fi
@@ -84,9 +84,9 @@ jobs:
           set -euo pipefail
           : "${DOKPLOY_HOST:?Missing DOKPLOY_HOST secret}"
           : "${DOKPLOY_TOKEN:?Missing DOKPLOY_TOKEN secret}"
-          : "${HARBOR_DOKPLOY_TARGET_TYPE:?Missing HARBOR_DOKPLOY_TARGET_TYPE variable}"
-          : "${HARBOR_DOKPLOY_TARGET_ID:?Missing HARBOR_DOKPLOY_TARGET_ID variable}"
-          : "${HARBOR_DEPLOY_HEALTH_URLS:?Missing HARBOR_DEPLOY_HEALTH_URLS variable}"
+          : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"
+          : "${LAUNCHPLANE_DOKPLOY_TARGET_ID:?Missing LAUNCHPLANE_DOKPLOY_TARGET_ID variable}"
+          : "${LAUNCHPLANE_DEPLOY_HEALTH_URLS:?Missing LAUNCHPLANE_DEPLOY_HEALTH_URLS variable}"
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -101,14 +101,14 @@ jobs:
         with:
           python-version-file: pyproject.toml
 
-      - name: Preflight Dokploy Harbor target
+      - name: Preflight Dokploy Launchplane target
         shell: bash
         run: |
           set -euo pipefail
 
-          uv run harbor service inspect-dokploy-target \
-            --target-type "$HARBOR_DOKPLOY_TARGET_TYPE" \
-            --target-id "$HARBOR_DOKPLOY_TARGET_ID"
+          uv run launchplane service inspect-dokploy-target \
+            --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+            --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID"
 
       - name: Set up Docker Buildx
         if: steps.prep.outputs.should_build == 'true'
@@ -122,7 +122,7 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push Harbor image
+      - name: Build and push Launchplane image
         if: steps.prep.outputs.should_build == 'true'
         id: build
         uses: docker/build-push-action@v6
@@ -145,7 +145,7 @@ jobs:
           fi
           echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy Harbor in Dokploy
+      - name: Deploy Launchplane in Dokploy
         shell: bash
         run: |
           set -euo pipefail
@@ -156,12 +156,12 @@ jobs:
             if [ -n "$health_url" ]; then
               health_args+=(--health-url "$health_url")
             fi
-          done < <(printf '%s\n' "$HARBOR_DEPLOY_HEALTH_URLS" | tr ',' '\n')
+          done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
-          uv run harbor service deploy-dokploy-image \
-            --target-type "$HARBOR_DOKPLOY_TARGET_TYPE" \
-            --target-id "$HARBOR_DOKPLOY_TARGET_ID" \
+          uv run launchplane service deploy-dokploy-image \
+            --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+            --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
             --image-reference "${{ steps.image.outputs.image_reference }}" \
-            --deploy-timeout-seconds "${HARBOR_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600}" \
-            --health-timeout-seconds "${HARBOR_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}" \
+            --deploy-timeout-seconds "${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600}" \
+            --health-timeout-seconds "${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}" \
             "${health_args[@]}"

@@ -9,7 +9,7 @@ from control_plane.contracts.preview_mutation_request import (
 )
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.harbor import (
+from control_plane.workflows.launchplane import (
     apply_generation_failed_transition,
     apply_generation_ready_transition,
     apply_generation_requested_transition,
@@ -24,7 +24,7 @@ def control_plane_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
 
-def upsert_harbor_preview_from_request(
+def upsert_launchplane_preview_from_request(
     *,
     control_plane_root_path: Path,
     record_store: FilesystemRecordStore,
@@ -63,14 +63,14 @@ def upsert_harbor_preview_from_request(
     return preview_record
 
 
-def apply_harbor_generation_evidence(
+def apply_launchplane_generation_evidence(
     *,
     control_plane_root_path: Path,
     record_store: FilesystemRecordStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
-    preview_record = upsert_harbor_preview_from_request(
+    preview_record = upsert_launchplane_preview_from_request(
         control_plane_root_path=control_plane_root_path,
         record_store=record_store,
         request=preview_request,
@@ -105,7 +105,7 @@ def apply_harbor_generation_evidence(
     }
 
 
-def apply_harbor_destroy_preview(
+def apply_launchplane_destroy_preview(
     *,
     record_store: FilesystemRecordStore,
     request: PreviewDestroyMutationRequest,
@@ -118,7 +118,7 @@ def apply_harbor_destroy_preview(
     )
     if preview_record is None:
         raise click.ClickException(
-            f"No Harbor preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
+            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
         )
     transitioned_preview = apply_preview_destroyed_transition(
         preview=preview_record,

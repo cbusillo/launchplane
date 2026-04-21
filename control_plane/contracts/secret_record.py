@@ -57,7 +57,7 @@ class SecretVersion(BaseModel):
     created_at: str
     created_by: str = ""
     cipher_alg: Literal["fernet-v1"] = "fernet-v1"
-    key_id: str = "harbor-master-key"
+    key_id: str = "launchplane-master-key"
     ciphertext: str
 
     @model_validator(mode="after")

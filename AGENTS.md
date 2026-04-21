@@ -1,7 +1,7 @@
 # AGENTS.md — Codex CLI Operating Guide (Read Me First)
 
 Treat this file as the launch checklist for every Codex session in
-`harbor`.
+`launchplane`.
 
 ## Start Here
 
@@ -43,14 +43,14 @@ Treat this file as the launch checklist for every Codex session in
 
 ## Repo Boundaries
 
-- `harbor` owns:
+- `launchplane` owns:
   - artifact manifests
   - release tuple catalogs
   - backup-gate records
   - promotion records
   - deployment records
   - environment inventory
-  - Harbor preview and generation records
+  - Launchplane preview and generation records
   - promotion and deploy orchestration
   - backup and restore control-plane workflows
 - Tenant/shared/devkit repos own:

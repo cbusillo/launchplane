@@ -7,9 +7,9 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 
-class StartHarborServiceScriptTests(unittest.TestCase):
+class StartLaunchplaneServiceScriptTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.script_path = Path(__file__).resolve().parents[1] / "scripts" / "start-harbor-service.sh"
+        self.script_path = Path(__file__).resolve().parents[1] / "scripts" / "start-launchplane-service.sh"
 
     def _write_fake_uv(self, bin_dir: Path) -> None:
         uv_path = bin_dir / "uv"
@@ -32,8 +32,8 @@ class StartHarborServiceScriptTests(unittest.TestCase):
                 text=True,
                 env={
                     **os.environ,
-                    "HARBOR_APP_ROOT": str(app_root),
-                    "HARBOR_STATE_DIR": str(temporary_directory / "state"),
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
                 },
                 check=False,
             )
@@ -45,7 +45,7 @@ class StartHarborServiceScriptTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
             app_root = temporary_directory / "app"
-            example_policy = app_root / "config" / "harbor-authz.toml.example"
+            example_policy = app_root / "config" / "launchplane-authz.toml.example"
             example_policy.parent.mkdir(parents=True)
             example_policy.write_text("schema_version = 1\n", encoding="utf-8")
 
@@ -55,18 +55,18 @@ class StartHarborServiceScriptTests(unittest.TestCase):
                 text=True,
                 env={
                     **os.environ,
-                    "HARBOR_APP_ROOT": str(app_root),
-                    "HARBOR_STATE_DIR": str(temporary_directory / "state"),
-                    "HARBOR_POLICY_FILE": str(example_policy),
+                    "LAUNCHPLANE_APP_ROOT": str(app_root),
+                    "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
+                    "LAUNCHPLANE_POLICY_FILE": str(example_policy),
                 },
                 check=False,
             )
 
         self.assertEqual(result.returncode, 1, msg=result.stderr)
-        self.assertIn("Refusing to start Harbor with example policy file", result.stderr)
+        self.assertIn("Refusing to start Launchplane with example policy file", result.stderr)
 
     def test_accepts_explicit_base64_policy_input(self) -> None:
-        policy_path = Path("/tmp/harbor-authz.toml")
+        policy_path = Path("/tmp/launchplane-authz.toml")
         policy_path.unlink(missing_ok=True)
 
         try:
@@ -87,9 +87,9 @@ class StartHarborServiceScriptTests(unittest.TestCase):
                         **os.environ,
                         "PATH": f"{bin_dir}{os.pathsep}{os.environ.get('PATH', '')}",
                         "UV_CAPTURE_FILE": str(capture_file),
-                        "HARBOR_APP_ROOT": str(app_root),
-                        "HARBOR_STATE_DIR": str(temporary_directory / "state"),
-                        "HARBOR_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode("ascii"),
+                        "LAUNCHPLANE_APP_ROOT": str(app_root),
+                        "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
+                        "LAUNCHPLANE_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode("ascii"),
                     },
                     check=False,
                 )

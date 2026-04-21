@@ -14,20 +14,20 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_valida
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.deployment_record import DeploymentRecord
-from control_plane.contracts.idempotency_record import HarborIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_harbor_idempotency_record_id
+from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.harbor_mutations import (
-    apply_harbor_destroy_preview,
-    apply_harbor_generation_evidence,
+from control_plane.launchplane_mutations import (
+    apply_launchplane_destroy_preview,
+    apply_launchplane_generation_evidence,
     control_plane_root,
 )
-from control_plane.service_auth import HarborAuthzPolicy, TokenVerifier, load_authz_policy
+from control_plane.service_auth import LaunchplaneAuthzPolicy, TokenVerifier, load_authz_policy
 from control_plane.storage.factory import build_record_store, storage_backend_name
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
@@ -185,7 +185,7 @@ def _http_status_text(status_code: int) -> str:
 
 
 def _trace_id() -> str:
-    return f"harbor_req_{uuid.uuid4().hex}"
+    return f"launchplane_req_{uuid.uuid4().hex}"
 
 
 def _utc_now_timestamp() -> str:
@@ -204,7 +204,7 @@ def _not_found_response(
         payload={
             "status": "rejected",
             "trace_id": trace_id,
-            "error": {"code": "not_found", "message": f"No Harbor route for {path}."},
+            "error": {"code": "not_found", "message": f"No Launchplane route for {path}."},
         },
     )
 
@@ -305,7 +305,7 @@ def _replay_idempotent_response(
     *,
     start_response: Callable[[str, list[tuple[str, str]]], None],
     trace_id: str,
-    stored_record: HarborIdempotencyRecord,
+    stored_record: LaunchplaneIdempotencyRecord,
 ) -> list[bytes]:
     stored_payload = dict(stored_record.response_payload)
     stored_driver_result = stored_payload.get("result")
@@ -329,7 +329,7 @@ def _read_idempotency_record(
     scope: str,
     route_path: str,
     idempotency_key: str,
-) -> HarborIdempotencyRecord | None:
+) -> LaunchplaneIdempotencyRecord | None:
     idempotency_store = _idempotency_capable_store(record_store)
     if idempotency_store is None or not idempotency_key:
         return None
@@ -355,8 +355,8 @@ def _write_idempotency_record(
     if idempotency_store is None or not idempotency_key:
         return
     idempotency_store.write_idempotency_record(
-        HarborIdempotencyRecord(
-            record_id=build_harbor_idempotency_record_id(
+        LaunchplaneIdempotencyRecord(
+            record_id=build_launchplane_idempotency_record_id(
                 scope=scope,
                 route_path=route_path,
                 idempotency_key=idempotency_key,
@@ -401,7 +401,7 @@ def _check_idempotent_request(
                 "error": {
                     "code": "idempotency_key_reused",
                     "message": (
-                        "Idempotency-Key was already used for a different Harbor request payload on this route."
+                        "Idempotency-Key was already used for a different Launchplane request payload on this route."
                     ),
                 },
             },
@@ -441,11 +441,11 @@ def _bearer_token(environ: dict[str, object]) -> str:
     return token.strip()
 
 
-def create_harbor_service_app(
+def create_launchplane_service_app(
     *,
     state_dir: Path,
     verifier: TokenVerifier,
-    authz_policy: HarborAuthzPolicy,
+    authz_policy: LaunchplaneAuthzPolicy,
     control_plane_root_path: Path | None = None,
     database_url: str | None = None,
 ):
@@ -491,7 +491,7 @@ def create_harbor_service_app(
                     "trace_id": request_trace_id,
                     "error": {
                         "code": "method_not_allowed",
-                        "message": "Only GET and POST are allowed for Harbor routes.",
+                        "message": "Only GET and POST are allowed for Launchplane routes.",
                     },
                 },
             )
@@ -504,7 +504,7 @@ def create_harbor_service_app(
                     "trace_id": request_trace_id,
                     "error": {
                         "code": "method_not_allowed",
-                        "message": "Only POST is allowed for this Harbor route.",
+                        "message": "Only POST is allowed for this Launchplane route.",
                     },
                 },
             )
@@ -517,7 +517,7 @@ def create_harbor_service_app(
                     "trace_id": request_trace_id,
                     "error": {
                         "code": "method_not_allowed",
-                        "message": "Only GET is allowed for this Harbor route.",
+                        "message": "Only GET is allowed for this Launchplane route.",
                     },
                 },
             )
@@ -532,7 +532,7 @@ def create_harbor_service_app(
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
-                        product="harbor",
+                        product="launchplane",
                         context=deployment.context,
                     ):
                         return _json_response(
@@ -561,7 +561,7 @@ def create_harbor_service_app(
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
-                        product="harbor",
+                        product="launchplane",
                         context=promotion.context,
                     ):
                         return _json_response(
@@ -593,7 +593,7 @@ def create_harbor_service_app(
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
-                        product="harbor",
+                        product="launchplane",
                         context=inventory.context,
                     ):
                         return _json_response(
@@ -622,7 +622,7 @@ def create_harbor_service_app(
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
-                        product="harbor",
+                        product="launchplane",
                         context=preview.context,
                     ):
                         return _json_response(
@@ -671,7 +671,7 @@ def create_harbor_service_app(
                                 "trace_id": request_trace_id,
                                 "error": {
                                     "code": "not_found",
-                                    "message": "Harbor secret status routes require the Postgres storage backend.",
+                                    "message": "Launchplane secret status routes require the Postgres storage backend.",
                                 },
                             },
                         )
@@ -682,7 +682,7 @@ def create_harbor_service_app(
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
-                        product="harbor",
+                        product="launchplane",
                         context=str(secret_status["context"]),
                     ):
                         return _json_response(
@@ -693,7 +693,7 @@ def create_harbor_service_app(
                                 "trace_id": request_trace_id,
                                 "error": {
                                     "code": "authorization_denied",
-                                    "message": "Workflow cannot read Harbor managed secret status for the requested context.",
+                                    "message": "Workflow cannot read Launchplane managed secret status for the requested context.",
                                 },
                             },
                         )
@@ -711,7 +711,7 @@ def create_harbor_service_app(
                     if not authz_policy.allows(
                         identity=identity,
                         action=action,
-                        product="harbor",
+                        product="launchplane",
                         context=context_name,
                     ):
                         return _json_response(
@@ -722,7 +722,7 @@ def create_harbor_service_app(
                                 "trace_id": request_trace_id,
                                 "error": {
                                     "code": "authorization_denied",
-                                    "message": "Workflow cannot list Harbor managed secret status for the requested context.",
+                                    "message": "Workflow cannot list Launchplane managed secret status for the requested context.",
                                 },
                             },
                         )
@@ -736,7 +736,7 @@ def create_harbor_service_app(
                                 "trace_id": request_trace_id,
                                 "error": {
                                     "code": "not_found",
-                                    "message": "Harbor secret status routes require the Postgres storage backend.",
+                                    "message": "Launchplane secret status routes require the Postgres storage backend.",
                                 },
                             },
                         )
@@ -760,7 +760,7 @@ def create_harbor_service_app(
                 if not authz_policy.allows(
                     identity=identity,
                     action=action,
-                    product="harbor",
+                    product="launchplane",
                     context=context_name,
                 ):
                     return _json_response(
@@ -1030,7 +1030,7 @@ def create_harbor_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                result = apply_harbor_generation_evidence(
+                result = apply_launchplane_generation_evidence(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
                     preview_request=request.preview,
@@ -1070,7 +1070,7 @@ def create_harbor_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                result = apply_harbor_destroy_preview(
+                result = apply_launchplane_destroy_preview(
                     record_store=record_store,
                     request=request.destroy,
                 )
@@ -1135,7 +1135,7 @@ def create_harbor_service_app(
     return app
 
 
-def serve_harbor_service(
+def serve_launchplane_service(
     *,
     state_dir: Path,
     policy_file: Path,
@@ -1148,12 +1148,12 @@ def serve_harbor_service(
 
     authz_policy = load_authz_policy(policy_file)
     verifier = GitHubOidcVerifier(audience=audience)
-    application = create_harbor_service_app(
+    application = create_launchplane_service_app(
         state_dir=state_dir,
         verifier=verifier,
         authz_policy=authz_policy,
         database_url=database_url,
     )
     with make_server(host, port, application) as server:
-        click.echo(f"Harbor service listening on http://{host}:{port}")
+        click.echo(f"Launchplane service listening on http://{host}:{port}")
         server.serve_forever()

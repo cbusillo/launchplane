@@ -3,9 +3,9 @@ requires = ["hatchling>=1.25"]
 build-backend = "hatchling.build"
 
 [project]
-name = "harbor"
+name = "launchplane"
 version = "0.1.0"
-description = "Harbor control-plane contracts and workflows for deployment truth and promotion"
+description = "Launchplane control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
     "click>=8.1",
@@ -22,7 +22,7 @@ dev = [
 ]
 
 [project.scripts]
-harbor = "control_plane.cli:main"
+launchplane = "control_plane.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["control_plane"]

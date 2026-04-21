@@ -37,7 +37,7 @@ OPENUPGRADE_ADDON_REPOSITORY = "OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd
 OPENUPGRADELIB_INSTALL_SPEC = "git+https://github.com/OCA/openupgradelib.git@46d66ff5ed6a99481f84d3c79fc6e50835da7286"
 
 # Stable Dokploy routes cover only the shared testing and prod lanes.
-# Pull-request previews are Harbor-managed ephemeral stacks, not durable routes
+# Pull-request previews are Launchplane-managed ephemeral stacks, not durable routes
 # in this catalog.
 
 [[targets]]

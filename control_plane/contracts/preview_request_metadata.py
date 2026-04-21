@@ -4,75 +4,75 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-HARBOR_PREVIEW_REQUEST_BLOCK_INFO_STRING = "harbor-preview"
-HARBOR_ALLOWED_COMPANION_REPOS: tuple[str, ...] = ("shared-addons",)
-HarborPreviewRequestParseStatus = Literal["missing", "valid", "invalid"]
+LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING = "launchplane-preview"
+LAUNCHPLANE_ALLOWED_COMPANION_REPOS: tuple[str, ...] = ("shared-addons",)
+LaunchplanePreviewRequestParseStatus = Literal["missing", "valid", "invalid"]
 
 
-class HarborCompanionPullRequestReference(BaseModel):
+class LaunchplaneCompanionPullRequestReference(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     repo: str
     pr_number: int = Field(ge=1)
 
     @model_validator(mode="after")
-    def _validate_reference(self) -> "HarborCompanionPullRequestReference":
+    def _validate_reference(self) -> "LaunchplaneCompanionPullRequestReference":
         normalized_repo = self.repo.strip()
         if not normalized_repo:
-            raise ValueError("Harbor companion pull request reference requires repo")
-        if normalized_repo not in HARBOR_ALLOWED_COMPANION_REPOS:
+            raise ValueError("Launchplane companion pull request reference requires repo")
+        if normalized_repo not in LAUNCHPLANE_ALLOWED_COMPANION_REPOS:
             raise ValueError(
-                f"Harbor companion repo {normalized_repo!r} is not allowlisted for v1 preview metadata"
+                f"Launchplane companion repo {normalized_repo!r} is not allowlisted for v1 preview metadata"
             )
         return self
 
 
-class HarborPreviewRequestMetadata(BaseModel):
+class LaunchplanePreviewRequestMetadata(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     baseline_channel: str = "testing"
-    companions: tuple[HarborCompanionPullRequestReference, ...] = ()
+    companions: tuple[LaunchplaneCompanionPullRequestReference, ...] = ()
 
     @model_validator(mode="after")
-    def _validate_metadata(self) -> "HarborPreviewRequestMetadata":
+    def _validate_metadata(self) -> "LaunchplanePreviewRequestMetadata":
         if not self.baseline_channel.strip():
-            raise ValueError("Harbor preview request metadata requires baseline_channel")
+            raise ValueError("Launchplane preview request metadata requires baseline_channel")
         seen_repos: set[str] = set()
         for companion in self.companions:
             normalized_repo = companion.repo.strip()
             if normalized_repo in seen_repos:
                 raise ValueError(
-                    f"Harbor preview request metadata contains duplicate companion repo {normalized_repo!r}"
+                    f"Launchplane preview request metadata contains duplicate companion repo {normalized_repo!r}"
                 )
             seen_repos.add(normalized_repo)
         return self
 
 
-class HarborPreviewRequestParseResult(BaseModel):
+class LaunchplanePreviewRequestParseResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    status: HarborPreviewRequestParseStatus
-    metadata: HarborPreviewRequestMetadata | None = None
+    status: LaunchplanePreviewRequestParseStatus
+    metadata: LaunchplanePreviewRequestMetadata | None = None
     error: str = ""
 
     @model_validator(mode="after")
-    def _validate_result(self) -> "HarborPreviewRequestParseResult":
+    def _validate_result(self) -> "LaunchplanePreviewRequestParseResult":
         if self.status == "valid":
             if self.metadata is None:
-                raise ValueError("valid Harbor preview request parse result requires metadata")
+                raise ValueError("valid Launchplane preview request parse result requires metadata")
             if self.error.strip():
-                raise ValueError("valid Harbor preview request parse result cannot include error")
+                raise ValueError("valid Launchplane preview request parse result cannot include error")
             return self
         if self.status == "missing":
             if self.metadata is not None:
-                raise ValueError("missing Harbor preview request parse result cannot include metadata")
+                raise ValueError("missing Launchplane preview request parse result cannot include metadata")
             if self.error.strip():
-                raise ValueError("missing Harbor preview request parse result cannot include error")
+                raise ValueError("missing Launchplane preview request parse result cannot include error")
             return self
         if self.metadata is not None:
-            raise ValueError("invalid Harbor preview request parse result cannot include metadata")
+            raise ValueError("invalid Launchplane preview request parse result cannot include metadata")
         if not self.error.strip():
-            raise ValueError("invalid Harbor preview request parse result requires error")
+            raise ValueError("invalid Launchplane preview request parse result requires error")
         return self

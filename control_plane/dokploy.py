@@ -24,7 +24,7 @@ CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_F
 CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE"
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
-DEFAULT_HARBOR_CONFIG_DIRNAME = "harbor"
+DEFAULT_LAUNCHPLANE_CONFIG_DIRNAME = "launchplane"
 DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME = "dokploy.env"
 DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
@@ -115,7 +115,7 @@ class DokploySourceOfTruth(BaseModel):
                 raise ValueError(
                     "Tracked Dokploy source-of-truth only supports stable remote instances "
                     f"{supported_instances}; found {target_definition.context}/{target_definition.instance}. "
-                    "Use Harbor preview records for PR previews instead of adding another tracked Dokploy lane."
+                    "Use Launchplane preview records for PR previews instead of adding another tracked Dokploy lane."
                 )
         return self
 
@@ -311,11 +311,10 @@ def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[s
     return control_plane_secrets.overlay_dokploy_environment_values(environment_values=environment_values)
 
 
-def resolve_harbor_config_dir() -> Path:
+def resolve_launchplane_config_dir() -> Path:
     configured_xdg_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    if configured_xdg_home:
-        return Path(configured_xdg_home).expanduser() / DEFAULT_HARBOR_CONFIG_DIRNAME
-    return Path.home() / ".config" / DEFAULT_HARBOR_CONFIG_DIRNAME
+    config_root = Path(configured_xdg_home).expanduser() if configured_xdg_home else Path.home() / ".config"
+    return config_root / DEFAULT_LAUNCHPLANE_CONFIG_DIRNAME
 
 
 def resolve_control_plane_dokploy_source_file(control_plane_root: Path) -> Path:
@@ -411,7 +410,7 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     host = environment_values.get("DOKPLOY_HOST", "").strip()
     token = environment_values.get("DOKPLOY_TOKEN", "").strip()
     if not host or not token:
-        external_env_file = resolve_harbor_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
+        external_env_file = resolve_launchplane_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
         raise click.ClickException(
             "Missing DOKPLOY_HOST or DOKPLOY_TOKEN for control-plane Dokploy execution. "
             f"Define them in the current process environment, set {CONTROL_PLANE_ENV_FILE_ENV_VAR}, "
@@ -430,7 +429,7 @@ def resolve_control_plane_env_file(control_plane_root: Path) -> Path | None:
     legacy_repo_env_file = control_plane_root / ".env"
     if legacy_repo_env_file.exists():
         return legacy_repo_env_file
-    external_env_file = resolve_harbor_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
+    external_env_file = resolve_launchplane_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
     if external_env_file.exists():
         return external_env_file
     return None

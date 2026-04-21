@@ -46,7 +46,7 @@ def resolve_runtime_environments_file(control_plane_root: Path) -> Path | None:
     legacy_repo_file = control_plane_root / DEFAULT_RUNTIME_ENVIRONMENTS_FILE
     if legacy_repo_file.exists():
         return legacy_repo_file
-    external_file = control_plane_dokploy.resolve_harbor_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
+    external_file = control_plane_dokploy.resolve_launchplane_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
     if external_file.exists():
         return external_file
     return None
@@ -57,7 +57,7 @@ def load_runtime_environment_definition(
 ) -> RuntimeEnvironmentDefinition:
     environments_file = resolve_runtime_environments_file(control_plane_root)
     if environments_file is None or not environments_file.exists():
-        external_file = control_plane_dokploy.resolve_harbor_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
+        external_file = control_plane_dokploy.resolve_launchplane_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
         raise click.ClickException(
             "Missing control-plane runtime environments file. "
             f"Set {RUNTIME_ENVIRONMENTS_FILE_ENV_VAR}, create {external_file}, "

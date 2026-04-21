@@ -1,18 +1,18 @@
 services:
-  harbor:
-    image: ${DOCKER_IMAGE_REFERENCE:-harbor:local}
+  launchplane:
+    image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
     pull_policy: always
     env_file:
       - .env
     command:
-      - /app/scripts/start-harbor-service.sh
+      - /app/scripts/start-launchplane-service.sh
     environment:
-      HARBOR_SERVICE_AUDIENCE: ${HARBOR_SERVICE_AUDIENCE:-harbor.shinycomputers.com}
-      HARBOR_SERVICE_HOST: 0.0.0.0
-      HARBOR_SERVICE_PORT: 8080
-      HARBOR_STATE_DIR: /app/state
+      LAUNCHPLANE_SERVICE_AUDIENCE: ${LAUNCHPLANE_SERVICE_AUDIENCE:-launchplane.shinycomputers.com}
+      LAUNCHPLANE_SERVICE_HOST: 0.0.0.0
+      LAUNCHPLANE_SERVICE_PORT: 8080
+      LAUNCHPLANE_STATE_DIR: /app/state
     volumes:
-      - harbor-state:/app/state
+      - launchplane-state:/app/state
 
 volumes:
-  harbor-state: {}
+  launchplane-state: {}

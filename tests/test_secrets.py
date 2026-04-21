@@ -19,11 +19,11 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
-class HarborSecretsTests(unittest.TestCase):
+class LaunchplaneSecretsTests(unittest.TestCase):
     def test_read_dokploy_config_prefers_managed_secret_overlay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "harbor.sqlite3")
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             (control_plane_root / ".env").write_text(
                 "DOKPLOY_HOST=https://dokploy.file.example\nDOKPLOY_TOKEN=file-token\n",
                 encoding="utf-8",
@@ -33,8 +33,8 @@ class HarborSecretsTests(unittest.TestCase):
             with patch.dict(
                 os.environ,
                 {
-                    control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "HARBOR_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
                 },
                 clear=True,
             ):
@@ -64,7 +64,7 @@ class HarborSecretsTests(unittest.TestCase):
     def test_resolve_runtime_environment_values_prefers_managed_secret_overlay(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "harbor.sqlite3")
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
             environments_file.parent.mkdir(parents=True, exist_ok=True)
             environments_file.write_text(
@@ -79,7 +79,7 @@ GITHUB_WEBHOOK_SECRET = "file-context-secret"
 
 [contexts.opw.instances.testing.env]
 ODOO_DB_PASSWORD = "file-instance-secret"
-HARBOR_PREVIEW_BASE_URL = "https://preview.example.com"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://preview.example.com"
 """.strip()
                 + "\n",
                 encoding="utf-8",
@@ -89,8 +89,8 @@ HARBOR_PREVIEW_BASE_URL = "https://preview.example.com"
             with patch.dict(
                 os.environ,
                 {
-                    control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "HARBOR_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
                 },
                 clear=True,
             ):
@@ -132,13 +132,13 @@ HARBOR_PREVIEW_BASE_URL = "https://preview.example.com"
                 self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "db-shared-master")
                 self.assertEqual(resolved_values["GITHUB_WEBHOOK_SECRET"], "db-context-secret")
                 self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "db-instance-secret")
-                self.assertEqual(resolved_values["HARBOR_PREVIEW_BASE_URL"], "https://preview.example.com")
+                self.assertEqual(resolved_values["LAUNCHPLANE_PREVIEW_BASE_URL"], "https://preview.example.com")
             store.close()
 
     def test_import_bootstrap_secrets_pulls_existing_dokploy_and_runtime_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "harbor.sqlite3")
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             (control_plane_root / ".env").write_text(
                 "DOKPLOY_HOST=https://dokploy.bootstrap.example\nDOKPLOY_TOKEN=bootstrap-token\n",
                 encoding="utf-8",
@@ -154,7 +154,7 @@ ODOO_MASTER_PASSWORD = "shared-master"
 
 [contexts.opw.shared_env]
 GITHUB_WEBHOOK_SECRET = "webhook-secret"
-HARBOR_PREVIEW_BASE_URL = "https://preview.example.com"
+LAUNCHPLANE_PREVIEW_BASE_URL = "https://preview.example.com"
 
 [contexts.opw.instances.testing.env]
 ODOO_DB_PASSWORD = "instance-password"
@@ -166,7 +166,7 @@ ODOO_DB_PASSWORD = "instance-password"
             store.ensure_schema()
             with patch.dict(
                 os.environ,
-                {control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
                 clear=True,
             ):
                 summary = control_plane_secrets.import_bootstrap_secrets(
@@ -193,7 +193,7 @@ ODOO_DB_PASSWORD = "instance-password"
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "harbor.sqlite3")
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             (control_plane_root / ".env").write_text(
                 "DOKPLOY_HOST=https://dokploy.bootstrap.example\nDOKPLOY_TOKEN=bootstrap-token\n",
                 encoding="utf-8",
@@ -212,7 +212,7 @@ GITHUB_WEBHOOK_SECRET = "webhook-secret"
             )
             with patch.dict(
                 os.environ,
-                {control_plane_secrets.HARBOR_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
                 clear=True,
             ):
                 result = runner.invoke(
