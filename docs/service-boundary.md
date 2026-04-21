@@ -35,6 +35,7 @@ The first service slice is now implemented locally in this repo:
   - `POST /v1/drivers/verireel/testing-deploy`
   - `POST /v1/drivers/verireel/prod-deploy`
   - `POST /v1/drivers/verireel/prod-promotion`
+  - `POST /v1/drivers/verireel/prod-rollback`
   - `POST /v1/drivers/verireel/preview-refresh`
   - `POST /v1/drivers/verireel/preview-destroy`
 
@@ -175,6 +176,7 @@ allowed actions:
   - backup_gate.write
   - verireel_prod_deploy.execute
   - verireel_prod_promotion.execute
+  - verireel_prod_rollback.execute
   - deployment.write
   - promotion.write
 ```
@@ -226,6 +228,7 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
 - `POST /v1/drivers/verireel/prod-promotion`
+- `POST /v1/drivers/verireel/prod-rollback`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
 
@@ -233,10 +236,11 @@ The first preview driver cut stays intentionally narrow: Launchplane owns previe
 runtime refresh and teardown, while VeriReel still owns image build/publish,
 browser verification, and the follow-up preview evidence write.
 
-The remaining VeriReel prod rollback tail is intentionally not yet folded into
-that driver list. It needs a privileged runtime contract for Proxmox access,
-not only another HTTP route. The current proposed execution model and decision
-points are captured in [`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
+VeriReel prod rollback now has a dedicated Launchplane driver route, but it
+still depends on a privileged delegated-worker runtime contract for Proxmox
+access rather than folding that authority into the main API host. The runtime
+posture and remaining decisions are captured in
+[`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
 
 Do not generalize the full driver surface before a few product-specific routes
 have proven the shape.

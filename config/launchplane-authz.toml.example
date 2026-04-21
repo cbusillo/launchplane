@@ -61,7 +61,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
 contexts = ["verireel"]
-actions = ["promotion.write", "verireel_prod_deploy.execute", "verireel_prod_promotion.execute"]
+actions = ["promotion.write", "verireel_prod_deploy.execute", "verireel_prod_promotion.execute", "verireel_prod_rollback.execute"]
 
 [[github_actions]]
 repository = "example-org/tenant-opw"

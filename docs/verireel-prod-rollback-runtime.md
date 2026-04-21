@@ -109,6 +109,13 @@ today and only moves names around.
 
 Prefer **Option B: Launchplane-owned delegated worker**.
 
+This is now the locked direction for the first implementation cut. The first
+rollback route should be a dedicated driver,
+`POST /v1/drivers/verireel/prod-rollback`, with Launchplane owning request
+authorization, durable rollback state, and post-rollback health verification,
+while a narrow Launchplane-owned worker owns the privileged Proxmox rollback
+command path.
+
 The reason is boundary discipline. VeriReel rollback needs privileged network
 reach and host-local behavior that are materially different from Launchplane's
 normal service ingress. A delegated worker lets Launchplane own the operation
@@ -184,8 +191,8 @@ Use this only if Launchplane should own the entire production finalize
 transaction as one atomic control-plane action.
 
 This can be attractive later, but it couples the current next slice to a bigger
-transactional decision. The dedicated rollback driver is the cleaner immediate
-fit.
+transactional decision. The dedicated rollback driver is the locked immediate
+fit for the first implementation cut.
 
 ## Secret And Config Contract
 
@@ -266,21 +273,25 @@ Required validation before implementation is considered complete:
 - workflow YAML parse after repo rollback-job simplification
 - one operator dry-run against the real Proxmox path
 
-## Open Decisions
+## Remaining Decisions
 
-- Should rollback remain a dedicated explicit driver or move into prod-promotion
-  once the runtime contract is proven?
-- Does the first worker execute only VeriReel prod rollback, or is the worker
-  contract named more generally from day one?
+- Should rollback remain a dedicated explicit driver long-term, or move into
+  prod-promotion once the runtime contract is proven?
 - When Launchplane later owns snapshot capture too, should backup and rollback
   share one privileged worker contract or remain separate operations?
 
 ## Immediate Next Step
 
-Before writing code, choose the execution posture explicitly:
+The execution posture is now chosen:
 
-- **preferred**: Launchplane-owned delegated worker
-- **acceptable only with explicit approval**: direct Launchplane host execution
+- use a Launchplane-owned delegated worker
+- do not keep GitHub as the privileged rollback execution plane
+- do not fold privileged Proxmox authority into the main Launchplane API host
 
-Once that decision is made, the next implementation doc should define the exact
-job payload, record schema, and authz action names for the first rollback route.
+The next implementation work should define and ship the exact job payload,
+record schema, authz action names, and worker command contract for the first
+rollback route.
+
+That first route now exists as `POST /v1/drivers/verireel/prod-rollback`.
+Launchplane still requires explicit worker runtime configuration before the
+route can execute real Proxmox rollback operations outside tests.

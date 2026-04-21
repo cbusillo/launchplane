@@ -86,11 +86,13 @@ Current implementation scope:
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
 - `POST /v1/drivers/verireel/prod-promotion`
+- `POST /v1/drivers/verireel/prod-rollback`
 
-VeriReel prod rollback remains outside the current service execution surface.
-That is deliberate: the remaining gap is a privileged runtime contract for
-Proxmox access, not just another request parser. The proposed next boundary is
-documented in [`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
+VeriReel prod rollback now has a dedicated Launchplane route, but the
+privileged Proxmox path is still intended to stay behind a narrow delegated
+worker contract rather than being absorbed into the main API host. That runtime
+posture is documented in
+[`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz

@@ -42,6 +42,10 @@ from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
     execute_verireel_prod_promotion,
 )
+from control_plane.workflows.verireel_prod_rollback import (
+    VeriReelProdRollbackRequest,
+    execute_verireel_prod_rollback,
+)
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
     VeriReelPreviewRefreshRequest,
@@ -172,6 +176,20 @@ class VeriReelProdPromotionEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelProdPromotionEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel prod promotion requires product 'verireel'.")
+        return self
+
+
+class VeriReelProdRollbackEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    rollback: VeriReelProdRollbackRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelProdRollbackEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel prod rollback requires product 'verireel'.")
         return self
 
 
@@ -338,6 +356,7 @@ def _accepted_payload(
             in {
                 "deployment_record_id",
                 "backup_gate_record_id",
+                "backup_record_id",
                 "inventory_record_id",
                 "preview_id",
                 "generation_id",
@@ -515,6 +534,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/testing-deploy",
         "/v1/drivers/verireel/prod-deploy",
         "/v1/drivers/verireel/prod-promotion",
+        "/v1/drivers/verireel/prod-rollback",
     }
 
     def app(
@@ -1053,6 +1073,49 @@ def create_launchplane_service_app(
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
                     "deployment_record_id": driver_result.deployment_record_id,
+                }
+            elif path == "/v1/drivers/verireel/prod-rollback":
+                request = VeriReelProdRollbackEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_prod_rollback.execute",
+                    product=request.product,
+                    context=request.rollback.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel prod rollback driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_prod_rollback(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.rollback,
+                )
+                result = {
+                    "promotion_record_id": driver_result.promotion_record_id,
+                    "backup_record_id": driver_result.backup_record_id,
                 }
             elif path == "/v1/drivers/verireel/preview-refresh":
                 request = VeriReelPreviewRefreshEnvelope.model_validate(payload)

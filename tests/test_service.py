@@ -23,6 +23,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewRefreshResult,
 )
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
+from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 
 
@@ -1170,6 +1171,125 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "source_git_ref": "abcdef1234567890",
                         "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
                         "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_prod_rollback_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_prod_rollback",
+                return_value=VeriReelProdRollbackResult(
+                    promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    snapshot_name="ver-predeploy-20260421-180000",
+                    rollback_status="pass",
+                    rollback_health_status="pass",
+                    rollback_started_at="2026-04-21T18:20:00Z",
+                    rollback_finished_at="2026-04-21T18:21:00Z",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-rollback",
+                    payload={
+                        "product": "verireel",
+                        "rollback": {
+                            "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                            "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                },
+            )
+            self.assertEqual(payload["result"]["rollback_status"], "pass")
+            execute_mock.assert_called_once()
+
+    def test_verireel_prod_rollback_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": ["promotion.write"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/prod-rollback",
+                payload={
+                    "product": "verireel",
+                    "rollback": {
+                        "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                        "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
                     },
                 },
             )
