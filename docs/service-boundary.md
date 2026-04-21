@@ -26,18 +26,24 @@ The first service slice is now implemented locally in this repo:
 - CLI: `uv run launchplane service serve`
 - health route: `GET /v1/health`
 - authenticated evidence routes:
+  - `POST /v1/evidence/backup-gates`
   - `POST /v1/evidence/deployments`
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
-- first driver route:
+- product driver routes:
   - `POST /v1/drivers/verireel/testing-deploy`
+  - `POST /v1/drivers/verireel/prod-deploy`
+  - `POST /v1/drivers/verireel/prod-promotion`
+  - `POST /v1/drivers/verireel/preview-refresh`
+  - `POST /v1/drivers/verireel/preview-destroy`
 
-That slice now covers the first documented evidence surface end to end plus the
-first explicit Launchplane-owned driver action. Launchplane can verify GitHub OIDC,
-authorize workflow identity claims, accept deployment/promotion/preview
-lifecycle evidence over HTTP, and execute the VeriReel shared testing deploy as
-an authenticated Launchplane route.
+That slice now covers the first documented evidence surface end to end plus
+the current VeriReel-specific driver routes. Launchplane can verify GitHub
+OIDC, authorize workflow identity claims, accept
+deployment/promotion/preview lifecycle evidence over HTTP, and execute the
+current VeriReel deploy, promotion, and preview mutations as authenticated
+Launchplane routes.
 
 ## First Host Assumption
 
@@ -182,6 +188,7 @@ writes, not on every possible operator action.
 ### Evidence ingress endpoints
 
 - `POST /v1/evidence/deployments`
+- `POST /v1/evidence/backup-gates`
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
@@ -216,6 +223,7 @@ The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
+- `POST /v1/drivers/verireel/prod-promotion`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
 

@@ -78,12 +78,14 @@ repo/workflow values before using it.
 Current implementation scope:
 
 - `GET /v1/health`
+- `POST /v1/evidence/backup-gates`
 - `POST /v1/evidence/deployments`
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
+- `POST /v1/drivers/verireel/prod-promotion`
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord, PreviewPullRequestSummary
@@ -21,6 +22,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyResult,
     VeriReelPreviewRefreshResult,
 )
+from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 
 
@@ -637,6 +639,89 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(inventory.promotion_record_id, promotion.record_id)
             self.assertEqual(inventory.promoted_from_instance, "testing")
 
+    def test_backup_gate_endpoint_writes_record_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["backup_gate.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/backup-gates",
+                payload={
+                    "product": "verireel",
+                    "backup_gate": {
+                        "record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                        "context": "verireel",
+                        "instance": "prod",
+                        "created_at": "2026-04-21T18:05:00Z",
+                        "source": "verireel-prod-gate",
+                        "status": "pass",
+                        "evidence": {
+                            "snapshot_name": "ver-predeploy-20260421T180500Z",
+                            "manifest_path": "scratch/prod-gates/ver-predeploy-20260421T180500Z.json",
+                        },
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "backup_gate_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                },
+            )
+            store = FilesystemRecordStore(state_dir=state_dir)
+            backup_gate = store.read_backup_gate_record(
+                "backup-gate-verireel-prod-run-12345-attempt-1"
+            )
+            self.assertEqual(
+                backup_gate,
+                BackupGateRecord(
+                    record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    context="verireel",
+                    instance="prod",
+                    created_at="2026-04-21T18:05:00Z",
+                    source="verireel-prod-gate",
+                    status="pass",
+                    evidence={
+                        "snapshot_name": "ver-predeploy-20260421T180500Z",
+                        "manifest_path": "scratch/prod-gates/ver-predeploy-20260421T180500Z.json",
+                    },
+                ),
+            )
+
     def test_preview_destroyed_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -956,6 +1041,135 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "instance": "prod",
                         "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
                         "source_git_ref": "abcdef1234567890",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_prod_promotion_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_prod_promotion",
+                return_value=VeriReelProdPromotionResult(
+                    promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    deploy_status="pass",
+                    deploy_started_at="2026-04-21T18:20:00Z",
+                    deploy_finished_at="2026-04-21T18:21:15Z",
+                    target_name="ver-prod-app",
+                    target_type="application",
+                    target_id="prod-app-123",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-promotion",
+                    payload={
+                        "product": "verireel",
+                        "promotion": {
+                            "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                            "source_git_ref": "abcdef1234567890",
+                            "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                            "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    "deployment_record_id": "deployment-verireel-prod-run-12345-attempt-1",
+                },
+            )
+            self.assertEqual(payload["result"]["deploy_status"], "pass")
+            self.assertEqual(
+                payload["result"]["promotion_record_id"],
+                "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+            )
+            execute_mock.assert_called_once()
+
+    def test_verireel_prod_promotion_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": ["promotion.write"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/prod-promotion",
+                payload={
+                    "product": "verireel",
+                    "promotion": {
+                        "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                        "source_git_ref": "abcdef1234567890",
+                        "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                        "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
                     },
                 },
             )
