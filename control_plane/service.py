@@ -4,6 +4,7 @@ from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import os
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -12,6 +13,7 @@ from wsgiref.simple_server import make_server
 import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from control_plane import dokploy as control_plane_dokploy
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -52,6 +54,10 @@ from control_plane.workflows.verireel_preview_driver import (
     execute_verireel_preview_destroy,
     execute_verireel_preview_refresh,
 )
+
+
+_LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 
 
 class PreviewGenerationEvidenceEnvelope(BaseModel):
@@ -221,6 +227,43 @@ class VeriReelPreviewDestroyEnvelope(BaseModel):
         return self
 
 
+class LaunchplaneSelfDeployRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    target_type: str
+    target_id: str
+    image_reference: str
+    no_cache: bool = False
+
+    @model_validator(mode="after")
+    def _validate_values(self) -> "LaunchplaneSelfDeployRequest":
+        normalized_target_type = self.target_type.strip()
+        if normalized_target_type not in {"compose", "application"}:
+            raise ValueError("Launchplane self deploy requires target_type 'compose' or 'application'.")
+        if not self.target_id.strip():
+            raise ValueError("Launchplane self deploy requires target_id.")
+        if not self.image_reference.strip():
+            raise ValueError("Launchplane self deploy requires image_reference.")
+        self.target_type = normalized_target_type
+        self.target_id = self.target_id.strip()
+        self.image_reference = self.image_reference.strip()
+        return self
+
+
+class LaunchplaneSelfDeployEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    deploy: LaunchplaneSelfDeployRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "LaunchplaneSelfDeployEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Launchplane self deploy requires product 'launchplane'.")
+        return self
+
+
 def _json_response(
     *,
     start_response: Callable[[str, list[tuple[str, str]]], None],
@@ -298,6 +341,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "secret.list", {"context": segments[2], "instance": segments[4]}
     if len(segments) == 5 and segments[:2] == ["v1", "contexts"] and segments[3:] == ["operations", "recent"]:
         return "operations.read", {"context": segments[2]}
+    if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
+        return "launchplane_service.read", {}
     return None
 
 
@@ -361,6 +406,9 @@ def _accepted_payload(
                 "preview_id",
                 "generation_id",
                 "promotion_record_id",
+                "target_id",
+                "target_type",
+                "image_reference",
                 "transition",
             }
         },
@@ -512,6 +560,55 @@ def _bearer_token(environ: dict[str, object]) -> str:
     return token.strip()
 
 
+def _launchplane_runtime_payload(*, storage_backend: str) -> dict[str, object]:
+    return {
+        "docker_image_reference": os.environ.get(_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "").strip(),
+        "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
+        "storage_backend": storage_backend,
+    }
+
+
+def _request_launchplane_self_deploy(
+    *,
+    control_plane_root_path: Path,
+    request: LaunchplaneSelfDeployRequest,
+) -> dict[str, object]:
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root_path)
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=request.target_type,
+        target_id=request.target_id,
+    )
+    raw_env_text = str(target_payload.get("env") or "")
+    updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
+        raw_env_text,
+        updates={_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference},
+    )
+    if updated_env_text != raw_env_text:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=request.target_type,
+            target_id=request.target_id,
+            target_payload=target_payload,
+            env_text=updated_env_text,
+        )
+    control_plane_dokploy.trigger_deployment(
+        host=host,
+        token=token,
+        target_type=request.target_type,
+        target_id=request.target_id,
+        no_cache=request.no_cache,
+    )
+    return {
+        "target_type": request.target_type,
+        "target_id": request.target_id,
+        "image_reference": request.image_reference,
+        "image_reference_changed": updated_env_text != raw_env_text,
+    }
+
+
 def create_launchplane_service_app(
     *,
     state_dir: Path,
@@ -529,6 +626,7 @@ def create_launchplane_service_app(
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/evidence/promotions",
+        "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/testing-deploy",
@@ -831,6 +929,34 @@ def create_launchplane_service_app(
                             "secrets": statuses,
                         },
                     )
+                if action == "launchplane_service.read":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Launchplane service runtime state.",
+                                },
+                            },
+                        )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "runtime": _launchplane_runtime_payload(storage_backend=storage_backend),
+                        },
+                    )
                 context_name = params["context"]
                 if not authz_policy.allows(
                     identity=identity,
@@ -951,6 +1077,41 @@ def create_launchplane_service_app(
                     return idempotent_response
                 record_store.write_backup_gate_record(request.backup_gate)
                 result = {"backup_gate_record_id": request.backup_gate.record_id}
+            elif path == "/v1/drivers/launchplane/self-deploy":
+                request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot execute Launchplane self deploy.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = _request_launchplane_self_deploy(
+                    control_plane_root_path=resolved_root,
+                    request=request.deploy,
+                )
             elif path == "/v1/drivers/verireel/testing-deploy":
                 request = VeriReelTestingDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(

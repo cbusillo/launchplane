@@ -140,9 +140,6 @@ manual laptop-side image swap. The current operator posture is:
 The repo now includes `.github/workflows/deploy-launchplane.yml` for that path.
 Configure these GitHub settings before enabling it:
 
-- repository secrets:
-  - `DOKPLOY_HOST`
-  - `DOKPLOY_TOKEN`
 - repository variables:
   - `LAUNCHPLANE_DOKPLOY_TARGET_TYPE`
   - `LAUNCHPLANE_DOKPLOY_TARGET_ID`
@@ -150,6 +147,10 @@ Configure these GitHub settings before enabling it:
   - optional `LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
+
+The deploy workflow now uses GitHub OIDC plus Launchplane's own service API to
+request a self-deploy. Dokploy credentials should live in Launchplane-managed
+secrets inside the shared store, not in GitHub repository secrets.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must point at Launchplane URLs that GitHub-hosted
 runners can reach, typically the public `https://.../v1/health` endpoint.
@@ -167,8 +168,8 @@ runtime contract pieces such as:
 
 - `LAUNCHPLANE_DATABASE_URL`
 - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
-- `DOKPLOY_HOST`
-- `DOKPLOY_TOKEN`
+- Launchplane-managed `DOKPLOY_HOST`
+- Launchplane-managed `DOKPLOY_TOKEN`
 - a Dokploy SSH key for private `git@github.com:...` compose sources
 
 It also reports warnings when the live target lacks a policy input, target-id

@@ -134,9 +134,6 @@ testing environment of its own.
 
 Required GitHub configuration for that workflow:
 
-- repository secrets:
-  - `DOKPLOY_HOST`
-  - `DOKPLOY_TOKEN`
 - repository variables:
   - `LAUNCHPLANE_DOKPLOY_TARGET_TYPE`
   - `LAUNCHPLANE_DOKPLOY_TARGET_ID`
@@ -144,6 +141,10 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
+
+The workflow should use GitHub OIDC to call Launchplane's own service API.
+Keep Dokploy host/token authority in Launchplane-managed secrets instead of
+duplicating those credentials in GitHub repository secrets.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from GitHub-hosted runners. Use the
 public Launchplane `GET /v1/health` endpoint rather than an internal-only Dokploy
@@ -163,11 +164,10 @@ uv run launchplane service inspect-dokploy-target \
 ```
 
 That command reports only non-secret metadata and fails closed when the live
-Launchplane target is missing critical runtime pieces such as `LAUNCHPLANE_DATABASE_URL`,
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, Launchplane-managed Dokploy secret bindings,
-or a Dokploy SSH key for a private `git@github.com:...` compose source. The
-GitHub deploy workflow now runs that same preflight before it builds or deploys
-a new image.
+Launchplane target is missing critical runtime pieces such as
+`LAUNCHPLANE_DATABASE_URL`, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`,
+Launchplane-managed Dokploy secret bindings, or a Dokploy SSH key for a private
+`git@github.com:...` compose source.
 
 The intended live service contract is now bootstrap-only target env plus
 DB-backed Launchplane records:

@@ -174,6 +174,140 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "ok")
             self.assertEqual(payload["storage_backend"], "filesystem")
 
+    def test_service_runtime_endpoint_reports_current_image_reference(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service.read"],
+                        }
+                    ]
+                }
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "DOCKER_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:test",
+                    "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane.shinycomputers.com",
+                },
+                clear=True,
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=Path(temporary_directory_name) / "state",
+                    verifier=_StubVerifier(
+                        _identity(
+                            repository="cbusillo/launchplane",
+                            workflow_ref=(
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ),
+                            event_name="workflow_dispatch",
+                        )
+                    ),
+                    authz_policy=policy,
+                    control_plane_root_path=Path(temporary_directory_name),
+                )
+
+                status_code, payload = _invoke_app(app, method="GET", path="/v1/service/runtime")
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(
+            payload["runtime"]["docker_image_reference"],
+            "ghcr.io/cbusillo/launchplane@sha256:test",
+        )
+        self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
+
+    def test_self_deploy_endpoint_updates_target_env_and_triggers_dokploy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            with (
+                patch(
+                    "control_plane.service.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:old\n"},
+                ),
+                patch(
+                    "control_plane.service.control_plane_dokploy.update_dokploy_target_env"
+                ) as update_env_mock,
+                patch(
+                    "control_plane.service.control_plane_dokploy.trigger_deployment"
+                ) as trigger_mock,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/launchplane/self-deploy",
+                    payload={
+                        "product": "launchplane",
+                        "deploy": {
+                            "target_type": "compose",
+                            "target_id": "compose-123",
+                            "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                        },
+                    },
+                    headers={"Idempotency-Key": "launchplane-self-deploy:test"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["target_id"], "compose-123")
+        self.assertEqual(payload["records"]["target_type"], "compose")
+        self.assertEqual(
+            payload["records"]["image_reference"],
+            "ghcr.io/cbusillo/launchplane@sha256:new",
+        )
+        update_env_mock.assert_called_once()
+        updated_env_text = update_env_mock.call_args.kwargs["env_text"]
+        self.assertIn("DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new", updated_env_text)
+        trigger_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="token-123",
+            target_type="compose",
+            target_id="compose-123",
+            no_cache=False,
+        )
+
     def test_preview_generation_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
