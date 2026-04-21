@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import secrets
 import shlex
@@ -600,42 +601,121 @@ def _run_application_command(
     )
 
 
-def _build_preview_database_command(*, action: Literal["ensure", "drop"], admin_database_url: str, database_name: str, role_name: str, password: str = "") -> str:
-    env_parts = [
-        f"ADMIN_DATABASE_URL={shlex.quote(admin_database_url)}",
-        f"DATABASE_NAME={shlex.quote(database_name)}",
-        f"ROLE_NAME={shlex.quote(role_name)}",
-        f"ACTION={shlex.quote(action)}",
-    ]
-    if action == "ensure":
-        env_parts.append(f"ROLE_PASSWORD={shlex.quote(password)}")
-    script = "".join(
+def _preview_database_admin_module_source() -> str:
+    return "".join(
         (
-            "const { Client } = require('pg');",
-            "const qid=(v)=>'\"'+String(v).replace(/\"/g,'\"\"')+'\"';",
-            "const ql=(v)=>\"'\"+String(v).replace(/'/g,\"''\")+\"'\";",
-            "(async()=>{",
-            "const client=new Client({connectionString:process.env.ADMIN_DATABASE_URL});",
-            "await client.connect();",
-            "try{",
-            "if(process.env.ACTION==='ensure'){",
-            "const role=process.env.ROLE_NAME; const db=process.env.DATABASE_NAME; const password=process.env.ROLE_PASSWORD || '';",
-            "const roleExists=await client.query('SELECT 1 FROM pg_roles WHERE rolname = $1',[role]);",
-            "await client.query(roleExists.rowCount===0 ? `CREATE ROLE ${qid(role)} LOGIN PASSWORD ${ql(password)}` : `ALTER ROLE ${qid(role)} WITH LOGIN PASSWORD ${ql(password)}`);",
-            "const dbExists=await client.query('SELECT 1 FROM pg_database WHERE datname = $1',[db]);",
-            "if(dbExists.rowCount===0){ await client.query(`CREATE DATABASE ${qid(db)} OWNER ${qid(role)}`); }",
-            "await client.query(`GRANT ALL PRIVILEGES ON DATABASE ${qid(db)} TO ${qid(role)}`);",
-            "} else {",
-            "const db=process.env.DATABASE_NAME; const role=process.env.ROLE_NAME;",
-            "await client.query('SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()', [db]);",
-            "await client.query(`DROP DATABASE IF EXISTS ${qid(db)}`);",
-            "await client.query(`DROP ROLE IF EXISTS ${qid(role)}`);",
-            "}",
-            "} finally { await client.end(); }",
-            "})().catch((error)=>{ console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });",
+            '#!/usr/bin/env node\n',
+            'import { Client } from "pg";\n',
+            'import { pathToFileURL } from "node:url";\n',
+            'function quoteIdentifier(value) { return `"${String(value).replace(/"/g, """")}"`; }\n',
+            "function quoteLiteral(value) { return `'${String(value).replace(/'/g, \"''\")}'`; }\n",
+            'function parseArgs(argv) {\n',
+            '  const options = { action: "", adminDatabaseUrl: "", databaseName: "", roleName: "", password: "" };\n',
+            '  for (let index = 0; index < argv.length; index += 1) {\n',
+            '    const arg = argv[index];\n',
+            '    const value = argv[index + 1] ?? "";\n',
+            '    if (arg === "--action") { options.action = value; index += 1; continue; }\n',
+            '    if (arg === "--admin-database-url") { options.adminDatabaseUrl = value; index += 1; continue; }\n',
+            '    if (arg === "--database-name") { options.databaseName = value; index += 1; continue; }\n',
+            '    if (arg === "--role-name") { options.roleName = value; index += 1; continue; }\n',
+            '    if (arg === "--password") { options.password = value; index += 1; continue; }\n',
+            '    throw new Error(`Unknown option: ${arg}`);\n',
+            '  }\n',
+            '  if (!["ensure", "drop"].includes(options.action)) { throw new Error("--action must be one of ensure or drop."); }\n',
+            '  if (!options.adminDatabaseUrl) { throw new Error("Missing required --admin-database-url value."); }\n',
+            '  if (!options.databaseName) { throw new Error("Missing required --database-name value."); }\n',
+            '  if (!options.roleName) { throw new Error("Missing required --role-name value."); }\n',
+            '  if (options.action === "ensure" && !options.password) { throw new Error("Missing required --password value for ensure."); }\n',
+            '  return options;\n',
+            '}\n',
+            'async function ensureDatabase(client, databaseName, roleName, password) {\n',
+            '  const existingRole = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [roleName]);\n',
+            '  if (existingRole.rowCount === 0) {\n',
+            '    await client.query(`CREATE ROLE ${quoteIdentifier(roleName)} LOGIN PASSWORD ${quoteLiteral(password)}`);\n',
+            '  } else {\n',
+            '    await client.query(`ALTER ROLE ${quoteIdentifier(roleName)} WITH LOGIN PASSWORD ${quoteLiteral(password)}`);\n',
+            '  }\n',
+            '  const existingDatabase = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [databaseName]);\n',
+            '  if (existingDatabase.rowCount === 0) {\n',
+            '    await client.query(`CREATE DATABASE ${quoteIdentifier(databaseName)} OWNER ${quoteIdentifier(roleName)}`);\n',
+            '  }\n',
+            '  await client.query(`GRANT ALL PRIVILEGES ON DATABASE ${quoteIdentifier(databaseName)} TO ${quoteIdentifier(roleName)}`);\n',
+            '}\n',
+            'async function dropDatabase(client, databaseName, roleName) {\n',
+            '  await client.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [databaseName]);\n',
+            '  await client.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)}`);\n',
+            '  await client.query(`DROP ROLE IF EXISTS ${quoteIdentifier(roleName)}`);\n',
+            '}\n',
+            'export async function main(argv = process.argv.slice(2)) {\n',
+            '  const options = parseArgs(argv);\n',
+            '  const client = new Client({ connectionString: options.adminDatabaseUrl });\n',
+            '  await client.connect();\n',
+            '  try {\n',
+            '    if (options.action === "ensure") {\n',
+            '      await ensureDatabase(client, options.databaseName, options.roleName, options.password);\n',
+            '      return;\n',
+            '    }\n',
+            '    await dropDatabase(client, options.databaseName, options.roleName);\n',
+            '  } finally {\n',
+            '    await client.end();\n',
+            '  }\n',
+            '}\n',
+            'if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {\n',
+            '  main().catch((error) => {\n',
+            '    console.error(error instanceof Error ? error.message : String(error));\n',
+            '    process.exit(1);\n',
+            '  });\n',
+            '}\n',
         )
     )
-    return f"{' '.join(env_parts)} node -e {shlex.quote(script)}"
+
+
+def _preview_database_admin_runner_source() -> str:
+    return "".join(
+        (
+            'import { pathToFileURL } from "node:url";\n',
+            'const argv = JSON.parse(Buffer.from(process.env.PREVIEW_DB_ARGS_BASE64 || "", "base64").toString("utf8"));\n',
+            'const bundledScriptPath = process.argv[2];\n',
+            'process.argv[1] = "";\n',
+            'const bundled = await import(pathToFileURL(bundledScriptPath).href);\n',
+            'process.argv[1] = bundledScriptPath;\n',
+            'await bundled.main(argv);\n',
+        )
+    )
+
+
+def _build_preview_database_command(*, action: Literal["ensure", "drop"], admin_database_url: str, database_name: str, role_name: str, password: str = "") -> str:
+    suffix = secrets.token_hex(6)
+    temp_script = f".preview-db-admin-{suffix}.mjs"
+    temp_runner = f".preview-db-admin-runner-{suffix}.mjs"
+    module_source = _preview_database_admin_module_source().encode("utf-8")
+    runner_source = _preview_database_admin_runner_source().encode("utf-8")
+    module_b64 = base64.b64encode(module_source).decode("ascii")
+    runner_b64 = base64.b64encode(runner_source).decode("ascii")
+    argv = [
+        "--action",
+        action,
+        "--admin-database-url",
+        admin_database_url,
+        "--database-name",
+        database_name,
+        "--role-name",
+        role_name,
+    ]
+    if action == "ensure":
+        argv.extend(["--password", password])
+    argv_b64 = base64.b64encode(json.dumps(argv, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    return (
+        f'temp_script="{temp_script}"; '
+        f'temp_runner="{temp_runner}"; '
+        f'status=0; '
+        f'printf "%s" {shlex.quote(module_b64)} | base64 -d > "$temp_script"; '
+        f'status=$?; '
+        f'if [ "$status" -eq 0 ]; then printf "%s" {shlex.quote(runner_b64)} | base64 -d > "$temp_runner"; status=$?; fi; '
+        f'if [ "$status" -eq 0 ]; then PREVIEW_DB_ARGS_BASE64={shlex.quote(argv_b64)} node "$temp_runner" "$temp_script"; status=$?; fi; '
+        f'rm -f "$temp_script" "$temp_runner" || true; '
+        f'exit "$status"'
+    )
 
 
 def _wait_for_preview_health(*, preview_url: str, timeout_seconds: int) -> None:
