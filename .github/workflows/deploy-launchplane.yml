@@ -20,6 +20,7 @@ on:
 permissions:
   actions: read
   contents: read
+  id-token: write
   packages: write
 
 concurrency:
@@ -36,8 +37,6 @@ jobs:
       github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     env:
-      DOKPLOY_HOST: ${{ secrets.DOKPLOY_HOST }}
-      DOKPLOY_TOKEN: ${{ secrets.DOKPLOY_TOKEN }}
       LAUNCHPLANE_DOKPLOY_TARGET_ID: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_DOKPLOY_TARGET_TYPE: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_TYPE }}
       LAUNCHPLANE_DEPLOY_HEALTH_URLS: ${{ vars.LAUNCHPLANE_DEPLOY_HEALTH_URLS }}
@@ -82,11 +81,31 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          : "${DOKPLOY_HOST:?Missing DOKPLOY_HOST secret}"
-          : "${DOKPLOY_TOKEN:?Missing DOKPLOY_TOKEN secret}"
           : "${LAUNCHPLANE_DOKPLOY_TARGET_TYPE:?Missing LAUNCHPLANE_DOKPLOY_TARGET_TYPE variable}"
           : "${LAUNCHPLANE_DOKPLOY_TARGET_ID:?Missing LAUNCHPLANE_DOKPLOY_TARGET_ID variable}"
           : "${LAUNCHPLANE_DEPLOY_HEALTH_URLS:?Missing LAUNCHPLANE_DEPLOY_HEALTH_URLS variable}"
+
+      - name: Resolve Launchplane service endpoint
+        id: service
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          python - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          raw_urls = [value.strip() for value in os.environ["LAUNCHPLANE_DEPLOY_HEALTH_URLS"].split(",") if value.strip()]
+          if not raw_urls:
+              raise SystemExit("Missing Launchplane deploy health URL.")
+          parsed = urlsplit(raw_urls[0])
+          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+              raise SystemExit(f"Could not derive Launchplane service endpoint from {raw_urls[0]!r}.")
+          service_url = f"{parsed.scheme}://{parsed.netloc}"
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"service_url={service_url}\n")
+              handle.write(f"service_audience={parsed.hostname}\n")
+          PY
 
       - name: Checkout
         uses: actions/checkout@v6
@@ -100,15 +119,6 @@ jobs:
         uses: actions/setup-python@v6
         with:
           python-version-file: pyproject.toml
-
-      - name: Preflight Dokploy Launchplane target
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          uv run launchplane service inspect-dokploy-target \
-            --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-            --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID"
 
       - name: Set up Docker Buildx
         if: steps.prep.outputs.should_build == 'true'
@@ -160,23 +170,72 @@ jobs:
           fi
           echo "image_reference=$image_reference" >> "$GITHUB_OUTPUT"
 
-      - name: Deploy Launchplane in Dokploy
+      - name: Request Launchplane self deploy
         shell: bash
         run: |
           set -euo pipefail
 
-          health_args=()
-          while IFS= read -r raw_url; do
-            health_url="$(printf '%s' "$raw_url" | xargs)"
-            if [ -n "$health_url" ]; then
-              health_args+=(--health-url "$health_url")
-            fi
-          done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
+            | jq -r '.value'
+          })"
 
-          uv run launchplane service deploy-dokploy-image \
-            --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-            --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
-            --image-reference "${{ steps.image.outputs.image_reference }}" \
-            --deploy-timeout-seconds "${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600}" \
-            --health-timeout-seconds "${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}" \
-            "${health_args[@]}"
+          request_payload="$({
+            jq -n \
+              --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+              --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+              --arg image_reference "${{ steps.image.outputs.image_reference }}" \
+              '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference}}'
+          })"
+
+          curl -fsSL \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H "Content-Type: application/json" \
+            -H "Idempotency-Key: launchplane-self-deploy:${{ steps.image.outputs.image_reference }}" \
+            --data "$request_payload" \
+            "${{ steps.service.outputs.service_url }}/v1/drivers/launchplane/self-deploy"
+
+      - name: Wait for deployed Launchplane image
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          expected_image_reference="${{ steps.image.outputs.image_reference }}"
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            all_healthy=1
+            while IFS= read -r raw_url; do
+              health_url="$(printf '%s' "$raw_url" | xargs)"
+              if [ -z "$health_url" ]; then
+                continue
+              fi
+              response_body="$(curl -fsSL "$health_url" 2>/dev/null || true)"
+              if [ -z "$response_body" ] || ! printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+                all_healthy=0
+                break
+              fi
+            done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
+
+            oidc_token="$({
+              curl -fsSL \
+                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
+              | jq -r '.value'
+            })"
+
+            runtime_payload="$(curl -fsSL \
+              -H "Authorization: Bearer ${oidc_token}" \
+              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
+            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
+
+            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$expected_image_reference" ]; then
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Timed out waiting for Launchplane image '$expected_image_reference' to become live and healthy." >&2
+          exit 1

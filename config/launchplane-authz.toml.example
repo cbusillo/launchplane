@@ -72,3 +72,13 @@ event_names = ["pull_request"]
 products = ["odoo"]
 contexts = ["opw"]
 actions = ["preview_generation.write"]
+
+[[github_actions]]
+repository = "example-org/launchplane"
+workflow_refs = [
+  "example-org/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
+]
+event_names = ["workflow_run", "workflow_dispatch"]
+products = ["launchplane"]
+contexts = ["launchplane"]
+actions = ["launchplane_service.read", "launchplane_service_deploy.execute"]
