@@ -289,7 +289,7 @@ def _worker_environment(
     control_plane_root: Path,
     request: VeriReelProdRollbackWorkerRequest,
 ) -> dict[str, str]:
-    environment = dict(os.environ)
+    environment = {key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS}
     environment.update(
         _resolve_worker_runtime_environment(
             control_plane_root=control_plane_root,

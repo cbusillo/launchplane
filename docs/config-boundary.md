@@ -6,8 +6,8 @@ title: Config Boundary
 
 - Make Launchplane's intended configuration authority explicit.
 - Separate bootstrap/root-of-trust inputs from live mutable control-plane config.
-- Identify the transitional file/env readers that still exist today and are
-  expected to be removed during the DB-backed config cutover.
+- Keep the DB-backed config boundary explicit now that implicit file/env
+  fallback readers have been removed.
 
 ## Final Boundary
 
@@ -47,7 +47,7 @@ Launchplane records/secrets instead of repo files or operator-local env.
 | --- | --- | --- | --- |
 | Dokploy credentials | Launchplane managed secrets (`DOKPLOY_HOST`, `DOKPLOY_TOKEN`) | Launchplane managed secrets | Fail closed when the shared store does not have both bindings. |
 | Runtime environment values | Runtime-environment records, with file input allowed only through explicit override/import flows | Launchplane runtime-environment records | Includes shared, context, and instance-scoped values. |
-| Secret-shaped runtime keys | Managed runtime secrets overlay plus file fallback | Launchplane managed secrets | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`. |
+| Secret-shaped runtime keys | Managed runtime secrets overlay | Launchplane managed secrets | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`. |
 | Ship mode overrides | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>` | Launchplane runtime-environment records | Mutable operator behavior, not bootstrap. |
 | Preview routing/config | `LAUNCHPLANE_PREVIEW_BASE_URL` | Launchplane runtime-environment records | Shared control-plane-owned runtime value. |
 | GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET` | Launchplane runtime-environment records and managed secrets | Current docs already classify these as DB-backed target state. |
@@ -78,18 +78,10 @@ input, never as implicit service runtime fallback.
 | Legacy runtime environments file | `~/.config/launchplane/archive/<date>/runtime-environments.toml` | Reference/import only. |
 | Legacy local policy copies after replacement | `~/.config/launchplane/archive/<date>/...` | Keep only if needed for historical reference. |
 
-## Transitional Readers To Remove
+## Removed Runtime Fallbacks
 
-These surfaces still exist in code today and are the main sources of authority
-ambiguity. The cutover should remove them as implicit runtime readers for
+The DB-backed cutover removed these surfaces as implicit runtime readers for
 DB-backed config classes.
-
-### Operator-local env and file selectors
-
-- `ODOO_CONTROL_PLANE_ENV_FILE`
-- `XDG_CONFIG_HOME`
-
-### Legacy implicit file fallbacks
 
 - repo-local `.env`
 - repo-local `config/runtime-environments.toml`
@@ -97,8 +89,8 @@ DB-backed config classes.
 - `~/.config/launchplane/dokploy.env`
 - `~/.config/launchplane/runtime-environments.toml`
 
-These may still be useful during migration, but only through explicit import,
-audit, or archive flows.
+These may still be useful as reference material, but only through explicit
+import, audit, or archive flows.
 
 ## Current Code Reality
 
@@ -114,8 +106,8 @@ live authority across DB, files, and process env:
 - release tuple baseline resolution fails closed unless DB-backed release-tuple
   records exist
 
-The remaining transition surface is mostly legacy-path visibility and explicit
-export material, not runtime fallback authority.
+The remaining transition surface is legacy-path visibility and explicit export
+material, not runtime fallback authority.
 
 ## Cutover Rules
 
@@ -136,5 +128,5 @@ contract are still DB-backed, file-backed, or mixed:
 uv run launchplane service inspect-config-boundary --control-plane-root .
 ```
 
-That payload is intended to make fallback removal measurable before the code
-paths are deleted.
+That payload is intended to make DB-backed authority and stale legacy files
+visible without treating those files as runtime inputs.

@@ -5756,19 +5756,8 @@ def _launchplane_path_payload(path: Path, *, kind: str) -> dict[str, object]:
     return {"path": str(path), "exists": path.exists(), "kind": kind}
 
 
-def _launchplane_dual_authority_status(*, has_database: bool, has_file: bool) -> str:
-    if has_database and has_file:
-        return "db_and_file"
-    if has_database:
-        return "db_only"
-    if has_file:
-        return "file_only"
-    return "missing"
-
-
 def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> dict[str, object]:
     env_map = dict(os.environ)
-    launchplane_config_dir = control_plane_dokploy.resolve_launchplane_config_dir()
     database_url = _launchplane_service_env_alias_value(env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS)
     managed_store_status = _launchplane_managed_store_status(database_url=database_url)
     managed_secret_bindings = managed_store_status.get("dokploy_secret_bindings", {})
@@ -5778,48 +5767,6 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
     repo_runtime_env_file = control_plane_root / control_plane_runtime_environments.DEFAULT_RUNTIME_ENVIRONMENTS_FILE
     repo_dokploy_source_file = control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
     repo_target_ids_file = control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
-    external_env_file = launchplane_config_dir / control_plane_dokploy.DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
-
-    resolved_env_file = control_plane_dokploy.resolve_control_plane_env_file(control_plane_root)
-    resolved_source_file = control_plane_dokploy.resolve_control_plane_dokploy_source_file(control_plane_root)
-    resolved_target_ids_file = None
-    resolved_runtime_env_file = None
-
-    if resolved_env_file is None:
-        resolved_env_file_payload = {"path": "", "exists": False, "kind": "missing"}
-    elif resolved_env_file == repo_env_file:
-        resolved_env_file_payload = _launchplane_path_payload(resolved_env_file, kind="repo_file")
-    elif resolved_env_file == external_env_file:
-        resolved_env_file_payload = _launchplane_path_payload(resolved_env_file, kind="external_file")
-    else:
-        resolved_env_file_payload = _launchplane_path_payload(resolved_env_file, kind="override_or_custom")
-
-    if resolved_runtime_env_file is None:
-        resolved_runtime_env_payload = {"path": "", "exists": False, "kind": "missing"}
-    elif resolved_runtime_env_file == repo_runtime_env_file:
-        resolved_runtime_env_payload = _launchplane_path_payload(
-            resolved_runtime_env_file,
-            kind="repo_file",
-        )
-    else:
-        resolved_runtime_env_payload = _launchplane_path_payload(
-            resolved_runtime_env_file,
-            kind="override_or_custom",
-        )
-
-    resolved_source_kind = "repo_file"
-    if resolved_source_file != repo_dokploy_source_file:
-        resolved_source_kind = "override_or_custom"
-    if resolved_target_ids_file is None:
-        resolved_target_ids_payload = {"path": "", "exists": False, "kind": "missing"}
-    else:
-        resolved_target_ids_kind = "repo_file"
-        if resolved_target_ids_file != repo_target_ids_file:
-            resolved_target_ids_kind = "override_or_custom"
-        resolved_target_ids_payload = _launchplane_path_payload(
-            resolved_target_ids_file,
-            kind=resolved_target_ids_kind,
-        )
 
     runtime_environment_record_count = int(managed_store_status.get("runtime_environment_record_count") or 0)
     dokploy_target_record_count = int(managed_store_status.get("dokploy_target_record_count") or 0)
@@ -5833,16 +5780,8 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
     else:
         dokploy_credentials_status = "missing"
 
-    transition_selector_env_keys = (
-        control_plane_dokploy.CONTROL_PLANE_ENV_FILE_ENV_VAR,
-        control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR,
-        "XDG_CONFIG_HOME",
-    )
-    transition_payload_env_keys: tuple[str, ...] = ()
-
     return {
         "control_plane_root": str(control_plane_root),
-        "launchplane_config_dir": str(launchplane_config_dir),
         "bootstrap": {
             "database_url_present": bool(database_url),
             "master_encryption_key_present": _launchplane_service_any_env_keys_present(
@@ -5893,12 +5832,6 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
             "dokploy_target_id_record_count": dokploy_target_id_record_count,
             "release_tuple_record_count": release_tuple_record_count,
         },
-        "resolved_inputs": {
-            "dokploy_env_file": resolved_env_file_payload,
-            "runtime_environments_file": resolved_runtime_env_payload,
-            "dokploy_source_file": _launchplane_path_payload(resolved_source_file, kind=resolved_source_kind),
-            "dokploy_target_ids_file": resolved_target_ids_payload,
-        },
         "legacy_paths": {
             "repo_env_file": _launchplane_path_payload(repo_env_file, kind="repo_file"),
             "repo_runtime_environments_file": _launchplane_path_payload(
@@ -5913,30 +5846,17 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
                 repo_target_ids_file,
                 kind="repo_file",
             ),
-            "external_env_file": _launchplane_path_payload(external_env_file, kind="external_file"),
         },
         "authority": {
             "dokploy_credentials": dokploy_credentials_status,
-            "runtime_environments": _launchplane_dual_authority_status(
-                has_database=runtime_environment_record_count > 0,
-                has_file=bool(resolved_runtime_env_payload["exists"]),
-            ),
-            "dokploy_target_ids": _launchplane_dual_authority_status(
-                has_database=dokploy_target_id_record_count > 0,
-                has_file=bool(resolved_target_ids_payload["exists"]),
-            ),
+            "runtime_environments": "db_only" if runtime_environment_record_count > 0 else "missing",
+            "dokploy_target_ids": "db_only" if dokploy_target_id_record_count > 0 else "missing",
             "stable_targets": "db_only" if dokploy_target_record_count > 0 else "missing",
             "release_tuples_catalog": "db_only" if release_tuple_record_count > 0 else "missing",
         },
         "transition_inputs": {
-            "selector_env_keys_present": _launchplane_present_env_keys(
-                env_map=env_map,
-                env_keys=transition_selector_env_keys,
-            ),
-            "payload_env_keys_present": _launchplane_present_env_keys(
-                env_map=env_map,
-                env_keys=transition_payload_env_keys,
-            ),
+            "selector_env_keys_present": [],
+            "payload_env_keys_present": [],
         },
     }
 
@@ -6555,7 +6475,8 @@ def _resolve_native_promotion_request(
     if should_verify_destination_health and not destination_healthcheck_urls:
         raise click.ClickException(
             "Healthcheck verification requested but no target domain/URL was resolved. "
-            f"Define domains or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL in {source_file} or disable with --no-verify-health."
+            "Define domains in the DB-backed target record or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL "
+            "in runtime-environment records, or disable with --no-verify-health."
         )
     configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
         context_name,

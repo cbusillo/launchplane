@@ -78,7 +78,6 @@ class DokployConfigTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            xdg_config_home = control_plane_root / "xdg"
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             with patch.dict(
@@ -86,7 +85,6 @@ class DokployConfigTests(unittest.TestCase):
                 {
                     "LAUNCHPLANE_DATABASE_URL": database_url,
                     control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "XDG_CONFIG_HOME": str(xdg_config_home),
                 },
                 clear=True,
             ):
@@ -134,7 +132,7 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(payload["authority"]["dokploy_target_ids"], "db_only")
         self.assertEqual(payload["authority"]["stable_targets"], "missing")
         self.assertEqual(payload["authority"]["release_tuples_catalog"], "missing")
-        self.assertEqual(payload["transition_inputs"]["selector_env_keys_present"], ["XDG_CONFIG_HOME"])
+        self.assertEqual(payload["transition_inputs"]["selector_env_keys_present"], [])
         self.assertEqual(payload["transition_inputs"]["payload_env_keys_present"], [])
 
     def test_service_inspect_config_boundary_reports_mixed_authority(self) -> None:
@@ -142,7 +140,6 @@ class DokployConfigTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            xdg_config_home = control_plane_root / "xdg"
             config_directory = control_plane_root / "config"
             config_directory.mkdir(parents=True, exist_ok=True)
             (control_plane_root / ".env").write_text(
@@ -184,7 +181,6 @@ class DokployConfigTests(unittest.TestCase):
                 {
                     "LAUNCHPLANE_DATABASE_URL": database_url,
                     control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "XDG_CONFIG_HOME": str(xdg_config_home),
                 },
                 clear=True,
             ):
@@ -973,8 +969,6 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                     "DOKPLOY_HOST=https://dokploy.example.com\n"
                     "DOKPLOY_TOKEN=token-123\n"
                     "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
-                    "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
-                    "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
                 ),
             ),
         ), patch(
@@ -1039,8 +1033,6 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                         "DOKPLOY_HOST=https://dokploy.example.com\n"
                         "DOKPLOY_TOKEN=token-123\n"
                         "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
-                        "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
-                        "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
                     ),
                 ),
                 self._target_payload(
@@ -1051,8 +1043,6 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                         "DOKPLOY_HOST=https://dokploy.example.com\n"
                         "DOKPLOY_TOKEN=token-123\n"
                         "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
-                        "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64=dGVzdA==\n"
-                        "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64=dGVzdA==\n"
                     ),
                 ),
             ],

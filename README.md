@@ -96,14 +96,12 @@ The compose service now expects the Launchplane container image through
 for real Launchplane deploys. For purely local compose usage, build a local image
 first, for example `docker build -t launchplane:local .`, then run `docker compose up`.
 
-The entrypoint can bootstrap operator-local files from environment variables so
-the deployed service does not need checked-in secret or target-id files:
+The entrypoint accepts only the bootstrap inputs needed to start Launchplane and
+reach DB-backed runtime authority:
 
 - `LAUNCHPLANE_DATABASE_URL`
 - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
 - `LAUNCHPLANE_POLICY_TOML` or `LAUNCHPLANE_POLICY_B64`
-- `LAUNCHPLANE_DOKPLOY_TARGET_IDS_TOML` or `LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64`
-- `LAUNCHPLANE_RUNTIME_ENVIRONMENTS_TOML` or `LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64`
 
 Launchplane now fails closed at startup when no explicit policy input is provided.
 Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example`; copy

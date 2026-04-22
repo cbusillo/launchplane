@@ -31,10 +31,6 @@ state_dir="${LAUNCHPLANE_STATE_DIR:-$launchplane_app_root/state}"
 launchplane_policy_toml="${LAUNCHPLANE_POLICY_TOML:-}"
 launchplane_policy_b64="${LAUNCHPLANE_POLICY_B64:-}"
 launchplane_policy_file="${LAUNCHPLANE_POLICY_FILE:-}"
-launchplane_target_ids_toml="${LAUNCHPLANE_DOKPLOY_TARGET_IDS_TOML:-}"
-launchplane_target_ids_b64="${LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64:-}"
-launchplane_runtime_env_toml="${LAUNCHPLANE_RUNTIME_ENVIRONMENTS_TOML:-}"
-launchplane_runtime_env_b64="${LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64:-}"
 launchplane_service_host="${LAUNCHPLANE_SERVICE_HOST:-0.0.0.0}"
 launchplane_service_port="${LAUNCHPLANE_SERVICE_PORT:-8080}"
 launchplane_service_audience="${LAUNCHPLANE_SERVICE_AUDIENCE:-launchplane.shinycomputers.com}"
@@ -69,26 +65,6 @@ esac
 if [ ! -f "$policy_file" ]; then
   echo "Launchplane policy file does not exist: $policy_file" >&2
   exit 1
-fi
-
-if [ -n "$launchplane_target_ids_toml" ]; then
-  target_ids_file="/tmp/dokploy-targets.toml"
-  write_text_file "$target_ids_file" "$launchplane_target_ids_toml"
-  export ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE="$target_ids_file"
-elif [ -n "$launchplane_target_ids_b64" ]; then
-  target_ids_file="/tmp/dokploy-targets.toml"
-  write_base64_file "$target_ids_file" "LAUNCHPLANE_DOKPLOY_TARGET_IDS_B64"
-  export ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE="$target_ids_file"
-fi
-
-if [ -n "$launchplane_runtime_env_toml" ]; then
-  runtime_env_file="/tmp/runtime-environments.toml"
-  write_text_file "$runtime_env_file" "$launchplane_runtime_env_toml"
-  export ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE="$runtime_env_file"
-elif [ -n "$launchplane_runtime_env_b64" ]; then
-  runtime_env_file="/tmp/runtime-environments.toml"
-  write_base64_file "$runtime_env_file" "LAUNCHPLANE_RUNTIME_ENVIRONMENTS_B64"
-  export ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE="$runtime_env_file"
 fi
 
 exec uv run launchplane service serve \

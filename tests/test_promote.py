@@ -445,7 +445,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -472,7 +472,6 @@ target_id = "compose-123"
                 os.environ,
                 {
                     "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                 },
             ), patch(
                 "control_plane.cli._run_compose_post_deploy_update",
@@ -1024,7 +1023,7 @@ class PromoteCliTests(unittest.TestCase):
             state_dir = repo_root / "state"
             _write_backup_gate_record(state_dir)
             _write_release_tuple_record(state_dir)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -1038,7 +1037,7 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
-            runtime_environments_file = _write_runtime_environments_file(
+            _write_runtime_environments_file(
                 repo_root,
                 """
 schema_version = 1
@@ -1084,7 +1083,6 @@ DOKPLOY_SHIP_MODE = "auto"
 
             with patch.dict(os.environ,
                             {
-                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
                             }):
                 result = runner.invoke(
@@ -2130,7 +2128,7 @@ DOKPLOY_SHIP_MODE = "auto"
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
             _write_artifact_manifest(state_dir)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -2157,7 +2155,6 @@ target_id = "compose-123"
                 os.environ,
                 {
                     "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                 },
             ), patch(
                 "control_plane.cli._run_compose_post_deploy_update",
@@ -2215,7 +2212,7 @@ target_id = "compose-123"
                 ),
                 encoding="utf-8",
             )
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -2243,7 +2240,6 @@ target_id = "compose-123"
                 os.environ,
                 {
                     "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                 },
             ), patch(
                 "control_plane.cli._sync_artifact_image_reference_for_target",
@@ -2284,7 +2280,7 @@ target_id = "compose-123"
             repo_root = Path(temporary_directory_name)
             state_dir = repo_root / "state"
             _write_artifact_manifest(state_dir)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -2317,7 +2313,6 @@ target_id = "compose-123"
                 os.environ,
                 {
                     "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                 },
             ), patch(
                 "control_plane.cli._run_compose_post_deploy_update",
@@ -2905,7 +2900,7 @@ target_id = "compose-123"
     def test_resolve_dokploy_target_reads_target_id_and_timeout_from_source_of_truth(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -2926,7 +2921,6 @@ target_id = "compose-123"
                 os.environ,
                 {
                     "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                 },
             ):
                 resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
@@ -2948,7 +2942,7 @@ target_id = "compose-123"
     def test_resolve_native_ship_request_reads_source_of_truth_and_env_healthcheck(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -2974,7 +2968,6 @@ DOKPLOY_SHIP_MODE = "auto"
             )
 
             with patch.dict(os.environ, {
-                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
             }):
                 ship_request = _resolve_native_ship_request(
@@ -3003,7 +2996,7 @@ DOKPLOY_SHIP_MODE = "auto"
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -3017,7 +3010,7 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
-            runtime_environments_file = _write_runtime_environments_file(
+            _write_runtime_environments_file(
                 repo_root,
                 """
 schema_version = 1
@@ -3029,7 +3022,6 @@ DOKPLOY_SHIP_MODE = "auto"
 
             with patch.dict(os.environ,
                             {
-                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
                             }):
                 result = runner.invoke(
@@ -3055,7 +3047,7 @@ DOKPLOY_SHIP_MODE = "auto"
     def test_resolve_native_promotion_request_reads_source_and_destination_targets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -3080,7 +3072,7 @@ healthcheck_timeout_seconds = 55
 domains = ["https://prod.example.com"]
 """,
             )
-            runtime_environments_file = _write_runtime_environments_file(
+            _write_runtime_environments_file(
                 repo_root,
                 """
 schema_version = 1
@@ -3092,7 +3084,6 @@ DOKPLOY_SHIP_MODE = "auto"
 
             with patch.dict(os.environ,
                             {
-                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
                             }):
                 promotion_request = _resolve_native_promotion_request(
@@ -3127,7 +3118,7 @@ DOKPLOY_SHIP_MODE = "auto"
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -3150,7 +3141,7 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
-            runtime_environments_file = _write_runtime_environments_file(
+            _write_runtime_environments_file(
                 repo_root,
                 """
 schema_version = 1
@@ -3162,7 +3153,6 @@ DOKPLOY_SHIP_MODE = "auto"
 
             with patch.dict(os.environ,
                             {
-                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
                             }):
                 result = runner.invoke(
@@ -3198,7 +3188,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_artifact_manifest(state_dir)
             _write_backup_gate_record(state_dir)
             _write_release_tuple_record(state_dir)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -3212,7 +3202,7 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
-            runtime_environments_file = _write_runtime_environments_file(
+            _write_runtime_environments_file(
                 repo_root,
                 """
 schema_version = 1
@@ -3232,7 +3222,6 @@ DOKPLOY_SHIP_MODE = "auto"
 
             with patch.dict(os.environ,
                             {
-                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
                             }):
                 result = runner.invoke(
@@ -3258,7 +3247,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_artifact_manifest(state_dir)
             _write_backup_gate_record(state_dir)
             _write_release_tuple_record(state_dir)
-            source_file = _write_control_plane_dokploy_source_of_truth(
+            _write_control_plane_dokploy_source_of_truth(
                 repo_root,
                 """
 schema_version = 2
@@ -3272,7 +3261,7 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
-            runtime_environments_file = _write_runtime_environments_file(
+            _write_runtime_environments_file(
                 repo_root,
                 """
 schema_version = 1
@@ -3300,7 +3289,6 @@ DOKPLOY_SHIP_MODE = "auto"
 
             with patch.dict(os.environ,
                             {
-                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
                                 "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
                             }):
                 result = runner.invoke(

@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import os
-import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -177,16 +175,6 @@ def _parse_runtime_environment_definition(
         shared_env=_read_optional_scalar_map(payload, "shared_env", scope="runtime_environments"),
         contexts=contexts,
     )
-
-
-def _load_runtime_environment_definition_from_file(environments_file: Path) -> RuntimeEnvironmentDefinition:
-    try:
-        payload = tomllib.loads(environments_file.read_text(encoding="utf-8"))
-    except (OSError, tomllib.TOMLDecodeError) as error:
-        raise click.ClickException(
-            f"Invalid runtime environments file {environments_file}: {error}"
-        ) from error
-    return _parse_runtime_environment_definition(payload, source_file=environments_file)
 
 
 def _load_optional_runtime_environment_definition_from_database(

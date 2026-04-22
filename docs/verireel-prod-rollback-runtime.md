@@ -212,16 +212,14 @@ Required runtime inputs:
 
 Launchplane now resolves the rollback worker contract from the `verireel/prod`
 runtime-environment definition before invoking the delegated worker. That means
-the worker command and Proxmox target metadata can live in the existing
-runtime-environment file or in DB-backed runtime-environment records, with any
-secret-looking values overlaid from Launchplane-managed secret records when the
-service is running with `LAUNCHPLANE_DATABASE_URL` and
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+the worker command and Proxmox target metadata must live in DB-backed
+runtime-environment records, with any secret-looking values overlaid from
+Launchplane-managed secret records when the service is running with
+`LAUNCHPLANE_DATABASE_URL` and `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
 
-For compatibility during migration, Launchplane still falls back to inherited
-process env when those rollback worker keys are not present in the runtime
-environment contract yet. The intended end state remains Launchplane-owned
-runtime records plus managed secrets, not ad hoc service-host env.
+Launchplane strips rollback worker config keys inherited from process env before
+starting the delegated worker. Missing DB-backed worker config is a hard error,
+not a compatibility fallback to service-host env.
 
 Rules:
 

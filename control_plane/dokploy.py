@@ -1,8 +1,6 @@
 import json
-import os
 import shlex
 import time
-import tomllib
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Literal
@@ -23,12 +21,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS = 600
 DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS = 180
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
-CONTROL_PLANE_ENV_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_ENV_FILE"
-CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE"
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
-DEFAULT_LAUNCHPLANE_CONFIG_DIRNAME = "launchplane"
-DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME = "dokploy.env"
 DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
@@ -38,8 +32,6 @@ DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES = {"done", "success", "succeeded", "complete
 POST_DEPLOY_UPDATE_IGNORED_ENV_KEYS = {
     "DOKPLOY_HOST",
     "DOKPLOY_TOKEN",
-    CONTROL_PLANE_ENV_FILE_ENV_VAR,
-    CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR,
 }
 POST_DEPLOY_UPDATE_ALLOWED_ENV_KEYS = {
     "ODOO_DB_NAME",
@@ -121,72 +113,6 @@ class DokploySourceOfTruth(BaseModel):
                     "Use Launchplane preview records for PR previews instead of adding another tracked Dokploy lane."
                 )
         return self
-
-
-class DokployTargetIdOverride(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    context: str
-    instance: str
-    target_id: str
-
-    @model_validator(mode="after")
-    def _validate_identity_fields(self) -> "DokployTargetIdOverride":
-        if not self.context.strip():
-            raise ValueError("Dokploy target-id override requires non-empty context")
-        if not self.instance.strip():
-            raise ValueError("Dokploy target-id override requires non-empty instance")
-        if not self.target_id.strip():
-            raise ValueError(
-                f"Dokploy target-id override {self.context}/{self.instance} requires non-empty target_id"
-            )
-        return self
-
-
-class DokployTargetIdCatalog(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(ge=1)
-    targets: tuple[DokployTargetIdOverride, ...] = ()
-
-    @model_validator(mode="after")
-    def _validate_unique_target_routes(self) -> "DokployTargetIdCatalog":
-        seen_targets: set[tuple[str, str]] = set()
-        for target_definition in self.targets:
-            target_route = (target_definition.context.strip(), target_definition.instance.strip())
-            if target_route in seen_targets:
-                context_name, instance_name = target_route
-                raise ValueError(
-                    f"Duplicate Dokploy target-id override for {context_name}/{instance_name} in target-id catalog"
-                )
-            seen_targets.add(target_route)
-        return self
-
-
-def load_dokploy_source_of_truth(
-    source_file_path: Path,
-    *,
-    target_id_catalog: DokployTargetIdCatalog | None = None,
-) -> DokploySourceOfTruth:
-    try:
-        payload = tomllib.loads(source_file_path.read_text(encoding="utf-8"))
-        if target_id_catalog is not None:
-            payload = _apply_dokploy_target_id_catalog(payload, target_id_catalog=target_id_catalog)
-        return DokploySourceOfTruth.model_validate(payload)
-    except FileNotFoundError as error:
-        raise click.ClickException(f"Dokploy source-of-truth file not found: {source_file_path}") from error
-    except ValueError as error:
-        raise click.ClickException(f"Invalid dokploy source-of-truth file {source_file_path}: {error}") from error
-
-
-def load_dokploy_target_id_catalog(target_ids_file_path: Path) -> DokployTargetIdCatalog:
-    try:
-        payload = tomllib.loads(target_ids_file_path.read_text(encoding="utf-8"))
-        return DokployTargetIdCatalog.model_validate(payload)
-    except FileNotFoundError as error:
-        raise click.ClickException(f"Dokploy target-id catalog file not found: {target_ids_file_path}") from error
-    except ValueError as error:
-        raise click.ClickException(f"Invalid Dokploy target-id catalog file {target_ids_file_path}: {error}") from error
 
 
 def find_dokploy_target_definition(
@@ -298,22 +224,6 @@ def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[s
     return control_plane_secrets.overlay_dokploy_environment_values(environment_values={})
 
 
-def resolve_launchplane_config_dir() -> Path:
-    configured_xdg_home = os.environ.get("XDG_CONFIG_HOME", "").strip()
-    config_root = Path(configured_xdg_home).expanduser() if configured_xdg_home else Path.home() / ".config"
-    return config_root / DEFAULT_LAUNCHPLANE_CONFIG_DIRNAME
-
-
-def resolve_control_plane_dokploy_source_file(control_plane_root: Path) -> Path:
-    configured_source_file = os.environ.get(CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR, "").strip()
-    if configured_source_file:
-        candidate_path = Path(configured_source_file)
-        if not candidate_path.is_absolute():
-            candidate_path = control_plane_root / candidate_path
-        return candidate_path
-    return control_plane_root / DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
-
-
 def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> DokploySourceOfTruth:
     del control_plane_root
     database_url = resolve_database_url()
@@ -418,38 +328,6 @@ def build_dokploy_source_of_truth_from_records(
     return DokploySourceOfTruth.model_validate({"schema_version": 1, "targets": targets_payload})
 
 
-def build_dokploy_target_id_catalog_from_records(
-    records: tuple[DokployTargetIdRecord, ...],
-) -> DokployTargetIdCatalog:
-    targets = tuple(
-        DokployTargetIdOverride(context=record.context, instance=record.instance, target_id=record.target_id)
-        for record in sorted(records, key=lambda item: (item.context, item.instance))
-    )
-    return DokployTargetIdCatalog(schema_version=1, targets=targets)
-
-
-def _load_optional_dokploy_target_id_catalog_from_database() -> DokployTargetIdCatalog | None:
-    database_url = resolve_database_url()
-    if not database_url:
-        return None
-    record_store: PostgresRecordStore | None = None
-    try:
-        record_store = PostgresRecordStore(database_url=database_url)
-        record_store.ensure_schema()
-        records = record_store.list_dokploy_target_id_records()
-    except Exception as error:
-        raise click.ClickException(f"Could not load Dokploy target-id overrides from Launchplane Postgres storage: {error}") from error
-    finally:
-        try:
-            if record_store is not None:
-                record_store.close()
-        except Exception:
-            pass
-    if not records:
-        return None
-    return build_dokploy_target_id_catalog_from_records(records)
-
-
 def _load_optional_dokploy_source_of_truth_from_database(*, database_url: str) -> DokploySourceOfTruth | None:
     record_store: PostgresRecordStore | None = None
     try:
@@ -474,52 +352,6 @@ def _load_optional_dokploy_source_of_truth_from_database(*, database_url: str) -
     return build_dokploy_source_of_truth_from_records(target_records, target_id_records)
 
 
-def _apply_dokploy_target_id_catalog(
-    payload: dict[str, object],
-    *,
-    target_id_catalog: DokployTargetIdCatalog,
-) -> dict[str, object]:
-    targets_payload = payload.get("targets")
-    if targets_payload is None:
-        targets_list: list[object] = []
-    elif isinstance(targets_payload, list):
-        targets_list = list(targets_payload)
-    else:
-        raise ValueError("Expected dokploy source-of-truth targets to be an array of tables")
-
-    override_map = {
-        (target.context.strip(), target.instance.strip()): target.target_id
-        for target in target_id_catalog.targets
-    }
-    remaining_routes = set(override_map)
-    merged_targets: list[object] = []
-    for raw_target in targets_list:
-        if not isinstance(raw_target, dict):
-            raise ValueError("Expected dokploy source-of-truth targets to be tables")
-        target_payload = dict(raw_target)
-        context_name = str(target_payload.get("context") or "").strip()
-        instance_name = str(target_payload.get("instance") or "").strip()
-        target_route = (context_name, instance_name)
-        override_target_id = override_map.get(target_route)
-        if override_target_id is not None:
-            target_payload["target_id"] = override_target_id
-            remaining_routes.discard(target_route)
-        merged_targets.append(target_payload)
-
-    if remaining_routes:
-        unknown_routes = ", ".join(
-            f"{context_name}/{instance_name}" for context_name, instance_name in sorted(remaining_routes)
-        )
-        raise ValueError(
-            "Dokploy target-id catalog contains route(s) that are not present in the source-of-truth: "
-            f"{unknown_routes}"
-        )
-
-    merged_payload = dict(payload)
-    merged_payload["targets"] = merged_targets
-    return merged_payload
-
-
 def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     environment_values = read_control_plane_environment_values(control_plane_root=control_plane_root)
 
@@ -531,22 +363,6 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
             "Configure Launchplane-managed Dokploy secrets in the shared store before running Dokploy operations."
         )
     return host, token
-
-
-def resolve_control_plane_env_file(control_plane_root: Path) -> Path | None:
-    configured_env_file = os.environ.get(CONTROL_PLANE_ENV_FILE_ENV_VAR, "").strip()
-    if configured_env_file:
-        candidate_path = Path(configured_env_file)
-        if not candidate_path.is_absolute():
-            candidate_path = control_plane_root / candidate_path
-        return candidate_path
-    legacy_repo_env_file = control_plane_root / ".env"
-    if legacy_repo_env_file.exists():
-        return legacy_repo_env_file
-    external_env_file = resolve_launchplane_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
-    if external_env_file.exists():
-        return external_env_file
-    return None
 
 
 def trigger_deployment(*, host: str, token: str, target_type: str, target_id: str, no_cache: bool) -> None:
