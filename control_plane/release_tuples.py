@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
-from pathlib import Path
-
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -217,8 +215,7 @@ def _toml_string(value: str) -> str:
     return json.dumps(value)
 
 
-def load_release_tuple_catalog(*, control_plane_root: Path) -> ReleaseTupleCatalog:
-    del control_plane_root
+def load_release_tuple_catalog() -> ReleaseTupleCatalog:
     database_url = resolve_database_url()
     if not database_url:
         raise click.ClickException(
@@ -236,11 +233,10 @@ def load_release_tuple_catalog(*, control_plane_root: Path) -> ReleaseTupleCatal
 
 def resolve_release_tuple(
     *,
-    control_plane_root: Path,
     context_name: str,
     channel_name: str,
 ) -> ReleaseTupleDefinition:
-    catalog = load_release_tuple_catalog(control_plane_root=control_plane_root)
+    catalog = load_release_tuple_catalog()
     context_definition = catalog.contexts.get(context_name)
     if context_definition is None:
         raise click.ClickException(

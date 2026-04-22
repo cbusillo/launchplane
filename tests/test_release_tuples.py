@@ -62,7 +62,6 @@ class ReleaseTupleTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 release_tuple = control_plane_release_tuples.resolve_release_tuple(
-                    control_plane_root=control_plane_root,
                     context_name="opw",
                     channel_name="testing",
                 )
@@ -84,7 +83,6 @@ class ReleaseTupleTests(unittest.TestCase):
             with patch.dict(os.environ, {}, clear=True):
                 with self.assertRaisesRegex(Exception, "LAUNCHPLANE_DATABASE_URL"):
                     control_plane_release_tuples.load_release_tuple_catalog(
-                        control_plane_root=control_plane_root,
                     )
 
     def test_load_release_tuple_catalog_requires_stored_records(self) -> None:
@@ -98,7 +96,6 @@ class ReleaseTupleTests(unittest.TestCase):
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 with self.assertRaisesRegex(Exception, "No Launchplane release tuple records"):
                     control_plane_release_tuples.load_release_tuple_catalog(
-                        control_plane_root=control_plane_root,
                     )
 
     def test_load_release_tuple_catalog_reads_database_records_only(self) -> None:
@@ -130,7 +127,6 @@ class ReleaseTupleTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 catalog = control_plane_release_tuples.load_release_tuple_catalog(
-                    control_plane_root=control_plane_root,
                 )
 
         self.assertEqual(catalog.contexts["opw"].channels["testing"].tuple_id, "opw-testing-db")
@@ -160,7 +156,6 @@ class ReleaseTupleTests(unittest.TestCase):
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 with self.assertRaisesRegex(Exception, "opw/prod"):
                     control_plane_release_tuples.resolve_release_tuple(
-                        control_plane_root=control_plane_root,
                         context_name="opw",
                         channel_name="prod",
                     )

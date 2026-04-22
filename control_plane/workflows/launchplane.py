@@ -1044,7 +1044,6 @@ def resolve_pull_request_event_manifest(
         return None
     try:
         release_tuple = control_plane_release_tuples.resolve_release_tuple(
-            control_plane_root=control_plane_root,
             context_name=effective_context,
             channel_name=metadata.baseline_channel,
         )
