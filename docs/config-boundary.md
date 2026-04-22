@@ -15,9 +15,9 @@ Launchplane's long-term config model is:
 
 - bootstrap/root-of-trust stays outside the database
 - all other live mutable config is DB-backed
-- checked-in repo files are examples, docs, schemas, tests, or explicit seed
-  material only
-- local files under `~/.config/launchplane/` are archive/import material only
+- checked-in repo files are examples, docs, schemas, or tests only
+- local files under `~/.config/launchplane/` are not Launchplane config
+  authority and should be archived or deleted when found
 - the service never silently falls back across multiple live authorities
 
 In steady state, if a DB-backed config class is missing from Launchplane's
@@ -46,16 +46,16 @@ Launchplane records/secrets instead of repo files or operator-local env.
 | Class | Current surface(s) | Final authority | Notes |
 | --- | --- | --- | --- |
 | Dokploy credentials | Launchplane managed secrets (`DOKPLOY_HOST`, `DOKPLOY_TOKEN`) | Launchplane managed secrets | Fail closed when the shared store does not have both bindings. |
-| Runtime environment values | Runtime-environment records, with file input allowed only through explicit override/import flows | Launchplane runtime-environment records | Includes shared, context, and instance-scoped values. |
+| Runtime environment values | Runtime-environment records | Launchplane runtime-environment records | Includes shared, context, and instance-scoped values. |
 | Secret-shaped runtime keys | Managed runtime secrets overlay | Launchplane managed secrets | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`. |
 | Ship mode overrides | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>` | Launchplane runtime-environment records | Mutable operator behavior, not bootstrap. |
 | Preview routing/config | `LAUNCHPLANE_PREVIEW_BASE_URL` | Launchplane runtime-environment records | Shared control-plane-owned runtime value. |
 | GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET` | Launchplane runtime-environment records and managed secrets | Current docs already classify these as DB-backed target state. |
 | Product/tenant runtime env | `ENV_OVERRIDE_*`, Odoo runtime values, tenant-specific env keys | Launchplane runtime-environment records and managed secrets | Includes shared and per-instance overlays. |
 | Worker/runtime-action config | `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`, `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, `VERIREEL_PROD_CT_ID`, `VERIREEL_PROD_GATE_LOCAL` | Launchplane runtime-environment records and managed secrets | Current rollback worker still reads env; target is DB-backed runtime authority. |
-| Dokploy target-id overrides | DB records, with file input allowed only through explicit override/import flows | Launchplane target-id records | File catalogs are no longer implicit steady-state authority. |
-| Stable target definitions | Launchplane DB-backed target records | Launchplane DB-backed target records | Repo catalogs should become example/seed material only. |
-| Release tuple baseline authority | Launchplane release-tuple records | Launchplane record store | Repo catalogs should be treated as export/seed material, not live mutable authority. |
+| Dokploy target-id overrides | DB records | Launchplane target-id records | File catalogs are not a supported authority. |
+| Stable target definitions | Launchplane DB-backed target records | Launchplane DB-backed target records | Repo catalogs should be examples only, not seed or authority material. |
+| Release tuple baseline authority | Launchplane release-tuple records | Launchplane record store | Repo catalogs should not be treated as live mutable authority. |
 
 ### Repo Only
 
@@ -63,20 +63,21 @@ These stay in git, but not as live mutable runtime authority.
 
 | Class | Examples |
 | --- | --- |
-| Examples/templates | `config/runtime-environments.toml.example`, `config/dokploy-targets.toml.example`, `config/launchplane-authz.toml.example` |
+| Examples/templates | `config/launchplane-authz.toml.example` for bootstrap policy only |
 | Docs/specs | `docs/*`, `README.md` |
-| Schemas/migrations/tests | storage schema code, tests, fixtures, explicit export/import formats |
+| Schemas/tests | storage schema code, tests, fixtures |
 
-### Archive Only
+### Stale Local Artifacts
 
-These should remain available only as operator reference or explicit import
-input, never as implicit service runtime fallback.
+These should not be treated as Launchplane config. If found, archive or delete
+them after verifying the equivalent authority is represented in DB-backed
+records or bootstrap env.
 
 | Class | Final location | Notes |
 | --- | --- | --- |
-| Legacy operator env file | `~/.config/launchplane/archive/<date>/dokploy.env` | Reference/import only. |
-| Legacy runtime environments file | `~/.config/launchplane/archive/<date>/runtime-environments.toml` | Reference/import only. |
-| Legacy local policy copies after replacement | `~/.config/launchplane/archive/<date>/...` | Keep only if needed for historical reference. |
+| Legacy operator env file | `~/.config/launchplane/dokploy.env` | Not a supported Launchplane input. |
+| Legacy runtime environments file | `~/.config/launchplane/runtime-environments.toml` | Not a supported Launchplane input. |
+| Legacy local policy copies after replacement | `~/.config/launchplane/...` | Not a supported Launchplane input once bootstrap policy is replaced. |
 
 ## Removed Runtime Fallbacks
 
@@ -89,8 +90,8 @@ DB-backed config classes.
 - `~/.config/launchplane/dokploy.env`
 - `~/.config/launchplane/runtime-environments.toml`
 
-These may still be useful as reference material, but only through explicit
-import, audit, or archive flows.
+These are stale artifacts only. They are not supported import or compatibility
+surfaces for DB-backed config classes.
 
 ## Current Code Reality
 
@@ -106,18 +107,18 @@ live authority across DB, files, and process env:
 - release tuple baseline resolution fails closed unless DB-backed release-tuple
   records exist
 
-The remaining transition surface is legacy-path visibility and explicit export
-material, not runtime fallback authority.
+The remaining transition surface is legacy-path visibility, not runtime fallback
+authority or supported import compatibility.
 
 ## Cutover Rules
 
 - If a config class is listed as DB authoritative here, Launchplane should read
   it from DB only in steady state.
-- Files are allowed only when the operator explicitly runs an import, export,
-  audit, or archive flow.
+- Files are not accepted as DB-authoritative config inputs. Use DB-backed
+  records or managed secrets directly.
 - Launchplane should fail closed when DB-backed config is missing.
-- Repo-owned config files should describe or seed config, not silently act as
-  the live source of truth for production behavior.
+- Repo-owned config files may document non-runtime examples, but they should not
+  seed or act as live source of truth for production behavior.
 
 ## Inspection
 

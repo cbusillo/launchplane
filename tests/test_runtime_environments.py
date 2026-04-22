@@ -70,56 +70,11 @@ def _seed_dokploy_target_records(*, database_url: str, payload: str) -> None:
 
 
 class RuntimeEnvironmentTests(unittest.TestCase):
-    def test_environments_import_writes_records_without_echoing_values(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            runtime_environments_file = control_plane_root / "runtime-environments.toml"
-            with runtime_environments_file.open("w", encoding="utf-8") as handle:
-                handle.write(
-                    'schema_version = 1\n\n'
-                    '[shared_env]\n'
-                    'LAUNCHPLANE_PREVIEW_BASE_URL = "https://preview.example.com"\n\n'
-                    '[contexts.verireel.instances.prod.env]\n'
-                    'LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND = "uv run python -m control_plane.workflows.verireel_prod_rollback_worker"\n'
-                    'VERIREEL_PROD_CT_ID = "101"\n'
-                    'VERIREEL_PROD_PROXMOX_HOST = "proxmox.example.com"\n'
-                    'VERIREEL_PROD_PROXMOX_USER = "root"\n'
-                )
+    def test_environments_import_command_is_not_available(self) -> None:
+        result = CliRunner().invoke(main, ["environments", "import"])
 
-            result = CliRunner().invoke(
-                main,
-                [
-                    "environments",
-                    "import",
-                    "--file",
-                    str(runtime_environments_file),
-                    "--database-url",
-                    database_url,
-                    "--source-label",
-                    "operator-test",
-                ],
-            )
-
-            self.assertEqual(result.exit_code, 0, result.output)
-            self.assertNotIn("proxmox.example.com", result.output)
-            payload = json.loads(result.output)
-            self.assertEqual(payload["status"], "ok")
-            self.assertEqual(payload["count"], 2)
-            self.assertEqual(payload["records"][0]["source_label"], "operator-test")
-
-            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="verireel",
-                    instance_name="prod",
-                )
-
-        self.assertEqual(resolved_values["VERIREEL_PROD_CT_ID"], "101")
-        self.assertEqual(
-            resolved_values["LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"],
-            "uv run python -m control_plane.workflows.verireel_prod_rollback_worker",
-        )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("No such command", result.output)
 
     def test_environments_list_redacts_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

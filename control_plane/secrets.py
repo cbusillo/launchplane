@@ -3,9 +3,8 @@ from __future__ import annotations
 import base64
 import hashlib
 import os
-import re
 import uuid
-from typing import Any, Literal
+from typing import Literal
 
 import click
 from cryptography.fernet import Fernet, InvalidToken
@@ -20,7 +19,6 @@ LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VARS = (LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR,
 DOKPLOY_SECRET_INTEGRATION = "dokploy"
 RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
 SECRET_STATUS_CONFIGURED = "configured"
-SECRET_VALUE_PATTERN = re.compile(r"(^|_)(PASSWORD|TOKEN|SECRET|KEY)(_|$)")
 
 SecretWriteAction = Literal["created", "rotated", "unchanged"]
 
@@ -58,10 +56,6 @@ def _scope_rank(scope: str) -> int:
     if scope == "context":
         return 1
     return 2
-
-
-def _runtime_environment_key_is_secret(key_name: str) -> bool:
-    return bool(SECRET_VALUE_PATTERN.search(key_name.strip().upper()))
 
 
 def _master_fernet_key(raw_key: str) -> bytes:
@@ -291,45 +285,6 @@ def write_secret_value(
         )
     )
     return {"status": "ok", "secret_id": secret_id, "action": action, "version_id": version_id}
-
-
-def _import_runtime_environment_scope(
-    *,
-    record_store: PostgresRecordStore,
-    values: dict[str, Any],
-    scope: SecretScope,
-    context_name: str = "",
-    instance_name: str = "",
-    actor: str,
-) -> dict[str, int]:
-    imported = 0
-    unchanged = 0
-    skipped_empty = 0
-    for key_name, raw_value in values.items():
-        if not _runtime_environment_key_is_secret(key_name):
-            continue
-        plaintext_value = str(raw_value).strip()
-        if not plaintext_value:
-            skipped_empty += 1
-            continue
-        result = write_secret_value(
-            record_store=record_store,
-            scope=scope,
-            integration=RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-            name=key_name,
-            plaintext_value=plaintext_value,
-            binding_key=key_name,
-            context_name=context_name,
-            instance_name=instance_name,
-            description=f"Managed runtime environment value for {key_name}.",
-            actor=actor,
-            source_label="runtime-environments.toml",
-        )
-        if result["action"] == "unchanged":
-            unchanged += 1
-        else:
-            imported += 1
-    return {"imported": imported, "unchanged": unchanged, "skipped_empty": skipped_empty}
 
 
 def build_secret_status(record_store: PostgresRecordStore, *, secret_id: str) -> dict[str, object]:
