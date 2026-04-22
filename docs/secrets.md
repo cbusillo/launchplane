@@ -14,17 +14,12 @@ title: Secrets
   backend when `LAUNCHPLANE_DATABASE_URL` is configured.
 - Managed secret values are encrypted before Launchplane stores them; the master key
   stays outside the database in `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
-- Keep existing bootstrap values only long enough to import them into
-  Launchplane-managed secret records, using the current process environment or
-  an external bootstrap file such as
-  `${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/dokploy.env`.
-- Local runtime environment truth should live outside the repo checkout, such
-  as `${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/runtime-environments.toml`.
-- Live Dokploy `target_id` values belong in the control-plane repo's untracked
-  `config/dokploy-targets.toml`.
-- Launchplane can import the current `DOKPLOY_HOST` / `DOKPLOY_TOKEN` values with
-  `uv run launchplane secrets import-bootstrap --database-url ...` so the first
-  shared-service bring-up does not require manual secret re-entry.
+- Keep bootstrap values only in process env long enough to write the real
+  Launchplane-managed secret records.
+- Runtime environment truth should live in Launchplane DB records in steady
+  state.
+- Live Dokploy `target_id` values belong in Launchplane DB-backed target-id
+  records.
 - Optional ship-mode overrides such as `DOKPLOY_SHIP_MODE` now belong in
   runtime-environment records instead of the service host env surface.
 - Launchplane preview routing now uses a dedicated `LAUNCHPLANE_PREVIEW_BASE_URL`
@@ -35,10 +30,6 @@ title: Secrets
   `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
   `VERIREEL_PROD_CT_ID` from the `verireel/prod` runtime-environment contract,
   with managed-secret overlays still available for secret-looking keys.
-- If you need a non-default secret file location, set
-  `ODOO_CONTROL_PLANE_ENV_FILE` to an alternate untracked env file path.
-- If you need a non-default runtime environments file location, set
-  `ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE`.
 
 ## DB-Backed Secret Resolution
 
@@ -48,8 +39,9 @@ title: Secrets
   - Dokploy `DOKPLOY_TOKEN`
   - runtime-environment keys that look like secrets, such as `*_PASSWORD`,
     `*_TOKEN`, `*_SECRET`, and `*_KEY`
-- Launchplane falls back to the older file/env surfaces only when no managed secret
-  record exists for a requested binding.
+- Runtime environment records do not fall back to repo or XDG files.
+- Dokploy credentials do not fall back to repo files, XDG files, or process
+  env. Missing managed bindings are a hard error.
 - Secret status surfaces return metadata only. Launchplane does not expose routine
   plaintext read commands or service endpoints.
 
@@ -59,10 +51,6 @@ title: Secrets
   - `LAUNCHPLANE_DATABASE_URL`
   - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
   - policy/bootstrap selectors such as `LAUNCHPLANE_POLICY_*`
-  - operator override selectors such as `ODOO_CONTROL_PLANE_ENV_FILE`,
-    `ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE`,
-    `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE`, and
-    `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
   - `DOKPLOY_HOST`
@@ -79,10 +67,6 @@ title: Secrets
 
 - Do not keep real secret files in the repo checkout.
 - Never commit alternate secret files or rendered env artifacts.
-- Never commit a real runtime environments file; keep it outside the repo and
-  start from `config/runtime-environments.toml.example`.
-- Never commit `config/dokploy-targets.toml`; keep the real file untracked and
-  start from `config/dokploy-targets.toml.example`.
 - Do not rely on a repo-local `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
 - Missing `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` is a hard error when Launchplane needs to
@@ -100,6 +84,8 @@ title: Secrets
 - `uv run launchplane environments resolve --context <ctx> --instance
 <instance> --json-output`
   emits the resolved runtime environment payload for a tenant environment.
+- In steady state that payload comes from Launchplane DB-backed runtime
+  environment records.
 - Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL` from the
   shared plus context-scoped runtime environment contract, with shared values
   providing the default and context values allowed to override it.
@@ -111,17 +97,7 @@ title: Secrets
 
 ## Bootstrap
 
-```bash
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/launchplane"
-cp config/dokploy-targets.toml.example config/dokploy-targets.toml
-cp config/runtime-environments.toml.example \
-  "${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/runtime-environments.toml"
-cp .env.example "${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/dokploy.env"
-export LAUNCHPLANE_MASTER_ENCRYPTION_KEY="replace-me"
-uv run launchplane secrets import-bootstrap --database-url "$LAUNCHPLANE_DATABASE_URL"
-uv run launchplane secrets list --database-url "$LAUNCHPLANE_DATABASE_URL" --integration dokploy
-```
-
-After bootstrap import succeeds, verify Launchplane can resolve the managed secret
-status you expect before removing older operator-local bootstrap files such as
-`~/.config/launchplane/dokploy.env`.
+Bring up the service with bootstrap env such as `LAUNCHPLANE_DATABASE_URL` and
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, then write the durable DB-backed secret
+and runtime records through the normal Launchplane commands. Dokploy
+credentials belong in Launchplane-managed secrets before Dokploy operations run.

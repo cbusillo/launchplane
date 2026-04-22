@@ -15,6 +15,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
@@ -24,7 +25,6 @@ DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS = 180
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
 CONTROL_PLANE_ENV_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_ENV_FILE"
 CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE"
-CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE"
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
 DEFAULT_LAUNCHPLANE_CONFIG_DIRNAME = "launchplane"
@@ -293,43 +293,9 @@ def resolve_ship_healthcheck_urls(
     return tuple(f"{base_url}{healthcheck_path}" for base_url in base_urls)
 
 
-def load_bootstrap_environment_values(
-    *,
-    default_env_file: Path | None = None,
-    env_file: Path | None = None,
-) -> dict[str, str]:
-    environment_values: dict[str, str] = {}
-    selected_env_file = env_file if env_file is not None else default_env_file
-    if selected_env_file is not None and selected_env_file.exists():
-        environment_values.update(_parse_env_file(selected_env_file))
-    for environment_key, environment_value in os.environ.items():
-        environment_values[environment_key] = environment_value
-    return environment_values
-
-
-def load_operator_environment_values(
-    *,
-    default_env_file: Path | None = None,
-    env_file: Path | None = None,
-) -> dict[str, str]:
-    environment_values: dict[str, str] = {}
-    selected_env_file = env_file if env_file is not None else default_env_file
-    if selected_env_file is not None and selected_env_file.exists():
-        environment_values.update(_parse_env_file(selected_env_file))
-    return environment_values
-
-
-def read_control_plane_bootstrap_environment_values(*, control_plane_root: Path) -> dict[str, str]:
-    control_plane_env_file = resolve_control_plane_env_file(control_plane_root)
-    return load_bootstrap_environment_values(default_env_file=control_plane_env_file)
-
-
 def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[str, str]:
-    control_plane_env_file = resolve_control_plane_env_file(control_plane_root)
-    environment_values: dict[str, str] = {}
-    if resolve_database_url() is None:
-        environment_values = load_operator_environment_values(default_env_file=control_plane_env_file)
-    return control_plane_secrets.overlay_dokploy_environment_values(environment_values=environment_values)
+    del control_plane_root
+    return control_plane_secrets.overlay_dokploy_environment_values(environment_values={})
 
 
 def resolve_launchplane_config_dir() -> Path:
@@ -348,46 +314,108 @@ def resolve_control_plane_dokploy_source_file(control_plane_root: Path) -> Path:
     return control_plane_root / DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
 
 
-def resolve_control_plane_dokploy_target_ids_file(
-    control_plane_root: Path,
-    *,
-    source_file_path: Path | None = None,
-) -> Path:
-    configured_target_ids_file = os.environ.get(CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR, "").strip()
-    if configured_target_ids_file:
-        candidate_path = Path(configured_target_ids_file)
-        if not candidate_path.is_absolute():
-            candidate_path = control_plane_root / candidate_path
-        return candidate_path
-    configured_source_file = os.environ.get(CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR, "").strip()
-    if configured_source_file and source_file_path is not None:
-        return source_file_path.parent / DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE.name
-    return control_plane_root / DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
-
-
 def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> DokploySourceOfTruth:
-    source_file_path = resolve_control_plane_dokploy_source_file(control_plane_root)
-    target_ids_file_path = resolve_control_plane_dokploy_target_ids_file(
-        control_plane_root,
-        source_file_path=source_file_path,
+    del control_plane_root
+    database_url = resolve_database_url()
+    if not database_url:
+        raise click.ClickException(
+            "Missing Launchplane tracked Dokploy target authority. Configure DB-backed tracked target records."
+        )
+    source_of_truth = _load_optional_dokploy_source_of_truth_from_database(database_url=database_url)
+    if source_of_truth is None:
+        raise click.ClickException(
+            "Missing DB-backed Launchplane tracked Dokploy target records."
+        )
+    return source_of_truth
+
+
+def build_dokploy_target_record_from_definition(
+    definition: DokployTargetDefinition,
+    *,
+    updated_at: str,
+    source_label: str = "",
+) -> DokployTargetRecord:
+    return DokployTargetRecord(
+        context=definition.context,
+        instance=definition.instance,
+        project_name=definition.project_name,
+        target_type=definition.target_type,
+        target_name=definition.target_name,
+        git_branch=definition.git_branch,
+        source_git_ref=definition.source_git_ref,
+        source_type=definition.source_type,
+        custom_git_url=definition.custom_git_url,
+        custom_git_branch=definition.custom_git_branch,
+        compose_path=definition.compose_path,
+        watch_paths=definition.watch_paths,
+        enable_submodules=definition.enable_submodules,
+        require_test_gate=definition.require_test_gate,
+        require_prod_gate=definition.require_prod_gate,
+        deploy_timeout_seconds=definition.deploy_timeout_seconds,
+        healthcheck_enabled=definition.healthcheck_enabled,
+        healthcheck_path=definition.healthcheck_path,
+        healthcheck_timeout_seconds=definition.healthcheck_timeout_seconds,
+        env=dict(definition.env),
+        domains=definition.domains,
+        updated_at=updated_at,
+        source_label=source_label,
     )
-    configured_target_ids_file = os.environ.get(CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR, "").strip()
-    target_id_catalog: DokployTargetIdCatalog | None = None
-    if configured_target_ids_file:
-        target_id_catalog = load_dokploy_target_id_catalog(target_ids_file_path)
-    else:
-        file_catalog = load_dokploy_target_id_catalog(target_ids_file_path) if target_ids_file_path.exists() else None
-        database_catalog = _load_optional_dokploy_target_id_catalog_from_database()
-        if database_catalog is not None and file_catalog is not None:
-            target_id_catalog = _merge_dokploy_target_id_catalogs(base_catalog=file_catalog, overlay_catalog=database_catalog)
-        elif database_catalog is not None:
-            target_id_catalog = database_catalog
-        else:
-            target_id_catalog = file_catalog
-    return load_dokploy_source_of_truth(
-        source_file_path,
-        target_id_catalog=target_id_catalog,
-    )
+
+
+def build_dokploy_source_of_truth_from_records(
+    target_records: tuple[DokployTargetRecord, ...],
+    target_id_records: tuple[DokployTargetIdRecord, ...],
+) -> DokploySourceOfTruth:
+    target_id_map = {
+        (record.context.strip(), record.instance.strip()): record.target_id
+        for record in target_id_records
+    }
+    remaining_target_id_routes = set(target_id_map)
+    targets_payload: list[dict[str, object]] = []
+    for record in target_records:
+        target_route = (record.context.strip(), record.instance.strip())
+        target_id = target_id_map.get(target_route, "").strip()
+        if not target_id:
+            raise click.ClickException(
+                "Missing DB-backed Dokploy target-id record for "
+                f"{record.context}/{record.instance}."
+            )
+        remaining_target_id_routes.discard(target_route)
+        targets_payload.append(
+            {
+                "context": record.context,
+                "instance": record.instance,
+                "project_name": record.project_name,
+                "target_type": record.target_type,
+                "target_id": target_id,
+                "target_name": record.target_name,
+                "git_branch": record.git_branch,
+                "source_git_ref": record.source_git_ref,
+                "source_type": record.source_type,
+                "custom_git_url": record.custom_git_url,
+                "custom_git_branch": record.custom_git_branch,
+                "compose_path": record.compose_path,
+                "watch_paths": list(record.watch_paths),
+                "enable_submodules": record.enable_submodules,
+                "require_test_gate": record.require_test_gate,
+                "require_prod_gate": record.require_prod_gate,
+                "deploy_timeout_seconds": record.deploy_timeout_seconds,
+                "healthcheck_enabled": record.healthcheck_enabled,
+                "healthcheck_path": record.healthcheck_path,
+                "healthcheck_timeout_seconds": record.healthcheck_timeout_seconds,
+                "env": dict(record.env),
+                "domains": list(record.domains),
+            }
+        )
+    if remaining_target_id_routes:
+        unknown_routes = ", ".join(
+            f"{context_name}/{instance_name}" for context_name, instance_name in sorted(remaining_target_id_routes)
+        )
+        raise click.ClickException(
+            "DB-backed Dokploy target-id records contain route(s) that are not present in the tracked target records: "
+            f"{unknown_routes}"
+        )
+    return DokploySourceOfTruth.model_validate({"schema_version": 1, "targets": targets_payload})
 
 
 def build_dokploy_target_id_catalog_from_records(
@@ -422,20 +450,28 @@ def _load_optional_dokploy_target_id_catalog_from_database() -> DokployTargetIdC
     return build_dokploy_target_id_catalog_from_records(records)
 
 
-def _merge_dokploy_target_id_catalogs(
-    *,
-    base_catalog: DokployTargetIdCatalog,
-    overlay_catalog: DokployTargetIdCatalog,
-) -> DokployTargetIdCatalog:
-    merged_routes: dict[tuple[str, str], DokployTargetIdOverride] = {
-        (target.context, target.instance): target for target in base_catalog.targets
-    }
-    for target in overlay_catalog.targets:
-        merged_routes[(target.context, target.instance)] = target
-    return DokployTargetIdCatalog(
-        schema_version=max(base_catalog.schema_version, overlay_catalog.schema_version),
-        targets=tuple(merged_routes[key] for key in sorted(merged_routes)),
-    )
+def _load_optional_dokploy_source_of_truth_from_database(*, database_url: str) -> DokploySourceOfTruth | None:
+    record_store: PostgresRecordStore | None = None
+    try:
+        record_store = PostgresRecordStore(database_url=database_url)
+        record_store.ensure_schema()
+        target_records = record_store.list_dokploy_target_records()
+        if not target_records:
+            return None
+        target_id_records = record_store.list_dokploy_target_id_records()
+    except click.ClickException:
+        raise
+    except Exception as error:
+        raise click.ClickException(
+            f"Could not load tracked Dokploy targets from Launchplane Postgres storage: {error}"
+        ) from error
+    finally:
+        try:
+            if record_store is not None:
+                record_store.close()
+        except Exception:
+            pass
+    return build_dokploy_source_of_truth_from_records(target_records, target_id_records)
 
 
 def _apply_dokploy_target_id_catalog(
@@ -490,19 +526,9 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     host = environment_values.get("DOKPLOY_HOST", "").strip()
     token = environment_values.get("DOKPLOY_TOKEN", "").strip()
     if not host or not token:
-        bootstrap_environment_values = read_control_plane_bootstrap_environment_values(
-            control_plane_root=control_plane_root
-        )
-        if not host:
-            host = bootstrap_environment_values.get("DOKPLOY_HOST", "").strip()
-        if not token:
-            token = bootstrap_environment_values.get("DOKPLOY_TOKEN", "").strip()
-    if not host or not token:
-        external_env_file = resolve_launchplane_config_dir() / DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
         raise click.ClickException(
             "Missing DOKPLOY_HOST or DOKPLOY_TOKEN for control-plane Dokploy execution. "
-            "Configure Launchplane-managed Dokploy secrets in the shared store, "
-            f"or use {CONTROL_PLANE_ENV_FILE_ENV_VAR} or {external_env_file} only as bootstrap input before import."
+            "Configure Launchplane-managed Dokploy secrets in the shared store before running Dokploy operations."
         )
     return host, token
 

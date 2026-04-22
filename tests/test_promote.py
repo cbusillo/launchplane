@@ -1,6 +1,7 @@
 import os
 import json
 import subprocess
+import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -26,6 +27,7 @@ from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.promotion_record import PromotionRequest
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import build_deployment_record
 from control_plane.workflows.promote import build_promotion_record
 from control_plane.workflows.promote import build_executed_promotion_record
@@ -117,7 +119,57 @@ def _write_control_plane_dokploy_source_of_truth(repo_root: Path, payload: str) 
     source_file = repo_root / "config" / "dokploy.toml"
     source_file.parent.mkdir(parents=True, exist_ok=True)
     source_file.write_text(payload.strip(), encoding="utf-8")
+    source_of_truth = control_plane_dokploy.DokploySourceOfTruth.model_validate(
+        tomllib.loads(payload.strip())
+    )
+    store = PostgresRecordStore(database_url=_runtime_environments_database_url(repo_root))
+    store.ensure_schema()
+    try:
+        for target in source_of_truth.targets:
+            store.write_dokploy_target_record(
+                control_plane_dokploy.build_dokploy_target_record_from_definition(
+                    target,
+                    updated_at="2026-04-22T00:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_id_record(
+                control_plane_dokploy.DokployTargetIdRecord(
+                    context=target.context,
+                    instance=target.instance,
+                    target_id=target.target_id,
+                    updated_at="2026-04-22T00:00:00Z",
+                    source_label="test",
+                )
+            )
+    finally:
+        store.close()
     return source_file
+
+
+def _write_runtime_environments_file(repo_root: Path, payload: str) -> Path:
+    runtime_environments_file = repo_root / "runtime-environments.toml"
+    runtime_environments_file.write_text(payload.strip() + "\n", encoding="utf-8")
+    definition = control_plane_runtime_environments._parse_runtime_environment_definition(
+        tomllib.loads(payload.strip()),
+        source_file=runtime_environments_file,
+    )
+    store = PostgresRecordStore(database_url=_runtime_environments_database_url(repo_root))
+    store.ensure_schema()
+    try:
+        for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+            definition,
+            updated_at="2026-04-22T00:00:00Z",
+            source_label="test",
+        ):
+            store.write_runtime_environment_record(record)
+    finally:
+        store.close()
+    return runtime_environments_file
+
+
+def _runtime_environments_database_url(repo_root: Path) -> str:
+    return f"sqlite+pysqlite:///{repo_root / 'launchplane.sqlite3'}"
 
 
 class PromoteWorkflowTests(unittest.TestCase):
@@ -416,8 +468,13 @@ target_id = "compose-123"
             )
             post_deploy_updates: list[dict[str, object]] = []
 
-            with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                },
+            ), patch(
                 "control_plane.cli._run_compose_post_deploy_update",
                 side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
             ), patch(
@@ -981,6 +1038,15 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
+            runtime_environments_file = _write_runtime_environments_file(
+                repo_root,
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+DOKPLOY_SHIP_MODE = "auto"
+""",
+            )
             artifact_dir = state_dir / "artifacts"
             artifact_dir.mkdir(parents=True, exist_ok=True)
             (artifact_dir / "artifact-sha256-image456.json").write_text(
@@ -1017,7 +1083,10 @@ domains = ["https://prod.example.com"]
             )
 
             with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+                            {
+                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                            }):
                 result = runner.invoke(
                     main,
                     [
@@ -2084,8 +2153,13 @@ target_id = "compose-123"
             )
             post_deploy_updates: list[dict[str, object]] = []
 
-            with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                },
+            ), patch(
                 "control_plane.cli._run_compose_post_deploy_update",
                 side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
             ), patch(
@@ -2165,8 +2239,13 @@ target_id = "compose-123"
 
             captured_sync_calls: list[dict[str, object]] = []
 
-            with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                },
+            ), patch(
                 "control_plane.cli._sync_artifact_image_reference_for_target",
                 side_effect=lambda **kwargs: captured_sync_calls.append(kwargs),
             ), patch(
@@ -2234,8 +2313,13 @@ target_id = "compose-123"
             post_deploy_updates: list[dict[str, object]] = []
             captured_health_urls: list[str] = []
 
-            with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}), patch(
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                },
+            ), patch(
                 "control_plane.cli._run_compose_post_deploy_update",
                 side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
             ), patch(
@@ -2838,8 +2922,13 @@ target_id = "compose-123"
 """,
             )
 
-            with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                },
+            ):
                 resolved_target, deploy_timeout_seconds = _resolve_dokploy_target(
                     request=ShipRequest(
                         artifact_id="artifact-sha256-image456",
@@ -2873,8 +2962,8 @@ deploy_timeout_seconds = 7200
 healthcheck_timeout_seconds = 55
 """,
             )
-            runtime_environments_file = repo_root / "runtime-environments.toml"
-            runtime_environments_file.write_text(
+            _write_runtime_environments_file(
+                repo_root,
                 """
 schema_version = 1
 
@@ -2882,13 +2971,11 @@ schema_version = 1
 ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "prod.example.com"
 DOKPLOY_SHIP_MODE = "auto"
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
 
             with patch.dict(os.environ, {
                 control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
-                control_plane_runtime_environments.RUNTIME_ENVIRONMENTS_FILE_ENV_VAR: str(runtime_environments_file),
+                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
             }):
                 ship_request = _resolve_native_ship_request(
                     context_name="opw",
@@ -2930,9 +3017,21 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
+            runtime_environments_file = _write_runtime_environments_file(
+                repo_root,
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+DOKPLOY_SHIP_MODE = "auto"
+""",
+            )
 
             with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+                            {
+                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                            }):
                 result = runner.invoke(
                     main,
                     [
@@ -2981,9 +3080,21 @@ healthcheck_timeout_seconds = 55
 domains = ["https://prod.example.com"]
 """,
             )
+            runtime_environments_file = _write_runtime_environments_file(
+                repo_root,
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+DOKPLOY_SHIP_MODE = "auto"
+""",
+            )
 
             with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+                            {
+                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                            }):
                 promotion_request = _resolve_native_promotion_request(
                     context_name="opw",
                     from_instance_name="testing",
@@ -3039,9 +3150,21 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
+            runtime_environments_file = _write_runtime_environments_file(
+                repo_root,
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+DOKPLOY_SHIP_MODE = "auto"
+""",
+            )
 
             with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+                            {
+                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                            }):
                 result = runner.invoke(
                     main,
                     [
@@ -3089,6 +3212,15 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
+            runtime_environments_file = _write_runtime_environments_file(
+                repo_root,
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+DOKPLOY_SHIP_MODE = "auto"
+""",
+            )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
                 PromotionRequest(artifact_id="artifact-sha256-image456",
@@ -3099,7 +3231,10 @@ domains = ["https://prod.example.com"]
             )
 
             with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+                            {
+                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                            }):
                 result = runner.invoke(
                     main,
                     [
@@ -3137,6 +3272,15 @@ target_name = "opw-prod"
 domains = ["https://prod.example.com"]
 """,
             )
+            runtime_environments_file = _write_runtime_environments_file(
+                repo_root,
+                """
+schema_version = 1
+
+[contexts.opw.instances.prod.env]
+DOKPLOY_SHIP_MODE = "auto"
+""",
+            )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
                 PromotionRequest(
@@ -3155,7 +3299,10 @@ domains = ["https://prod.example.com"]
             )
 
             with patch.dict(os.environ,
-                            {control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file)}):
+                            {
+                                control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(source_file),
+                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                            }):
                 result = runner.invoke(
                     main,
                     [

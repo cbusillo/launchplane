@@ -52,31 +52,23 @@ Shared-service core records can now be backed by Postgres with
 The same service boundary now exposes authenticated operator read endpoints for
 deployment, promotion, inventory, preview, preview history, and recent
 context-scoped operations. Launchplane-managed secrets now use the same Postgres
-backend, with encrypted secret values stored in DB and a bootstrap import path
-from the existing `dokploy.env` and runtime-environment file surfaces.
+backend, with encrypted secret values stored in DB and bootstrap limited to
+process env for the first bring-up.
 
 ## Quick Start
 
 ```bash
-mkdir -p "${XDG_CONFIG_HOME:-$HOME/.config}/launchplane"
-cp config/dokploy-targets.toml.example config/dokploy-targets.toml
 uv run launchplane --help
 uv run launchplane service serve --help
 uv run launchplane storage import-core-records --help
-uv run launchplane secrets import-bootstrap --help
 uv run python -m unittest
 ```
 
-Runtime secrets should come from the current process environment or from
-external Launchplane config files such as
-`${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/dokploy.env` and
-`${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/runtime-environments.toml`, not from
-repo-local secret files.
-
-Once Launchplane-managed secret records exist in Postgres, Launchplane reads those
-encrypted DB-backed values first for Dokploy credentials and runtime
-environment secret keys, then falls back to the older file/env surfaces only
-when no Launchplane-managed secret has been written yet.
+Runtime authority should come from Launchplane DB records in steady state.
+Launchplane-managed secrets, runtime-environment records, tracked Dokploy
+target records, and Dokploy target-id records are DB-backed concerns;
+bootstrap stays in process env long enough to bring the service up and write
+the real records.
 
 For the first local Launchplane service run, copy
 `config/launchplane-authz.toml.example` to a real local policy file such as
@@ -84,11 +76,11 @@ For the first local Launchplane service run, copy
 example repo/workflow values and adjust the product, context, and action
 allow-lists to match the workflows you want Launchplane to trust.
 
-The tracked Dokploy route catalog lives in `config/dokploy.toml`, with
-operator-local target IDs supplied through `config/dokploy-targets.toml`.
-The stable remote lane catalog is now `testing` plus `prod`; pull requests use
-Launchplane-managed preview identities and ephemeral preview stacks instead of a
-durable shared `dev` lane.
+Steady-state tracked Dokploy route definitions and target IDs should come from
+Launchplane DB-backed target records and target-id records. The stable remote
+lane catalog is now `testing` plus `prod`; pull requests use Launchplane-managed
+preview identities and ephemeral preview stacks instead of a durable shared
+`dev` lane.
 
 ## Service Container Deploy
 
@@ -118,10 +110,10 @@ Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example
 the example to a non-`.example` path first and replace the placeholder repo
 identities.
 
-Regular runtime env such as `DOKPLOY_HOST`, `DOKPLOY_TOKEN`, and any
-`DOKPLOY_SHIP_MODE_*` overrides can still be passed directly as process
-environment variables. `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` must be present whenever
-Launchplane needs to read or write DB-backed managed secrets.
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` must be present whenever Launchplane needs
+to read or write DB-backed managed secrets. Dokploy credentials now resolve
+from Launchplane-managed secrets only, and ship-mode overrides belong in
+runtime-environment records instead of process env.
 
 The intended first real Launchplane bring-up path is GitHub-driven deploy, not a
 manual laptop-side image swap. The current operator posture is:
@@ -172,9 +164,11 @@ runtime contract pieces such as:
 - Launchplane-managed `DOKPLOY_TOKEN`
 - a Dokploy SSH key for private `git@github.com:...` compose sources
 
-It also reports warnings when the live target lacks a policy input, target-id
-catalog input, runtime-environment catalog input, or an existing
-`DOCKER_IMAGE_REFERENCE` rollback baseline.
+It also reports warnings when the live target still exposes legacy Dokploy
+credentials in target env, when managed-store inspection is unavailable, or
+when the target lacks a policy input, DB-backed target-id records, DB-backed
+runtime-environment records, or an existing `DOCKER_IMAGE_REFERENCE` rollback
+baseline.
 
 The deploy path still depends on two Dokploy-side prerequisites that Launchplane can
 document but cannot fully validate through the current Dokploy API surface:
@@ -198,6 +192,7 @@ cleanup needed before that move live in [docs/public-readiness.md](docs/public-r
 
 - [docs/README.md](docs/README.md)
 - [docs/architecture.md](docs/architecture.md)
+- [docs/config-boundary.md](docs/config-boundary.md)
 - [docs/service-boundary.md](docs/service-boundary.md)
 - [docs/operations.md](docs/operations.md)
 - [docs/records.md](docs/records.md)

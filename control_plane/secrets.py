@@ -5,7 +5,6 @@ import hashlib
 import os
 import re
 import uuid
-from pathlib import Path
 from typing import Any, Literal
 
 import click
@@ -331,82 +330,6 @@ def _import_runtime_environment_scope(
         else:
             imported += 1
     return {"imported": imported, "unchanged": unchanged, "skipped_empty": skipped_empty}
-
-
-def import_bootstrap_secrets(
-    *,
-    record_store: PostgresRecordStore,
-    control_plane_root: Path,
-    actor: str = "bootstrap",
-) -> dict[str, object]:
-    from control_plane import dokploy as control_plane_dokploy
-    from control_plane import runtime_environments as control_plane_runtime_environments
-
-    summary: dict[str, object] = {
-        "dokploy": {"imported": 0, "unchanged": 0},
-        "runtime_environment": {"imported": 0, "unchanged": 0, "skipped_empty": 0},
-    }
-    environment_values = control_plane_dokploy.read_control_plane_bootstrap_environment_values(
-        control_plane_root=control_plane_root
-    )
-    for secret_name, binding_key in (("host", "DOKPLOY_HOST"), ("token", "DOKPLOY_TOKEN")):
-        value = environment_values.get(binding_key, "").strip()
-        if not value:
-            continue
-        result = write_secret_value(
-            record_store=record_store,
-            scope="global",
-            integration=DOKPLOY_SECRET_INTEGRATION,
-            name=secret_name,
-            plaintext_value=value,
-            binding_key=binding_key,
-            description=f"Managed Dokploy {secret_name} value.",
-            actor=actor,
-            source_label="dokploy.env",
-        )
-        category = "unchanged" if result["action"] == "unchanged" else "imported"
-        dokploy_summary = summary["dokploy"]
-        assert isinstance(dokploy_summary, dict)
-        dokploy_summary[category] = int(dokploy_summary[category]) + 1
-
-    definition = control_plane_runtime_environments.load_runtime_environment_definition(
-        control_plane_root=control_plane_root
-    )
-    shared_summary = _import_runtime_environment_scope(
-        record_store=record_store,
-        values=definition.shared_env,
-        scope="global",
-        actor=actor,
-    )
-    runtime_summary = summary["runtime_environment"]
-    assert isinstance(runtime_summary, dict)
-    runtime_summary["imported"] = int(runtime_summary["imported"]) + shared_summary["imported"]
-    runtime_summary["unchanged"] = int(runtime_summary["unchanged"]) + shared_summary["unchanged"]
-    runtime_summary["skipped_empty"] = int(runtime_summary["skipped_empty"]) + shared_summary["skipped_empty"]
-    for context_name, context_definition in definition.contexts.items():
-        context_summary = _import_runtime_environment_scope(
-            record_store=record_store,
-            values=context_definition.shared_env,
-            scope="context",
-            context_name=context_name,
-            actor=actor,
-        )
-        runtime_summary["imported"] = int(runtime_summary["imported"]) + context_summary["imported"]
-        runtime_summary["unchanged"] = int(runtime_summary["unchanged"]) + context_summary["unchanged"]
-        runtime_summary["skipped_empty"] = int(runtime_summary["skipped_empty"]) + context_summary["skipped_empty"]
-        for instance_name, instance_definition in context_definition.instances.items():
-            instance_summary = _import_runtime_environment_scope(
-                record_store=record_store,
-                values=instance_definition.env,
-                scope="context_instance",
-                context_name=context_name,
-                instance_name=instance_name,
-                actor=actor,
-            )
-            runtime_summary["imported"] = int(runtime_summary["imported"]) + instance_summary["imported"]
-            runtime_summary["unchanged"] = int(runtime_summary["unchanged"]) + instance_summary["unchanged"]
-            runtime_summary["skipped_empty"] = int(runtime_summary["skipped_empty"]) + instance_summary["skipped_empty"]
-    return summary
 
 
 def build_secret_status(record_store: PostgresRecordStore, *, secret_id: str) -> dict[str, object]:

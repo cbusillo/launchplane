@@ -140,10 +140,8 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   and the live ship execution boundary.
 - Direct `ship` ownership also enters through this repo, and Dokploy target
   resolution, credentials, and trigger/wait execution run here.
-- The tracked Dokploy route catalog lives in this repo under
-  `config/dokploy.toml` by default, with an explicit
-  `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` override for alternate operator
-  paths.
+- The tracked Dokploy route catalog resolves from Launchplane DB-backed target
+  records plus DB-backed target-id records.
 - The tracked Dokploy route catalog is limited to stable remote lanes
   (`testing`, `prod`). Pull-request previews flow through Launchplane preview
   records instead of tracked Dokploy lane entries.
@@ -156,14 +154,12 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 - Promotion execution requires the source lane's current release tuple to match
   the requested artifact, then writes the destination tuple from that same
   source tuple after the deploy passes.
-- The tracked `config/release-tuples.toml` now records the active split-repo
-  artifact-backed baseline for CM and OPW stable lanes. Future tracked
-  baseline changes should come from reviewed state-backed tuple evidence rather
-  than legacy monorepo branch heads.
-- Live Dokploy `target_id` values load from operator-local
-  `config/dokploy-targets.toml` by default, with an explicit
-  `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` override for alternate local
-  paths.
+- The active split-repo artifact-backed baseline for CM and OPW stable lanes
+  now resolves from DB-backed release-tuple records. Any tracked
+  `config/release-tuples.toml` catalog is export or seed material rather than
+  live runtime authority.
+- Live Dokploy `target_id` values load from Launchplane DB-backed target-id
+  records.
 - The Odoo-specific compose post-deploy update runs natively here via
   a control-plane-owned Dokploy schedule workflow, so deploy execution no
   longer shells back into another repo at runtime.

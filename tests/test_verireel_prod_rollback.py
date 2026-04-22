@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 import click
 
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -13,6 +14,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_prod_rollback import (
     VeriReelProdRollbackRequest,
     VeriReelProdRollbackWorkerRequest,
@@ -24,6 +26,9 @@ from control_plane.workflows.verireel_prod_promotion import VeriReelRolloutVerif
 
 
 class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
+    def _sqlite_database_url(self, root: Path) -> str:
+        return f"sqlite+pysqlite:///{root / 'launchplane.sqlite3'}"
+
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
 
@@ -68,21 +73,36 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
     def test_run_delegated_worker_prefers_runtime_environment_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
-            environments_file = root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
-                """
-schema_version = 1
-
-[contexts.verireel.instances.prod.env]
-LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND = "uv run python -m control_plane.workflows.verireel_prod_rollback_worker"
-VERIREEL_PROD_PROXMOX_HOST = "proxmox.runtime.example"
-VERIREEL_PROD_PROXMOX_USER = "runtime-user"
-VERIREEL_PROD_CT_ID = "211"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
+            database_url = self._sqlite_database_url(root)
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+                    control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                        schema_version=1,
+                        shared_env={},
+                        contexts={
+                            "verireel": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                                shared_env={},
+                                instances={
+                                    "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                        env={
+                                            "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "uv run python -m control_plane.workflows.verireel_prod_rollback_worker",
+                                            "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
+                                            "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
+                                            "VERIREEL_PROD_CT_ID": "211",
+                                        }
+                                    )
+                                },
+                            )
+                        },
+                    ),
+                    updated_at="2026-04-22T00:00:00Z",
+                    source_label="test",
+                ):
+                    store.write_runtime_environment_record(record)
+            finally:
+                store.close()
 
             captured: dict[str, object] = {}
 
@@ -106,6 +126,7 @@ VERIREEL_PROD_CT_ID = "211"
             ), patch.dict(
                 "os.environ",
                 {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
                     "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "legacy worker",
                     "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
                     "VERIREEL_PROD_PROXMOX_USER": "legacy-user",

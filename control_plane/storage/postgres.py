@@ -10,6 +10,7 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sess
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -168,6 +169,16 @@ class LaunchplaneDokployTargetIdRow(Base):
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
     target_id: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneDokployTargetRow(Base):
+    __tablename__ = "launchplane_dokploy_targets"
+    __table_args__ = (Index("launchplane_dokploy_targets_updated_idx", desc("updated_at")),)
+
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -701,6 +712,33 @@ class PostgresRecordStore:
             model_type=DokployTargetIdRecord,
             orm_model=LaunchplaneDokployTargetIdRow,
             order_by=(LaunchplaneDokployTargetIdRow.context.asc(), LaunchplaneDokployTargetIdRow.instance.asc()),
+        )
+
+    def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
+        self._write_row(
+            LaunchplaneDokployTargetRow(
+                context=record.context,
+                instance=record.instance,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_dokploy_target_record(self, *, context_name: str, instance_name: str) -> DokployTargetRecord:
+        return self._read_model(
+            model_type=DokployTargetRecord,
+            orm_model=LaunchplaneDokployTargetRow,
+            filters=(
+                LaunchplaneDokployTargetRow.context == context_name,
+                LaunchplaneDokployTargetRow.instance == instance_name,
+            ),
+        )
+
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]:
+        return self._list_models(
+            model_type=DokployTargetRecord,
+            orm_model=LaunchplaneDokployTargetRow,
+            order_by=(LaunchplaneDokployTargetRow.context.asc(), LaunchplaneDokployTargetRow.instance.asc()),
         )
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
