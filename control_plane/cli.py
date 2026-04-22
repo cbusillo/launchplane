@@ -50,6 +50,7 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
@@ -7487,6 +7488,20 @@ def _build_runtime_environment_rows(
     ]
 
 
+def _summarize_runtime_environment_record(
+    record: RuntimeEnvironmentRecord,
+) -> dict[str, object]:
+    return {
+        "scope": record.scope,
+        "context": record.context,
+        "instance": record.instance,
+        "updated_at": record.updated_at,
+        "source_label": record.source_label,
+        "env_keys": sorted(record.env.keys()),
+        "env_value_count": len(record.env),
+    }
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -9388,6 +9403,83 @@ def _apply_launchplane_pr_event_intent(
 @main.group()
 def environments() -> None:
     """Runtime environment contract commands."""
+
+
+@environments.command("import")
+@click.option(
+    "--file",
+    "runtime_environments_file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    required=True,
+)
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime-environment records.",
+)
+@click.option("--source-label", default="", show_default=False)
+def environments_import(
+    runtime_environments_file: Path,
+    database_url: str,
+    source_label: str,
+) -> None:
+    definition = control_plane_runtime_environments.load_runtime_environment_definition_from_file(
+        runtime_environments_file
+    )
+    records = control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        definition,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or str(runtime_environments_file),
+    )
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        for record in records:
+            postgres_store.write_runtime_environment_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [
+                    _summarize_runtime_environment_record(record) for record in records
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@environments.command("list")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime-environment records.",
+)
+def environments_list(database_url: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        records = postgres_store.list_runtime_environment_records()
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [
+                    _summarize_runtime_environment_record(record) for record in records
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @environments.command("resolve")

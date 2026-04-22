@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+import tomllib
 
 import click
 
@@ -49,6 +50,25 @@ def load_runtime_environment_definition(
 
     raise click.ClickException(
         "Missing Launchplane runtime environment authority. Configure DB-backed runtime environment records."
+    )
+
+
+def load_runtime_environment_definition_from_file(
+    runtime_environments_file: Path,
+) -> RuntimeEnvironmentDefinition:
+    try:
+        payload = tomllib.loads(runtime_environments_file.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            f"Missing runtime environments file: {runtime_environments_file}"
+        ) from error
+    except tomllib.TOMLDecodeError as error:
+        raise click.ClickException(
+            f"Could not parse runtime environments file {runtime_environments_file}: {error}"
+        ) from error
+    return _parse_runtime_environment_definition(
+        payload,
+        source_file=runtime_environments_file,
     )
 
 
