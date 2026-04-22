@@ -246,18 +246,14 @@ Current derived-state behavior:
 
 ## Dokploy Contracts
 
-- Tracked Dokploy route definitions live in `config/dokploy.toml` by default.
+- Tracked Dokploy route definitions live in Launchplane DB-backed target
+  records.
 - Tracked route definitions are expected to be stable remote lanes only:
   `testing` and `prod`.
-- Live Dokploy `target_id` values come from untracked
-  `config/dokploy-targets.toml` by default.
-- Set `ODOO_CONTROL_PLANE_DOKPLOY_SOURCE_FILE` to use an alternate route
-  catalog.
-- Set `ODOO_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE` to use an alternate local
-  target-id catalog.
+- Live Dokploy `target_id` values should come from Launchplane DB-backed
+  target-id records in steady state.
 - Dokploy source loading fails closed when target ids are missing, duplicate
-  routes are present, or the local target-id catalog contains routes not found
-  in the tracked source catalog.
+  routes are present, or the tracked target records omit a required target id.
 
 ## Runtime Environment Contracts
 
@@ -308,16 +304,14 @@ The current command group supports:
 - captured delivery replay: `replay-github-webhook`,
   `build-github-webhook-replay-envelope`
 
-`show-tenant`, `render-index-page`, and `render-site` accept
-`--release-tuples-file` when a cockpit or local render needs an explicit tuple
-catalog without relying on process-wide environment setup.
+`show-tenant`, `render-index-page`, and `render-site` now resolve stable-lane
+baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and
+local renders should run with `LAUNCHPLANE_DATABASE_URL` pointed at the same
+shared store that owns the current stable-lane tuple state.
 
-The tracked default catalog at `config/release-tuples.toml` now records the
-current split-repo artifact-backed baseline for CM and OPW stable lanes. Pull
-requests flow through Launchplane preview records instead of a tracked long-lived
-`dev` tuple lane. Runtime `ship` and `promote` flows continue to write current
-tuple records under the selected state directory rather than silently rewriting
-this tracked file.
+The tracked `config/release-tuples.toml` catalog is export/seed material now,
+not live runtime authority. Pull requests flow through Launchplane preview
+records instead of a tracked long-lived `dev` tuple lane.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are the current local preview-evidence ingest adapters for products whose

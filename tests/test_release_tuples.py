@@ -16,6 +16,22 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
+def _write_release_tuple_records(
+    *,
+    control_plane_root: Path,
+    records: tuple[ReleaseTupleRecord, ...],
+) -> str:
+    database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        for record in records:
+            store.write_release_tuple_record(record)
+    finally:
+        store.close()
+    return database_url
+
+
 class ReleaseTupleTests(unittest.TestCase):
     def test_should_mint_release_tuple_only_for_stable_remote_channels(self) -> None:
         self.assertTrue(control_plane_release_tuples.should_mint_release_tuple_for_channel("testing"))
@@ -23,31 +39,33 @@ class ReleaseTupleTests(unittest.TestCase):
         self.assertFalse(control_plane_release_tuples.should_mint_release_tuple_for_channel("dev"))
         self.assertFalse(control_plane_release_tuples.should_mint_release_tuple_for_channel("preview"))
 
-    def test_resolve_release_tuple_reads_context_channel_repo_refs(self) -> None:
+    def test_resolve_release_tuple_reads_context_channel_repo_refs_from_database(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.testing]
-tuple_id = "opw-testing-2026-04-13"
-
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
-
-            release_tuple = control_plane_release_tuples.resolve_release_tuple(
+            database_url = _write_release_tuple_records(
                 control_plane_root=control_plane_root,
-                context_name="opw",
-                channel_name="testing",
+                records=(
+                    ReleaseTupleRecord(
+                        tuple_id="opw-testing-2026-04-13",
+                        context="opw",
+                        channel="testing",
+                        artifact_id="artifact-testing",
+                        repo_shas={
+                            "tenant-opw": "1111111111111111111111111111111111111111",
+                            "shared-addons": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        },
+                        provenance="ship",
+                        minted_at="2026-04-21T18:00:00Z",
+                    ),
+                ),
             )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                release_tuple = control_plane_release_tuples.resolve_release_tuple(
+                    control_plane_root=control_plane_root,
+                    context_name="opw",
+                    channel_name="testing",
+                )
 
         self.assertEqual(release_tuple.tuple_id, "opw-testing-2026-04-13")
         self.assertEqual(
@@ -59,237 +77,134 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         )
 
-    def test_resolve_release_tuple_uses_env_override_file(self) -> None:
+    def test_load_release_tuple_catalog_requires_database_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            custom_file = control_plane_root / "custom-tuples.toml"
-            custom_file.write_text(
-                """
-schema_version = 1
 
-[contexts.cm.channels.prod]
-tuple_id = "cm-prod-2026-04-13"
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(Exception, "LAUNCHPLANE_DATABASE_URL"):
+                    control_plane_release_tuples.load_release_tuple_catalog(
+                        control_plane_root=control_plane_root,
+                    )
 
-[contexts.cm.channels.prod.repo_shas]
-tenant-cm = "4444444444444444444444444444444444444444"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR: str(custom_file)},
-                clear=True,
-            ):
-                release_tuple = control_plane_release_tuples.resolve_release_tuple(
-                    control_plane_root=control_plane_root,
-                    context_name="cm",
-                    channel_name="prod",
-                )
-
-        self.assertEqual(release_tuple.tuple_id, "cm-prod-2026-04-13")
-
-    def test_load_release_tuple_catalog_merges_postgres_records_over_file_catalog(self) -> None:
+    def test_load_release_tuple_catalog_requires_stored_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.testing]
-tuple_id = "opw-testing-file"
-
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-
-[contexts.opw.channels.prod]
-tuple_id = "opw-prod-file"
-
-[contexts.opw.channels.prod.repo_shas]
-tenant-opw = "2222222222222222222222222222222222222222"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
-            store.write_release_tuple_record(
-                ReleaseTupleRecord(
-                    tuple_id="opw-testing-db",
-                    context="opw",
-                    channel="testing",
-                    artifact_id="artifact-testing",
-                    repo_shas={"tenant-opw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
-                    provenance="ship",
-                    minted_at="2026-04-21T18:00:00Z",
-                )
-            )
             store.close()
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                catalog = control_plane_release_tuples.load_release_tuple_catalog(control_plane_root=control_plane_root)
+                with self.assertRaisesRegex(Exception, "No Launchplane release tuple records"):
+                    control_plane_release_tuples.load_release_tuple_catalog(
+                        control_plane_root=control_plane_root,
+                    )
 
-        self.assertEqual(catalog.contexts["opw"].channels["testing"].tuple_id, "opw-testing-db")
-        self.assertEqual(catalog.contexts["opw"].channels["prod"].tuple_id, "opw-prod-file")
-
-    def test_load_release_tuple_catalog_explicit_file_override_wins_over_postgres(self) -> None:
+    def test_load_release_tuple_catalog_reads_database_records_only(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            custom_file = control_plane_root / "custom-tuples.toml"
-            custom_file.write_text(
-                """
-schema_version = 1
-
-[contexts.cm.channels.testing]
-tuple_id = "cm-testing-file"
-
-[contexts.cm.channels.testing.repo_shas]
-tenant-cm = "3333333333333333333333333333333333333333"
-""".strip()
-                + "\n",
-                encoding="utf-8",
+            database_url = _write_release_tuple_records(
+                control_plane_root=control_plane_root,
+                records=(
+                    ReleaseTupleRecord(
+                        tuple_id="opw-testing-db",
+                        context="opw",
+                        channel="testing",
+                        artifact_id="artifact-testing",
+                        repo_shas={"tenant-opw": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        provenance="ship",
+                        minted_at="2026-04-21T18:00:00Z",
+                    ),
+                    ReleaseTupleRecord(
+                        tuple_id="opw-prod-db",
+                        context="opw",
+                        channel="prod",
+                        artifact_id="artifact-prod",
+                        repo_shas={"tenant-opw": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
+                        provenance="ship",
+                        minted_at="2026-04-21T19:00:00Z",
+                    ),
+                ),
             )
-            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            store.write_release_tuple_record(
-                ReleaseTupleRecord(
-                    tuple_id="cm-testing-db",
-                    context="cm",
-                    channel="testing",
-                    artifact_id="artifact-testing",
-                    repo_shas={"tenant-cm": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},
-                    provenance="ship",
-                    minted_at="2026-04-21T18:00:00Z",
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                catalog = control_plane_release_tuples.load_release_tuple_catalog(
+                    control_plane_root=control_plane_root,
                 )
-            )
-            store.close()
 
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_release_tuples.RELEASE_TUPLES_FILE_ENV_VAR: str(custom_file),
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                },
-                clear=True,
-            ):
-                catalog = control_plane_release_tuples.load_release_tuple_catalog(control_plane_root=control_plane_root)
-
-        self.assertEqual(catalog.contexts["cm"].channels["testing"].tuple_id, "cm-testing-file")
+        self.assertEqual(catalog.contexts["opw"].channels["testing"].tuple_id, "opw-testing-db")
+        self.assertEqual(catalog.contexts["opw"].channels["prod"].tuple_id, "opw-prod-db")
 
     def test_resolve_release_tuple_fails_closed_when_channel_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.testing]
-tuple_id = "opw-testing-2026-04-13"
-
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
+            database_url = _write_release_tuple_records(
+                control_plane_root=control_plane_root,
+                records=(
+                    ReleaseTupleRecord(
+                        tuple_id="opw-testing-2026-04-13",
+                        context="opw",
+                        channel="testing",
+                        artifact_id="artifact-testing",
+                        repo_shas={
+                            "tenant-opw": "1111111111111111111111111111111111111111",
+                            "shared-addons": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                        },
+                        provenance="ship",
+                        minted_at="2026-04-21T18:00:00Z",
+                    ),
+                ),
             )
 
-            with self.assertRaisesRegex(Exception, "opw/prod"):
-                control_plane_release_tuples.resolve_release_tuple(
-                    control_plane_root=control_plane_root,
-                    context_name="opw",
-                    channel_name="prod",
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                with self.assertRaisesRegex(Exception, "opw/prod"):
+                    control_plane_release_tuples.resolve_release_tuple(
+                        control_plane_root=control_plane_root,
+                        context_name="opw",
+                        channel_name="prod",
+                    )
+
+    def test_build_release_tuple_catalog_from_records_rejects_duplicate_tuple_ids(self) -> None:
+        with self.assertRaisesRegex(Exception, "Duplicate release tuple id"):
+            control_plane_release_tuples.build_release_tuple_catalog_from_records(
+                (
+                    ReleaseTupleRecord(
+                        tuple_id="shared-tuple",
+                        context="opw",
+                        channel="testing",
+                        artifact_id="artifact-opw",
+                        repo_shas={"tenant-opw": "1111111111111111111111111111111111111111"},
+                        provenance="ship",
+                        minted_at="2026-04-21T18:00:00Z",
+                    ),
+                    ReleaseTupleRecord(
+                        tuple_id="shared-tuple",
+                        context="cm",
+                        channel="testing",
+                        artifact_id="artifact-cm",
+                        repo_shas={"tenant-cm": "3333333333333333333333333333333333333333"},
+                        provenance="ship",
+                        minted_at="2026-04-21T18:10:00Z",
+                    ),
                 )
-
-    def test_load_release_tuple_catalog_rejects_duplicate_tuple_ids(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.testing]
-tuple_id = "shared-tuple"
-
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-[contexts.cm.channels.testing]
-tuple_id = "shared-tuple"
-
-[contexts.cm.channels.testing.repo_shas]
-tenant-cm = "3333333333333333333333333333333333333333"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(Exception, "Duplicate release tuple id"):
-                control_plane_release_tuples.load_release_tuple_catalog(
-                    control_plane_root=control_plane_root,
+    def test_build_release_tuple_catalog_from_records_rejects_non_stable_remote_channels(self) -> None:
+        with self.assertRaisesRegex(Exception, "stable remote channels"):
+            control_plane_release_tuples.build_release_tuple_catalog_from_records(
+                (
+                    ReleaseTupleRecord(
+                        tuple_id="opw-dev-2026-04-13",
+                        context="opw",
+                        channel="dev",
+                        artifact_id="artifact-dev",
+                        repo_shas={"tenant-opw": "1111111111111111111111111111111111111111"},
+                        provenance="ship",
+                        minted_at="2026-04-21T18:00:00Z",
+                    ),
                 )
-
-    def test_load_release_tuple_catalog_rejects_non_sha_repo_values(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.testing]
-tuple_id = "opw-testing-2026-04-13"
-
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "origin/opw-testing"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
             )
-
-            with self.assertRaisesRegex(Exception, "hexadecimal git sha"):
-                control_plane_release_tuples.load_release_tuple_catalog(
-                    control_plane_root=control_plane_root,
-                )
-
-    def test_load_release_tuple_catalog_rejects_non_stable_remote_channels(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.dev]
-tuple_id = "opw-dev-2026-04-13"
-
-[contexts.opw.channels.dev.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
-
-            with self.assertRaisesRegex(Exception, "stable remote channels"):
-                control_plane_release_tuples.load_release_tuple_catalog(
-                    control_plane_root=control_plane_root,
-                )
 
     def test_build_release_tuple_record_from_artifact_manifest_uses_split_repo_shas(self) -> None:
         manifest = ArtifactIdentityManifest(
@@ -399,35 +314,24 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 minted_at="2026-04-10T18:24:00Z",
             )
 
-    def test_render_release_tuple_catalog_toml_round_trips_to_catalog(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            tuples_file = control_plane_root / "config" / "release-tuples.toml"
-            tuples_file.parent.mkdir(parents=True, exist_ok=True)
-            tuples_file.write_text(
-                control_plane_release_tuples.render_release_tuple_catalog_toml(
-                    (
-                        ReleaseTupleRecord(
-                            tuple_id="opw-testing-artifact-sha256-image456",
-                            context="opw",
-                            channel="testing",
-                            artifact_id="artifact-sha256-image456",
-                            repo_shas={"tenant-opw": "abc1234", "shared-addons": "def5678"},
-                            provenance="ship",
-                            minted_at="2026-04-10T18:24:00Z",
-                        ),
-                    )
+    def test_render_release_tuple_catalog_toml_renders_database_backed_records(self) -> None:
+        rendered_catalog = control_plane_release_tuples.render_release_tuple_catalog_toml(
+            (
+                ReleaseTupleRecord(
+                    tuple_id="opw-testing-artifact-sha256-image456",
+                    context="opw",
+                    channel="testing",
+                    artifact_id="artifact-sha256-image456",
+                    repo_shas={"tenant-opw": "abc1234", "shared-addons": "def5678"},
+                    provenance="ship",
+                    minted_at="2026-04-10T18:24:00Z",
                 ),
-                encoding="utf-8",
             )
+        )
 
-            catalog = control_plane_release_tuples.load_release_tuple_catalog(
-                control_plane_root=control_plane_root,
-            )
-
-        release_tuple = catalog.contexts["opw"].channels["testing"]
-        self.assertEqual(release_tuple.tuple_id, "opw-testing-artifact-sha256-image456")
-        self.assertEqual(release_tuple.repo_shas["tenant-opw"], "abc1234")
+        self.assertIn('tuple_id = "opw-testing-artifact-sha256-image456"', rendered_catalog)
+        self.assertIn('tenant-opw = "abc1234"', rendered_catalog)
+        self.assertIn('shared-addons = "def5678"', rendered_catalog)
 
     def test_render_release_tuple_catalog_toml_rejects_preview_channel(self) -> None:
         with self.assertRaisesRegex(Exception, "stable remote channels"):

@@ -1,5 +1,6 @@
 import json
 import os
+import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -7,10 +8,14 @@ from unittest.mock import patch
 
 import click
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -18,7 +23,254 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
+def _write_dokploy_managed_secrets(*, store: PostgresRecordStore, host: str, token: str) -> None:
+    control_plane_secrets.write_secret_value(
+        record_store=store,
+        scope="global",
+        integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+        name="host",
+        plaintext_value=host,
+        binding_key="DOKPLOY_HOST",
+        actor="test",
+    )
+    control_plane_secrets.write_secret_value(
+        record_store=store,
+        scope="global",
+        integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+        name="token",
+        plaintext_value=token,
+        binding_key="DOKPLOY_TOKEN",
+        actor="test",
+    )
+
+
+def _seed_dokploy_target_records(
+    *,
+    store: PostgresRecordStore,
+    payload: str,
+    updated_at: str = "2026-04-22T00:00:00Z",
+) -> None:
+    source_of_truth = control_plane_dokploy.DokploySourceOfTruth.model_validate(
+        tomllib.loads(payload.strip())
+    )
+    for target in source_of_truth.targets:
+        store.write_dokploy_target_record(
+            control_plane_dokploy.build_dokploy_target_record_from_definition(
+                target,
+                updated_at=updated_at,
+                source_label="test",
+            )
+        )
+        store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=target.context,
+                instance=target.instance,
+                target_id=target.target_id,
+                updated_at=updated_at,
+                source_label="test",
+            )
+        )
+
+
 class DokployConfigTests(unittest.TestCase):
+    def test_service_inspect_config_boundary_reports_db_only_authority(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            xdg_config_home = control_plane_root / "xdg"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "XDG_CONFIG_HOME": str(xdg_config_home),
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=store,
+                    host="https://dokploy.db.example",
+                    token="db-token",
+                )
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="global",
+                        context="",
+                        instance="",
+                        env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://launchplane.example.com"},
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context="cm",
+                        instance="prod",
+                        target_id="compose-123",
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                result = runner.invoke(
+                    main,
+                    [
+                        "service",
+                        "inspect-config-boundary",
+                        "--control-plane-root",
+                        str(control_plane_root),
+                    ],
+                )
+
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertTrue(payload["db"]["inspectable"])
+        self.assertEqual(payload["authority"]["dokploy_credentials"], "db_only")
+        self.assertEqual(payload["authority"]["runtime_environments"], "db_only")
+        self.assertEqual(payload["authority"]["dokploy_target_ids"], "db_only")
+        self.assertEqual(payload["authority"]["stable_targets"], "missing")
+        self.assertEqual(payload["authority"]["release_tuples_catalog"], "missing")
+        self.assertEqual(payload["transition_inputs"]["selector_env_keys_present"], ["XDG_CONFIG_HOME"])
+        self.assertEqual(payload["transition_inputs"]["payload_env_keys_present"], [])
+
+    def test_service_inspect_config_boundary_reports_mixed_authority(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            xdg_config_home = control_plane_root / "xdg"
+            config_directory = control_plane_root / "config"
+            config_directory.mkdir(parents=True, exist_ok=True)
+            (control_plane_root / ".env").write_text(
+                "DOKPLOY_HOST=https://dokploy.file.example\nDOKPLOY_TOKEN=file-token\n",
+                encoding="utf-8",
+            )
+            (config_directory / "runtime-environments.toml").write_text(
+                (
+                    'schema_version = 1\n\n'
+                    '[shared_env]\n'
+                    'LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.file.example.com"\n'
+                ),
+                encoding="utf-8",
+            )
+            (config_directory / "dokploy.toml").write_text(
+                (
+                    'schema_version = 2\n\n'
+                    '[[targets]]\n'
+                    'context = "cm"\n'
+                    'instance = "prod"\n'
+                    'target_id = "compose-file"\n'
+                ),
+                encoding="utf-8",
+            )
+            (config_directory / "dokploy-targets.toml").write_text(
+                (
+                    'schema_version = 1\n\n'
+                    '[[targets]]\n'
+                    'context = "cm"\n'
+                    'instance = "prod"\n'
+                    'target_id = "compose-override"\n'
+                ),
+                encoding="utf-8",
+            )
+            (config_directory / "release-tuples.toml").write_text(
+                (
+                    'schema_version = 1\n\n'
+                    '[contexts.cm.channels.testing]\n'
+                    'tuple_id = "cm-testing-file"\n\n'
+                    '[contexts.cm.channels.testing.repo_shas]\n'
+                    'tenant-cm = "3333333333333333333333333333333333333333"\n'
+                ),
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "XDG_CONFIG_HOME": str(xdg_config_home),
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=store,
+                    host="https://dokploy.db.example",
+                    token="db-token",
+                )
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="global",
+                        context="",
+                        instance="",
+                        env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://launchplane.db.example.com"},
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_dokploy_target_id_record(
+                    DokployTargetIdRecord(
+                        context="cm",
+                        instance="prod",
+                        target_id="compose-123",
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_dokploy_target_record(
+                    control_plane_dokploy.build_dokploy_target_record_from_definition(
+                        control_plane_dokploy.DokployTargetDefinition(
+                            context="cm",
+                            instance="prod",
+                            target_id="compose-123",
+                            target_type="compose",
+                        ),
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                store.write_release_tuple_record(
+                    ReleaseTupleRecord(
+                        tuple_id="cm-testing-2026-04-22",
+                        context="cm",
+                        channel="testing",
+                        artifact_id="artifact-testing",
+                        repo_shas={"tenant-cm": "3333333333333333333333333333333333333333"},
+                        provenance="ship",
+                        minted_at="2026-04-22T00:00:00Z",
+                    )
+                )
+
+                result = runner.invoke(
+                    main,
+                    [
+                        "service",
+                        "inspect-config-boundary",
+                        "--control-plane-root",
+                        str(control_plane_root),
+                    ],
+                )
+
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["authority"]["dokploy_credentials"], "db_only")
+        self.assertEqual(payload["authority"]["runtime_environments"], "db_only")
+        self.assertEqual(payload["authority"]["dokploy_target_ids"], "db_only")
+        self.assertEqual(payload["authority"]["stable_targets"], "db_only")
+        self.assertEqual(payload["authority"]["release_tuples_catalog"], "db_only")
+        self.assertTrue(payload["legacy_paths"]["repo_env_file"]["exists"])
+        self.assertTrue(payload["legacy_paths"]["repo_runtime_environments_file"]["exists"])
+        self.assertTrue(payload["legacy_paths"]["repo_dokploy_source_file"]["exists"])
+        self.assertTrue(payload["legacy_paths"]["repo_dokploy_target_ids_file"]["exists"])
+        self.assertTrue(payload["legacy_paths"]["repo_release_tuples_file"]["exists"])
+
     def test_environments_show_live_target_reports_legacy_runtime_contract_blockers(self) -> None:
         runner = CliRunner()
         source_of_truth = control_plane_dokploy.DokploySourceOfTruth.model_validate(
@@ -191,79 +443,30 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-devkit.git")
         self.assertEqual(payload["sync_preview"]["source_changes"]["custom_git_url"]["tracked"], "git@github.com:cbusillo/odoo-devkit.git")
 
-    def test_read_control_plane_dokploy_source_of_truth_merges_operator_local_target_ids(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            source_file = control_plane_root / "config" / "dokploy.toml"
-            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
-            source_file.parent.mkdir(parents=True, exist_ok=True)
-            source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-            target_ids_file.write_text(
-                """
-schema_version = 1
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_id = "compose-123"
-""".strip(),
-                encoding="utf-8",
-            )
-
-            with patch.dict(os.environ, {}, clear=True):
-                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
-                    control_plane_root=control_plane_root
-                )
-
-        self.assertEqual(len(source_of_truth.targets), 1)
-        self.assertEqual(source_of_truth.targets[0].target_id, "compose-123")
-
-    def test_read_control_plane_dokploy_source_of_truth_merges_postgres_target_ids_over_file_catalog(self) -> None:
+    def test_read_control_plane_dokploy_source_of_truth_prefers_postgres_target_ids_without_file_fallback(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            source_file = control_plane_root / "config" / "dokploy.toml"
-            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
-            source_file.parent.mkdir(parents=True, exist_ok=True)
-            source_file.write_text(
-                """
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
 schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-
-[[targets]]
-context = "cm"
-instance = "testing"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-            target_ids_file.write_text(
-                """
-schema_version = 1
 
 [[targets]]
 context = "opw"
 instance = "prod"
 target_id = "compose-file"
-""".strip(),
-                encoding="utf-8",
+target_type = "compose"
+
+[[targets]]
+context = "cm"
+instance = "testing"
+target_id = "compose-cm-file"
+target_type = "compose"
+""",
             )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
             store.write_dokploy_target_id_record(
                 DokployTargetIdRecord(
                     context="opw",
@@ -282,142 +485,57 @@ target_id = "compose-file"
                     source_label="import:test",
                 )
             )
-            store.close()
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
                     control_plane_root=control_plane_root
                 )
 
-        self.assertEqual([(target.context, target.instance, target.target_id) for target in source_of_truth.targets], [("opw", "prod", "compose-db"), ("cm", "testing", "compose-cm-db")])
+            store.close()
 
-    def test_read_control_plane_dokploy_source_of_truth_explicit_target_id_catalog_wins_over_postgres(self) -> None:
+        self.assertEqual(
+            [(target.context, target.instance, target.target_id) for target in source_of_truth.targets],
+            [("cm", "testing", "compose-cm-db"), ("opw", "prod", "compose-db")],
+        )
+
+    def test_read_control_plane_dokploy_source_of_truth_requires_database_target_ids_without_file_fallback(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            source_file = control_plane_root / "config" / "dokploy.toml"
-            explicit_target_ids_file = control_plane_root / "tmp" / "dokploy-targets.toml"
-            source_file.parent.mkdir(parents=True, exist_ok=True)
-            explicit_target_ids_file.parent.mkdir(parents=True, exist_ok=True)
-            source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-            explicit_target_ids_file.write_text(
-                """
-schema_version = 1
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_id = "compose-file"
-""".strip(),
-                encoding="utf-8",
-            )
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
-            store.write_dokploy_target_id_record(
-                DokployTargetIdRecord(
-                    context="opw",
-                    instance="prod",
-                    target_id="compose-db",
-                    updated_at="2026-04-21T19:00:00Z",
-                    source_label="import:test",
+            store.write_dokploy_target_record(
+                control_plane_dokploy.build_dokploy_target_record_from_definition(
+                    control_plane_dokploy.DokployTargetDefinition(
+                        context="opw",
+                        instance="prod",
+                        target_id="compose-placeholder",
+                        target_type="compose",
+                    ),
+                    updated_at="2026-04-22T00:00:00Z",
+                    source_label="test",
                 )
             )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                with self.assertRaises(click.ClickException) as raised_error:
+                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                        control_plane_root=control_plane_root
+                    )
+
             store.close()
 
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR: str(explicit_target_ids_file),
-                },
-                clear=True,
-            ):
-                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
-                    control_plane_root=control_plane_root
-                )
+        self.assertIn("Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception))
 
-        self.assertEqual(source_of_truth.targets[0].target_id, "compose-file")
-
-    def test_storage_import_dokploy_target_ids_writes_records_to_postgres(self) -> None:
-        runner = CliRunner()
+    def test_read_control_plane_dokploy_source_of_truth_reads_database_target_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            source_file = control_plane_root / "config" / "dokploy.toml"
-            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
-            source_file.parent.mkdir(parents=True, exist_ok=True)
-            source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-
-[[targets]]
-context = "cm"
-instance = "testing"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-            target_ids_file.write_text(
-                """
-schema_version = 1
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_id = "compose-123"
-
-[[targets]]
-context = "cm"
-instance = "testing"
-target_id = "compose-456"
-""".strip(),
-                encoding="utf-8",
-            )
-
-            result = runner.invoke(
-                main,
-                [
-                    "storage",
-                    "import-dokploy-target-ids",
-                    "--database-url",
-                    database_url,
-                    "--control-plane-root",
-                    str(control_plane_root),
-                ],
-            )
-
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
-            listed_records = store.list_dokploy_target_id_records()
-            store.close()
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        payload = json.loads(result.output)
-        self.assertEqual(payload["count"], 2)
-        self.assertEqual([(record.context, record.instance, record.target_id) for record in listed_records], [("cm", "testing", "compose-456"), ("opw", "prod", "compose-123")])
-
-    def test_read_control_plane_dokploy_source_of_truth_prefers_explicit_source_file(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            explicit_source_file = control_plane_root / "tmp" / "dokploy.toml"
-            explicit_source_file.parent.mkdir(parents=True, exist_ok=True)
-            explicit_source_file.write_text(
-                """
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
 schema_version = 2
 
 [[targets]]
@@ -425,312 +543,195 @@ context = "opw"
 instance = "prod"
 target_id = "compose-123"
 target_type = "compose"
-""".strip(),
-                encoding="utf-8",
+""",
             )
 
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(explicit_source_file),
-                },
-                clear=True,
-            ):
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
                     control_plane_root=control_plane_root
                 )
+
+            store.close()
 
         self.assertEqual(len(source_of_truth.targets), 1)
         self.assertEqual(source_of_truth.targets[0].target_id, "compose-123")
 
     def test_read_control_plane_dokploy_source_of_truth_fails_closed_when_target_id_missing(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            explicit_source_file = control_plane_root / "tmp" / "dokploy.toml"
-            explicit_source_file.parent.mkdir(parents=True, exist_ok=True)
-            explicit_source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
+        with self.assertRaises(click.ClickException) as raised_error:
+            control_plane_dokploy.build_dokploy_source_of_truth_from_records(
+                (
+                    control_plane_dokploy.build_dokploy_target_record_from_definition(
+                        control_plane_dokploy.DokployTargetDefinition(
+                            context="opw",
+                            instance="prod",
+                            target_id="compose-placeholder",
+                            target_type="compose",
+                        ),
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    ),
+                ),
+                (),
             )
 
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(explicit_source_file),
-                },
-                clear=True,
-            ):
-                with self.assertRaises(click.ClickException) as raised_error:
-                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
-
-        self.assertIn("requires non-empty target_id", str(raised_error.exception))
-
-    def test_read_control_plane_dokploy_source_of_truth_fails_closed_when_explicit_target_id_catalog_is_missing(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            source_file = control_plane_root / "config" / "dokploy.toml"
-            missing_target_ids_file = control_plane_root / "tmp" / "dokploy-targets.toml"
-            source_file.parent.mkdir(parents=True, exist_ok=True)
-            source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE_ENV_VAR: str(missing_target_ids_file),
-                },
-                clear=True,
-            ):
-                with self.assertRaises(click.ClickException) as raised_error:
-                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
-
-        self.assertIn("Dokploy target-id catalog file not found", str(raised_error.exception))
+        self.assertIn("Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception))
 
     def test_read_control_plane_dokploy_source_of_truth_rejects_duplicate_context_instance_targets(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            explicit_source_file = control_plane_root / "tmp" / "dokploy.toml"
-            explicit_source_file.parent.mkdir(parents=True, exist_ok=True)
-            explicit_source_file.write_text(
-                """
-schema_version = 2
+        duplicate_records = (
+            control_plane_dokploy.build_dokploy_target_record_from_definition(
+                control_plane_dokploy.DokployTargetDefinition(
+                    context="opw",
+                    instance="prod",
+                    target_id="compose-123",
+                    target_type="compose",
+                ),
+                updated_at="2026-04-22T00:00:00Z",
+                source_label="test",
+            ),
+            control_plane_dokploy.build_dokploy_target_record_from_definition(
+                control_plane_dokploy.DokployTargetDefinition(
+                    context="opw",
+                    instance="prod",
+                    target_id="compose-456",
+                    target_type="compose",
+                ),
+                updated_at="2026-04-22T00:00:00Z",
+                source_label="test",
+            ),
+        )
+        target_id_records = (
+            DokployTargetIdRecord(
+                context="opw",
+                instance="prod",
+                target_id="compose-123",
+                updated_at="2026-04-22T00:00:00Z",
+                source_label="test",
+            ),
+        )
 
-[[targets]]
-context = "opw"
-instance = "prod"
-target_id = "compose-123"
-target_type = "compose"
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_id = "compose-456"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(explicit_source_file),
-                },
-                clear=True,
-            ):
-                with self.assertRaises(click.ClickException) as raised_error:
-                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
+        with self.assertRaises(ValidationError) as raised_error:
+            control_plane_dokploy.build_dokploy_source_of_truth_from_records(duplicate_records, target_id_records)
 
         self.assertIn("Duplicate Dokploy target definition for opw/prod", str(raised_error.exception))
 
     def test_read_control_plane_dokploy_source_of_truth_rejects_dev_lane_targets(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            explicit_source_file = control_plane_root / "tmp" / "dokploy.toml"
-            explicit_source_file.parent.mkdir(parents=True, exist_ok=True)
-            explicit_source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "dev"
-target_id = "compose-123"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
+        with self.assertRaises(ValidationError) as raised_error:
+            control_plane_dokploy.build_dokploy_source_of_truth_from_records(
+                (
+                    control_plane_dokploy.build_dokploy_target_record_from_definition(
+                        control_plane_dokploy.DokployTargetDefinition(
+                            context="opw",
+                            instance="dev",
+                            target_id="compose-123",
+                            target_type="compose",
+                        ),
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    ),
+                ),
+                (
+                    DokployTargetIdRecord(
+                        context="opw",
+                        instance="dev",
+                        target_id="compose-123",
+                        updated_at="2026-04-22T00:00:00Z",
+                        source_label="test",
+                    ),
+                ),
             )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_dokploy.CONTROL_PLANE_DOKPLOY_SOURCE_FILE_ENV_VAR: str(explicit_source_file),
-                },
-                clear=True,
-            ):
-                with self.assertRaises(click.ClickException) as raised_error:
-                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
 
         self.assertIn("stable remote instances prod, testing", str(raised_error.exception))
         self.assertIn("opw/dev", str(raised_error.exception))
         self.assertIn("Launchplane preview records", str(raised_error.exception))
 
-    def test_read_control_plane_dokploy_source_of_truth_rejects_unknown_target_id_override_routes(self) -> None:
+    def test_read_dokploy_config_reads_managed_secrets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            source_file = control_plane_root / "config" / "dokploy.toml"
-            target_ids_file = control_plane_root / "config" / "dokploy-targets.toml"
-            source_file.parent.mkdir(parents=True, exist_ok=True)
-            source_file.write_text(
-                """
-schema_version = 2
-
-[[targets]]
-context = "opw"
-instance = "prod"
-target_type = "compose"
-""".strip(),
-                encoding="utf-8",
-            )
-            target_ids_file.write_text(
-                """
-schema_version = 1
-
-[[targets]]
-context = "cm"
-instance = "prod"
-target_id = "compose-456"
-""".strip(),
-                encoding="utf-8",
-            )
-
-            with patch.dict(os.environ, {}, clear=True):
-                with self.assertRaises(click.ClickException) as raised_error:
-                    control_plane_dokploy.read_control_plane_dokploy_source_of_truth(control_plane_root=control_plane_root)
-
-        self.assertIn("route(s) that are not present in the source-of-truth: cm/prod", str(raised_error.exception))
-
-    def test_read_dokploy_config_prefers_control_plane_env_file(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            (control_plane_root / ".env").write_text(
-                "DOKPLOY_HOST=https://dokploy.control-plane.example\nDOKPLOY_TOKEN=control-plane-token\n",
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {},
-                clear=True,
-            ):
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-
-        self.assertEqual(host, "https://dokploy.control-plane.example")
-        self.assertEqual(token, "control-plane-token")
-
-    def test_read_dokploy_config_runtime_ignores_process_environment_over_file(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            (control_plane_root / ".env").write_text(
-                "DOKPLOY_HOST=https://dokploy.control-plane.example\nDOKPLOY_TOKEN=control-plane-token\n",
-                encoding="utf-8",
-            )
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
 
             with patch.dict(
                 os.environ,
                 {
-                    "DOKPLOY_HOST": "https://dokploy.process.example",
-                    "DOKPLOY_TOKEN": "process-token",
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
                 },
                 clear=True,
             ):
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-
-        self.assertEqual(host, "https://dokploy.control-plane.example")
-        self.assertEqual(token, "control-plane-token")
-
-    def test_read_dokploy_config_falls_back_to_process_environment_bootstrap(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            xdg_config_home = control_plane_root / "xdg"
-
-            with patch.dict(
-                os.environ,
-                {
-                    "DOKPLOY_HOST": "https://dokploy.process.example",
-                    "DOKPLOY_TOKEN": "process-token",
-                    "XDG_CONFIG_HOME": str(xdg_config_home),
-                },
-                clear=True,
-            ):
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-
-        self.assertEqual(host, "https://dokploy.process.example")
-        self.assertEqual(token, "process-token")
-
-    def test_read_dokploy_config_supports_explicit_control_plane_env_file(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            explicit_env_file = control_plane_root / "tmp" / "control-plane.env"
-            explicit_env_file.parent.mkdir(parents=True, exist_ok=True)
-            explicit_env_file.write_text(
-                "DOKPLOY_HOST=https://dokploy.explicit.example\nDOKPLOY_TOKEN=explicit-token\n",
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_dokploy.CONTROL_PLANE_ENV_FILE_ENV_VAR: str(explicit_env_file),
-                },
-                clear=True,
-            ):
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-
-        self.assertEqual(host, "https://dokploy.explicit.example")
-        self.assertEqual(token, "explicit-token")
-
-    def test_read_dokploy_config_uses_external_launchplane_config_dir_when_repo_file_missing(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name) / "repo"
-            control_plane_root.mkdir(parents=True, exist_ok=True)
-            xdg_config_home = Path(temporary_directory_name) / "xdg"
-            external_env_file = xdg_config_home / "launchplane" / "dokploy.env"
-            external_env_file.parent.mkdir(parents=True, exist_ok=True)
-            external_env_file.write_text(
-                "DOKPLOY_HOST=https://dokploy.external.example\nDOKPLOY_TOKEN=external-token\n",
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    "XDG_CONFIG_HOME": str(xdg_config_home),
-                },
-                clear=True,
-            ):
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
-
-        self.assertEqual(host, "https://dokploy.external.example")
-        self.assertEqual(token, "external-token")
-
-    def test_read_control_plane_bootstrap_environment_values_includes_process_overrides(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            (control_plane_root / ".env").write_text(
-                "DOKPLOY_SHIP_MODE=compose\n",
-                encoding="utf-8",
-            )
-
-            with patch.dict(
-                os.environ,
-                {
-                    "DOKPLOY_SHIP_MODE": "application",
-                },
-                clear=True,
-            ):
-                environment_values = control_plane_dokploy.read_control_plane_bootstrap_environment_values(
-                    control_plane_root=control_plane_root
+                _write_dokploy_managed_secrets(
+                    store=store,
+                    host="https://dokploy.db.example",
+                    token="db-token",
                 )
+                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
 
-        self.assertEqual(environment_values["DOKPLOY_SHIP_MODE"], "application")
+            store.close()
 
-    def test_read_control_plane_environment_values_runtime_ignores_process_overrides(self) -> None:
+        self.assertEqual(host, "https://dokploy.db.example")
+        self.assertEqual(token, "db-token")
+
+    def test_read_dokploy_config_ignores_repo_env_file(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            (control_plane_root / ".env").write_text(
+                "DOKPLOY_HOST=https://dokploy.control-plane.example\nDOKPLOY_TOKEN=control-plane-token\n",
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=store,
+                    host="https://dokploy.db.example",
+                    token="db-token",
+                )
+                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+
+            store.close()
+
+        self.assertEqual(host, "https://dokploy.db.example")
+        self.assertEqual(token, "db-token")
+
+    def test_read_dokploy_config_ignores_process_environment_bootstrap(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "DOKPLOY_HOST": "https://dokploy.process.example",
+                    "DOKPLOY_TOKEN": "process-token",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=store,
+                    host="https://dokploy.db.example",
+                    token="db-token",
+                )
+                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+
+            store.close()
+
+        self.assertEqual(host, "https://dokploy.db.example")
+        self.assertEqual(token, "db-token")
+
+    def test_read_dokploy_config_fails_closed_with_only_repo_env_file(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             (control_plane_root / ".env").write_text(
@@ -740,27 +741,73 @@ target_id = "compose-456"
 
             with patch.dict(
                 os.environ,
+                {},
+                clear=True,
+            ):
+                with self.assertRaises(click.ClickException) as raised_error:
+                    control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+
+        self.assertIn("Configure Launchplane-managed Dokploy secrets in the shared store", str(raised_error.exception))
+
+    def test_read_dokploy_config_fails_closed_with_only_process_environment_bootstrap(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+
+            with patch.dict(
+                os.environ,
                 {
                     "DOKPLOY_HOST": "https://dokploy.process.example",
                     "DOKPLOY_TOKEN": "process-token",
                 },
                 clear=True,
             ):
+                with self.assertRaises(click.ClickException) as raised_error:
+                    control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+
+        self.assertIn("Configure Launchplane-managed Dokploy secrets in the shared store", str(raised_error.exception))
+
+    def test_read_control_plane_environment_values_reads_managed_secrets_only(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            (control_plane_root / ".env").write_text(
+                "DOKPLOY_HOST=https://dokploy.file.example\nDOKPLOY_TOKEN=file-token\n",
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "DOKPLOY_HOST": "https://dokploy.process.example",
+                    "DOKPLOY_TOKEN": "process-token",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(
+                    store=store,
+                    host="https://dokploy.db.example",
+                    token="db-token",
+                )
                 environment_values = control_plane_dokploy.read_control_plane_environment_values(
                     control_plane_root=control_plane_root
                 )
 
-        self.assertEqual(environment_values["DOKPLOY_HOST"], "https://dokploy.file.example")
-        self.assertEqual(environment_values["DOKPLOY_TOKEN"], "file-token")
+            store.close()
+
+        self.assertEqual(environment_values["DOKPLOY_HOST"], "https://dokploy.db.example")
+        self.assertEqual(environment_values["DOKPLOY_TOKEN"], "db-token")
 
     def test_read_dokploy_config_fails_closed_without_control_plane_secret_source(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            xdg_config_home = Path(temporary_directory_name) / "xdg"
 
             with patch.dict(
                 os.environ,
-                {"XDG_CONFIG_HOME": str(xdg_config_home)},
+                {},
                 clear=True,
             ):
                 with self.assertRaises(click.ClickException) as raised_error:

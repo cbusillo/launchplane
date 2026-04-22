@@ -8,6 +8,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -103,6 +104,23 @@ def _dokploy_target_id_record(*, context: str = "opw", instance: str = "prod", t
         context=context,
         instance=instance,
         target_id=target_id,
+        updated_at="2026-04-21T18:30:00Z",
+        source_label="import:test",
+    )
+
+
+def _dokploy_target_record(*, context: str = "opw", instance: str = "prod") -> DokployTargetRecord:
+    return DokployTargetRecord(
+        context=context,
+        instance=instance,
+        target_type="compose",
+        target_name=f"{context}-{instance}",
+        source_git_ref="origin/main",
+        source_type="git",
+        custom_git_url="git@github.com:every/odoo-opw.git",
+        custom_git_branch=instance,
+        compose_path="./docker-compose.yml",
+        domains=(f"https://{instance}.example.com",),
         updated_at="2026-04-21T18:30:00Z",
         source_label="import:test",
     )
@@ -242,6 +260,22 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_dokploy_target_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            record = _dokploy_target_record()
+            store.write_dokploy_target_record(record)
+            loaded = store.read_dokploy_target_record(context_name="opw", instance_name="prod")
+            listed = store.list_dokploy_target_records()
+
+            self.assertEqual(loaded.target_name, "opw-prod")
+            self.assertEqual(loaded.compose_path, "./docker-compose.yml")
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0].context, "opw")
+
     def test_idempotency_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"

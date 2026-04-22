@@ -6,17 +6,32 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from click.testing import CliRunner
-
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
-from control_plane.cli import main
 from control_plane.storage.postgres import PostgresRecordStore
 
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _seed_runtime_environment_records(
+    *,
+    database_url: str,
+    definition: control_plane_runtime_environments.RuntimeEnvironmentDefinition,
+) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+            definition,
+            updated_at="2026-04-22T00:00:00Z",
+            source_label="test",
+        ):
+            store.write_runtime_environment_record(record)
+    finally:
+        store.close()
 
 
 class LaunchplaneSecretsTests(unittest.TestCase):
@@ -65,24 +80,25 @@ class LaunchplaneSecretsTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
-                """
-schema_version = 1
-
-[shared_env]
-ODOO_MASTER_PASSWORD = "file-shared-master"
-
-[contexts.opw.shared_env]
-GITHUB_WEBHOOK_SECRET = "file-context-secret"
-
-[contexts.opw.instances.testing.env]
-ODOO_DB_PASSWORD = "file-instance-secret"
-LAUNCHPLANE_PREVIEW_BASE_URL = "https://preview.example.com"
-""".strip()
-                + "\n",
-                encoding="utf-8",
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ODOO_MASTER_PASSWORD": "file-shared-master"},
+                    contexts={
+                        "opw": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={"GITHUB_WEBHOOK_SECRET": "file-context-secret"},
+                            instances={
+                                "testing": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={
+                                        "ODOO_DB_PASSWORD": "file-instance-secret",
+                                        "LAUNCHPLANE_PREVIEW_BASE_URL": "https://preview.example.com",
+                                    }
+                                )
+                            },
+                        )
+                    },
+                ),
             )
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
@@ -134,143 +150,6 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://preview.example.com"
                 self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "db-instance-secret")
                 self.assertEqual(resolved_values["LAUNCHPLANE_PREVIEW_BASE_URL"], "https://preview.example.com")
             store.close()
-
-    def test_import_bootstrap_secrets_pulls_existing_dokploy_and_runtime_values(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            (control_plane_root / ".env").write_text(
-                "DOKPLOY_HOST=https://dokploy.bootstrap.example\nDOKPLOY_TOKEN=bootstrap-token\n",
-                encoding="utf-8",
-            )
-            runtime_environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            runtime_environments_file.parent.mkdir(parents=True, exist_ok=True)
-            runtime_environments_file.write_text(
-                """
-schema_version = 1
-
-[shared_env]
-ODOO_MASTER_PASSWORD = "shared-master"
-
-[contexts.opw.shared_env]
-GITHUB_WEBHOOK_SECRET = "webhook-secret"
-LAUNCHPLANE_PREVIEW_BASE_URL = "https://preview.example.com"
-
-[contexts.opw.instances.testing.env]
-ODOO_DB_PASSWORD = "instance-password"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                summary = control_plane_secrets.import_bootstrap_secrets(
-                    record_store=store,
-                    control_plane_root=control_plane_root,
-                    actor="bootstrap-test",
-                )
-                statuses = control_plane_secrets.list_secret_statuses(store, context_name="opw", instance_name="testing")
-                self.assertEqual(summary["dokploy"]["imported"], 2)
-                self.assertEqual(summary["runtime_environment"]["imported"], 3)
-                self.assertEqual(summary["runtime_environment"]["skipped_empty"], 0)
-                self.assertEqual(
-                    {status["binding"]["binding_key"] for status in statuses if status["binding"] is not None},
-                    {
-                        "DOKPLOY_HOST",
-                        "DOKPLOY_TOKEN",
-                        "ODOO_MASTER_PASSWORD",
-                        "GITHUB_WEBHOOK_SECRET",
-                        "ODOO_DB_PASSWORD",
-                    },
-                )
-            store.close()
-
-    def test_import_bootstrap_secrets_skips_empty_runtime_secret_values(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            xdg_config_home = control_plane_root / "xdg"
-            runtime_environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            runtime_environments_file.parent.mkdir(parents=True, exist_ok=True)
-            runtime_environments_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.instances.prod.env]
-ENV_OVERRIDE_SHOPIFY__API_TOKEN = ""
-ENV_OVERRIDE_SHOPIFY__SHOP_URL_KEY = ""
-ENV_OVERRIDE_SHOPIFY__WEBHOOK_KEY = ""
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
-            store = PostgresRecordStore(database_url=database_url)
-            store.ensure_schema()
-            with patch.dict(
-                os.environ,
-                {
-                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
-                    "XDG_CONFIG_HOME": str(xdg_config_home),
-                },
-                clear=True,
-            ):
-                summary = control_plane_secrets.import_bootstrap_secrets(
-                    record_store=store,
-                    control_plane_root=control_plane_root,
-                    actor="bootstrap-test",
-                )
-                statuses = control_plane_secrets.list_secret_statuses(store, context_name="opw", instance_name="prod")
-                self.assertEqual(summary["runtime_environment"]["imported"], 0)
-                self.assertEqual(summary["runtime_environment"]["skipped_empty"], 3)
-                self.assertEqual(statuses, [])
-            store.close()
-
-    def test_secrets_cli_import_bootstrap_reports_summary(self) -> None:
-        runner = CliRunner()
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
-            (control_plane_root / ".env").write_text(
-                "DOKPLOY_HOST=https://dokploy.bootstrap.example\nDOKPLOY_TOKEN=bootstrap-token\n",
-                encoding="utf-8",
-            )
-            runtime_environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            runtime_environments_file.parent.mkdir(parents=True, exist_ok=True)
-            runtime_environments_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.shared_env]
-GITHUB_WEBHOOK_SECRET = "webhook-secret"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
-            with patch.dict(
-                os.environ,
-                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
-                clear=True,
-            ):
-                result = runner.invoke(
-                    main,
-                    [
-                        "secrets",
-                        "import-bootstrap",
-                        "--database-url",
-                        database_url,
-                        "--control-plane-root",
-                        str(control_plane_root),
-                    ],
-                )
-
-        self.assertEqual(result.exit_code, 0, msg=result.output)
-        self.assertIn('"dokploy": {', result.output)
-        self.assertIn('"runtime_environment": {', result.output)
 
 
 if __name__ == "__main__":

@@ -150,8 +150,9 @@ state/
   the current source tuple for the promoted-from lane.
 - Launchplane previews are not long-lived release-tuple channels; they derive their
   baseline from stored tuple evidence plus preview generation records.
-- Runtime tuple records live under `state/` and do not rewrite the tracked
-  default TOML catalog implicitly.
+- Local-dev tuple records live under `state/`; shared-service runtime baseline
+  authority comes from the same release-tuple record shape in Postgres-backed
+  storage. Neither path rewrites any tracked TOML catalog implicitly.
 
 ## Launchplane Preview Record
 

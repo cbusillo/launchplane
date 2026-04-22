@@ -1,6 +1,8 @@
+import os
 import hashlib
 import hmac
 import json
+import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -9,6 +11,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
@@ -19,6 +22,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewSourceRecord,
 )
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -28,6 +32,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane import (
     apply_generation_failed_transition,
     apply_generation_ready_transition,
@@ -286,36 +291,45 @@ def _promotion_record(
 
 
 def _write_release_tuples_file(control_plane_root: Path) -> None:
-    release_tuples_file = control_plane_root / "config" / "release-tuples.toml"
-    release_tuples_file.parent.mkdir(parents=True, exist_ok=True)
-    release_tuples_file.write_text(
-        """
-schema_version = 1
+    database_url = _runtime_environments_database_url(control_plane_root)
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="opw-testing-2026-04-13",
+                context="opw",
+                channel="testing",
+                artifact_id="artifact-opw-testing",
+                repo_shas={
+                    "tenant-opw": "1111111111111111111111111111111111111111",
+                    "shared-addons": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                },
+                provenance="ship",
+                minted_at="2026-04-22T00:00:00Z",
+            )
+        )
+        store.write_release_tuple_record(
+            ReleaseTupleRecord(
+                tuple_id="cm-testing-2026-04-13",
+                context="cm",
+                channel="testing",
+                artifact_id="artifact-cm-testing",
+                repo_shas={
+                    "tenant-cm": "3333333333333333333333333333333333333333",
+                    "shared-addons": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                },
+                provenance="ship",
+                minted_at="2026-04-22T00:00:00Z",
+            )
+        )
+    finally:
+        store.close()
 
-[contexts.opw.channels.testing]
-tuple_id = "opw-testing-2026-04-13"
 
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-
-[contexts.cm.channels.testing]
-tuple_id = "cm-testing-2026-04-13"
-
-[contexts.cm.channels.testing.repo_shas]
-tenant-cm = "3333333333333333333333333333333333333333"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-        + "\n",
-        encoding="utf-8",
-    )
-
-
-def _write_runtime_environments_file(control_plane_root: Path) -> None:
-    environments_file = control_plane_root / "config" / "runtime-environments.toml"
-    environments_file.parent.mkdir(parents=True, exist_ok=True)
-    environments_file.write_text(
-        """
+def _write_runtime_environments_file(control_plane_root: Path, payload: str | None = None) -> None:
+    if payload is None:
+        payload = """
 schema_version = 1
 
 [shared_env]
@@ -328,9 +342,29 @@ ENV_OVERRIDE_DISABLE_CRON = true
 [contexts.cm.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
 """.strip()
-        + "\n",
-        encoding="utf-8",
-    )
+    database_url = _runtime_environments_database_url(control_plane_root)
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+            control_plane_runtime_environments._parse_runtime_environment_definition(
+                tomllib.loads(payload),
+                source_file=control_plane_root / "config" / "runtime-environments.toml",
+            ),
+            updated_at="2026-04-22T00:00:00Z",
+            source_label="test",
+        ):
+            store.write_runtime_environment_record(record)
+    finally:
+        store.close()
+
+
+def _runtime_environments_database_url(control_plane_root: Path) -> str:
+    return f"sqlite+pysqlite:///{control_plane_root / 'launchplane.sqlite3'}"
+
+
+def _runtime_environments_env(control_plane_root: Path) -> dict[str, str]:
+    return {"LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(control_plane_root)}
 
 
 def _github_pull_request_webhook_payload(
@@ -480,9 +514,8 @@ class LaunchplanePreviewReadModelTests(unittest.TestCase):
     def test_resolve_launchplane_preview_base_url_reads_context_runtime_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
+            _write_runtime_environments_file(
+                control_plane_root,
                 """
 schema_version = 1
 
@@ -495,38 +528,35 @@ ENV_OVERRIDE_DISABLE_CRON = true
 [contexts.opw.instances.local.env]
 ODOO_DB_PASSWORD = "local-secret"
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
 
-            resolved_base_url = resolve_launchplane_preview_base_url(
-                control_plane_root=control_plane_root,
-                context_name="opw",
-            )
+            with patch.dict(os.environ, _runtime_environments_env(control_plane_root), clear=True):
+                resolved_base_url = resolve_launchplane_preview_base_url(
+                    control_plane_root=control_plane_root,
+                    context_name="opw",
+                )
 
         self.assertEqual(resolved_base_url, "https://launchplane.example")
 
     def test_resolve_launchplane_preview_base_url_fails_closed_when_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
+            _write_runtime_environments_file(
+                control_plane_root,
                 """
 schema_version = 1
 
 [contexts.opw.instances.local.env]
 ODOO_DB_PASSWORD = "local-secret"
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
 
-            with self.assertRaisesRegex(Exception, "LAUNCHPLANE_PREVIEW_BASE_URL"):
-                resolve_launchplane_preview_base_url(
-                    control_plane_root=control_plane_root,
-                    context_name="opw",
-                )
+            with patch.dict(os.environ, _runtime_environments_env(control_plane_root), clear=True):
+                with self.assertRaisesRegex(Exception, "LAUNCHPLANE_PREVIEW_BASE_URL"):
+                    resolve_launchplane_preview_base_url(
+                        control_plane_root=control_plane_root,
+                        context_name="opw",
+                    )
 
     def test_build_preview_generation_record_links_anchor_and_sequence(self) -> None:
         generation_record = build_preview_generation_record(
@@ -1334,27 +1364,13 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(enablement_by_pr[129]["request_metadata_status"], "valid")
             self.assertEqual(enablement_by_pr[129]["action"]["status"], "actionable")
 
-    def test_launchplane_previews_render_site_release_tuples_file_resolves_enablement_recipe(self) -> None:
+    def test_launchplane_previews_render_site_release_tuple_records_resolve_enablement_recipe(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
             state_dir = temporary_directory / "state"
             output_dir = temporary_directory / "site"
-            release_tuples_file = temporary_directory / "release-tuples.toml"
-            release_tuples_file.write_text(
-                """
-schema_version = 1
-
-[contexts.opw.channels.testing]
-tuple_id = "opw-testing-2026-04-13"
-
-[contexts.opw.channels.testing.repo_shas]
-tenant-opw = "1111111111111111111111111111111111111111"
-shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-""".strip()
-                + "\n",
-                encoding="utf-8",
-            )
+            _write_release_tuples_file(temporary_directory)
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_enablement_record(
                 _preview_enablement_record(
@@ -1378,11 +1394,10 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                     str(state_dir),
                     "--context",
                     "opw",
-                    "--release-tuples-file",
-                    str(release_tuples_file),
                     "--output-dir",
                     str(output_dir),
                 ],
+                env=_runtime_environments_env(temporary_directory),
             )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -2860,9 +2875,8 @@ shared-addons = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             state_dir = control_plane_root / "state"
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
+            _write_runtime_environments_file(
+                control_plane_root,
                 """
 schema_version = 1
 
@@ -2872,8 +2886,6 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
             input_file = control_plane_root / "preview-request.json"
             input_file.write_text(
@@ -2901,6 +2913,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -2918,9 +2931,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             state_dir = control_plane_root / "state"
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
+            _write_runtime_environments_file(
+                control_plane_root,
                 """
 schema_version = 1
 
@@ -2930,8 +2942,6 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
@@ -2967,6 +2977,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -2981,17 +2992,14 @@ ENV_OVERRIDE_DISABLE_CRON = true
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             state_dir = control_plane_root / "state"
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
+            _write_runtime_environments_file(
+                control_plane_root,
                 """
 schema_version = 1
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
             input_file = control_plane_root / "preview-request.json"
             input_file.write_text(
@@ -3019,6 +3027,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertNotEqual(result.exit_code, 0)
@@ -3161,9 +3170,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             state_dir = control_plane_root / "state"
-            environments_file = control_plane_root / "config" / "runtime-environments.toml"
-            environments_file.parent.mkdir(parents=True, exist_ok=True)
-            environments_file.write_text(
+            _write_runtime_environments_file(
+                control_plane_root,
                 """
 schema_version = 1
 
@@ -3173,8 +3181,6 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
 """.strip()
-                + "\n",
-                encoding="utf-8",
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
@@ -3629,6 +3635,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -3707,6 +3714,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -3778,6 +3786,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -3841,6 +3850,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(input_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -4022,6 +4032,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(input_file),
                         "--apply",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -4258,6 +4269,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(input_file),
                         "--deliver-feedback",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -4400,6 +4412,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         _github_webhook_signature(webhook_payload),
                         "--apply",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -4444,6 +4457,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--signature-256",
                         _github_webhook_signature(webhook_payload),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -4526,6 +4540,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--signature-256",
                         "sha256=deadbeef",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertNotEqual(result.exit_code, 0)
@@ -4595,6 +4610,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(input_file),
                         "--apply",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
@@ -4714,6 +4730,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(envelope_file),
                         "--apply",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(replay_result.exit_code, 0, msg=replay_result.output)
@@ -4924,6 +4941,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(envelope_file),
                         "--apply",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(replay_result.exit_code, 0, msg=replay_result.output)
@@ -5151,6 +5169,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         "--input-file",
                         str(envelope_file),
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(replay_result.exit_code, 0, msg=replay_result.output)
@@ -6028,6 +6047,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                         str(input_file),
                         "--apply",
                     ],
+                    env=_runtime_environments_env(control_plane_root),
                 )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)

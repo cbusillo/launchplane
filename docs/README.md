@@ -5,6 +5,8 @@ title: Control Plane Docs
 Use these docs as the source of truth for `launchplane`.
 
 - [architecture.md](architecture.md) — ownership boundaries and system shape.
+- [config-boundary.md](config-boundary.md) — bootstrap-vs-DB config authority
+  and the fallback-removal target.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
   OIDC trust, and first API contracts.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.

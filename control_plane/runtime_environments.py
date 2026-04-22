@@ -13,9 +13,7 @@ from control_plane.contracts.runtime_environment_record import RuntimeEnvironmen
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 
-RUNTIME_ENVIRONMENTS_FILE_ENV_VAR = "ODOO_CONTROL_PLANE_RUNTIME_ENVIRONMENTS_FILE"
 DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
-DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE = "runtime-environments.toml"
 
 ScalarValue = str | int | float | bool
 ScalarMap = dict[str, ScalarValue]
@@ -39,47 +37,20 @@ class RuntimeEnvironmentDefinition:
     contexts: dict[str, RuntimeEnvironmentContextDefinition]
 
 
-def resolve_runtime_environments_file(control_plane_root: Path) -> Path | None:
-    configured_file = os.environ.get(RUNTIME_ENVIRONMENTS_FILE_ENV_VAR, "").strip()
-    if configured_file:
-        candidate_path = Path(configured_file)
-        if not candidate_path.is_absolute():
-            candidate_path = control_plane_root / candidate_path
-        return candidate_path
-    legacy_repo_file = control_plane_root / DEFAULT_RUNTIME_ENVIRONMENTS_FILE
-    if legacy_repo_file.exists():
-        return legacy_repo_file
-    external_file = control_plane_dokploy.resolve_launchplane_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
-    if external_file.exists():
-        return external_file
-    return None
-
-
 def load_runtime_environment_definition(
     *, control_plane_root: Path
 ) -> RuntimeEnvironmentDefinition:
-    configured_file = os.environ.get(RUNTIME_ENVIRONMENTS_FILE_ENV_VAR, "").strip()
-    if configured_file:
-        environments_file = resolve_runtime_environments_file(control_plane_root)
-        assert environments_file is not None
-        return _load_runtime_environment_definition_from_file(environments_file)
-
-    file_definition = _load_optional_runtime_environment_definition_from_file(control_plane_root=control_plane_root)
     database_url = resolve_database_url()
     if database_url:
         database_definition = _load_optional_runtime_environment_definition_from_database(database_url=database_url)
-        if database_definition is not None and file_definition is not None:
-            return _merge_runtime_environment_definitions(base_definition=file_definition, overlay_definition=database_definition)
         if database_definition is not None:
             return database_definition
-    if file_definition is not None:
-        return file_definition
+        raise click.ClickException(
+            "Missing DB-backed Launchplane runtime environment records."
+        )
 
-    external_file = control_plane_dokploy.resolve_launchplane_config_dir() / DEFAULT_EXTERNAL_RUNTIME_ENVIRONMENTS_FILE
     raise click.ClickException(
-        "Missing control-plane runtime environments file. "
-        f"Set {RUNTIME_ENVIRONMENTS_FILE_ENV_VAR}, create {external_file}, "
-        f"or use the legacy repo-local file at {control_plane_root / DEFAULT_RUNTIME_ENVIRONMENTS_FILE}."
+        "Missing Launchplane runtime environment authority. Configure DB-backed runtime environment records."
     )
 
 
@@ -142,12 +113,16 @@ def resolve_tracked_target_environment_values(
     context_name: str,
     instance_name: str,
 ) -> dict[str, str]:
-    source_file_path = control_plane_dokploy.resolve_control_plane_dokploy_source_file(control_plane_root)
-    if not source_file_path.exists():
-        return {}
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
-        control_plane_root=control_plane_root
-    )
+    try:
+        source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+            control_plane_root=control_plane_root
+        )
+    except click.ClickException as error:
+        if str(error).startswith("Missing Launchplane tracked Dokploy target authority") or str(error).startswith(
+            "Missing DB-backed Launchplane tracked Dokploy target records."
+        ):
+            return {}
+        raise
     target_definition = control_plane_dokploy.find_dokploy_target_definition(
         source_of_truth,
         context_name=context_name,
@@ -212,15 +187,6 @@ def _load_runtime_environment_definition_from_file(environments_file: Path) -> R
             f"Invalid runtime environments file {environments_file}: {error}"
         ) from error
     return _parse_runtime_environment_definition(payload, source_file=environments_file)
-
-
-def _load_optional_runtime_environment_definition_from_file(
-    *, control_plane_root: Path
-) -> RuntimeEnvironmentDefinition | None:
-    environments_file = resolve_runtime_environments_file(control_plane_root)
-    if environments_file is None or not environments_file.exists():
-        return None
-    return _load_runtime_environment_definition_from_file(environments_file)
 
 
 def _load_optional_runtime_environment_definition_from_database(
@@ -317,40 +283,6 @@ def build_runtime_environment_records_from_definition(
                 )
             )
     return tuple(records)
-
-
-def _merge_runtime_environment_definitions(
-    *,
-    base_definition: RuntimeEnvironmentDefinition,
-    overlay_definition: RuntimeEnvironmentDefinition,
-) -> RuntimeEnvironmentDefinition:
-    shared_env: ScalarMap = dict(base_definition.shared_env)
-    shared_env.update(overlay_definition.shared_env)
-    contexts: dict[str, RuntimeEnvironmentContextDefinition] = {
-        context_name: RuntimeEnvironmentContextDefinition(
-            shared_env=dict(context_definition.shared_env),
-            instances={
-                instance_name: RuntimeEnvironmentInstanceDefinition(env=dict(instance_definition.env))
-                for instance_name, instance_definition in context_definition.instances.items()
-            },
-        )
-        for context_name, context_definition in base_definition.contexts.items()
-    }
-    for context_name, overlay_context in overlay_definition.contexts.items():
-        base_context = contexts.get(
-            context_name,
-            RuntimeEnvironmentContextDefinition(shared_env={}, instances={}),
-        )
-        merged_shared_env = dict(base_context.shared_env)
-        merged_shared_env.update(overlay_context.shared_env)
-        merged_instances = dict(base_context.instances)
-        for instance_name, overlay_instance in overlay_context.instances.items():
-            merged_instances[instance_name] = RuntimeEnvironmentInstanceDefinition(env=dict(overlay_instance.env))
-        contexts[context_name] = RuntimeEnvironmentContextDefinition(
-            shared_env=merged_shared_env,
-            instances=merged_instances,
-        )
-    return RuntimeEnvironmentDefinition(schema_version=max(base_definition.schema_version, overlay_definition.schema_version), shared_env=shared_env, contexts=contexts)
 
 
 def _normalize_scalar_map(raw_values: ScalarMap) -> dict[str, str]:
