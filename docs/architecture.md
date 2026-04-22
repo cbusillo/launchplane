@@ -155,9 +155,8 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   the requested artifact, then writes the destination tuple from that same
   source tuple after the deploy passes.
 - The active split-repo artifact-backed baseline for CM and OPW stable lanes
-  now resolves from DB-backed release-tuple records. Any tracked
-  `config/release-tuples.toml` catalog is export or seed material rather than
-  live runtime authority.
+  now resolves from DB-backed release-tuple records. Any exported release-
+  tuple catalog is seed material rather than live runtime authority.
 - Live Dokploy `target_id` values load from Launchplane DB-backed target-id
   records.
 - The Odoo-specific compose post-deploy update runs natively here via

@@ -177,16 +177,6 @@ class DokployConfigTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            (config_directory / "release-tuples.toml").write_text(
-                (
-                    'schema_version = 1\n\n'
-                    '[contexts.cm.channels.testing]\n'
-                    'tuple_id = "cm-testing-file"\n\n'
-                    '[contexts.cm.channels.testing.repo_shas]\n'
-                    'tenant-cm = "3333333333333333333333333333333333333333"\n'
-                ),
-                encoding="utf-8",
-            )
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             with patch.dict(
@@ -269,7 +259,6 @@ class DokployConfigTests(unittest.TestCase):
         self.assertTrue(payload["legacy_paths"]["repo_runtime_environments_file"]["exists"])
         self.assertTrue(payload["legacy_paths"]["repo_dokploy_source_file"]["exists"])
         self.assertTrue(payload["legacy_paths"]["repo_dokploy_target_ids_file"]["exists"])
-        self.assertTrue(payload["legacy_paths"]["repo_release_tuples_file"]["exists"])
 
     def test_environments_show_live_target_reports_legacy_runtime_contract_blockers(self) -> None:
         runner = CliRunner()

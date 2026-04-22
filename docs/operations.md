@@ -309,9 +309,9 @@ baseline tuples from Launchplane's DB-backed release-tuple records. Cockpit and
 local renders should run with `LAUNCHPLANE_DATABASE_URL` pointed at the same
 shared store that owns the current stable-lane tuple state.
 
-The tracked `config/release-tuples.toml` catalog is export/seed material now,
-not live runtime authority. Pull requests flow through Launchplane preview
-records instead of a tracked long-lived `dev` tuple lane.
+Any exported release-tuple catalog is seed/reference material now, not live
+runtime authority. Pull requests flow through Launchplane preview records
+instead of a tracked long-lived `dev` tuple lane.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are the current local preview-evidence ingest adapters for products whose

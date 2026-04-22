@@ -5778,7 +5778,6 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
     repo_runtime_env_file = control_plane_root / control_plane_runtime_environments.DEFAULT_RUNTIME_ENVIRONMENTS_FILE
     repo_dokploy_source_file = control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
     repo_target_ids_file = control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
-    repo_release_tuples_file = control_plane_root / "config" / "release-tuples.toml"
     external_env_file = launchplane_config_dir / control_plane_dokploy.DEFAULT_CONTROL_PLANE_ENV_FILE_BASENAME
 
     resolved_env_file = control_plane_dokploy.resolve_control_plane_env_file(control_plane_root)
@@ -5912,10 +5911,6 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
             ),
             "repo_dokploy_target_ids_file": _launchplane_path_payload(
                 repo_target_ids_file,
-                kind="repo_file",
-            ),
-            "repo_release_tuples_file": _launchplane_path_payload(
-                repo_release_tuples_file,
                 kind="repo_file",
             ),
             "external_env_file": _launchplane_path_payload(external_env_file, kind="external_file"),
