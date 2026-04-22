@@ -16,7 +16,8 @@ boundary for Launchplane.
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
 - `deployments`: write and inspect deployment records.
-- `environments`: resolve runtime environment contracts.
+- `environments`: write, list, and resolve DB-backed runtime environment
+  contracts.
 - `launchplane-previews`: inspect, mutate, render, ingest, and replay Launchplane preview
   state.
 - `inventory`: inspect current environment inventory.
@@ -257,8 +258,16 @@ Current derived-state behavior:
 
 ## Runtime Environment Contracts
 
+- `environments put` writes explicit non-secret `KEY=VALUE` runtime settings
+  directly into DB-backed runtime-environment records for `global`, `context`,
+  or `instance` scope. It rejects secret-shaped keys and returns key metadata
+  only, not plaintext values.
+- `environments list` shows DB-backed runtime-environment record metadata and
+  keys without echoing plaintext values.
 - `environments resolve` reads the control-plane-owned runtime environment
   contract for a context and instance.
+- TOML/env files are not runtime import surfaces; use DB-native
+  runtime-environment records and managed secrets instead.
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.

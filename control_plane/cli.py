@@ -116,6 +116,7 @@ _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
 )
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
 _SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
+_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
@@ -7502,6 +7503,80 @@ def _summarize_runtime_environment_record(
     }
 
 
+def _parse_runtime_environment_assignment(raw_assignment: str) -> tuple[str, str]:
+    key_name, separator, value = raw_assignment.partition("=")
+    normalized_key = key_name.strip()
+    if not separator or not normalized_key:
+        raise click.ClickException("Runtime environment values must be provided as KEY=VALUE.")
+    if _runtime_environment_key_requires_secret_store(normalized_key):
+        raise click.ClickException(
+            f"Runtime environment key {normalized_key!r} must be written with launchplane secrets put."
+        )
+    return normalized_key, value
+
+
+def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
+    return any(
+        key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
+        for key_part in key_name.strip().upper().split("_")
+    )
+
+
+def _runtime_environment_record_matches(
+    record: RuntimeEnvironmentRecord,
+    *,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+) -> bool:
+    return record.scope == scope and record.context == context_name and record.instance == instance_name
+
+
+def _build_runtime_environment_record_for_put(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    assignments: tuple[str, ...],
+    source_label: str,
+) -> RuntimeEnvironmentRecord:
+    if scope == "global":
+        if context_name or instance_name:
+            raise click.ClickException("Global runtime environment records do not accept --context or --instance.")
+    elif scope == "context":
+        if not context_name or instance_name:
+            raise click.ClickException("Context runtime environment records require --context and do not accept --instance.")
+    elif scope == "instance":
+        if not context_name or not instance_name:
+            raise click.ClickException("Instance runtime environment records require --context and --instance.")
+    else:
+        raise click.ClickException(f"Unsupported runtime environment scope: {scope}")
+
+    env_values: dict[str, object] = {}
+    for record in existing_records:
+        if _runtime_environment_record_matches(
+            record,
+            scope=scope,
+            context_name=context_name,
+            instance_name=instance_name,
+        ):
+            env_values.update(record.env)
+            break
+    for raw_assignment in assignments:
+        key_name, value = _parse_runtime_environment_assignment(raw_assignment)
+        env_values[key_name] = value
+
+    return RuntimeEnvironmentRecord(
+        scope=scope,
+        context=context_name,
+        instance=instance_name,
+        env=env_values,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or "cli",
+    )
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -9403,6 +9478,53 @@ def _apply_launchplane_pr_event_intent(
 @main.group()
 def environments() -> None:
     """Runtime environment contract commands."""
+
+
+@environments.command("put")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime-environment records.",
+)
+@click.option("--scope", type=click.Choice(["global", "context", "instance"]), required=True)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--set", "assignments", multiple=True, required=True, help="Runtime value assignment as KEY=VALUE.")
+@click.option("--source-label", default="cli", show_default=True)
+def environments_put(
+    database_url: str,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    assignments: tuple[str, ...],
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_runtime_environment_records()
+        record = _build_runtime_environment_record_for_put(
+            existing_records=existing_records,
+            scope=scope,
+            context_name=context_name.strip(),
+            instance_name=instance_name.strip(),
+            assignments=assignments,
+            source_label=source_label,
+        )
+        postgres_store.write_runtime_environment_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "record": _summarize_runtime_environment_record(record),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @environments.command("list")

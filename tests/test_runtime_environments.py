@@ -76,6 +76,157 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("No such command", result.output)
 
+    def test_environments_put_writes_db_record_without_echoing_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "put",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "verireel",
+                    "--instance",
+                    "prod",
+                    "--set",
+                    "VERIREEL_PROD_PROXMOX_HOST=proxmox.example.com",
+                    "--set",
+                    "VERIREEL_PROD_CT_ID=101",
+                    "--source-label",
+                    "operator-cli",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertNotIn("proxmox.example.com", result.output)
+            self.assertNotIn("101", result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["record"]["source_label"], "operator-cli")
+            self.assertEqual(
+                payload["record"]["env_keys"],
+                ["VERIREEL_PROD_CT_ID", "VERIREEL_PROD_PROXMOX_HOST"],
+            )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="verireel",
+                    instance_name="prod",
+                )
+
+        self.assertEqual(resolved_values["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.example.com")
+        self.assertEqual(resolved_values["VERIREEL_PROD_CT_ID"], "101")
+
+    def test_environments_put_merges_existing_record_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "verireel": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"VERIREEL_PROD_PROXMOX_HOST": "proxmox.example.com"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "put",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "verireel",
+                    "--instance",
+                    "prod",
+                    "--set",
+                    "VERIREEL_PROD_CT_ID=101",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertNotIn("proxmox.example.com", result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(
+                payload["record"]["env_keys"],
+                ["VERIREEL_PROD_CT_ID", "VERIREEL_PROD_PROXMOX_HOST"],
+            )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="verireel",
+                    instance_name="prod",
+                )
+
+        self.assertEqual(resolved_values["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.example.com")
+        self.assertEqual(resolved_values["VERIREEL_PROD_CT_ID"], "101")
+
+    def test_environments_put_rejects_instance_scope_without_instance(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "put",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "verireel",
+                    "--set",
+                    "VERIREEL_PROD_CT_ID=101",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("require --context and --instance", result.output)
+
+    def test_environments_put_rejects_secret_shaped_keys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "put",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "context",
+                    "--context",
+                    "verireel",
+                    "--set",
+                    "GITHUB_TOKEN=secret-value",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("must be written with launchplane secrets put", result.output)
+        self.assertNotIn("secret-value", result.output)
+
     def test_environments_list_redacts_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
