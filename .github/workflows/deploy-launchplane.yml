@@ -198,12 +198,13 @@ jobs:
             --data "$request_payload" \
             "${{ steps.service.outputs.service_url }}/v1/drivers/launchplane/self-deploy"
 
-      - name: Wait for Launchplane health
+      - name: Wait for deployed Launchplane image
         shell: bash
         run: |
           set -euo pipefail
 
-          deadline=$((SECONDS + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          expected_image_reference="${{ steps.image.outputs.image_reference }}"
           while [ "$SECONDS" -lt "$deadline" ]; do
             all_healthy=1
             while IFS= read -r raw_url; do
@@ -218,36 +219,23 @@ jobs:
               fi
             done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
-            if [ "$all_healthy" -eq 1 ]; then
+            oidc_token="$({
+              curl -fsSL \
+                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
+              | jq -r '.value'
+            })"
+
+            runtime_payload="$(curl -fsSL \
+              -H "Authorization: Bearer ${oidc_token}" \
+              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
+            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
+
+            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$expected_image_reference" ]; then
               exit 0
             fi
             sleep 5
           done
 
-          echo "Timed out waiting for Launchplane health checks." >&2
+          echo "Timed out waiting for Launchplane image '$expected_image_reference' to become live and healthy." >&2
           exit 1
-
-      - name: Verify deployed Launchplane image reference
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-            | jq -r '.value'
-          })"
-
-          runtime_payload="$({
-            curl -fsSL \
-              -H "Authorization: Bearer ${oidc_token}" \
-              "${{ steps.service.outputs.service_url }}/v1/service/runtime"
-          })"
-
-          actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference')"
-          expected_image_reference="${{ steps.image.outputs.image_reference }}"
-          if [ "$actual_image_reference" != "$expected_image_reference" ]; then
-            echo "Launchplane reported image reference '$actual_image_reference', expected '$expected_image_reference'." >&2
-            exit 1
-          fi
