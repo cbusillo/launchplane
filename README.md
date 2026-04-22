@@ -74,7 +74,9 @@ Use `uv run launchplane environments put --scope ... --set KEY=VALUE` to write
 non-secret runtime values directly into DB-backed runtime-environment records;
 secret-shaped keys are rejected there. Use `uv run launchplane secrets put ...`
 for managed secret values. TOML/env files are not supported runtime import
-surfaces outside bootstrap policy/env.
+surfaces outside bootstrap policy/env. Use `uv run launchplane environments
+unset --scope ... --key KEY` to remove stale runtime keys without reading or
+printing plaintext values.
 
 For the first local Launchplane service run, copy
 `config/launchplane-authz.toml.example` to a real local policy file such as

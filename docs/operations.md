@@ -262,6 +262,8 @@ Current derived-state behavior:
   directly into DB-backed runtime-environment records for `global`, `context`,
   or `instance` scope. It rejects secret-shaped keys and returns key metadata
   only, not plaintext values.
+- `environments unset` removes named keys from a DB-backed runtime-environment
+  record without reading or printing plaintext values.
 - `environments list` shows DB-backed runtime-environment record metadata and
   keys without echoing plaintext values.
 - `environments resolve` reads the control-plane-owned runtime environment

@@ -7522,6 +7522,27 @@ def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
     )
 
 
+def _validate_runtime_environment_scope_route(
+    *,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+) -> None:
+    if scope == "global":
+        if context_name or instance_name:
+            raise click.ClickException("Global runtime environment records do not accept --context or --instance.")
+        return
+    if scope == "context":
+        if not context_name or instance_name:
+            raise click.ClickException("Context runtime environment records require --context and do not accept --instance.")
+        return
+    if scope == "instance":
+        if not context_name or not instance_name:
+            raise click.ClickException("Instance runtime environment records require --context and --instance.")
+        return
+    raise click.ClickException(f"Unsupported runtime environment scope: {scope}")
+
+
 def _runtime_environment_record_matches(
     record: RuntimeEnvironmentRecord,
     *,
@@ -7541,17 +7562,11 @@ def _build_runtime_environment_record_for_put(
     assignments: tuple[str, ...],
     source_label: str,
 ) -> RuntimeEnvironmentRecord:
-    if scope == "global":
-        if context_name or instance_name:
-            raise click.ClickException("Global runtime environment records do not accept --context or --instance.")
-    elif scope == "context":
-        if not context_name or instance_name:
-            raise click.ClickException("Context runtime environment records require --context and do not accept --instance.")
-    elif scope == "instance":
-        if not context_name or not instance_name:
-            raise click.ClickException("Instance runtime environment records require --context and --instance.")
-    else:
-        raise click.ClickException(f"Unsupported runtime environment scope: {scope}")
+    _validate_runtime_environment_scope_route(
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
 
     env_values: dict[str, object] = {}
     for record in existing_records:
@@ -7574,6 +7589,81 @@ def _build_runtime_environment_record_for_put(
         env=env_values,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
+    )
+
+
+def _normalize_runtime_environment_key(raw_key: str) -> str:
+    normalized_key = raw_key.strip()
+    if not normalized_key:
+        raise click.ClickException("Runtime environment keys must be non-empty.")
+    return normalized_key
+
+
+def _find_runtime_environment_record(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    scope: str,
+    context_name: str,
+    instance_name: str,
+) -> RuntimeEnvironmentRecord | None:
+    for record in existing_records:
+        if _runtime_environment_record_matches(
+            record,
+            scope=scope,
+            context_name=context_name,
+            instance_name=instance_name,
+        ):
+            return record
+    return None
+
+
+def _build_runtime_environment_record_for_unset(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    keys: tuple[str, ...],
+    source_label: str,
+) -> tuple[RuntimeEnvironmentRecord, tuple[str, ...], tuple[str, ...]]:
+    _validate_runtime_environment_scope_route(
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    target_record = _find_runtime_environment_record(
+        existing_records=existing_records,
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if target_record is None:
+        raise click.ClickException("Missing DB-backed runtime environment record for the requested scope.")
+
+    requested_keys = tuple(_normalize_runtime_environment_key(key_name) for key_name in keys)
+    env_values = dict(target_record.env)
+    removed_keys: list[str] = []
+    missing_keys: list[str] = []
+    for key_name in requested_keys:
+        if key_name in env_values:
+            removed_keys.append(key_name)
+            del env_values[key_name]
+        else:
+            missing_keys.append(key_name)
+    if not env_values:
+        raise click.ClickException("Refusing to leave an empty runtime environment record.")
+
+    return (
+        RuntimeEnvironmentRecord(
+            scope=target_record.scope,
+            context=target_record.context,
+            instance=target_record.instance,
+            env=env_values,
+            updated_at=utc_now_timestamp(),
+            source_label=source_label.strip() or "cli",
+        ),
+        tuple(sorted(removed_keys)),
+        tuple(sorted(missing_keys)),
     )
 
 
@@ -9520,6 +9610,55 @@ def environments_put(
             {
                 "status": "ok",
                 "record": _summarize_runtime_environment_record(record),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@environments.command("unset")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime-environment records.",
+)
+@click.option("--scope", type=click.Choice(["global", "context", "instance"]), required=True)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--key", "keys", multiple=True, required=True, help="Runtime value key to remove from the record.")
+@click.option("--source-label", default="cli", show_default=True)
+def environments_unset(
+    database_url: str,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    keys: tuple[str, ...],
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_runtime_environment_records()
+        record, removed_keys, missing_keys = _build_runtime_environment_record_for_unset(
+            existing_records=existing_records,
+            scope=scope,
+            context_name=context_name.strip(),
+            instance_name=instance_name.strip(),
+            keys=keys,
+            source_label=source_label,
+        )
+        postgres_store.write_runtime_environment_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "record": _summarize_runtime_environment_record(record),
+                "removed_keys": removed_keys,
+                "missing_keys": missing_keys,
             },
             indent=2,
             sort_keys=True,
