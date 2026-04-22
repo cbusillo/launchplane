@@ -84,6 +84,10 @@ title: Secrets
 - `uv run launchplane environments resolve --context <ctx> --instance
 <instance> --json-output`
   emits the resolved runtime environment payload for a tenant environment.
+- `uv run launchplane environments put --scope <scope> --set KEY=VALUE` writes
+  non-secret runtime values directly to DB-backed runtime-environment records
+  and redacts values from command output. Secret-shaped keys are rejected and
+  should be written with `secrets put`.
 - In steady state that payload comes from Launchplane DB-backed runtime
   environment records.
 - Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL` from the
