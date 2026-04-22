@@ -227,6 +227,102 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertIn("must be written with launchplane secrets put", result.output)
         self.assertNotIn("secret-value", result.output)
 
+    def test_environments_unset_removes_keys_without_echoing_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "verireel": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={
+                                        "VERIREEL_PROD_CT_ID": "101",
+                                        "VERIREEL_PROD_PROXMOX_HOST": "proxmox.example.com",
+                                    }
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "unset",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "verireel",
+                    "--instance",
+                    "prod",
+                    "--key",
+                    "VERIREEL_PROD_CT_ID",
+                    "--key",
+                    "MISSING_KEY",
+                    "--source-label",
+                    "operator-cli",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            self.assertNotIn("proxmox.example.com", result.output)
+            self.assertNotIn("101", result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["record"]["source_label"], "operator-cli")
+            self.assertEqual(payload["record"]["env_keys"], ["VERIREEL_PROD_PROXMOX_HOST"])
+            self.assertEqual(payload["removed_keys"], ["VERIREEL_PROD_CT_ID"])
+            self.assertEqual(payload["missing_keys"], ["MISSING_KEY"])
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+                    control_plane_root=control_plane_root,
+                    context_name="verireel",
+                    instance_name="prod",
+                )
+
+        self.assertNotIn("VERIREEL_PROD_CT_ID", resolved_values)
+        self.assertEqual(resolved_values["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.example.com")
+
+    def test_environments_unset_rejects_empty_result_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ONLY_KEY": "only-value"},
+                    contexts={},
+                ),
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "unset",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--key",
+                    "ONLY_KEY",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Refusing to leave an empty runtime environment record", result.output)
+        self.assertNotIn("only-value", result.output)
+
     def test_environments_list_redacts_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
