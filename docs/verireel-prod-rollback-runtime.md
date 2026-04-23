@@ -16,7 +16,7 @@ That rollback path currently depends on repo-local runtime assumptions:
 
 - a dedicated GitHub self-hosted runner label
 - repo-local `.env` default loading
-- direct Proxmox `ssh`, `sudo`, and `pct rollback` execution
+- direct Proxmox `ssh` and `pct rollback` execution
 
 This document exists to turn that tail into an explicit Launchplane runtime
 contract instead of letting those assumptions leak across the service boundary.
@@ -32,7 +32,8 @@ That path currently does four jobs:
 
 1. resolve Proxmox connection and container inputs
 2. locate or accept the stored rollback point
-3. execute `pct rollback` through SSH and sudo on the Proxmox host
+3. execute `pct rollback` through a constrained forced-command SSH key on the
+   Proxmox host
 4. verify that production is healthy after rollback
 
 Launchplane does not yet own the runtime authority needed for step 3, even
@@ -62,7 +63,7 @@ Move VeriReel prod rollback into Launchplane so that:
 
 ### Option A: direct Launchplane host execution
 
-Launchplane itself would hold the SSH and sudo contract needed to reach the
+Launchplane itself would hold the SSH contract needed to reach the
 Proxmox host and run rollback commands.
 
 Pros:
@@ -73,7 +74,8 @@ Pros:
 
 Cons:
 
-- couples the main Launchplane service host to Proxmox network reach and sudo
+- couples the main Launchplane service host to Proxmox network reach and
+  forced-command SSH behavior
   authority
 - raises the blast radius of a Launchplane compromise
 - makes future runtime separation harder if more products need privileged ops
@@ -82,7 +84,7 @@ Cons:
 
 Launchplane would remain the control-plane ingress and record owner, but it
 would dispatch rollback execution to a Launchplane-controlled worker that holds
-the Proxmox network and sudo contract.
+the Proxmox network and forced-command SSH contract.
 
 Pros:
 
@@ -139,12 +141,12 @@ GitHub workflow
   -> Launchplane authn/authz and record creation
   -> Launchplane rollback dispatcher
   -> Launchplane-owned rollback worker
-  -> Proxmox host via SSH/sudo
+  -> Proxmox host via constrained SSH
   -> Launchplane post-rollback health verification
   -> durable rollback result on the promotion record
 ```
 
-The product workflow should stop owning Proxmox SSH and sudo behavior. It
+The product workflow should stop owning Proxmox SSH behavior. It
 should own only:
 
 - the decision to request rollback after failed final prod health
@@ -207,7 +209,8 @@ Required runtime inputs:
 - `VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS`
 - `VERIREEL_PROD_CT_ID`
 - `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`
-- allowed sudo command contract for `pct rollback`
+- forced-command SSH allow-list for `pct rollback`, `pct start`, and read-only
+  snapshot listing
 - SSH private key or equivalent Launchplane-managed credential
 - host key trust policy
 - snapshot prefix and retention policy when Launchplane later also owns capture
