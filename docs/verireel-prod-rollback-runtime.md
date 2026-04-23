@@ -203,6 +203,8 @@ Required runtime inputs:
 
 - `VERIREEL_PROD_PROXMOX_HOST`
 - `VERIREEL_PROD_PROXMOX_USER`
+- `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY`
+- `VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS`
 - `VERIREEL_PROD_CT_ID`
 - `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`
 - allowed sudo command contract for `pct rollback`
@@ -213,9 +215,10 @@ Required runtime inputs:
 Launchplane now resolves the rollback worker contract from the `verireel/prod`
 runtime-environment definition before invoking the delegated worker. That means
 the worker command and Proxmox target metadata must live in DB-backed
-runtime-environment records, with any secret-looking values overlaid from
-Launchplane-managed secret records when the service is running with
-`LAUNCHPLANE_DATABASE_URL` and `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+runtime-environment records, with secret-looking values such as
+`VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` overlaid from Launchplane-managed
+secret records when the service is running with `LAUNCHPLANE_DATABASE_URL` and
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
 
 Launchplane strips rollback worker config keys inherited from process env before
 starting the delegated worker. Missing DB-backed worker config is a hard error,

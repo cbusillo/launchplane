@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import subprocess
 import sys
 
@@ -12,6 +14,10 @@ from control_plane.workflows.verireel_prod_rollback import (
     VeriReelProdRollbackWorkerResult,
 )
 from control_plane.workflows.ship import utc_now_timestamp
+
+
+SSH_PRIVATE_KEY_ENV_VAR = "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
+SSH_KNOWN_HOSTS_ENV_VAR = "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"
 
 
 def _env_flag(name: str, default: bool = False) -> bool:
@@ -32,17 +38,79 @@ def _required_env(name: str) -> str:
     return value
 
 
-def _build_proxmox_command(command_args: list[str]) -> list[str]:
+def _write_ssh_material(*, material_dir: Path) -> tuple[str, str]:
+    private_key = _required_env(SSH_PRIVATE_KEY_ENV_VAR)
+    known_hosts = _required_env(SSH_KNOWN_HOSTS_ENV_VAR)
+    identity_file = material_dir / "proxmox-worker-key"
+    known_hosts_file = material_dir / "known_hosts"
+    identity_file.write_text(f"{private_key.rstrip()}\n", encoding="utf-8")
+    known_hosts_file.write_text(f"{known_hosts.rstrip()}\n", encoding="utf-8")
+    identity_file.chmod(0o600)
+    known_hosts_file.chmod(0o600)
+    return str(identity_file), str(known_hosts_file)
+
+
+def _build_proxmox_command(
+    command_args: list[str],
+    *,
+    identity_file: str = "",
+    known_hosts_file: str = "",
+) -> list[str]:
     if _env_flag("VERIREEL_PROD_GATE_LOCAL", default=False):
         return ["sudo", "-n", *command_args]
     host = _required_env("VERIREEL_PROD_PROXMOX_HOST")
     user = _required_env("VERIREEL_PROD_PROXMOX_USER")
-    return ["ssh", f"{user}@{host}", "sudo", "-n", *command_args]
+    if not identity_file or not known_hosts_file:
+        raise click.ClickException(
+            "Missing explicit SSH material for VeriReel prod rollback worker."
+        )
+    return [
+        "ssh",
+        "-F",
+        "/dev/null",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={known_hosts_file}",
+        "-i",
+        identity_file,
+        f"{user}@{host}",
+        "sudo",
+        "-n",
+        *command_args,
+    ]
 
 
 def _run_proxmox_command(command_args: list[str], *, timeout_seconds: int) -> None:
+    if _env_flag("VERIREEL_PROD_GATE_LOCAL", default=False):
+        command = _build_proxmox_command(command_args)
+    else:
+        with TemporaryDirectory(prefix="launchplane-verireel-rollback-") as material_dir_name:
+            identity_file, known_hosts_file = _write_ssh_material(
+                material_dir=Path(material_dir_name)
+            )
+            command = _build_proxmox_command(
+                command_args,
+                identity_file=identity_file,
+                known_hosts_file=known_hosts_file,
+            )
+            completed = subprocess.run(
+                command,
+                capture_output=True,
+                text=True,
+                timeout=max(timeout_seconds, 1),
+                check=False,
+            )
+            if completed.returncode == 0:
+                return
+            detail = completed.stderr.strip() or completed.stdout.strip() or "unknown error"
+            raise click.ClickException(detail)
     completed = subprocess.run(
-        _build_proxmox_command(command_args),
+        command,
         capture_output=True,
         text=True,
         timeout=max(timeout_seconds, 1),

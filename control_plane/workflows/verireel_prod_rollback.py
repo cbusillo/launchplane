@@ -13,7 +13,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.promotion_record import HealthcheckEvidence, PromotionRecord, RollbackExecutionEvidence
+from control_plane.contracts.promotion_record import (
+    HealthcheckEvidence,
+    PromotionRecord,
+    RollbackExecutionEvidence,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.verireel_prod_promotion import (
@@ -98,6 +102,8 @@ WORKER_RUNTIME_ENV_KEYS = (
     WORKER_COMMAND_ENV_VAR,
     "VERIREEL_PROD_PROXMOX_HOST",
     "VERIREEL_PROD_PROXMOX_USER",
+    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY",
+    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS",
     "VERIREEL_PROD_CT_ID",
     "VERIREEL_PROD_GATE_LOCAL",
 )
@@ -207,7 +213,9 @@ def _verify_post_rollback_health(
         if remaining_seconds <= 0:
             break
         time.sleep(min(request.rollout_interval_seconds, remaining_seconds))
-    raise click.ClickException(f"VeriReel prod rollback health verification timed out: {last_error}")
+    raise click.ClickException(
+        f"VeriReel prod rollback health verification timed out: {last_error}"
+    )
 
 
 def _build_health_evidence(
@@ -253,9 +261,7 @@ def _write_promotion_rollback_state(
             "rollback_health": _build_health_evidence(
                 request=request,
                 health_result=(
-                    health_result
-                    if rollback_health_status in {"pass", "fail"}
-                    else None
+                    health_result if rollback_health_status in {"pass", "fail"} else None
                 ),
             ),
         },
@@ -289,7 +295,9 @@ def _worker_environment(
     control_plane_root: Path,
     request: VeriReelProdRollbackWorkerRequest,
 ) -> dict[str, str]:
-    environment = {key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS}
+    environment = {
+        key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS
+    }
     environment.update(
         _resolve_worker_runtime_environment(
             control_plane_root=control_plane_root,
@@ -333,7 +341,9 @@ def _run_delegated_worker(
     )
     stdout = completed.stdout.strip()
     if not stdout:
-        detail = completed.stderr.strip() or "VeriReel prod rollback worker returned no JSON payload."
+        detail = (
+            completed.stderr.strip() or "VeriReel prod rollback worker returned no JSON payload."
+        )
         raise click.ClickException(detail)
     try:
         payload = json.loads(stdout)
@@ -383,7 +393,10 @@ def execute_verireel_prod_rollback(
             error_message=str(exc),
         )
 
-    if promotion_record.context != request.context or promotion_record.to_instance != request.instance:
+    if (
+        promotion_record.context != request.context
+        or promotion_record.to_instance != request.instance
+    ):
         error_message = (
             "Promotion record does not match VeriReel prod rollback request. "
             f"Record={promotion_record.context}/{promotion_record.to_instance} "
@@ -410,7 +423,10 @@ def execute_verireel_prod_rollback(
             error_message=error_message,
         )
 
-    if promotion_record.backup_record_id and promotion_record.backup_record_id != request.backup_record_id:
+    if (
+        promotion_record.backup_record_id
+        and promotion_record.backup_record_id != request.backup_record_id
+    ):
         error_message = (
             "Promotion record backup_record_id does not match VeriReel prod rollback request. "
             f"Record={promotion_record.backup_record_id} request={request.backup_record_id}."

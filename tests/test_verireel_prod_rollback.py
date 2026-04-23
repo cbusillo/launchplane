@@ -15,6 +15,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.workflows import verireel_prod_rollback_worker
 from control_plane.workflows.verireel_prod_rollback import (
     VeriReelProdRollbackRequest,
     VeriReelProdRollbackWorkerRequest,
@@ -90,6 +91,8 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                                             "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "uv run python -m control_plane.workflows.verireel_prod_rollback_worker",
                                             "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
                                             "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
+                                            "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "runtime-private-key",
+                                            "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "runtime-known-hosts",
                                             "VERIREEL_PROD_CT_ID": "211",
                                         }
                                     )
@@ -120,19 +123,22 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
                     stderr="",
                 )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_rollback.subprocess.run",
-                side_effect=_fake_run,
-            ), patch.dict(
-                "os.environ",
-                {
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                    "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "legacy worker",
-                    "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
-                    "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
-                    "VERIREEL_PROD_CT_ID": "999",
-                },
-                clear=True,
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_rollback.subprocess.run",
+                    side_effect=_fake_run,
+                ),
+                patch.dict(
+                    "os.environ",
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "legacy worker",
+                        "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
+                        "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
+                        "VERIREEL_PROD_CT_ID": "999",
+                    },
+                    clear=True,
+                ),
             ):
                 result = _run_delegated_worker(
                     control_plane_root=root,
@@ -155,19 +161,116 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.runtime.example")
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_USER"], "runtime-user")
         self.assertEqual(worker_env["VERIREEL_PROD_CT_ID"], "211")
+        self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"], "runtime-private-key")
+        self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
 
-    def test_run_delegated_worker_rejects_process_environment_worker_config(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
+    def test_worker_uses_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
+        captured: dict[str, object] = {}
+
+        def _fake_run(command: list[str], **kwargs: object) -> CompletedProcess[str]:
+            captured["command"] = command
+            identity_file = Path(command[command.index("-i") + 1])
+            known_hosts_option = next(
+                item for item in command if item.startswith("UserKnownHostsFile=")
+            )
+            known_hosts_file = Path(known_hosts_option.partition("=")[2])
+            captured["identity_file_exists"] = identity_file.exists()
+            captured["known_hosts_file_exists"] = known_hosts_file.exists()
+            captured["identity_file_mode"] = identity_file.stat().st_mode & 0o777
+            captured["known_hosts_file_mode"] = known_hosts_file.stat().st_mode & 0o777
+            captured["identity_file_text"] = identity_file.read_text(encoding="utf-8")
+            captured["known_hosts_file_text"] = known_hosts_file.read_text(encoding="utf-8")
+            return CompletedProcess(args=command, returncode=0, stdout="", stderr="")
+
+        with (
+            patch.dict(
+                "os.environ",
+                {
+                    "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
+                    "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
+                    "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY": "test-private-key",
+                    "VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS": "proxmox.runtime.example ssh-ed25519 test-key",
+                    "VERIREEL_PROD_CT_ID": "211",
+                },
+                clear=True,
+            ),
+            patch(
+                "control_plane.workflows.verireel_prod_rollback_worker.subprocess.run",
+                side_effect=_fake_run,
+            ),
+        ):
+            result = verireel_prod_rollback_worker.execute_worker(
+                VeriReelProdRollbackWorkerRequest(
+                    context="verireel",
+                    instance="prod",
+                    promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    snapshot_name="ver-predeploy-20260421-180000",
+                    start_after_rollback=False,
+                )
+            )
+
+        self.assertEqual(result.status, "pass")
+        command = captured["command"]
+        assert isinstance(command, list)
+        self.assertEqual(command[0], "ssh")
+        self.assertIn("/dev/null", command)
+        self.assertIn("BatchMode=yes", command)
+        self.assertIn("IdentitiesOnly=yes", command)
+        self.assertIn("StrictHostKeyChecking=yes", command)
+        self.assertIn("runtime-user@proxmox.runtime.example", command)
+        self.assertNotIn("test-private-key", " ".join(command))
+        self.assertTrue(captured["identity_file_exists"])
+        self.assertTrue(captured["known_hosts_file_exists"])
+        self.assertEqual(captured["identity_file_mode"], 0o600)
+        self.assertEqual(captured["known_hosts_file_mode"], 0o600)
+        self.assertEqual(captured["identity_file_text"], "test-private-key\n")
+        self.assertEqual(
+            captured["known_hosts_file_text"],
+            "proxmox.runtime.example ssh-ed25519 test-key\n",
+        )
+
+    def test_worker_requires_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
+        with patch.dict(
             "os.environ",
             {
-                "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "python worker.py",
-                "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
-                "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
-                "VERIREEL_PROD_CT_ID": "999",
+                "VERIREEL_PROD_PROXMOX_HOST": "proxmox.runtime.example",
+                "VERIREEL_PROD_PROXMOX_USER": "runtime-user",
+                "VERIREEL_PROD_CT_ID": "211",
             },
             clear=True,
         ):
-            with self.assertRaisesRegex(Exception, "Missing LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"):
+            with self.assertRaisesRegex(
+                click.ClickException, "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
+            ):
+                verireel_prod_rollback_worker.execute_worker(
+                    VeriReelProdRollbackWorkerRequest(
+                        context="verireel",
+                        instance="prod",
+                        promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        snapshot_name="ver-predeploy-20260421-180000",
+                        start_after_rollback=False,
+                    )
+                )
+
+    def test_run_delegated_worker_rejects_process_environment_worker_config(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND": "python worker.py",
+                    "VERIREEL_PROD_PROXMOX_HOST": "legacy.example",
+                    "VERIREEL_PROD_PROXMOX_USER": "legacy-user",
+                    "VERIREEL_PROD_CT_ID": "999",
+                },
+                clear=True,
+            ),
+        ):
+            with self.assertRaisesRegex(
+                Exception, "Missing LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND"
+            ):
                 _run_delegated_worker(
                     control_plane_root=Path(temporary_directory_name),
                     request=VeriReelProdRollbackWorkerRequest(
@@ -186,23 +289,26 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
             self._write_backup_gate(record_store)
             self._write_promotion(record_store)
 
-            with patch(
-                "control_plane.workflows.verireel_prod_rollback._run_delegated_worker",
-                return_value=VeriReelProdRollbackWorkerResult(
-                    status="pass",
-                    snapshot_name="ver-predeploy-20260421-180000",
-                    started_at="2026-04-21T18:20:00Z",
-                    finished_at="2026-04-21T18:21:00Z",
-                    detail="Rollback completed.",
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_rollback._run_delegated_worker",
+                    return_value=VeriReelProdRollbackWorkerResult(
+                        status="pass",
+                        snapshot_name="ver-predeploy-20260421-180000",
+                        started_at="2026-04-21T18:20:00Z",
+                        finished_at="2026-04-21T18:21:00Z",
+                        detail="Rollback completed.",
+                    ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_rollback._verify_post_rollback_health",
-                return_value=VeriReelRolloutVerificationResult(
-                    status="pass",
-                    base_url="https://ver-prod.shinycomputers.com",
-                    health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    started_at="2026-04-21T18:21:00Z",
-                    finished_at="2026-04-21T18:22:00Z",
+                patch(
+                    "control_plane.workflows.verireel_prod_rollback._verify_post_rollback_health",
+                    return_value=VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-prod.shinycomputers.com",
+                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        started_at="2026-04-21T18:21:00Z",
+                        finished_at="2026-04-21T18:22:00Z",
+                    ),
                 ),
             ):
                 result = execute_verireel_prod_rollback(
@@ -261,21 +367,25 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
             self._write_backup_gate(record_store)
             self._write_promotion(record_store)
 
-            with patch(
-                "control_plane.workflows.verireel_prod_rollback._run_delegated_worker",
-                return_value=VeriReelProdRollbackWorkerResult(
-                    status="pass",
-                    snapshot_name="ver-predeploy-20260421-180000",
-                    started_at="2026-04-21T18:20:00Z",
-                    finished_at="2026-04-21T18:21:00Z",
-                    detail="Rollback completed.",
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_rollback._run_delegated_worker",
+                    return_value=VeriReelProdRollbackWorkerResult(
+                        status="pass",
+                        snapshot_name="ver-predeploy-20260421-180000",
+                        started_at="2026-04-21T18:20:00Z",
+                        finished_at="2026-04-21T18:21:00Z",
+                        detail="Rollback completed.",
+                    ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_rollback._resolve_rollout_base_urls",
-                return_value=("https://ver-prod.shinycomputers.com",),
-            ), patch(
-                "control_plane.workflows.verireel_prod_rollback._verify_post_rollback_health",
-                side_effect=click.ClickException("health still failed after rollback"),
+                patch(
+                    "control_plane.workflows.verireel_prod_rollback._resolve_rollout_base_urls",
+                    return_value=("https://ver-prod.shinycomputers.com",),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_rollback._verify_post_rollback_health",
+                    side_effect=click.ClickException("health still failed after rollback"),
+                ),
             ):
                 result = execute_verireel_prod_rollback(
                     control_plane_root=root,
