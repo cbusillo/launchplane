@@ -11,6 +11,7 @@ from click.testing import CliRunner
 from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -959,11 +960,16 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             clear_stale_lock=False,
             data_workflow_lock_path="/volumes/data/.data_workflow_in_progress",
             workflow_environment_overrides={
+                ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload-value",
                 "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com",
             },
             required_workflow_environment_keys=("ENV_OVERRIDE_SHOPIFY__API_TOKEN",),
         )
 
+        self.assertIn(
+            f"workflow_environment+=(-e {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}=payload-value)",
+            script,
+        )
         self.assertIn(
             "workflow_environment+=(-e ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=https://opw-prod.example.com)",
             script,
