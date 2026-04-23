@@ -28,8 +28,10 @@ title: Secrets
 - VeriReel prod rollback worker dispatch now resolves
   `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
   `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
-  `VERIREEL_PROD_CT_ID` from the `verireel/prod` runtime-environment contract,
-  with managed-secret overlays still available for secret-looking keys.
+  `VERIREEL_PROD_CT_ID` from the `verireel/prod` runtime-environment contract.
+  The worker also requires `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` and
+  `VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS`; the private key must come from a
+  managed runtime-environment secret binding.
 
 ## DB-Backed Secret Resolution
 
@@ -61,7 +63,8 @@ title: Secrets
   - rollback worker values such as
     `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
     `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
-    `VERIREEL_PROD_CT_ID`
+    `VERIREEL_PROD_CT_ID`, with `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` stored
+    as a managed secret
 
 ## Rules
 
