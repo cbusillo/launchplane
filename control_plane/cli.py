@@ -27,6 +27,7 @@ from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhook
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
@@ -7834,6 +7835,43 @@ def _build_odoo_instance_override_record_with_addon_setting(
     )
 
 
+def _build_odoo_instance_override_record_with_apply_result(
+    *,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+    context_name: str,
+    instance_name: str,
+    status: str,
+    detail: str,
+    applied_at: str,
+    source_label: str,
+) -> OdooInstanceOverrideRecord:
+    normalized_context = context_name.strip().lower()
+    normalized_instance = instance_name.strip().lower()
+    if not normalized_context or not normalized_instance:
+        raise click.ClickException("Odoo instance override records require --context and --instance.")
+    target_record = _find_odoo_instance_override_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    if target_record is None:
+        raise click.ClickException("Missing DB-backed Odoo instance override record for the requested instance.")
+    normalized_status = status.strip().lower()
+    attempted = normalized_status in {"pending", "pass", "fail"}
+    return target_record.model_copy(
+        update={
+            "last_apply": OdooOverrideApplyResult(
+                attempted=attempted,
+                status=normalized_status,
+                applied_at=applied_at.strip() or (utc_now_timestamp() if normalized_status in {"pass", "fail"} else ""),
+                detail=detail,
+            ),
+            "updated_at": utc_now_timestamp(),
+            "source_label": source_label.strip() or "cli",
+        }
+    )
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -10099,6 +10137,53 @@ def odoo_overrides_show(database_url: str, context_name: str, instance_name: str
     finally:
         postgres_store.close()
     click.echo(json.dumps(_summarize_odoo_instance_override_record(record), indent=2, sort_keys=True))
+
+
+@odoo_overrides.command("mark-apply")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--status", type=click.Choice(["skipped", "pending", "pass", "fail"]), required=True)
+@click.option("--applied-at", default="", help="UTC timestamp for completed apply results.")
+@click.option("--detail", default="")
+@click.option("--source-label", default="cli", show_default=True)
+def odoo_overrides_mark_apply(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    status: str,
+    applied_at: str,
+    detail: str,
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_odoo_instance_override_records()
+        record = _build_odoo_instance_override_record_with_apply_result(
+            existing_records=existing_records,
+            context_name=context_name,
+            instance_name=instance_name,
+            status=status,
+            detail=detail,
+            applied_at=applied_at,
+            source_label=source_label,
+        )
+        postgres_store.write_odoo_instance_override_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_odoo_instance_override_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @environments.command("sync-live-target")

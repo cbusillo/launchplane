@@ -153,6 +153,57 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(payload["records"][0]["addon_settings"], ["shopify.api_token"])
         self.assertNotIn("secret-binding-shopify-token", list_result.output)
 
+    def test_cli_mark_apply_updates_result_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            runner = CliRunner()
+            put_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-config-param",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--key",
+                    "web.base.url",
+                    "--value",
+                    "https://opw-prod.example.com",
+                ],
+            )
+            mark_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "mark-apply",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--status",
+                    "pass",
+                    "--applied-at",
+                    "2026-04-23T12:00:00Z",
+                    "--detail",
+                    "Applied through test driver.",
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            stored_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            store.close()
+
+        self.assertEqual(put_result.exit_code, 0, msg=put_result.output)
+        self.assertEqual(mark_result.exit_code, 0, msg=mark_result.output)
+        self.assertIn('"last_apply_status": "pass"', mark_result.output)
+        self.assertEqual(stored_record.last_apply.status, "pass")
+        self.assertEqual(stored_record.last_apply.applied_at, "2026-04-23T12:00:00Z")
+
 
 if __name__ == "__main__":
     unittest.main()

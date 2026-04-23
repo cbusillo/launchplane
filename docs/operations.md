@@ -297,6 +297,8 @@ Current derived-state behavior:
 - `odoo-overrides list` and `odoo-overrides show` return keys, counts, source
   labels, and timestamps only. They do not echo literal values or managed secret
   binding ids.
+- `odoo-overrides mark-apply` updates the latest apply status metadata for a
+  record, giving the future Odoo driver a tested result-write path.
 - These records do not yet change deploy behavior. The next Odoo driver slice
   should consume them and then retire equivalent `ENV_OVERRIDE_*` runtime
   environment authority.
