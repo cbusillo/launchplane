@@ -4,6 +4,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from control_plane.contracts.runtime_environment_record import ScalarValue
 
+OdooOverrideApplyPhase = Literal["restore", "deploy", "promotion", "preview", "manual"]
+OdooOverrideApplyStatus = Literal["skipped", "pending", "pass", "fail"]
 OdooOverrideValueSource = Literal["literal", "secret_binding"]
 
 
@@ -73,14 +75,37 @@ class OdooAddonSettingOverride(BaseModel):
         return normalized
 
 
+class OdooOverrideApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempted: bool = False
+    status: OdooOverrideApplyStatus = "skipped"
+    applied_at: str = ""
+    detail: str = ""
+
+    @model_validator(mode="after")
+    def _validate_apply_result(self) -> "OdooOverrideApplyResult":
+        self.applied_at = self.applied_at.strip()
+        self.detail = self.detail.strip()
+        if not self.attempted and self.status != "skipped":
+            raise ValueError("non-attempted Odoo override apply result must use skipped status")
+        if self.attempted and self.status not in {"pending", "pass", "fail"}:
+            raise ValueError("attempted Odoo override apply result must use pending/pass/fail status")
+        if self.status in {"pass", "fail"} and not self.applied_at:
+            raise ValueError("completed Odoo override apply result requires applied_at")
+        return self
+
+
 class OdooInstanceOverrideRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     context: str
     instance: str
+    apply_on: tuple[OdooOverrideApplyPhase, ...] = ("deploy", "promotion")
     config_parameters: tuple[OdooConfigParameterOverride, ...] = ()
     addon_settings: tuple[OdooAddonSettingOverride, ...] = ()
+    last_apply: OdooOverrideApplyResult = Field(default_factory=OdooOverrideApplyResult)
     updated_at: str
     source_label: str = ""
 
@@ -98,6 +123,10 @@ class OdooInstanceOverrideRecord(BaseModel):
             raise ValueError("Odoo instance override record requires updated_at")
         if not self.config_parameters and not self.addon_settings:
             raise ValueError("Odoo instance override record requires at least one override")
+        if not self.apply_on:
+            raise ValueError("Odoo instance override record requires at least one apply phase")
+        if len(self.apply_on) != len(set(self.apply_on)):
+            raise ValueError("Odoo instance override record has duplicate apply phases")
 
         config_parameter_keys = [override.key for override in self.config_parameters]
         if len(config_parameter_keys) != len(set(config_parameter_keys)):

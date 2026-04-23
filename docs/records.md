@@ -165,6 +165,9 @@ state/
   `web.base.url`.
 - `addon_settings` stores addon-shaped intent such as Authentik SSO or Shopify
   settings without coupling Launchplane records to environment variable names.
+- `apply_on` records the phases where the override is intended to apply, and
+  `last_apply` records the latest driver result without making the addon layer
+  the durable audit surface.
 - Secret-shaped values must reference Launchplane managed secret bindings; list
   and show commands return only keys and counts, not plaintext values or binding
   ids.

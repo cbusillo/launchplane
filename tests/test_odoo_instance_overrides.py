@@ -10,6 +10,7 @@ from control_plane.cli import main
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
+    OdooOverrideApplyResult,
     OdooOverrideValue,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -40,6 +41,10 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 updated_at="2026-04-21T18:30:00Z",
             )
 
+    def test_apply_result_requires_completed_timestamp(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "requires applied_at"):
+            OdooOverrideApplyResult(attempted=True, status="pass")
+
     def test_cli_put_config_param_does_not_echo_plaintext_value(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -69,6 +74,8 @@ class OdooInstanceOverrideTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertIn('"web.base.url"', result.output)
+            self.assertIn('"deploy"', result.output)
+            self.assertIn('"skipped"', result.output)
             self.assertNotIn("https://opw-prod.example.com", result.output)
 
             store = PostgresRecordStore(database_url=database_url)
