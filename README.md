@@ -76,7 +76,8 @@ secret-shaped keys are rejected there. Use `uv run launchplane secrets put ...`
 for managed secret values. TOML/env files are not supported runtime import
 surfaces outside bootstrap policy/env. Use `uv run launchplane environments
 unset --scope ... --key KEY` to remove stale runtime keys without reading or
-printing plaintext values.
+printing plaintext values. Use `uv run launchplane environments relabel` to
+correct stale record metadata without changing runtime values.
 
 For the first local Launchplane service run, copy
 `config/launchplane-authz.toml.example` to a real local policy file such as

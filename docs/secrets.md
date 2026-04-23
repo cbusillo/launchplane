@@ -91,6 +91,8 @@ title: Secrets
 - `uv run launchplane environments unset --scope <scope> --key KEY` removes
   stale keys from DB-backed runtime-environment records without reading or
   printing plaintext values.
+- `uv run launchplane environments relabel --scope <scope> --source-label ...`
+  updates stale source metadata without changing runtime values.
 - In steady state that payload comes from Launchplane DB-backed runtime
   environment records.
 - Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL` from the

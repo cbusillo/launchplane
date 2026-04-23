@@ -7667,6 +7667,37 @@ def _build_runtime_environment_record_for_unset(
     )
 
 
+def _build_runtime_environment_record_for_relabel(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    source_label: str,
+) -> RuntimeEnvironmentRecord:
+    _validate_runtime_environment_scope_route(
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    target_record = _find_runtime_environment_record(
+        existing_records=existing_records,
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if target_record is None:
+        raise click.ClickException("Missing DB-backed runtime environment record for the requested scope.")
+    return RuntimeEnvironmentRecord(
+        scope=target_record.scope,
+        context=target_record.context,
+        instance=target_record.instance,
+        env=dict(target_record.env),
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or "cli",
+    )
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -9659,6 +9690,50 @@ def environments_unset(
                 "record": _summarize_runtime_environment_record(record),
                 "removed_keys": removed_keys,
                 "missing_keys": missing_keys,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@environments.command("relabel")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime-environment records.",
+)
+@click.option("--scope", type=click.Choice(["global", "context", "instance"]), required=True)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--source-label", required=True)
+def environments_relabel(
+    database_url: str,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_runtime_environment_records()
+        record = _build_runtime_environment_record_for_relabel(
+            existing_records=existing_records,
+            scope=scope,
+            context_name=context_name.strip(),
+            instance_name=instance_name.strip(),
+            source_label=source_label,
+        )
+        postgres_store.write_runtime_environment_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "record": _summarize_runtime_environment_record(record),
             },
             indent=2,
             sort_keys=True,
