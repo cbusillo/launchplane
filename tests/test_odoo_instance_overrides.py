@@ -1,9 +1,11 @@
+import base64
 import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY
 from click.testing import CliRunner
 from pydantic import ValidationError
 
@@ -270,9 +272,20 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             stored_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
             store.close()
 
+        payload = json.loads(
+            base64.b64decode(captured_workflow_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]).decode("utf-8")
+        )
         self.assertEqual(
-            captured_workflow_environment,
-            {"ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com"},
+            payload["config_parameters"],
+            [
+                {
+                    "key": "web.base.url",
+                    "value": {
+                        "source": "literal",
+                        "value": "https://opw-prod.example.com",
+                    },
+                }
+            ],
         )
         self.assertEqual(stored_record.last_apply.status, "pass")
 

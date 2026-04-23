@@ -299,14 +299,16 @@ Current derived-state behavior:
   binding ids.
 - `odoo-overrides mark-apply` updates the latest apply status metadata for a
   record, giving the future Odoo driver a tested result-write path.
-- Compose post-deploy updates consume deploy-phase literal overrides from these
-  records and pass them to the current Odoo data-workflow runner as transient
-  environment transport. Secret-backed overrides are not rendered into schedule
-  scripts; the bridge requires their mapped keys to already exist in the
-  script-runner container environment, where managed runtime secrets are already
-  expected to land.
-- This is a migration bridge: record authority belongs to Launchplane, while
-  `ENV_OVERRIDE_*` names remain only the current Odoo runner transport to retire.
+- Compose post-deploy updates consume deploy-phase overrides from these records
+  and pass them to the Odoo data-workflow runner as one typed payload env var.
+- Secret-backed overrides are still not rendered into schedule scripts as
+  plaintext. The payload references the already-present script-runner
+  environment key for each managed secret binding, and the workflow asserts
+  those keys before Odoo starts.
+- This keeps record authority in Launchplane while moving Odoo off the
+  temporary literal `ENV_OVERRIDE_*` transport bridge. Those names now remain
+  only as secret-binding landing zones to retire in a later managed-binding
+  slice.
 
 Artifact handoff example:
 

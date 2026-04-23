@@ -1,3 +1,5 @@
+import base64
+import json
 from dataclasses import dataclass
 
 import click
@@ -6,6 +8,7 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 
 ODOO_CONFIG_PARAMETER_ENV_PREFIX = "ENV_OVERRIDE_CONFIG_PARAM__"
+ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
 ODOO_ADDON_ENV_PREFIXES = {
     "authentik": "ENV_OVERRIDE_AUTHENTIK__",
     "authentik_sso": "ENV_OVERRIDE_AUTHENTIK__",
@@ -17,6 +20,57 @@ ODOO_ADDON_ENV_PREFIXES = {
 class PostDeployOverrideEnvironment:
     inline_environment: dict[str, str]
     required_container_environment_keys: tuple[str, ...]
+
+
+def _payload_override_value(*, value: OdooOverrideValue, environment_key: str | None = None) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "source": value.source,
+    }
+    if value.source == "literal":
+        payload["value"] = value.value
+        return payload
+    payload["secret_binding_id"] = value.secret_binding_id
+    if not environment_key:
+        raise click.ClickException("Secret-backed Odoo overrides require a runtime environment key.")
+    payload["environment_variable"] = environment_key
+    return payload
+
+
+def render_post_deploy_payload(record: OdooInstanceOverrideRecord) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "schema_version": 1,
+        "context": record.context,
+        "instance": record.instance,
+        "config_parameters": [],
+        "addon_settings": [],
+    }
+    config_parameters: list[dict[str, object]] = []
+    for override in record.config_parameters:
+        environment_key = config_parameter_env_key(override.key)
+        config_parameters.append(
+            {
+                "key": override.key,
+                "value": _payload_override_value(value=override.value, environment_key=environment_key),
+            }
+        )
+    addon_settings: list[dict[str, object]] = []
+    for override in record.addon_settings:
+        environment_key = addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
+        addon_settings.append(
+            {
+                "addon": override.addon,
+                "setting": override.setting,
+                "value": _payload_override_value(value=override.value, environment_key=environment_key),
+            }
+        )
+    payload["config_parameters"] = config_parameters
+    payload["addon_settings"] = addon_settings
+    return payload
+
+
+def _encode_post_deploy_payload(payload: dict[str, object]) -> str:
+    encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+    return base64.b64encode(encoded).decode("ascii")
 
 
 def config_parameter_env_key(config_parameter_key: str) -> str:
@@ -38,45 +92,21 @@ def addon_setting_env_key(*, addon_name: str, setting_name: str) -> str:
         raise click.ClickException("Odoo addon setting override requires a non-empty setting.")
     return f"{prefix}{suffix}"
 
-
-def _apply_override_value(
-    *,
-    environment_key: str,
-    value: OdooOverrideValue,
-    override_name: str,
-    inline_environment: dict[str, str],
-    required_container_environment_keys: list[str],
-) -> None:
-    if value.source == "secret_binding":
-        _ = override_name
-        required_container_environment_keys.append(environment_key)
-        return
-    if value.value is None:
-        raise click.ClickException(f"Odoo override {override_name!r} is missing a literal value.")
-    inline_environment[environment_key] = str(value.value)
-
-
 def build_post_deploy_environment(record: OdooInstanceOverrideRecord) -> PostDeployOverrideEnvironment:
-    inline_environment: dict[str, str] = {}
+    payload = render_post_deploy_payload(record)
+    inline_environment: dict[str, str] = {
+        ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
+    }
     required_container_environment_keys: list[str] = []
     for override in record.config_parameters:
-        environment_key = config_parameter_env_key(override.key)
-        _apply_override_value(
-            environment_key=environment_key,
-            value=override.value,
-            override_name=override.key,
-            inline_environment=inline_environment,
-            required_container_environment_keys=required_container_environment_keys,
-        )
+        if override.value.source != "secret_binding":
+            continue
+        required_container_environment_keys.append(config_parameter_env_key(override.key))
     for override in record.addon_settings:
-        override_name = f"{override.addon}.{override.setting}"
-        environment_key = addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
-        _apply_override_value(
-            environment_key=environment_key,
-            value=override.value,
-            override_name=override_name,
-            inline_environment=inline_environment,
-            required_container_environment_keys=required_container_environment_keys,
+        if override.value.source != "secret_binding":
+            continue
+        required_container_environment_keys.append(
+            addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
         )
     return PostDeployOverrideEnvironment(
         inline_environment=inline_environment,
