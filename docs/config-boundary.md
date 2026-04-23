@@ -52,7 +52,7 @@ Launchplane records/secrets instead of repo files or operator-local env.
 | Preview routing/config | `LAUNCHPLANE_PREVIEW_BASE_URL` | Launchplane runtime-environment records | Shared control-plane-owned runtime value. |
 | GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET` | Launchplane runtime-environment records and managed secrets | Current docs already classify these as DB-backed target state. |
 | Product/tenant runtime env | `ENV_OVERRIDE_*`, Odoo runtime values, tenant-specific env keys | Launchplane runtime-environment records and managed secrets | Includes shared and per-instance overlays. |
-| Worker/runtime-action config | `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`, `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, `VERIREEL_PROD_CT_ID`, `VERIREEL_PROD_GATE_LOCAL` | Launchplane runtime-environment records and managed secrets | Current rollback worker still reads env; target is DB-backed runtime authority. |
+| Worker/runtime-action config | `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`, `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, `VERIREEL_PROD_CT_ID`, `VERIREEL_PROD_GATE_LOCAL` | Launchplane runtime-environment records and managed secrets | Rollback dispatch strips inherited process values for these keys and injects the DB-resolved runtime contract into the delegated worker environment. |
 | Dokploy target-id overrides | DB records | Launchplane target-id records | File catalogs are not a supported authority. |
 | Stable target definitions | Launchplane DB-backed target records | Launchplane DB-backed target records | Repo catalogs should be examples only, not seed or authority material. |
 | Release tuple baseline authority | Launchplane release-tuple records | Launchplane record store | Repo catalogs should not be treated as live mutable authority. |
@@ -106,6 +106,9 @@ live authority across DB, files, and process env:
 - stable target definitions resolve from DB-backed tracked target records
 - release tuple baseline resolution fails closed unless DB-backed release-tuple
   records exist
+- VeriReel prod rollback dispatch resolves worker/runtime-action config from
+  `verireel/prod` runtime-environment records, then passes those values to the
+  delegated worker process
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.
