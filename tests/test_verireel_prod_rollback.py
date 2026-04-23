@@ -219,6 +219,11 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
         self.assertIn("IdentitiesOnly=yes", command)
         self.assertIn("StrictHostKeyChecking=yes", command)
         self.assertIn("runtime-user@proxmox.runtime.example", command)
+        remote_command_start = command.index("runtime-user@proxmox.runtime.example") + 1
+        self.assertEqual(
+            command[remote_command_start:],
+            ["pct", "rollback", "211", "ver-predeploy-20260421-180000"],
+        )
         self.assertNotIn("test-private-key", " ".join(command))
         self.assertTrue(captured["identity_file_exists"])
         self.assertTrue(captured["known_hosts_file_exists"])

@@ -79,8 +79,6 @@ def _build_proxmox_command(
         "-i",
         identity_file,
         f"{user}@{host}",
-        "sudo",
-        "-n",
         *command_args,
     ]
 
