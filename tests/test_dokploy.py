@@ -951,6 +951,24 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
         self.assertEqual(rendered, "KEEP=1\nADD=2")
 
+    def test_build_dokploy_data_workflow_script_injects_workflow_environment(self) -> None:
+        script = control_plane_dokploy._build_dokploy_data_workflow_script(
+            compose_app_name="opw-prod",
+            database_name="opw_prod",
+            filestore_path="/volumes/data/filestore",
+            clear_stale_lock=False,
+            data_workflow_lock_path="/volumes/data/.data_workflow_in_progress",
+            workflow_environment_overrides={
+                "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com",
+            },
+        )
+
+        self.assertIn(
+            "workflow_environment+=(-e ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=https://opw-prod.example.com)",
+            script,
+        )
+        self.assertIn('"${workflow_environment[@]}"', script)
+
     def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:
         runner = CliRunner()
         captured_env_updates: list[dict[str, object]] = []

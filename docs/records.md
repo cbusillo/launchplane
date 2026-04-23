@@ -174,6 +174,10 @@ state/
 - This record is the target authority for the Odoo driver. Runtime-environment
   `ENV_OVERRIDE_*` keys remain a migration input to retire, not the final
   override model.
+- The first compose post-deploy bridge renders only literal values into the
+  current data-workflow runner transport. Secret-backed values intentionally
+  fail closed until Launchplane can deliver them without storing plaintext in a
+  Dokploy schedule payload.
 
 ## Launchplane Preview Record
 

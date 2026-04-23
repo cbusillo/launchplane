@@ -299,9 +299,13 @@ Current derived-state behavior:
   binding ids.
 - `odoo-overrides mark-apply` updates the latest apply status metadata for a
   record, giving the future Odoo driver a tested result-write path.
-- These records do not yet change deploy behavior. The next Odoo driver slice
-  should consume them and then retire equivalent `ENV_OVERRIDE_*` runtime
-  environment authority.
+- Compose post-deploy updates consume deploy-phase literal overrides from these
+  records and pass them to the current Odoo data-workflow runner as transient
+  environment transport. Secret-backed overrides fail closed until the Odoo
+  driver has a delivery path that does not persist plaintext in Dokploy schedule
+  payloads.
+- This is a migration bridge: record authority belongs to Launchplane, while
+  `ENV_OVERRIDE_*` names remain only the current Odoo runner transport to retire.
 
 Artifact handoff example:
 

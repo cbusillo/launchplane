@@ -14,6 +14,7 @@ import click
 from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
@@ -65,6 +66,7 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane import (
     adapt_github_webhook_pull_request_event,
@@ -6592,12 +6594,98 @@ def _run_compose_post_deploy_update(
             "Compose post-deploy update requires a compose target in the control-plane Dokploy source-of-truth. "
             f"Configured={target_definition.target_type}."
         )
-    control_plane_dokploy.run_compose_post_deploy_update(
-        host=host,
-        token=token,
-        target_definition=target_definition,
-        env_file=env_file,
+    odoo_override_record = _read_odoo_instance_override_record_for_post_deploy(
+        context_name=request.context,
+        instance_name=request.instance,
     )
+    workflow_environment_overrides: dict[str, str] = {}
+    if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
+        try:
+            workflow_environment_overrides = control_plane_odoo_instance_overrides.render_post_deploy_environment(
+                odoo_override_record
+            )
+        except click.ClickException as error:
+            _write_odoo_instance_override_apply_result(
+                record=odoo_override_record,
+                status="fail",
+                detail=str(error),
+            )
+            raise
+    try:
+        control_plane_dokploy.run_compose_post_deploy_update(
+            host=host,
+            token=token,
+            target_definition=target_definition,
+            env_file=env_file,
+            workflow_environment_overrides=workflow_environment_overrides,
+        )
+    except click.ClickException as error:
+        if odoo_override_record is not None:
+            _write_odoo_instance_override_apply_result(
+                record=odoo_override_record,
+                status="fail",
+                detail=str(error),
+            )
+        raise
+    if odoo_override_record is not None:
+        _write_odoo_instance_override_apply_result(
+            record=odoo_override_record,
+            status="pass" if workflow_environment_overrides else "skipped",
+            detail=(
+                "Applied Odoo instance overrides through the compose post-deploy workflow."
+                if workflow_environment_overrides
+                else "No deploy-phase Odoo instance overrides were rendered for the compose post-deploy workflow."
+            ),
+        )
+
+
+def _read_odoo_instance_override_record_for_post_deploy(
+    *,
+    context_name: str,
+    instance_name: str,
+) -> OdooInstanceOverrideRecord | None:
+    database_url = resolve_database_url(None)
+    if database_url is None:
+        return None
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        return postgres_store.read_odoo_instance_override_record(
+            context_name=context_name.strip().lower(),
+            instance_name=instance_name.strip().lower(),
+        )
+    except FileNotFoundError:
+        return None
+    finally:
+        postgres_store.close()
+
+
+def _write_odoo_instance_override_apply_result(
+    *,
+    record: OdooInstanceOverrideRecord,
+    status: str,
+    detail: str,
+) -> None:
+    database_url = resolve_database_url(None)
+    if database_url is None:
+        return
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        updated_record = record.model_copy(
+            update={
+                "last_apply": OdooOverrideApplyResult(
+                    attempted=status in {"pending", "pass", "fail"},
+                    status=status,
+                    applied_at=utc_now_timestamp() if status in {"pass", "fail"} else "",
+                    detail=detail,
+                ),
+                "updated_at": utc_now_timestamp(),
+                "source_label": "odoo-post-deploy-driver",
+            }
+        )
+        postgres_store.write_odoo_instance_override_record(updated_record)
+    finally:
+        postgres_store.close()
 
 
 def _skipped_destination_health(
