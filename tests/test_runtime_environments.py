@@ -323,6 +323,39 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertIn("Refusing to leave an empty runtime environment record", result.output)
         self.assertNotIn("only-value", result.output)
 
+    def test_environments_relabel_updates_metadata_without_echoing_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ODOO_DB_USER": "odoo"},
+                    contexts={},
+                ),
+                source_label="legacy-source",
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "relabel",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--source-label",
+                    "operator:db-native",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("odoo", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["record"]["source_label"], "operator:db-native")
+        self.assertEqual(payload["record"]["env_keys"], ["ODOO_DB_USER"])
+
     def test_environments_list_redacts_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
