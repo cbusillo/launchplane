@@ -777,6 +777,7 @@ def run_compose_post_deploy_update(
     target_definition: DokployTargetDefinition,
     env_file: Path | None,
     workflow_environment_overrides: Mapping[str, str] | None = None,
+    required_workflow_environment_keys: tuple[str, ...] = (),
 ) -> None:
     compose_id = target_definition.target_id.strip()
     compose_name = target_definition.target_name.strip() or f"{target_definition.context}-{target_definition.instance}"
@@ -868,6 +869,7 @@ def run_compose_post_deploy_update(
         clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
         data_workflow_lock_path=data_workflow_lock_path,
         workflow_environment_overrides=workflow_environment_overrides or {},
+        required_workflow_environment_keys=required_workflow_environment_keys,
     )
     schedule_payload: JsonObject = {
         "name": schedule_name,
@@ -1090,6 +1092,7 @@ def _build_dokploy_data_workflow_script(
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
     workflow_environment_overrides: Mapping[str, str] | None = None,
+    required_workflow_environment_keys: tuple[str, ...] = (),
 ) -> str:
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
@@ -1097,6 +1100,7 @@ def _build_dokploy_data_workflow_script(
     quoted_filestore_path = shlex.quote(normalized_filestore_path)
     quoted_lock_path = shlex.quote(data_workflow_lock_path)
     workflow_environment_lines = _render_docker_exec_environment_lines(workflow_environment_overrides or {})
+    required_workflow_environment_lines = _render_required_environment_key_lines(required_workflow_environment_keys)
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -1107,6 +1111,8 @@ workflow_ssh_dir=/tmp/platform-data-workflow-ssh
 workflow_arguments=(--update-only)
 workflow_environment=()
 {workflow_environment_lines}
+required_workflow_environment_keys=()
+{required_workflow_environment_lines}
 clear_stale_lock={'1' if clear_stale_lock else '0'}
 data_workflow_lock_path={quoted_lock_path}
 
@@ -1163,6 +1169,18 @@ web_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")
 if [ "${{web_status}}" = "running" ]; then
     echo "Stopping web container ${{web_container_id}}"
     docker stop "${{web_container_id}}" >/dev/null
+fi
+
+if [ "${{#required_workflow_environment_keys[@]}}" -gt 0 ]; then
+    docker exec "${{script_runner_container_id}}" /bin/bash -lc '
+        set -euo pipefail
+        for key_name in "$@"; do
+            if [ -z "${{!key_name+x}}" ]; then
+                echo "Missing required Odoo override environment key: $key_name" >&2
+                exit 1
+            fi
+        done
+    ' _ "${{required_workflow_environment_keys[@]}}"
 fi
 
 echo "Normalizing filestore ownership for ${{database_name}}"
@@ -1235,6 +1253,18 @@ def _render_docker_exec_environment_lines(environment_values: Mapping[str, str])
             raise click.ClickException(f"Invalid post-deploy workflow environment override key: {normalized_key!r}.")
         value = str(environment_values[key_name])
         lines.append(f"workflow_environment+=(-e {shlex.quote(f'{normalized_key}={value}')})")
+    return "\n".join(lines)
+
+
+def _render_required_environment_key_lines(environment_keys: tuple[str, ...]) -> str:
+    lines: list[str] = []
+    for key_name in sorted(set(environment_keys)):
+        normalized_key = key_name.strip()
+        if not normalized_key:
+            raise click.ClickException("Required post-deploy workflow environment keys must be non-empty.")
+        if not normalized_key.replace("_", "A").isalnum() or normalized_key[0].isdigit():
+            raise click.ClickException(f"Invalid required post-deploy workflow environment key: {normalized_key!r}.")
+        lines.append(f"required_workflow_environment_keys+=({shlex.quote(normalized_key)})")
     return "\n".join(lines)
 
 

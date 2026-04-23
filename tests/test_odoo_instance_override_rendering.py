@@ -1,8 +1,6 @@
 import unittest
 
-import click
-
-from control_plane.odoo_instance_overrides import render_post_deploy_environment
+from control_plane.odoo_instance_overrides import build_post_deploy_environment, render_post_deploy_environment
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooConfigParameterOverride,
@@ -42,7 +40,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
             },
         )
 
-    def test_render_post_deploy_environment_rejects_secret_backed_values(self) -> None:
+    def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(self) -> None:
         record = OdooInstanceOverrideRecord(
             context="opw",
             instance="prod",
@@ -59,8 +57,10 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
             updated_at="2026-04-23T12:00:00Z",
         )
 
-        with self.assertRaisesRegex(click.ClickException, "cannot be rendered into a Dokploy schedule payload"):
-            render_post_deploy_environment(record)
+        environment = build_post_deploy_environment(record)
+
+        self.assertEqual(environment.inline_environment, {})
+        self.assertEqual(environment.required_container_environment_keys, ("ENV_OVERRIDE_SHOPIFY__API_TOKEN",))
 
 
 if __name__ == "__main__":

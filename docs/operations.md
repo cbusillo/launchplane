@@ -301,9 +301,10 @@ Current derived-state behavior:
   record, giving the future Odoo driver a tested result-write path.
 - Compose post-deploy updates consume deploy-phase literal overrides from these
   records and pass them to the current Odoo data-workflow runner as transient
-  environment transport. Secret-backed overrides fail closed until the Odoo
-  driver has a delivery path that does not persist plaintext in Dokploy schedule
-  payloads.
+  environment transport. Secret-backed overrides are not rendered into schedule
+  scripts; the bridge requires their mapped keys to already exist in the
+  script-runner container environment, where managed runtime secrets are already
+  expected to land.
 - This is a migration bridge: record authority belongs to Launchplane, while
   `ENV_OVERRIDE_*` names remain only the current Odoo runner transport to retire.
 

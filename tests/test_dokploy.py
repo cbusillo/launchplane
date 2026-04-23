@@ -961,12 +961,15 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             workflow_environment_overrides={
                 "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com",
             },
+            required_workflow_environment_keys=("ENV_OVERRIDE_SHOPIFY__API_TOKEN",),
         )
 
         self.assertIn(
             "workflow_environment+=(-e ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=https://opw-prod.example.com)",
             script,
         )
+        self.assertIn("required_workflow_environment_keys+=(ENV_OVERRIDE_SHOPIFY__API_TOKEN)", script)
+        self.assertIn("Missing required Odoo override environment key", script)
         self.assertIn('"${workflow_environment[@]}"', script)
 
     def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:

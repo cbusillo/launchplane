@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+
 import click
 
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -9,6 +11,12 @@ ODOO_ADDON_ENV_PREFIXES = {
     "authentik_sso": "ENV_OVERRIDE_AUTHENTIK__",
     "shopify": "ENV_OVERRIDE_SHOPIFY__",
 }
+
+
+@dataclass(frozen=True)
+class PostDeployOverrideEnvironment:
+    inline_environment: dict[str, str]
+    required_container_environment_keys: tuple[str, ...]
 
 
 def config_parameter_env_key(config_parameter_key: str) -> str:
@@ -31,23 +39,50 @@ def addon_setting_env_key(*, addon_name: str, setting_name: str) -> str:
     return f"{prefix}{suffix}"
 
 
-def literal_override_value(value: OdooOverrideValue, *, override_name: str) -> str:
+def _apply_override_value(
+    *,
+    environment_key: str,
+    value: OdooOverrideValue,
+    override_name: str,
+    inline_environment: dict[str, str],
+    required_container_environment_keys: list[str],
+) -> None:
     if value.source == "secret_binding":
-        raise click.ClickException(
-            f"Odoo override {override_name!r} is secret-backed and cannot be rendered into a Dokploy schedule payload."
-        )
+        _ = override_name
+        required_container_environment_keys.append(environment_key)
+        return
     if value.value is None:
         raise click.ClickException(f"Odoo override {override_name!r} is missing a literal value.")
-    return str(value.value)
+    inline_environment[environment_key] = str(value.value)
 
 
-def render_post_deploy_environment(record: OdooInstanceOverrideRecord) -> dict[str, str]:
-    environment: dict[str, str] = {}
+def build_post_deploy_environment(record: OdooInstanceOverrideRecord) -> PostDeployOverrideEnvironment:
+    inline_environment: dict[str, str] = {}
+    required_container_environment_keys: list[str] = []
     for override in record.config_parameters:
         environment_key = config_parameter_env_key(override.key)
-        environment[environment_key] = literal_override_value(override.value, override_name=override.key)
+        _apply_override_value(
+            environment_key=environment_key,
+            value=override.value,
+            override_name=override.key,
+            inline_environment=inline_environment,
+            required_container_environment_keys=required_container_environment_keys,
+        )
     for override in record.addon_settings:
         override_name = f"{override.addon}.{override.setting}"
         environment_key = addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
-        environment[environment_key] = literal_override_value(override.value, override_name=override_name)
-    return environment
+        _apply_override_value(
+            environment_key=environment_key,
+            value=override.value,
+            override_name=override_name,
+            inline_environment=inline_environment,
+            required_container_environment_keys=required_container_environment_keys,
+        )
+    return PostDeployOverrideEnvironment(
+        inline_environment=inline_environment,
+        required_container_environment_keys=tuple(sorted(set(required_container_environment_keys))),
+    )
+
+
+def render_post_deploy_environment(record: OdooInstanceOverrideRecord) -> dict[str, str]:
+    return build_post_deploy_environment(record).inline_environment

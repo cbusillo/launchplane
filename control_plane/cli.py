@@ -6599,11 +6599,14 @@ def _run_compose_post_deploy_update(
         instance_name=request.instance,
     )
     workflow_environment_overrides: dict[str, str] = {}
+    required_workflow_environment_keys: tuple[str, ...] = ()
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
         try:
-            workflow_environment_overrides = control_plane_odoo_instance_overrides.render_post_deploy_environment(
+            post_deploy_environment = control_plane_odoo_instance_overrides.build_post_deploy_environment(
                 odoo_override_record
             )
+            workflow_environment_overrides = post_deploy_environment.inline_environment
+            required_workflow_environment_keys = post_deploy_environment.required_container_environment_keys
         except click.ClickException as error:
             _write_odoo_instance_override_apply_result(
                 record=odoo_override_record,
@@ -6618,6 +6621,7 @@ def _run_compose_post_deploy_update(
             target_definition=target_definition,
             env_file=env_file,
             workflow_environment_overrides=workflow_environment_overrides,
+            required_workflow_environment_keys=required_workflow_environment_keys,
         )
     except click.ClickException as error:
         if odoo_override_record is not None:
@@ -6630,10 +6634,10 @@ def _run_compose_post_deploy_update(
     if odoo_override_record is not None:
         _write_odoo_instance_override_apply_result(
             record=odoo_override_record,
-            status="pass" if workflow_environment_overrides else "skipped",
+            status="pass" if workflow_environment_overrides or required_workflow_environment_keys else "skipped",
             detail=(
                 "Applied Odoo instance overrides through the compose post-deploy workflow."
-                if workflow_environment_overrides
+                if workflow_environment_overrides or required_workflow_environment_keys
                 else "No deploy-phase Odoo instance overrides were rendered for the compose post-deploy workflow."
             ),
         )

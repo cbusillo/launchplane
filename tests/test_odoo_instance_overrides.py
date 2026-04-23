@@ -4,7 +4,6 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-import click
 from click.testing import CliRunner
 from pydantic import ValidationError
 
@@ -12,6 +11,7 @@ from control_plane.cli import main
 from control_plane.cli import _run_compose_post_deploy_update
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.odoo_instance_override_record import (
+    OdooAddonSettingOverride,
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideApplyResult,
@@ -276,7 +276,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         )
         self.assertEqual(stored_record.last_apply.status, "pass")
 
-    def test_post_deploy_update_rejects_secret_backed_odoo_overrides_and_marks_fail(self) -> None:
+    def test_post_deploy_update_requires_container_env_for_secret_backed_odoo_overrides(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
             store = PostgresRecordStore(database_url=database_url)
@@ -285,9 +285,10 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 OdooInstanceOverrideRecord(
                     context="opw",
                     instance="prod",
-                    config_parameters=(
-                        OdooConfigParameterOverride(
-                            key="shopify.api_token",
+                    addon_settings=(
+                        OdooAddonSettingOverride(
+                            addon="shopify",
+                            setting="api_token",
                             value=OdooOverrideValue(
                                 source="secret_binding",
                                 secret_binding_id="secret-binding-shopify-token",
@@ -309,6 +310,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     ),
                 ),
             )
+            captured_required_environment_keys: list[str] = []
 
             with patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False), patch(
                 "control_plane.dokploy.read_dokploy_config",
@@ -316,14 +318,19 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             ), patch(
                 "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
                 return_value=source_of_truth,
+            ), patch(
+                "control_plane.dokploy.run_compose_post_deploy_update",
+                side_effect=lambda **kwargs: captured_required_environment_keys.extend(
+                    kwargs["required_workflow_environment_keys"]
+                ),
             ):
-                with self.assertRaisesRegex(click.ClickException, "cannot be rendered into a Dokploy schedule payload"):
-                    _run_compose_post_deploy_update(env_file=None, request=_ship_request())
+                _run_compose_post_deploy_update(env_file=None, request=_ship_request())
 
             stored_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
             store.close()
 
-        self.assertEqual(stored_record.last_apply.status, "fail")
+        self.assertEqual(captured_required_environment_keys, ["ENV_OVERRIDE_SHOPIFY__API_TOKEN"])
+        self.assertEqual(stored_record.last_apply.status, "pass")
 
 
 if __name__ == "__main__":
