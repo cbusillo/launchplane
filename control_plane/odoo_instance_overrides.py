@@ -73,6 +73,26 @@ def _encode_post_deploy_payload(payload: dict[str, object]) -> str:
     return base64.b64encode(encoded).decode("ascii")
 
 
+def _render_legacy_literal_environment(record: OdooInstanceOverrideRecord) -> dict[str, str]:
+    legacy_environment: dict[str, str] = {}
+    for override in record.config_parameters:
+        if override.value.source != "literal":
+            continue
+        if override.value.value is None:
+            raise click.ClickException(f"Odoo override {override.key!r} is missing a literal value.")
+        legacy_environment[config_parameter_env_key(override.key)] = str(override.value.value)
+    for override in record.addon_settings:
+        if override.value.source != "literal":
+            continue
+        override_name = f"{override.addon}.{override.setting}"
+        if override.value.value is None:
+            raise click.ClickException(f"Odoo override {override_name!r} is missing a literal value.")
+        legacy_environment[
+            addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
+        ] = str(override.value.value)
+    return legacy_environment
+
+
 def config_parameter_env_key(config_parameter_key: str) -> str:
     suffix = config_parameter_key.strip().upper().replace(".", "__")
     if not suffix:
@@ -97,6 +117,7 @@ def build_post_deploy_environment(record: OdooInstanceOverrideRecord) -> PostDep
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
     }
+    inline_environment.update(_render_legacy_literal_environment(record))
     required_container_environment_keys: list[str] = []
     for override in record.config_parameters:
         if override.value.source != "secret_binding":

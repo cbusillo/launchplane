@@ -301,14 +301,17 @@ Current derived-state behavior:
   record, giving the future Odoo driver a tested result-write path.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to the Odoo data-workflow runner as one typed payload env var.
+- During the rollout window, Launchplane also emits legacy literal
+  `ENV_OVERRIDE_*` values for non-secret overrides so older Odoo consumers keep
+  applying the same settings until the typed payload path is everywhere.
 - Secret-backed overrides are still not rendered into schedule scripts as
   plaintext. The payload references the already-present script-runner
   environment key for each managed secret binding, and the workflow asserts
   those keys before Odoo starts.
-- This keeps record authority in Launchplane while moving Odoo off the
-  temporary literal `ENV_OVERRIDE_*` transport bridge. Those names now remain
-  only as secret-binding landing zones to retire in a later managed-binding
-  slice.
+- This keeps record authority in Launchplane while moving Odoo toward the
+  typed payload contract. The remaining literal `ENV_OVERRIDE_*` bridge is now
+  compatibility-only and can be deleted once the typed consumer is deployed
+  everywhere.
 
 Artifact handoff example:
 

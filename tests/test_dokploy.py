@@ -961,12 +961,17 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             data_workflow_lock_path="/volumes/data/.data_workflow_in_progress",
             workflow_environment_overrides={
                 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload-value",
+                "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com",
             },
             required_workflow_environment_keys=("ENV_OVERRIDE_SHOPIFY__API_TOKEN",),
         )
 
         self.assertIn(
             f"workflow_environment+=(-e {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}=payload-value)",
+            script,
+        )
+        self.assertIn(
+            "workflow_environment+=(-e ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=https://opw-prod.example.com)",
             script,
         )
         self.assertIn("required_workflow_environment_keys+=(ENV_OVERRIDE_SHOPIFY__API_TOKEN)", script)

@@ -175,8 +175,8 @@ state/
   `ENV_OVERRIDE_*` keys remain a migration input to retire, not the final
   override model.
 - The compose post-deploy bridge now renders one typed Odoo override payload
-  for the data-workflow runner instead of flattening literal record intent into
-  `ENV_OVERRIDE_*` transport keys.
+  for the data-workflow runner and, during the compatibility window, also emits
+  legacy literal `ENV_OVERRIDE_*` keys for non-secret values.
 - Secret-backed values still avoid Dokploy schedule plaintext. The payload
   points at the already-present container environment key for each managed
   secret binding, and the driver asserts those keys before invoking Odoo.

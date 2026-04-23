@@ -287,6 +287,10 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 }
             ],
         )
+        self.assertEqual(
+            captured_workflow_environment["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
+            "https://opw-prod.example.com",
+        )
         self.assertEqual(stored_record.last_apply.status, "pass")
 
     def test_post_deploy_update_requires_container_env_for_secret_backed_odoo_overrides(self) -> None:

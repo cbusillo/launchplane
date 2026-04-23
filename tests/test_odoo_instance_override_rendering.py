@@ -85,6 +85,10 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         decoded_payload = json.loads(base64.b64decode(encoded_payload).decode("utf-8"))
 
         self.assertEqual(decoded_payload, render_post_deploy_payload(record))
+        self.assertEqual(
+            environment.inline_environment["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
+            "https://opw-prod.example.com",
+        )
 
     def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(self) -> None:
         record = OdooInstanceOverrideRecord(
