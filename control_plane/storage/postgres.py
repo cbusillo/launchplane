@@ -6,7 +6,7 @@ from typing import Any, TypeVar
 from pydantic import BaseModel
 from sqlalchemy import JSON, Index, Integer, String, create_engine, desc, select
 from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import DeclarativeBase, Mapped, Session, mapped_column, sessionmaker
+from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -15,6 +15,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -188,6 +189,16 @@ class LaunchplaneRuntimeEnvironmentRow(Base):
     __table_args__ = (Index("launchplane_runtime_environments_updated_idx", desc("updated_at")),)
 
     scope: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, primary_key=True)
+    instance: Mapped[str] = mapped_column(String, primary_key=True)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneOdooInstanceOverrideRow(Base):
+    __tablename__ = "launchplane_odoo_instance_overrides"
+    __table_args__ = (Index("launchplane_odoo_instance_overrides_updated_idx", desc("updated_at")),)
+
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
@@ -763,6 +774,36 @@ class PostgresRecordStore:
             ),
         )
 
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> None:
+        self._write_row(
+            LaunchplaneOdooInstanceOverrideRow(
+                context=record.context,
+                instance=record.instance,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_odoo_instance_override_record(self, *, context_name: str, instance_name: str) -> OdooInstanceOverrideRecord:
+        return self._read_model(
+            model_type=OdooInstanceOverrideRecord,
+            orm_model=LaunchplaneOdooInstanceOverrideRow,
+            filters=(
+                LaunchplaneOdooInstanceOverrideRow.context == context_name,
+                LaunchplaneOdooInstanceOverrideRow.instance == instance_name,
+            ),
+        )
+
+    def list_odoo_instance_override_records(self) -> tuple[OdooInstanceOverrideRecord, ...]:
+        return self._list_models(
+            model_type=OdooInstanceOverrideRecord,
+            orm_model=LaunchplaneOdooInstanceOverrideRow,
+            order_by=(
+                LaunchplaneOdooInstanceOverrideRow.context.asc(),
+                LaunchplaneOdooInstanceOverrideRow.instance.asc(),
+            ),
+        )
+
     def write_secret_record(self, record: SecretRecord) -> None:
         self._write_row(
             LaunchplaneSecretRow(
@@ -921,6 +962,7 @@ class PostgresRecordStore:
             "deployments": 0,
             "promotions": 0,
             "inventory": 0,
+            "odoo_instance_overrides": 0,
             "preview_records": 0,
             "preview_generations": 0,
             "release_tuples": 0,
@@ -937,6 +979,9 @@ class PostgresRecordStore:
         for record in filesystem_store.list_environment_inventory():
             self.write_environment_inventory(record)
             counts["inventory"] += 1
+        for record in filesystem_store.list_odoo_instance_override_records():
+            self.write_odoo_instance_override_record(record)
+            counts["odoo_instance_overrides"] += 1
         for record in filesystem_store.list_preview_records():
             self.write_preview_record(record)
             counts["preview_records"] += 1

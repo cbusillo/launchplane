@@ -24,6 +24,10 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
+from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
+from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
 from control_plane.contracts.preview_mutation_request import (
@@ -7698,6 +7702,135 @@ def _build_runtime_environment_record_for_relabel(
     )
 
 
+def _summarize_odoo_instance_override_record(record: OdooInstanceOverrideRecord) -> dict[str, object]:
+    return {
+        "context": record.context,
+        "instance": record.instance,
+        "updated_at": record.updated_at,
+        "source_label": record.source_label,
+        "config_parameter_keys": sorted(override.key for override in record.config_parameters),
+        "addon_settings": sorted(f"{override.addon}.{override.setting}" for override in record.addon_settings),
+        "config_parameter_count": len(record.config_parameters),
+        "addon_setting_count": len(record.addon_settings),
+    }
+
+
+def _odoo_override_name_requires_secret_store(key_name: str) -> bool:
+    normalized_parts = key_name.replace(".", "_").replace("-", "_").upper().split("_")
+    return any(key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS for key_part in normalized_parts)
+
+
+def _build_odoo_override_value(
+    *,
+    value: str | None,
+    secret_binding_id: str,
+    value_name: str,
+) -> OdooOverrideValue:
+    normalized_secret_binding_id = secret_binding_id.strip()
+    if value is None and not normalized_secret_binding_id:
+        raise click.ClickException("Provide either --value or --secret-binding-id.")
+    if value is not None and normalized_secret_binding_id:
+        raise click.ClickException("Provide only one of --value or --secret-binding-id.")
+    if value is not None:
+        if _odoo_override_name_requires_secret_store(value_name):
+            raise click.ClickException(
+                f"Odoo override {value_name!r} looks secret-shaped and must use --secret-binding-id."
+            )
+        return OdooOverrideValue(source="literal", value=value)
+    return OdooOverrideValue(source="secret_binding", secret_binding_id=normalized_secret_binding_id)
+
+
+def _find_odoo_instance_override_record(
+    *,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+    context_name: str,
+    instance_name: str,
+) -> OdooInstanceOverrideRecord | None:
+    for record in existing_records:
+        if record.context == context_name and record.instance == instance_name:
+            return record
+    return None
+
+
+def _build_odoo_instance_override_record_with_config_parameter(
+    *,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+    context_name: str,
+    instance_name: str,
+    key_name: str,
+    override_value: OdooOverrideValue,
+    source_label: str,
+) -> OdooInstanceOverrideRecord:
+    normalized_context = context_name.strip().lower()
+    normalized_instance = instance_name.strip().lower()
+    normalized_key = key_name.strip().lower()
+    if not normalized_context or not normalized_instance:
+        raise click.ClickException("Odoo instance override records require --context and --instance.")
+    if not normalized_key:
+        raise click.ClickException("Odoo config parameter overrides require --key.")
+    target_record = _find_odoo_instance_override_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    config_parameters = {
+        override.key: override for override in (target_record.config_parameters if target_record is not None else ())
+    }
+    addon_settings = target_record.addon_settings if target_record is not None else ()
+    config_parameters[normalized_key] = OdooConfigParameterOverride(key=normalized_key, value=override_value)
+    return OdooInstanceOverrideRecord(
+        context=normalized_context,
+        instance=normalized_instance,
+        config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
+        addon_settings=addon_settings,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or "cli",
+    )
+
+
+def _build_odoo_instance_override_record_with_addon_setting(
+    *,
+    existing_records: tuple[OdooInstanceOverrideRecord, ...],
+    context_name: str,
+    instance_name: str,
+    addon_name: str,
+    setting_name: str,
+    override_value: OdooOverrideValue,
+    source_label: str,
+) -> OdooInstanceOverrideRecord:
+    normalized_context = context_name.strip().lower()
+    normalized_instance = instance_name.strip().lower()
+    normalized_addon = addon_name.strip().lower()
+    normalized_setting = setting_name.strip().lower()
+    if not normalized_context or not normalized_instance:
+        raise click.ClickException("Odoo instance override records require --context and --instance.")
+    if not normalized_addon or not normalized_setting:
+        raise click.ClickException("Odoo addon setting overrides require --addon and --setting.")
+    target_record = _find_odoo_instance_override_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    config_parameters = target_record.config_parameters if target_record is not None else ()
+    addon_settings = {
+        (override.addon, override.setting): override
+        for override in (target_record.addon_settings if target_record is not None else ())
+    }
+    addon_settings[(normalized_addon, normalized_setting)] = OdooAddonSettingOverride(
+        addon=normalized_addon,
+        setting=normalized_setting,
+        value=override_value,
+    )
+    return OdooInstanceOverrideRecord(
+        context=normalized_context,
+        instance=normalized_instance,
+        config_parameters=config_parameters,
+        addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or "cli",
+    )
+
+
 @click.group()
 def main() -> None:
     """Control-plane CLI."""
@@ -9805,6 +9938,164 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
         instance_name=instance_name,
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@main.group("odoo-overrides")
+def odoo_overrides() -> None:
+    """Odoo instance override record commands."""
+
+
+@odoo_overrides.command("put-config-param")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--key", "key_name", required=True, help="Odoo ir.config_parameter key.")
+@click.option("--value", default=None, help="Non-secret literal value.")
+@click.option("--secret-binding-id", default="", help="Managed secret binding id for secret values.")
+@click.option("--source-label", default="cli", show_default=True)
+def odoo_overrides_put_config_param(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    key_name: str,
+    value: str | None,
+    secret_binding_id: str,
+    source_label: str,
+) -> None:
+    override_value = _build_odoo_override_value(
+        value=value,
+        secret_binding_id=secret_binding_id,
+        value_name=key_name,
+    )
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_odoo_instance_override_records()
+        record = _build_odoo_instance_override_record_with_config_parameter(
+            existing_records=existing_records,
+            context_name=context_name,
+            instance_name=instance_name,
+            key_name=key_name,
+            override_value=override_value,
+            source_label=source_label,
+        )
+        postgres_store.write_odoo_instance_override_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_odoo_instance_override_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@odoo_overrides.command("put-addon-setting")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--addon", "addon_name", required=True, help="Odoo addon or integration name.")
+@click.option("--setting", "setting_name", required=True, help="Addon setting name.")
+@click.option("--value", default=None, help="Non-secret literal value.")
+@click.option("--secret-binding-id", default="", help="Managed secret binding id for secret values.")
+@click.option("--source-label", default="cli", show_default=True)
+def odoo_overrides_put_addon_setting(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    addon_name: str,
+    setting_name: str,
+    value: str | None,
+    secret_binding_id: str,
+    source_label: str,
+) -> None:
+    value_name = f"{addon_name}.{setting_name}"
+    override_value = _build_odoo_override_value(
+        value=value,
+        secret_binding_id=secret_binding_id,
+        value_name=value_name,
+    )
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_odoo_instance_override_records()
+        record = _build_odoo_instance_override_record_with_addon_setting(
+            existing_records=existing_records,
+            context_name=context_name,
+            instance_name=instance_name,
+            addon_name=addon_name,
+            setting_name=setting_name,
+            override_value=override_value,
+            source_label=source_label,
+        )
+        postgres_store.write_odoo_instance_override_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_odoo_instance_override_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@odoo_overrides.command("list")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+def odoo_overrides_list(database_url: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        records = postgres_store.list_odoo_instance_override_records()
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [_summarize_odoo_instance_override_record(record) for record in records],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@odoo_overrides.command("show")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+def odoo_overrides_show(database_url: str, context_name: str, instance_name: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        record = postgres_store.read_odoo_instance_override_record(
+            context_name=context_name.strip().lower(),
+            instance_name=instance_name.strip().lower(),
+        )
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps(_summarize_odoo_instance_override_record(record), indent=2, sort_keys=True))
 
 
 @environments.command("sync-live-target")

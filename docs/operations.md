@@ -286,6 +286,21 @@ Current derived-state behavior:
   alternate verification surfaces and accepts the first `2xx` response instead
   of requiring every URL to succeed.
 
+## Odoo Instance Override Contracts
+
+- `odoo-overrides put-config-param` writes a typed Odoo `ir.config_parameter`
+  override for a context and instance.
+- `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
+  such as Authentik or Shopify settings for a context and instance.
+- Secret-shaped override names, including `*_TOKEN`, `*_PASSWORD`, and
+  `*_KEY`, must use `--secret-binding-id`; plaintext secret writes are rejected.
+- `odoo-overrides list` and `odoo-overrides show` return keys, counts, source
+  labels, and timestamps only. They do not echo literal values or managed secret
+  binding ids.
+- These records do not yet change deploy behavior. The next Odoo driver slice
+  should consume them and then retire equivalent `ENV_OVERRIDE_*` runtime
+  environment authority.
+
 Artifact handoff example:
 
 ```bash

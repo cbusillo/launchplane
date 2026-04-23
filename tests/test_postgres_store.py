@@ -13,6 +13,9 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -140,6 +143,21 @@ def _runtime_environment_record(
         env=env or {"ODOO_DB_PASSWORD": "local-secret"},
         updated_at="2026-04-21T18:30:00Z",
         source_label="import:test",
+    )
+
+
+def _odoo_instance_override_record(*, context: str = "opw", instance: str = "prod") -> OdooInstanceOverrideRecord:
+    return OdooInstanceOverrideRecord(
+        context=context,
+        instance=instance,
+        config_parameters=(
+            OdooConfigParameterOverride(
+                key="web.base.url",
+                value=OdooOverrideValue(source="literal", value=f"https://{context}-{instance}.example.com"),
+            ),
+        ),
+        updated_at="2026-04-21T18:30:00Z",
+        source_label="test",
     )
 
 
@@ -447,6 +465,24 @@ class PostgresRecordStoreTests(unittest.TestCase):
             [("global", "", ""), ("instance", "opw", "local")],
         )
 
+    def test_write_read_and_list_odoo_instance_override_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            )
+            store.ensure_schema()
+            store.write_odoo_instance_override_record(_odoo_instance_override_record(context="opw", instance="prod"))
+            store.write_odoo_instance_override_record(_odoo_instance_override_record(context="cm", instance="testing"))
+            loaded_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            listed_records = store.list_odoo_instance_override_records()
+            store.close()
+
+        self.assertEqual(loaded_record.config_parameters[0].key, "web.base.url")
+        self.assertEqual(
+            [(record.context, record.instance) for record in listed_records],
+            [("cm", "testing"), ("opw", "prod")],
+        )
+
     def test_secret_records_round_trip_and_find_latest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -537,6 +573,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 _promotion_record(record_id="promotion-20260420T160500Z-opw-testing-to-prod")
             )
             filesystem_store.write_environment_inventory(_inventory_record())
+            filesystem_store.write_odoo_instance_override_record(_odoo_instance_override_record())
             filesystem_store.write_preview_record(
                 _preview_record(
                     preview_id="preview-verireel-testing-verireel-pr-123",
@@ -560,6 +597,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "deployments": 1,
                     "promotions": 1,
                     "inventory": 1,
+                    "odoo_instance_overrides": 1,
                     "preview_records": 1,
                     "preview_generations": 1,
                     "release_tuples": 1,
