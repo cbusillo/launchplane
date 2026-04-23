@@ -53,6 +53,8 @@ state/
     <record-id>.json
   inventory/
     <context>-<instance>.json
+  odoo_instance_overrides/
+    <context>-<instance>.json
   release_tuples/
     <context>-<channel>.json
 ```
@@ -153,6 +155,28 @@ state/
 - Local-dev tuple records live under `state/`; shared-service runtime baseline
   authority comes from the same release-tuple record shape in Postgres-backed
   storage. Neither path rewrites any tracked TOML catalog implicitly.
+
+## Odoo Instance Override Record
+
+- One record per Odoo context and stable instance.
+- Record Odoo application intent in typed fields instead of treating
+  `ENV_OVERRIDE_*` names as the durable contract.
+- `config_parameters` stores explicit `ir.config_parameter` writes such as
+  `web.base.url`.
+- `addon_settings` stores addon-shaped intent such as Authentik SSO or Shopify
+  settings without coupling Launchplane records to environment variable names.
+- `apply_on` records the phases where the override is intended to apply, and
+  `last_apply` records the latest driver result without making the addon layer
+  the durable audit surface.
+- Secret-shaped values must reference Launchplane managed secret bindings; list
+  and show commands return only keys and counts, not plaintext values or binding
+  ids.
+- This record is the target authority for the Odoo driver. Runtime-environment
+  `ENV_OVERRIDE_*` keys remain a migration input to retire, not the final
+  override model.
+- The first compose post-deploy bridge renders literal values into the current
+  data-workflow runner transport. Secret-backed values are passed as required
+  container environment keys, not as plaintext in the Dokploy schedule payload.
 
 ## Launchplane Preview Record
 

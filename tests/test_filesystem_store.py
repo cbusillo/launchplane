@@ -9,6 +9,10 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
+from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.promotion_record import DeploymentEvidence, PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -527,3 +531,38 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_record.instance, "prod")
             self.assertEqual(loaded_record.promotion_record_id, "promotion-20260410T182231Z-opw-testing-to-prod")
             self.assertEqual(len(listed_records), 1)
+
+    def test_write_and_read_odoo_instance_override_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = OdooInstanceOverrideRecord(
+                context="opw",
+                instance="prod",
+                config_parameters=(
+                    OdooConfigParameterOverride(
+                        key="web.base.url",
+                        value=OdooOverrideValue(source="literal", value="https://opw-prod.example.com"),
+                    ),
+                ),
+                addon_settings=(
+                    OdooAddonSettingOverride(
+                        addon="shopify",
+                        setting="api_token",
+                        value=OdooOverrideValue(
+                            source="secret_binding",
+                            secret_binding_id="secret-binding-shopify-token",
+                        ),
+                    ),
+                ),
+                updated_at="2026-04-21T18:30:00Z",
+                source_label="test",
+            )
+
+            written_path = store.write_odoo_instance_override_record(record)
+            loaded_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            listed_records = store.list_odoo_instance_override_records()
+
+            self.assertEqual(written_path.relative_to(state_dir).as_posix(), "odoo_instance_overrides/opw-prod.json")
+            self.assertEqual(loaded_record.addon_settings[0].value.secret_binding_id, "secret-binding-shopify-token")
+            self.assertEqual([(record.context, record.instance) for record in listed_records], [("opw", "prod")])

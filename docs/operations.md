@@ -286,6 +286,28 @@ Current derived-state behavior:
   alternate verification surfaces and accepts the first `2xx` response instead
   of requiring every URL to succeed.
 
+## Odoo Instance Override Contracts
+
+- `odoo-overrides put-config-param` writes a typed Odoo `ir.config_parameter`
+  override for a context and instance.
+- `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
+  such as Authentik or Shopify settings for a context and instance.
+- Secret-shaped override names, including `*_TOKEN`, `*_PASSWORD`, and
+  `*_KEY`, must use `--secret-binding-id`; plaintext secret writes are rejected.
+- `odoo-overrides list` and `odoo-overrides show` return keys, counts, source
+  labels, and timestamps only. They do not echo literal values or managed secret
+  binding ids.
+- `odoo-overrides mark-apply` updates the latest apply status metadata for a
+  record, giving the future Odoo driver a tested result-write path.
+- Compose post-deploy updates consume deploy-phase literal overrides from these
+  records and pass them to the current Odoo data-workflow runner as transient
+  environment transport. Secret-backed overrides are not rendered into schedule
+  scripts; the bridge requires their mapped keys to already exist in the
+  script-runner container environment, where managed runtime secrets are already
+  expected to land.
+- This is a migration bridge: record authority belongs to Launchplane, while
+  `ENV_OVERRIDE_*` names remain only the current Odoo runner transport to retire.
+
 Artifact handoff example:
 
 ```bash

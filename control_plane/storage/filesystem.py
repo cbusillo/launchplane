@@ -10,6 +10,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -205,6 +206,20 @@ class FilesystemRecordStore:
 
     def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
         return self._list_models(EnvironmentInventory, "inventory")
+
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> Path:
+        return self._write_model("odoo_instance_overrides", f"{record.context}-{record.instance}", record)
+
+    def read_odoo_instance_override_record(self, *, context_name: str, instance_name: str) -> OdooInstanceOverrideRecord:
+        record_id = f"{context_name}-{instance_name}"
+        return OdooInstanceOverrideRecord.model_validate(
+            self._read_model(OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id).model_dump(mode="json")
+        )
+
+    def list_odoo_instance_override_records(self) -> tuple[OdooInstanceOverrideRecord, ...]:
+        records = list(self._list_models(OdooInstanceOverrideRecord, "odoo_instance_overrides"))
+        records.sort(key=lambda record: (record.context, record.instance))
+        return tuple(records)
 
     def write_preview_record(self, record: PreviewRecord) -> Path:
         return self._write_model("launchplane_previews", record.preview_id, record)
