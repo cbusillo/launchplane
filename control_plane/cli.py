@@ -22,6 +22,8 @@ from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
@@ -161,7 +163,15 @@ def _status_tone(value: str) -> str:
         return "good"
     if normalized_value in {"fail", "failed", "destroyed"}:
         return "bad"
-    if normalized_value in {"pending", "building", "deploying", "verifying", "requested", "paused", "unavailable"}:
+    if normalized_value in {
+        "pending",
+        "building",
+        "deploying",
+        "verifying",
+        "requested",
+        "paused",
+        "unavailable",
+    }:
         return "warn"
     return "neutral"
 
@@ -176,7 +186,9 @@ def _generation_in_progress(value: str) -> bool:
 
 
 def _launchplane_action_slug(value: str) -> str:
-    compact = "".join(character.lower() if character.isalnum() else "-" for character in value.strip())
+    compact = "".join(
+        character.lower() if character.isalnum() else "-" for character in value.strip()
+    )
     normalized = "-".join(part for part in compact.split("-") if part)
     return normalized or "launchplane-preview"
 
@@ -219,10 +231,18 @@ def _build_launchplane_action_script(
     lines = ['STATE_DIR="/path/to/state"']
     for variable_name, file_path, payload in file_payloads:
         lines.append(f'{variable_name}="{file_path}"')
-        lines.append(f'cat >"${variable_name}" <<\'JSON\'')
+        lines.append(f"cat >\"${variable_name}\" <<'JSON'")
         lines.append(json.dumps(payload, indent=2, sort_keys=True))
         lines.append("JSON")
-    command_parts = ["uv", "run", "launchplane", "launchplane-previews", command_name, "--state-dir", '"$STATE_DIR"']
+    command_parts = [
+        "uv",
+        "run",
+        "launchplane",
+        "launchplane-previews",
+        command_name,
+        "--state-dir",
+        '"$STATE_DIR"',
+    ]
     command_parts.extend(command_args)
     lines.append(" ".join(command_parts))
     return "\n".join(lines)
@@ -405,7 +425,9 @@ def _launchplane_inventory_bucket(row: dict[str, object]) -> str:
     return "live"
 
 
-def _launchplane_preview_enablement_record_id(*, context_name: str, anchor_repo: str, anchor_pr_number: int) -> str:
+def _launchplane_preview_enablement_record_id(
+    *, context_name: str, anchor_repo: str, anchor_pr_number: int
+) -> str:
     return f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
 
 
@@ -445,9 +467,9 @@ def _build_launchplane_backup_gate_write_recipe_script(
     lines = [
         'STATE_DIR="/path/to/state"',
         'BACKUP_GATE_FILE="/tmp/launchplane-backup-gate.json"',
-        'cat >"$BACKUP_GATE_FILE" <<\'JSON\'',
+        "cat >\"$BACKUP_GATE_FILE\" <<'JSON'",
         json.dumps(payload, indent=2, sort_keys=True),
-        'JSON',
+        "JSON",
         'uv run launchplane backup-gates write --state-dir "$STATE_DIR" --input-file "$BACKUP_GATE_FILE"',
     ]
     return "\n".join(lines)
@@ -488,10 +510,22 @@ def _build_launchplane_environment_action_payload(
     instance_name: str,
     environment_payload: dict[str, object] | None,
 ) -> dict[str, object]:
-    live_payload = environment_payload.get("live") if isinstance(environment_payload, dict) else None
-    artifact_id = str(live_payload.get("artifact_id", "")).strip() if isinstance(live_payload, dict) else ""
-    source_git_ref = str(live_payload.get("source_git_ref", "")).strip() if isinstance(live_payload, dict) else ""
-    deploy_status = str(live_payload.get("deploy_status", "")).strip().lower() if isinstance(live_payload, dict) else ""
+    live_payload = (
+        environment_payload.get("live") if isinstance(environment_payload, dict) else None
+    )
+    artifact_id = (
+        str(live_payload.get("artifact_id", "")).strip() if isinstance(live_payload, dict) else ""
+    )
+    source_git_ref = (
+        str(live_payload.get("source_git_ref", "")).strip()
+        if isinstance(live_payload, dict)
+        else ""
+    )
+    deploy_status = (
+        str(live_payload.get("deploy_status", "")).strip().lower()
+        if isinstance(live_payload, dict)
+        else ""
+    )
     if not artifact_id or not source_git_ref:
         return {
             "instance": instance_name,
@@ -582,11 +616,17 @@ def _build_launchplane_preview_enablement_action_payload(
             "verify_status": "pending",
             "overall_health_status": "pending",
         }
-        action_slug = _launchplane_action_slug(f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}")
+        action_slug = _launchplane_action_slug(
+            f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
+        )
         recipe = _build_launchplane_action_script(
             command_name="request-generation",
             file_payloads=(
-                ("PREVIEW_FILE", f"/tmp/launchplane-{action_slug}-preview.json", preview_request_payload),
+                (
+                    "PREVIEW_FILE",
+                    f"/tmp/launchplane-{action_slug}-preview.json",
+                    preview_request_payload,
+                ),
                 (
                     "GENERATION_FILE",
                     f"/tmp/launchplane-{action_slug}-generation.json",
@@ -633,10 +673,7 @@ def _build_launchplane_preview_enablement_action_payload(
         ]
 
     def companion_summaries_payload() -> list[dict[str, object]]:
-        return [
-            summary.model_dump(mode="json")
-            for summary in request_metadata_companion_summaries
-        ]
+        return [summary.model_dump(mode="json") for summary in request_metadata_companion_summaries]
 
     def unresolved_companion_payload(*, detail: str) -> dict[str, object]:
         return {
@@ -799,15 +836,25 @@ def _build_launchplane_promotion_action_payload(
     testing_environment: dict[str, object] | None,
     prod_environment: dict[str, object] | None,
 ) -> dict[str, object]:
-    testing_live = testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    testing_live = (
+        testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    )
     prod_live = prod_environment.get("live") if isinstance(prod_environment, dict) else None
-    testing_artifact_id = str(testing_live.get("artifact_id", "")).strip() if isinstance(testing_live, dict) else ""
-    prod_artifact_id = str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
+    testing_artifact_id = (
+        str(testing_live.get("artifact_id", "")).strip() if isinstance(testing_live, dict) else ""
+    )
+    prod_artifact_id = (
+        str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
+    )
     testing_source_git_ref = (
-        str(testing_live.get("source_git_ref", "")).strip() if isinstance(testing_live, dict) else ""
+        str(testing_live.get("source_git_ref", "")).strip()
+        if isinstance(testing_live, dict)
+        else ""
     )
     testing_deploy_status = (
-        str(testing_live.get("deploy_status", "")).strip().lower() if isinstance(testing_live, dict) else ""
+        str(testing_live.get("deploy_status", "")).strip().lower()
+        if isinstance(testing_live, dict)
+        else ""
     )
     testing_health_status = (
         str(testing_live.get("destination_health_status", "")).strip().lower()
@@ -842,12 +889,12 @@ def _build_launchplane_promotion_action_payload(
         candidate_detail = f"Testing and prod are already aligned on {testing_artifact_id}."
     elif testing_artifact_id:
         candidate_status = "pass"
-        candidate_detail = (
-            f"Testing is carrying {testing_artifact_id or 'an artifact'} while prod is carrying {prod_artifact_id or 'nothing recorded yet'}."
-        )
+        candidate_detail = f"Testing is carrying {testing_artifact_id or 'an artifact'} while prod is carrying {prod_artifact_id or 'nothing recorded yet'}."
     elif prod_artifact_id:
         candidate_status = "fail"
-        candidate_detail = "Prod has an artifact, but Launchplane has no current testing artifact to promote from."
+        candidate_detail = (
+            "Prod has an artifact, but Launchplane has no current testing artifact to promote from."
+        )
     evidence_checks.append(
         {
             "label": "Promotion candidate",
@@ -919,8 +966,12 @@ def _build_launchplane_promotion_action_payload(
     if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
         promotion_status = "in_sync"
         headline = "Prod is already serving the current testing artifact."
-        summary = "No promotion is pending because the tenant's long-lived lanes are already aligned."
-        next_action = "Keep shipping new artifacts into testing until a new promotion candidate appears."
+        summary = (
+            "No promotion is pending because the tenant's long-lived lanes are already aligned."
+        )
+        next_action = (
+            "Keep shipping new artifacts into testing until a new promotion candidate appears."
+        )
         tone = "good"
     elif testing_artifact_id:
         all_checks_pass = (
@@ -932,19 +983,25 @@ def _build_launchplane_promotion_action_payload(
             promotion_status = "promotable"
             headline = "Testing is ready to promote into prod."
             summary = "Launchplane has the artifact, testing evidence, and backup authorization needed to plan the next promotion request."
-            next_action = "Resolve the typed promotion request, review it, then execute it against prod."
+            next_action = (
+                "Resolve the typed promotion request, review it, then execute it against prod."
+            )
             tone = "good"
             resolve_recipe = _build_launchplane_promotion_resolve_recipe_script(
                 context_name=context_name,
                 artifact_id=testing_artifact_id,
                 backup_record_id=backup_record_id,
             )
-            execute_recipe = _build_launchplane_promotion_execute_recipe_script(state_dir="/path/to/state")
+            execute_recipe = _build_launchplane_promotion_execute_recipe_script(
+                state_dir="/path/to/state"
+            )
         else:
             promotion_status = "blocked"
             headline = "A newer testing artifact exists, but Launchplane cannot promote it yet."
             summary = "The tenant has a promotion candidate, but one or more required evidence checks are still missing or failing."
-            next_action = "Clear the failing evidence checks before using Launchplane's promotion flow."
+            next_action = (
+                "Clear the failing evidence checks before using Launchplane's promotion flow."
+            )
             tone = "warn"
             if backup_check_status != "pass":
                 backup_gate_recipe = _build_launchplane_backup_gate_write_recipe_script(
@@ -959,9 +1016,7 @@ def _build_launchplane_promotion_action_payload(
         next_action = "Ship a new artifact into testing first, then return here to plan promotion."
         tone = "neutral"
 
-    retained_evidence = (
-        "Launchplane will append a promotion record, keep backup-gate evidence, and refresh prod inventory when a waited promotion completes successfully."
-    )
+    retained_evidence = "Launchplane will append a promotion record, keep backup-gate evidence, and refresh prod inventory when a waited promotion completes successfully."
     return {
         "status": promotion_status,
         "tone": tone,
@@ -971,7 +1026,9 @@ def _build_launchplane_promotion_action_payload(
         "candidate_artifact_id": testing_artifact_id,
         "current_prod_artifact_id": prod_artifact_id,
         "source_git_ref": testing_source_git_ref,
-        "latest_backup_gate": _summarize_backup_gate_record(latest_backup_gate) if latest_backup_gate is not None else None,
+        "latest_backup_gate": _summarize_backup_gate_record(latest_backup_gate)
+        if latest_backup_gate is not None
+        else None,
         "latest_promotion": latest_promotion if isinstance(latest_promotion, dict) else None,
         "evidence_checks": evidence_checks,
         "retained_evidence": retained_evidence,
@@ -1002,7 +1059,9 @@ def _build_launchplane_promotion_detail_payload(
         if isinstance(recent_promotions_payload, (list, tuple))
         else []
     )
-    testing_live = testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    testing_live = (
+        testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    )
     prod_live = prod_environment.get("live") if isinstance(prod_environment, dict) else None
     latest_backup_gate = (
         promotion_action.get("latest_backup_gate")
@@ -1024,7 +1083,10 @@ def _build_launchplane_promotion_detail_payload(
         and prod_live is None
         and not recent_promotions
         and not recent_backup_gates
-        and not any(str(promotion_action.get(key, "")).strip() for key in ("candidate_artifact_id", "current_prod_artifact_id"))
+        and not any(
+            str(promotion_action.get(key, "")).strip()
+            for key in ("candidate_artifact_id", "current_prod_artifact_id")
+        )
     ):
         return None
     return {
@@ -1040,7 +1102,9 @@ def _build_launchplane_promotion_detail_payload(
         "summary": str(promotion_action.get("summary", "No promotion summary recorded.")),
         "next_action": str(promotion_action.get("next_action", "No next action recorded.")),
         "candidate_artifact_id": str(promotion_action.get("candidate_artifact_id", "")).strip(),
-        "current_prod_artifact_id": str(promotion_action.get("current_prod_artifact_id", "")).strip(),
+        "current_prod_artifact_id": str(
+            promotion_action.get("current_prod_artifact_id", "")
+        ).strip(),
         "source_git_ref": str(promotion_action.get("source_git_ref", "")).strip(),
         "retained_evidence": str(promotion_action.get("retained_evidence", "")).strip(),
         "evidence_checks": [item for item in evidence_checks if isinstance(item, dict)],
@@ -1049,9 +1113,7 @@ def _build_launchplane_promotion_detail_payload(
         "recent_backup_gates": tuple(
             _summarize_backup_gate_record(record) for record in recent_backup_gates
         ),
-        "recent_promotions": tuple(
-            item for item in recent_promotions if isinstance(item, dict)
-        ),
+        "recent_promotions": tuple(item for item in recent_promotions if isinstance(item, dict)),
         "testing_live": testing_live if isinstance(testing_live, dict) else None,
         "prod_live": prod_live if isinstance(prod_live, dict) else None,
         "backup_gate_recipe": str(promotion_action.get("backup_gate_recipe", "")).strip(),
@@ -1090,7 +1152,9 @@ def _build_launchplane_preview_enablement_record(
         request_metadata_status=request_metadata.status,
         request_metadata_error=request_metadata.error,
         request_metadata_baseline_channel=(
-            request_metadata.metadata.baseline_channel if request_metadata.metadata is not None else ""
+            request_metadata.metadata.baseline_channel
+            if request_metadata.metadata is not None
+            else ""
         ),
         request_metadata_companions=(
             request_metadata.metadata.companions if request_metadata.metadata is not None else ()
@@ -1176,10 +1240,16 @@ def _build_launchplane_preview_enablement_items(
             return "history"
         return "none"
 
-    def item_state(*, preview_row: dict[str, object] | None, label_enabled: bool, pr_state: str) -> str:
-        preview_state = str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
+    def item_state(
+        *, preview_row: dict[str, object] | None, label_enabled: bool, pr_state: str
+    ) -> str:
+        preview_state = (
+            str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
+        )
         serving_generation_id = (
-            str(preview_row.get("serving_generation_id", "")).strip() if preview_row is not None else ""
+            str(preview_row.get("serving_generation_id", "")).strip()
+            if preview_row is not None
+            else ""
         )
         if preview_state == "destroyed":
             return "retained"
@@ -1213,12 +1283,12 @@ def _build_launchplane_preview_enablement_items(
                     f"{request_metadata_error}"
                 )
             if preview_row is None:
-                return (
-                    "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet."
-                )
+                return "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet."
             return "GitHub label launchplane-preview is the current preview request source."
         if source == "launchplane":
-            return "Launchplane explicitly requested this preview without relying on the GitHub label."
+            return (
+                "Launchplane explicitly requested this preview without relying on the GitHub label."
+            )
         if state == "paused":
             return "Launchplane is intentionally holding this preview in place until operators resume it."
         return "Launchplane still has preview evidence from an earlier request even though no current GitHub label is present."
@@ -1242,16 +1312,22 @@ def _build_launchplane_preview_enablement_items(
         pr_state = enablement_record.pr_state if enablement_record is not None else "open"
         state = item_state(
             preview_row=preview_row,
-            label_enabled=enablement_record.label_enabled if enablement_record is not None else False,
+            label_enabled=enablement_record.label_enabled
+            if enablement_record is not None
+            else False,
             pr_state=pr_state,
         )
         if not state:
             continue
 
-        preview_id = str(preview_row.get("preview_id", "")).strip() if preview_row is not None else ""
+        preview_id = (
+            str(preview_row.get("preview_id", "")).strip() if preview_row is not None else ""
+        )
         latest_requested_reason = ""
         if preview_id:
-            latest_generations = record_store.list_preview_generation_records(preview_id=preview_id, limit=1)
+            latest_generations = record_store.list_preview_generation_records(
+                preview_id=preview_id, limit=1
+            )
             if latest_generations:
                 latest_requested_reason = latest_generations[0].requested_reason
 
@@ -1262,7 +1338,9 @@ def _build_launchplane_preview_enablement_items(
             latest_requested_reason=latest_requested_reason,
         )
         request_metadata_status = (
-            enablement_record.request_metadata_status if enablement_record is not None else "missing"
+            enablement_record.request_metadata_status
+            if enablement_record is not None
+            else "missing"
         )
         request_metadata_error = (
             enablement_record.request_metadata_error if enablement_record is not None else ""
@@ -1274,9 +1352,7 @@ def _build_launchplane_preview_enablement_items(
             else ""
         )
         request_metadata_companions = (
-            enablement_record.request_metadata_companions
-            if enablement_record is not None
-            else ()
+            enablement_record.request_metadata_companions if enablement_record is not None else ()
         )
         request_metadata_companion_summaries = (
             enablement_record.request_metadata_companion_summaries
@@ -1292,7 +1368,9 @@ def _build_launchplane_preview_enablement_items(
         anchor_pr_url = (
             str(preview_row.get("anchor_pr_url", "")).strip()
             if preview_row is not None
-            else enablement_record.anchor_pr_url if enablement_record is not None else ""
+            else enablement_record.anchor_pr_url
+            if enablement_record is not None
+            else ""
         )
         preview_label = (
             str(preview_row.get("preview_label", "")).strip()
@@ -1322,7 +1400,9 @@ def _build_launchplane_preview_enablement_items(
                 "anchor_head_sha": anchor_head_sha,
                 "preview_id": preview_id,
                 "preview_label": preview_label,
-                "canonical_url": str(preview_row.get("canonical_url", "")).strip() if preview_row is not None else "",
+                "canonical_url": str(preview_row.get("canonical_url", "")).strip()
+                if preview_row is not None
+                else "",
                 "state": state,
                 "tone": item_tone(state),
                 "request_source": source,
@@ -1340,10 +1420,11 @@ def _build_launchplane_preview_enablement_items(
                 "request_metadata_status": request_metadata_status,
                 "request_metadata_baseline_channel": request_metadata_baseline_channel,
                 "request_metadata_companion_summaries": [
-                    item.model_dump(mode="json")
-                    for item in request_metadata_companion_summaries
+                    item.model_dump(mode="json") for item in request_metadata_companion_summaries
                 ],
-                "preview_state": str(preview_row.get("state", "")).strip() if preview_row is not None else "",
+                "preview_state": str(preview_row.get("state", "")).strip()
+                if preview_row is not None
+                else "",
                 "action": action_payload,
             }
         )
@@ -1382,11 +1463,17 @@ def _build_launchplane_tenant_payload(
         record_store=record_store,
         context_name=resolved_context,
     )
-    preview_rows = preview_inventory.get("previews") if isinstance(preview_inventory.get("previews"), list) else []
+    preview_rows = (
+        preview_inventory.get("previews")
+        if isinstance(preview_inventory.get("previews"), list)
+        else []
+    )
     previews = [item for item in preview_rows if isinstance(item, dict)]
     if resolved_anchor_repo:
         previews = [
-            item for item in previews if str(item.get("anchor_repo", "")).strip() == resolved_anchor_repo
+            item
+            for item in previews
+            if str(item.get("anchor_repo", "")).strip() == resolved_anchor_repo
         ]
 
     environments: dict[str, dict[str, object] | None] = {}
@@ -1416,8 +1503,12 @@ def _build_launchplane_tenant_payload(
 
     preview_counts = {
         "all": len(previews),
-        "attention": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "attention"),
-        "in_flight": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "in_flight"),
+        "attention": sum(
+            1 for row in previews if _launchplane_inventory_bucket(row) == "attention"
+        ),
+        "in_flight": sum(
+            1 for row in previews if _launchplane_inventory_bucket(row) == "in_flight"
+        ),
         "live": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "live"),
         "retained": sum(1 for row in previews if _launchplane_inventory_bucket(row) == "retained"),
         "reviewable": sum(
@@ -1428,17 +1519,23 @@ def _build_launchplane_tenant_payload(
             and str(row.get("serving_generation_id", "")).strip()
         ),
     }
-    preview_candidates = [item for item in preview_enablement if str(item.get("state", "")).strip() == "candidate"]
+    preview_candidates = [
+        item for item in preview_enablement if str(item.get("state", "")).strip() == "candidate"
+    ]
 
     testing_environment = environments.get("testing")
     prod_environment = environments.get("prod")
-    testing_live = testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    testing_live = (
+        testing_environment.get("live") if isinstance(testing_environment, dict) else None
+    )
     prod_live = prod_environment.get("live") if isinstance(prod_environment, dict) else None
 
     testing_artifact_id = (
         str(testing_live.get("artifact_id", "")).strip() if isinstance(testing_live, dict) else ""
     )
-    prod_artifact_id = str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
+    prod_artifact_id = (
+        str(prod_live.get("artifact_id", "")).strip() if isinstance(prod_live, dict) else ""
+    )
     promotion_summary = {
         "status": "unknown",
         "summary": "Launchplane has not recorded enough tenant environment evidence to describe promotion state yet.",
@@ -1481,7 +1578,9 @@ def _build_launchplane_tenant_payload(
         instance_name: _build_launchplane_environment_action_payload(
             context_name=resolved_context,
             instance_name=instance_name,
-            environment_payload=environments.get(instance_name) if isinstance(environments, dict) else None,
+            environment_payload=environments.get(instance_name)
+            if isinstance(environments, dict)
+            else None,
         )
         for instance_name in ("testing", "prod")
     }
@@ -1519,9 +1618,15 @@ def _write_launchplane_site_bundle(
         record_store=record_store,
         context_name=context_name,
     )
-    preview_rows = inventory_payload.get("previews") if isinstance(inventory_payload.get("previews"), list) else []
+    preview_rows = (
+        inventory_payload.get("previews")
+        if isinstance(inventory_payload.get("previews"), list)
+        else []
+    )
     preview_items = [item for item in preview_rows if isinstance(item, dict)]
-    tenant_environments = tenant_payload.get("environments") if isinstance(tenant_payload, dict) else None
+    tenant_environments = (
+        tenant_payload.get("environments") if isinstance(tenant_payload, dict) else None
+    )
     tenant_environment_actions = (
         tenant_payload.get("environment_actions") if isinstance(tenant_payload, dict) else None
     )
@@ -1537,8 +1642,11 @@ def _write_launchplane_site_bundle(
     if isinstance(tenant_promotion_detail, dict):
         item_context = str(tenant_promotion_detail.get("context", "")).strip() or context_name
         if item_context:
-            promotion_output_map[item_context] = output_dir / _launchplane_promotion_bundle_relative_path(
-                context_name=item_context,
+            promotion_output_map[item_context] = (
+                output_dir
+                / _launchplane_promotion_bundle_relative_path(
+                    context_name=item_context,
+                )
             )
 
     environment_output_map: dict[tuple[str, str], Path] = {}
@@ -1564,7 +1672,9 @@ def _write_launchplane_site_bundle(
             anchor_repo=anchor_repo,
             anchor_pr_number=anchor_pr_number,
         )
-        preview_output_map[(item_context, anchor_repo, anchor_pr_number)] = output_dir / relative_path
+        preview_output_map[(item_context, anchor_repo, anchor_pr_number)] = (
+            output_dir / relative_path
+        )
 
     def detail_href_builder(item_context: str, anchor_repo: str, anchor_pr_number: int) -> str:
         preview_file = preview_output_map.get((item_context, anchor_repo, anchor_pr_number))
@@ -1603,9 +1713,14 @@ def _write_launchplane_site_bundle(
     )
     index_file.write_text(index_html, encoding="utf-8")
 
-    policy_nav_links = {"overview": _relative_href(from_file=policy_file, to_file=index_file), "policy": "policy.html"}
+    policy_nav_links = {
+        "overview": _relative_href(from_file=policy_file, to_file=index_file),
+        "policy": "policy.html",
+    }
     if first_detail_file is not None:
-        policy_nav_links["detail"] = _relative_href(from_file=policy_file, to_file=first_detail_file)
+        policy_nav_links["detail"] = _relative_href(
+            from_file=policy_file, to_file=first_detail_file
+        )
     policy_html = _render_launchplane_preview_policy_page_html(
         inventory_payload,
         nav_links=policy_nav_links,
@@ -1767,21 +1882,47 @@ def _render_launchplane_preview_index_page_html(
         return badges[:3]
 
     bucket_specs = (
-        ("attention", "Needs attention", "Previews that are blocked, degraded, or no longer serving cleanly."),
-        ("in_flight", "In flight", "Preview generations that are still forming or replacing existing review environments."),
+        (
+            "attention",
+            "Needs attention",
+            "Previews that are blocked, degraded, or no longer serving cleanly.",
+        ),
+        (
+            "in_flight",
+            "In flight",
+            "Preview generations that are still forming or replacing existing review environments.",
+        ),
         ("live", "Live review", "Serving previews that are currently usable for review work."),
-        ("retained", "Retained evidence", "Destroyed previews that still matter as historical evidence."),
+        (
+            "retained",
+            "Retained evidence",
+            "Destroyed previews that still matter as historical evidence.",
+        ),
     )
     filter_specs = (
         ("all", "All fleet", "Scan the full Launchplane queue without losing lane structure."),
         ("attention", "Needs attention", "Surface broken, blocked, or non-serving previews first."),
-        ("in_flight", "In flight", "Track previews that are building or rotating toward a new generation."),
-        ("reviewable", "Reviewable now", "Show only previews that are currently serving a stable review route."),
+        (
+            "in_flight",
+            "In flight",
+            "Track previews that are building or rotating toward a new generation.",
+        ),
+        (
+            "reviewable",
+            "Reviewable now",
+            "Show only previews that are currently serving a stable review route.",
+        ),
         ("retained", "Retained", "Limit the queue to historical evidence kept after cleanup."),
     )
-    scope_specs: list[tuple[str, str, str]] = [("all", "All scopes", "Across every Launchplane context and anchor repo.")]
+    scope_specs: list[tuple[str, str, str]] = [
+        ("all", "All scopes", "Across every Launchplane context and anchor repo.")
+    ]
     contexts = sorted(
-        {str(row.get("context", "")).strip() for row in preview_rows if str(row.get("context", "")).strip()}
+        {
+            str(row.get("context", "")).strip()
+            for row in preview_rows
+            if str(row.get("context", "")).strip()
+        }
     )
     repos = sorted(
         {
@@ -1823,7 +1964,8 @@ def _render_launchplane_preview_index_page_html(
         "retained": len(grouped_rows["retained"]),
     }
     filter_counts = {
-        key: sum(1 for row in preview_rows if preview_matches_filter(row, key)) for key, _, _ in filter_specs
+        key: sum(1 for row in preview_rows if preview_matches_filter(row, key))
+        for key, _, _ in filter_specs
     }
     filter_notes = {key: note for key, _, note in filter_specs}
     scope_counts = {
@@ -1865,7 +2007,9 @@ def _render_launchplane_preview_index_page_html(
             for label, tone in signal_badges(row)
         )
         route_html = (
-            f'<a href="{canonical_url}">{canonical_url}</a>' if canonical_url else "No preview route recorded."
+            f'<a href="{canonical_url}">{canonical_url}</a>'
+            if canonical_url
+            else "No preview route recorded."
         )
         title_html = (
             f'<a class="preview-row-title" href="{escape(detail_href)}">{preview_label}</a>'
@@ -1894,13 +2038,13 @@ def _render_launchplane_preview_index_page_html(
             </div>
           </div>
           <div class=\"preview-row-signals\">{signal_html}</div>
-          <p class=\"preview-row-summary\">{next_action or status_summary or 'No next action recorded.'}</p>
+          <p class=\"preview-row-summary\">{next_action or status_summary or "No next action recorded."}</p>
           <div class=\"preview-row-actions\">{actions_html}</div>
           <dl class=\"preview-row-meta\">
-            <div><dt>Anchor</dt><dd>{anchor_repo or 'Unknown'} PR {anchor_pr_number or 'Unknown'}</dd></div>
-            <div><dt>Artifact</dt><dd><code>{artifact_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Manifest</dt><dd><code>{manifest or 'Unavailable'}</code></dd></div>
-            <div><dt>Updated</dt><dd>{updated_at or 'Unavailable'}</dd></div>
+            <div><dt>Anchor</dt><dd>{anchor_repo or "Unknown"} PR {anchor_pr_number or "Unknown"}</dd></div>
+            <div><dt>Artifact</dt><dd><code>{artifact_id or "Unavailable"}</code></dd></div>
+            <div><dt>Manifest</dt><dd><code>{manifest or "Unavailable"}</code></dd></div>
+            <div><dt>Updated</dt><dd>{updated_at or "Unavailable"}</dd></div>
           </dl>
         </article>
         """
@@ -1908,7 +2052,10 @@ def _render_launchplane_preview_index_page_html(
     lane_html = ""
     for key, label, description in bucket_specs:
         rows = grouped_rows[key]
-        rows_html = "".join(render_preview_row(row) for row in rows) or "<p class=\"lane-empty\">No previews in this lane.</p>"
+        rows_html = (
+            "".join(render_preview_row(row) for row in rows)
+            or '<p class="lane-empty">No previews in this lane.</p>'
+        )
         lane_html += f"""
         <section class=\"lane-section\" data-lane-section data-bucket=\"{escape(key)}\">
           <div class=\"lane-section-head\">
@@ -1928,7 +2075,7 @@ def _render_launchplane_preview_index_page_html(
             f'<button class="focus-chip{" is-active" if key == "all" else ""}" '
             f'type="button" data-filter-control="{escape(key)}" '
             f'aria-pressed="{"true" if key == "all" else "false"}">'
-            f'<span>{escape(label)}</span><strong>{filter_counts[key]}</strong></button>'
+            f"<span>{escape(label)}</span><strong>{filter_counts[key]}</strong></button>"
         )
         for key, label, _ in filter_specs
     )
@@ -1937,7 +2084,7 @@ def _render_launchplane_preview_index_page_html(
             f'<button class="scope-chip{" is-active" if key == "all" else ""}" '
             f'type="button" data-scope-control="{escape(key)}" '
             f'aria-pressed="{"true" if key == "all" else "false"}">'
-            f'<span>{escape(label)}</span><strong>{scope_counts[key]}</strong></button>'
+            f"<span>{escape(label)}</span><strong>{scope_counts[key]}</strong></button>"
         )
         for key, label, _ in scope_specs
     )
@@ -1949,13 +2096,15 @@ def _render_launchplane_preview_index_page_html(
               <div class=\"scope-chip-row\" role=\"toolbar\" aria-label=\"Fleet scope filters\">{scope_controls_html}</div>
             </div>
         """
-    focus_status_class = "focus-status" if not show_scope_controls else "focus-status focus-status-hidden"
+    focus_status_class = (
+        "focus-status" if not show_scope_controls else "focus-status focus-status-hidden"
+    )
     summary_strip_html = f"""
         <dl class=\"summary-strip\">
-          <div><dt>Needs attention</dt><dd>{summary_counts['attention']}</dd></div>
-          <div><dt>In flight</dt><dd>{summary_counts['in_flight']}</dd></div>
-          <div><dt>Live review</dt><dd>{summary_counts['live']}</dd></div>
-          <div><dt>Retained evidence</dt><dd>{summary_counts['retained']}</dd></div>
+          <div><dt>Needs attention</dt><dd>{summary_counts["attention"]}</dd></div>
+          <div><dt>In flight</dt><dd>{summary_counts["in_flight"]}</dd></div>
+          <div><dt>Live review</dt><dd>{summary_counts["live"]}</dd></div>
+          <div><dt>Retained evidence</dt><dd>{summary_counts["retained"]}</dd></div>
         </dl>
     """
     if show_scope_controls:
@@ -1977,7 +2126,9 @@ def _render_launchplane_preview_index_page_html(
             return "warn"
         return "neutral"
 
-    def render_environment_lane(instance_name: str, environment_payload: dict[str, object] | None) -> str:
+    def render_environment_lane(
+        instance_name: str, environment_payload: dict[str, object] | None
+    ) -> str:
         lane_label = "Testing lane" if instance_name == "testing" else "Prod lane"
         if not isinstance(environment_payload, dict):
             return f"""
@@ -1996,7 +2147,11 @@ def _render_launchplane_preview_index_page_html(
         item_context = str(environment_payload.get("context", "")).strip()
         if environment_detail_href_builder is not None and item_context:
             detail_href = environment_detail_href_builder(item_context, instance_name)
-        live_payload = environment_payload.get("live") if isinstance(environment_payload.get("live"), dict) else {}
+        live_payload = (
+            environment_payload.get("live")
+            if isinstance(environment_payload.get("live"), dict)
+            else {}
+        )
         latest_promotion = (
             environment_payload.get("latest_promotion")
             if isinstance(environment_payload.get("latest_promotion"), dict)
@@ -2019,13 +2174,15 @@ def _render_launchplane_preview_index_page_html(
         promotion_meta = ""
         if latest_promotion is not None and instance_name == "prod":
             promotion_meta = (
-                "<p class=\"environment-note\">"
+                '<p class="environment-note">'
                 f"Latest promotion moved <code>{escape(str(latest_promotion.get('artifact_id', '')) or 'Unavailable')}</code> "
                 f"from {escape(str(latest_promotion.get('from_instance', 'testing')) or 'testing')} into prod."
                 "</p>"
             )
         elif promoted_from:
-            promotion_meta = f'<p class="environment-note">This lane was last promoted from {promoted_from}.</p>'
+            promotion_meta = (
+                f'<p class="environment-note">This lane was last promoted from {promoted_from}.</p>'
+            )
         detail_link_html = ""
         if detail_href:
             detail_link_html = (
@@ -2048,10 +2205,10 @@ def _render_launchplane_preview_index_page_html(
           <p class=\"environment-summary\">{lane_summary}</p>
           {promotion_meta}
           <dl class=\"environment-meta\">
-            <div><dt>Artifact</dt><dd><code>{artifact_id or 'Unavailable'}</code></dd></div>
-            <div><dt>Source ref</dt><dd><code>{source_git_ref or 'Unavailable'}</code></dd></div>
-            <div><dt>Updated</dt><dd>{updated_at or 'Unavailable'}</dd></div>
-            <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get('deployment_record_id', '')) or 'Unavailable')}</code></dd></div>
+            <div><dt>Artifact</dt><dd><code>{artifact_id or "Unavailable"}</code></dd></div>
+            <div><dt>Source ref</dt><dd><code>{source_git_ref or "Unavailable"}</code></dd></div>
+            <div><dt>Updated</dt><dd>{updated_at or "Unavailable"}</dd></div>
+            <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get("deployment_record_id", "")) or "Unavailable")}</code></dd></div>
           </dl>
           {detail_link_html}
         </section>
@@ -2064,7 +2221,12 @@ def _render_launchplane_preview_index_page_html(
         summary = escape(str(action_payload.get("summary", "")))
         if action_status == "actionable":
             recipe = str(action_payload.get("recipe", "")).strip()
-            recipe_id = escape(str(action_payload.get("recipe_id", "preview-enable-request") or "preview-enable-request"))
+            recipe_id = escape(
+                str(
+                    action_payload.get("recipe_id", "preview-enable-request")
+                    or "preview-enable-request"
+                )
+            )
             return f"""
             <div class=\"enablement-inline-action tone-{action_tone}\">
               <div class=\"enablement-inline-action-head\">
@@ -2081,7 +2243,12 @@ def _render_launchplane_preview_index_page_html(
               </details>
             </div>
             """
-        if action_status in {"blocked", "manual_review_required", "missing_context", "missing_evidence"}:
+        if action_status in {
+            "blocked",
+            "manual_review_required",
+            "missing_context",
+            "missing_evidence",
+        }:
             return f"""
             <div class=\"enablement-inline-note tone-{action_tone}\">
               <h4>{headline}</h4>
@@ -2144,10 +2311,10 @@ def _render_launchplane_preview_index_page_html(
         return f"""
         <article class=\"promotion-check promotion-check-{tone}\">
           <div class=\"promotion-check-head\">
-            <h4>{escape(str(check.get('label', 'Evidence')))}</h4>
+            <h4>{escape(str(check.get("label", "Evidence")))}</h4>
             <span class=\"signal-chip signal-{tone}\">{escape(_status_label(status))}</span>
           </div>
-          <p>{escape(str(check.get('detail', 'No evidence detail recorded.')))}</p>
+          <p>{escape(str(check.get("detail", "No evidence detail recorded.")))}</p>
         </article>
         """
 
@@ -2226,14 +2393,10 @@ def _render_launchplane_preview_index_page_html(
         )
         latest_backup_gate_html = "Unavailable"
         if latest_backup_gate is not None:
-            latest_backup_gate_html = (
-                f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
-            )
+            latest_backup_gate_html = f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
         latest_promotion_html = "Unavailable"
         if latest_promotion is not None:
-            latest_promotion_html = (
-                f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
-            )
+            latest_promotion_html = f"<code>{escape(str(latest_promotion.get('record_id', '')) or 'Unavailable')}</code>"
         recipe_html = "".join(recipe_cards) or (
             '<p class="action-empty">Launchplane is not exposing a promotion recipe for the current tenant state yet.</p>'
         )
@@ -2242,22 +2405,22 @@ def _render_launchplane_preview_index_page_html(
           <div class=\"promotion-stage-head\">
             <div>
               <div class=\"section-label\">Next promotion</div>
-              <h3>{escape(str(promotion_action.get('headline', 'Launchplane cannot describe the next promotion yet.')))}</h3>
-              <p class=\"promotion-stage-copy\">{escape(str(promotion_action.get('summary', 'No promotion summary recorded.')))}</p>
+              <h3>{escape(str(promotion_action.get("headline", "Launchplane cannot describe the next promotion yet.")))}</h3>
+              <p class=\"promotion-stage-copy\">{escape(str(promotion_action.get("summary", "No promotion summary recorded.")))}</p>
             </div>
-            <span class=\"tone-pill tone-{escape(tone)}\">{escape(str(promotion_action.get('status', 'unknown')).replace('_', ' '))}</span>
+            <span class=\"tone-pill tone-{escape(tone)}\">{escape(str(promotion_action.get("status", "unknown")).replace("_", " "))}</span>
           </div>
           <div class=\"promotion-stage-grid\">
             <div class=\"promotion-primary\">
               <dl class=\"promotion-meta\">
-                <div><dt>Candidate artifact</dt><dd><code>{escape(str(promotion_action.get('candidate_artifact_id', '')) or 'Unavailable')}</code></dd></div>
-                <div><dt>Current prod</dt><dd><code>{escape(str(promotion_action.get('current_prod_artifact_id', '')) or 'Unavailable')}</code></dd></div>
-                <div><dt>Testing source ref</dt><dd><code>{escape(str(promotion_action.get('source_git_ref', '')) or 'Unavailable')}</code></dd></div>
+                <div><dt>Candidate artifact</dt><dd><code>{escape(str(promotion_action.get("candidate_artifact_id", "")) or "Unavailable")}</code></dd></div>
+                <div><dt>Current prod</dt><dd><code>{escape(str(promotion_action.get("current_prod_artifact_id", "")) or "Unavailable")}</code></dd></div>
+                <div><dt>Testing source ref</dt><dd><code>{escape(str(promotion_action.get("source_git_ref", "")) or "Unavailable")}</code></dd></div>
                 <div><dt>Latest backup gate</dt><dd>{latest_backup_gate_html}</dd></div>
                 <div><dt>Latest promotion</dt><dd>{latest_promotion_html}</dd></div>
-                <div><dt>Launchplane retains</dt><dd>{escape(str(promotion_action.get('retained_evidence', 'Unavailable')))}</dd></div>
+                <div><dt>Launchplane retains</dt><dd>{escape(str(promotion_action.get("retained_evidence", "Unavailable")))}</dd></div>
               </dl>
-              <p class=\"promotion-next-action\">{escape(str(promotion_action.get('next_action', 'No next action recorded.')))}</p>
+              <p class=\"promotion-next-action\">{escape(str(promotion_action.get("next_action", "No next action recorded.")))}</p>
             </div>
             <div class=\"promotion-evidence\">{evidence_html}</div>
           </div>
@@ -2291,7 +2454,11 @@ def _render_launchplane_preview_index_page_html(
                         )
                     action_cards.append(
                         _render_launchplane_action_recipe(
-                            title=str(action_payload.get("headline", f"Re-ship current {instance_name} artifact")),
+                            title=str(
+                                action_payload.get(
+                                    "headline", f"Re-ship current {instance_name} artifact"
+                                )
+                            ),
                             summary=str(action_payload.get("summary", "")),
                             tone=str(action_payload.get("tone", "neutral")),
                             script=recipe,
@@ -2315,8 +2482,8 @@ def _render_launchplane_preview_index_page_html(
                 f"""
                 <article class=\"lane-action-note\">
                   <div class=\"section-label\">{escape(instance_name)} lane</div>
-                  <h3>{escape(str(action_payload.get('headline', 'No lane action available.')))}</h3>
-                  <p>{escape(str(action_payload.get('summary', 'Launchplane does not have enough evidence for a typed lane action yet.')))}</p>
+                  <h3>{escape(str(action_payload.get("headline", "No lane action available.")))}</h3>
+                  <p>{escape(str(action_payload.get("summary", "Launchplane does not have enough evidence for a typed lane action yet.")))}</p>
                   {detail_link_html}
                 </article>
                 """
@@ -2332,19 +2499,23 @@ def _render_launchplane_preview_index_page_html(
             </div>
             <p class=\"lane-actions-copy\">Use current environment evidence to re-ship the live artifact without reconstructing the request by hand.</p>
           </div>
-          <div class=\"lane-actions-grid\">{''.join(action_cards)}</div>
+          <div class=\"lane-actions-grid\">{"".join(action_cards)}</div>
         </section>
         """
 
     tenant_stage_html = ""
     roster_label = "Preview queue"
     roster_title = "Launchplane-native review lanes"
-    roster_summary = (
-        "GitHub remains the PR and event source. Launchplane owns the preview inventory, lifecycle, routing, and operator triage surface."
-    )
+    roster_summary = "GitHub remains the PR and event source. Launchplane owns the preview inventory, lifecycle, routing, and operator triage surface."
     if isinstance(tenant_payload, dict):
-        tenant_label = escape(str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant")
-        preview_counts = tenant_payload.get("preview_counts") if isinstance(tenant_payload.get("preview_counts"), dict) else {}
+        tenant_label = escape(
+            str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant"
+        )
+        preview_counts = (
+            tenant_payload.get("preview_counts")
+            if isinstance(tenant_payload.get("preview_counts"), dict)
+            else {}
+        )
         preview_candidates = (
             tenant_payload.get("preview_candidates")
             if isinstance(tenant_payload.get("preview_candidates"), list)
@@ -2360,7 +2531,11 @@ def _render_launchplane_preview_index_page_html(
             if isinstance(tenant_payload.get("preview_enablement_counts"), dict)
             else {}
         )
-        environments = tenant_payload.get("environments") if isinstance(tenant_payload.get("environments"), dict) else {}
+        environments = (
+            tenant_payload.get("environments")
+            if isinstance(tenant_payload.get("environments"), dict)
+            else {}
+        )
         promotion_summary = (
             tenant_payload.get("promotion_summary")
             if isinstance(tenant_payload.get("promotion_summary"), dict)
@@ -2382,7 +2557,7 @@ def _render_launchplane_preview_index_page_html(
             visible_enablement_rows = preview_enablement_rows[:4]
             remaining_enablement_count = len(preview_enablement_rows) - len(visible_enablement_rows)
             overflow_note = (
-                f"<p class=\"enablement-overflow\">{remaining_enablement_count} more PRs stay visible in the queue below.</p>"
+                f'<p class="enablement-overflow">{remaining_enablement_count} more PRs stay visible in the queue below.</p>'
                 if remaining_enablement_count > 0
                 else ""
             )
@@ -2395,44 +2570,53 @@ def _render_launchplane_preview_index_page_html(
                 </div>
                 <p class=\"tenant-enablement-copy\">Candidates, label-driven requests, Launchplane-driven requests, and retained history now stay visible before the deeper queue.</p>
               </div>
-              <div class=\"enablement-list\">{''.join(render_enablement_row(item) for item in visible_enablement_rows)}</div>
+              <div class=\"enablement-list\">{"".join(render_enablement_row(item) for item in visible_enablement_rows)}</div>
               {overflow_note}
             </section>
             """
         has_environment_evidence = any(
-            isinstance(environments.get(instance_name), dict) for instance_name in ("testing", "prod")
+            isinstance(environments.get(instance_name), dict)
+            for instance_name in ("testing", "prod")
         )
-        promotion_status = str(promotion_action.get("status", "")).strip().lower() if promotion_action else ""
-        show_promotion_stage = bool(has_environment_evidence or promotion_status not in {"", "unknown"})
-        lane_actions_html = render_environment_action_panel(environment_actions, context_name=context_name)
-        promotion_stage_html = render_promotion_action_panel(promotion_action, context_name=context_name)
+        promotion_status = (
+            str(promotion_action.get("status", "")).strip().lower() if promotion_action else ""
+        )
+        show_promotion_stage = bool(
+            has_environment_evidence or promotion_status not in {"", "unknown"}
+        )
+        lane_actions_html = render_environment_action_panel(
+            environment_actions, context_name=context_name
+        )
+        promotion_stage_html = render_promotion_action_panel(
+            promotion_action, context_name=context_name
+        )
         sparse_preview_html = ""
         if not has_environment_evidence:
             sparse_preview_html = f"""
             {preview_enablement_html}
             <dl class=\"tenant-preview-strip\">
-              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get('candidate', len(preview_candidates))}</dd></div>
-              <div><dt>Requested</dt><dd>{preview_enablement_counts.get('requested', 0)}</dd></div>
-              <div><dt>Running</dt><dd>{preview_enablement_counts.get('running', preview_counts.get('live', 0))}</dd></div>
-              <div><dt>Paused</dt><dd>{preview_enablement_counts.get('paused', 0)}</dd></div>
-              <div><dt>Retained</dt><dd>{preview_enablement_counts.get('retained', preview_counts.get('retained', 0))}</dd></div>
+              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get("candidate", len(preview_candidates))}</dd></div>
+              <div><dt>Requested</dt><dd>{preview_enablement_counts.get("requested", 0)}</dd></div>
+              <div><dt>Running</dt><dd>{preview_enablement_counts.get("running", preview_counts.get("live", 0))}</dd></div>
+              <div><dt>Paused</dt><dd>{preview_enablement_counts.get("paused", 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_enablement_counts.get("retained", preview_counts.get("retained", 0))}</dd></div>
             </dl>
             """
         dense_environment_html = ""
         if has_environment_evidence:
             dense_environment_html = f"""
             <div class=\"environment-board\">
-              {render_environment_lane('testing', environments.get('testing') if isinstance(environments, dict) else None)}
-              {render_environment_lane('prod', environments.get('prod') if isinstance(environments, dict) else None)}
+              {render_environment_lane("testing", environments.get("testing") if isinstance(environments, dict) else None)}
+              {render_environment_lane("prod", environments.get("prod") if isinstance(environments, dict) else None)}
             </div>
             {lane_actions_html}
-            {promotion_stage_html if show_promotion_stage else ''}
+            {promotion_stage_html if show_promotion_stage else ""}
             <dl class=\"tenant-preview-strip\">
-              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get('candidate', len(preview_candidates))}</dd></div>
-              <div><dt>Requested</dt><dd>{preview_enablement_counts.get('requested', 0)}</dd></div>
-              <div><dt>Running</dt><dd>{preview_enablement_counts.get('running', preview_counts.get('live', 0))}</dd></div>
-              <div><dt>Paused</dt><dd>{preview_enablement_counts.get('paused', 0)}</dd></div>
-              <div><dt>Retained</dt><dd>{preview_enablement_counts.get('retained', preview_counts.get('retained', 0))}</dd></div>
+              <div><dt>Candidate PRs</dt><dd>{preview_enablement_counts.get("candidate", len(preview_candidates))}</dd></div>
+              <div><dt>Requested</dt><dd>{preview_enablement_counts.get("requested", 0)}</dd></div>
+              <div><dt>Running</dt><dd>{preview_enablement_counts.get("running", preview_counts.get("live", 0))}</dd></div>
+              <div><dt>Paused</dt><dd>{preview_enablement_counts.get("paused", 0)}</dd></div>
+              <div><dt>Retained</dt><dd>{preview_enablement_counts.get("retained", preview_counts.get("retained", 0))}</dd></div>
             </dl>
             {preview_enablement_html}
             """
@@ -2441,7 +2625,9 @@ def _render_launchplane_preview_index_page_html(
             if has_environment_evidence
             else "Launchplane has preview request evidence for this tenant, but it has not recorded current testing or prod lane evidence yet. Preview enablement is the first meaningful control surface until long-lived lane evidence arrives."
         )
-        tenant_brief_label = "Promotion path" if has_environment_evidence else "Current Launchplane focus"
+        tenant_brief_label = (
+            "Promotion path" if has_environment_evidence else "Current Launchplane focus"
+        )
         tenant_brief_copy = (
             escape(str(promotion_summary.get("summary", "No promotion evidence recorded yet.")))
             if has_environment_evidence
@@ -2466,9 +2652,7 @@ def _render_launchplane_preview_index_page_html(
         """
         roster_label = "Preview roster"
         roster_title = "Pull request previews"
-        roster_summary = (
-            "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Launchplane shows deeper preview detail."
-        )
+        roster_summary = "This tenant page keeps testing, prod, preview enablement, and lifecycle evidence together. The queue below is still where Launchplane shows deeper preview detail."
 
     body_html = f"""
     <div data-launchplane-overview>
@@ -2485,7 +2669,7 @@ def _render_launchplane_preview_index_page_html(
             <p class=\"focus-kicker\">Filter the queue before opening detail pages.</p>
             <div class=\"focus-chip-row\" role=\"toolbar\" aria-label=\"Fleet focus filters\">{focus_controls_html}</div>
             {scope_panel_html}
-            <p class=\"{focus_status_class}\" data-focus-status>{escape(filter_notes['all'])} Showing {len(preview_rows)} of {len(preview_rows)} previews.</p>
+            <p class=\"{focus_status_class}\" data-focus-status>{escape(filter_notes["all"])} Showing {len(preview_rows)} of {len(preview_rows)} previews.</p>
           </aside>
         </div>
         {summary_strip_html}
@@ -3571,20 +3755,34 @@ def _render_launchplane_preview_policy_page_html(
     context_name = str(payload.get("context", ""))
     previews = payload.get("previews") if isinstance(payload.get("previews"), list) else []
     preview_rows = [item for item in previews if isinstance(item, dict)]
-    active_preview_count = sum(1 for row in preview_rows if str(row.get("state", "")).strip().lower() != "destroyed")
-    retained_preview_count = sum(1 for row in preview_rows if str(row.get("state", "")).strip().lower() == "destroyed")
+    active_preview_count = sum(
+        1 for row in preview_rows if str(row.get("state", "")).strip().lower() != "destroyed"
+    )
+    retained_preview_count = sum(
+        1 for row in preview_rows if str(row.get("state", "")).strip().lower() == "destroyed"
+    )
     overview_href = escape((nav_links or {}).get("overview", "index.html") or "index.html")
     context_distribution_rows = []
     for context_value in sorted(
-        {str(row.get("context", "")).strip() for row in preview_rows if str(row.get("context", "")).strip()}
+        {
+            str(row.get("context", "")).strip()
+            for row in preview_rows
+            if str(row.get("context", "")).strip()
+        }
     ):
-        matching_rows = [row for row in preview_rows if str(row.get("context", "")).strip() == context_value]
-        active_count = sum(1 for row in matching_rows if str(row.get("state", "")).strip().lower() != "destroyed")
-        retained_count = sum(1 for row in matching_rows if str(row.get("state", "")).strip().lower() == "destroyed")
+        matching_rows = [
+            row for row in preview_rows if str(row.get("context", "")).strip() == context_value
+        ]
+        active_count = sum(
+            1 for row in matching_rows if str(row.get("state", "")).strip().lower() != "destroyed"
+        )
+        retained_count = sum(
+            1 for row in matching_rows if str(row.get("state", "")).strip().lower() == "destroyed"
+        )
         context_link = f"{overview_href}#scope=context:{escape(context_value)}"
         context_distribution_rows.append(
             "<tr>"
-            f"<td><a href=\"{context_link}\">{escape(context_value)}</a></td>"
+            f'<td><a href="{context_link}">{escape(context_value)}</a></td>'
             f"<td>{len(matching_rows)}</td>"
             f"<td>{active_count}</td>"
             f"<td>{retained_count}</td>"
@@ -3599,7 +3797,7 @@ def _render_launchplane_preview_policy_page_html(
       <p>When Launchplane is showing more than one tenant context, this page should still reveal how the current preview fleet is distributed across those contexts.</p>
       <table>
         <thead><tr><th>Context</th><th>Total</th><th>Active</th><th>Retained</th></tr></thead>
-        <tbody>{''.join(context_distribution_rows)}</tbody>
+        <tbody>{"".join(context_distribution_rows)}</tbody>
       </table>
     </section>
     """
@@ -3625,7 +3823,7 @@ def _render_launchplane_preview_policy_page_html(
         <div class=\"section-label\">Current queue</div>
         <h3>Observed state</h3>
         <dl class=\"policy-stats\">
-          <div><dt>Context</dt><dd>{escape(context_name) or 'all contexts'}</dd></div>
+          <div><dt>Context</dt><dd>{escape(context_name) or "all contexts"}</dd></div>
           <div><dt>Active previews</dt><dd>{active_preview_count}</dd></div>
           <div><dt>Retained evidence</dt><dd>{retained_preview_count}</dd></div>
           <div><dt>Total records</dt><dd>{len(preview_rows)}</dd></div>
@@ -3660,7 +3858,7 @@ def _render_launchplane_preview_policy_page_html(
         <div class=\"section-label\">Companions</div>
         <h3>Allowlisted companion repos</h3>
         <p>Companion refs are explicit, PR-based, and allowlisted. Launchplane does not accept raw branch-name or SHA overrides here.</p>
-        <ul class=\"policy-list\">{companion_items or '<li>None</li>'}</ul>
+        <ul class=\"policy-list\">{companion_items or "<li>None</li>"}</ul>
       </article>
     </section>
 
@@ -3806,17 +4004,33 @@ def _render_launchplane_promotion_status_page_html(
     context_name = str(payload.get("context", "")).strip()
     path_label = str(payload.get("path_label", "")).strip() or f"{context_name}/testing-to-prod"
     tone = str(payload.get("tone", "neutral")).strip() or "neutral"
-    headline = escape(str(payload.get("headline", "Launchplane cannot describe the promotion path yet.")))
+    headline = escape(
+        str(payload.get("headline", "Launchplane cannot describe the promotion path yet."))
+    )
     summary = escape(str(payload.get("summary", "No promotion summary recorded.")))
     next_action = escape(str(payload.get("next_action", "No next action recorded.")))
-    retained_evidence = escape(str(payload.get("retained_evidence", "No retained evidence summary recorded.")))
+    retained_evidence = escape(
+        str(payload.get("retained_evidence", "No retained evidence summary recorded."))
+    )
     candidate_artifact_id = escape(str(payload.get("candidate_artifact_id", "")) or "Unavailable")
-    current_prod_artifact_id = escape(str(payload.get("current_prod_artifact_id", "")) or "Unavailable")
+    current_prod_artifact_id = escape(
+        str(payload.get("current_prod_artifact_id", "")) or "Unavailable"
+    )
     source_git_ref = escape(str(payload.get("source_git_ref", "")) or "Unavailable")
     status_label = escape(str(payload.get("status", "unknown")).replace("_", " "))
-    evidence_checks = payload.get("evidence_checks") if isinstance(payload.get("evidence_checks"), list) else []
-    latest_backup_gate = payload.get("latest_backup_gate") if isinstance(payload.get("latest_backup_gate"), dict) else None
-    latest_promotion = payload.get("latest_promotion") if isinstance(payload.get("latest_promotion"), dict) else None
+    evidence_checks = (
+        payload.get("evidence_checks") if isinstance(payload.get("evidence_checks"), list) else []
+    )
+    latest_backup_gate = (
+        payload.get("latest_backup_gate")
+        if isinstance(payload.get("latest_backup_gate"), dict)
+        else None
+    )
+    latest_promotion = (
+        payload.get("latest_promotion")
+        if isinstance(payload.get("latest_promotion"), dict)
+        else None
+    )
     recent_backup_gates_payload = payload.get("recent_backup_gates")
     recent_backup_gates = (
         list(recent_backup_gates_payload)
@@ -3829,22 +4043,27 @@ def _render_launchplane_promotion_status_page_html(
         if isinstance(recent_promotions_payload, (list, tuple))
         else []
     )
-    testing_live = payload.get("testing_live") if isinstance(payload.get("testing_live"), dict) else None
+    testing_live = (
+        payload.get("testing_live") if isinstance(payload.get("testing_live"), dict) else None
+    )
     prod_live = payload.get("prod_live") if isinstance(payload.get("prod_live"), dict) else None
 
-    evidence_html = "".join(
-        f"""
-        <article class=\"promotion-detail-check promotion-detail-check-{('good' if str(check.get('status', '')).strip().lower() == 'pass' else 'bad' if str(check.get('status', '')).strip().lower() == 'fail' else 'warn')}\">
+    evidence_html = (
+        "".join(
+            f"""
+        <article class=\"promotion-detail-check promotion-detail-check-{("good" if str(check.get("status", "")).strip().lower() == "pass" else "bad" if str(check.get("status", "")).strip().lower() == "fail" else "warn")}\">
           <div class=\"promotion-detail-check-head\">
-            <h4>{escape(str(check.get('label', 'Evidence')))}</h4>
-            <span class=\"signal-chip signal-{('good' if str(check.get('status', '')).strip().lower() == 'pass' else 'bad' if str(check.get('status', '')).strip().lower() == 'fail' else 'warn')}\">{escape(_status_label(str(check.get('status', 'pending'))))}</span>
+            <h4>{escape(str(check.get("label", "Evidence")))}</h4>
+            <span class=\"signal-chip signal-{("good" if str(check.get("status", "")).strip().lower() == "pass" else "bad" if str(check.get("status", "")).strip().lower() == "fail" else "warn")}\">{escape(_status_label(str(check.get("status", "pending"))))}</span>
           </div>
-          <p>{escape(str(check.get('detail', 'No evidence detail recorded.')))}</p>
+          <p>{escape(str(check.get("detail", "No evidence detail recorded.")))}</p>
         </article>
         """
-        for check in evidence_checks
-        if isinstance(check, dict)
-    ) or '<p class="table-empty">No promotion evidence checks recorded yet.</p>'
+            for check in evidence_checks
+            if isinstance(check, dict)
+        )
+        or '<p class="table-empty">No promotion evidence checks recorded yet.</p>'
+    )
 
     recipe_cards: list[str] = []
     backup_gate_recipe = str(payload.get("backup_gate_recipe", "")).strip()
@@ -3899,18 +4118,18 @@ def _render_launchplane_promotion_status_page_html(
         return f"""
         <article class=\"promotion-lane-card\">
           <div class=\"section-label\">{escape(title)}</div>
-          <h3><code>{escape(str(lane_payload.get('artifact_id', '')) or 'Unavailable')}</code></h3>
-          <p>{escape(str(lane_payload.get('source_git_ref', '')) or 'No source ref recorded.')}</p>
+          <h3><code>{escape(str(lane_payload.get("artifact_id", "")) or "Unavailable")}</code></h3>
+          <p>{escape(str(lane_payload.get("source_git_ref", "")) or "No source ref recorded.")}</p>
           <dl class=\"promotion-lane-meta\">
-            <div><dt>Updated</dt><dd>{escape(str(lane_payload.get('updated_at', '')) or 'Unavailable')}</dd></div>
-            <div><dt>Deploy</dt><dd>{escape(str(lane_payload.get('deploy_status', '')) or 'Unavailable')}</dd></div>
-            <div><dt>Health</dt><dd>{escape(str(lane_payload.get('destination_health_status', '')) or 'Unavailable')}</dd></div>
-            <div><dt>Record</dt><dd><code>{escape(str(lane_payload.get('deployment_record_id', '')) or 'Unavailable')}</code></dd></div>
+            <div><dt>Updated</dt><dd>{escape(str(lane_payload.get("updated_at", "")) or "Unavailable")}</dd></div>
+            <div><dt>Deploy</dt><dd>{escape(str(lane_payload.get("deploy_status", "")) or "Unavailable")}</dd></div>
+            <div><dt>Health</dt><dd>{escape(str(lane_payload.get("destination_health_status", "")) or "Unavailable")}</dd></div>
+            <div><dt>Record</dt><dd><code>{escape(str(lane_payload.get("deployment_record_id", "")) or "Unavailable")}</code></dd></div>
           </dl>
         </article>
         """
 
-    recent_promotions_html = "<p class=\"table-empty\">No promotion history recorded yet.</p>"
+    recent_promotions_html = '<p class="table-empty">No promotion history recorded yet.</p>'
     if recent_promotions:
         recent_promotions_html = (
             "<table><thead><tr><th>Promotion record</th><th>From lane</th><th>Artifact</th><th>Backup</th><th>Health</th><th>Finished</th></tr></thead><tbody>"
@@ -3929,7 +4148,9 @@ def _render_launchplane_promotion_status_page_html(
             + "</tbody></table>"
         )
 
-    recent_backup_gates_html = "<p class=\"table-empty\">No prod backup-gate history recorded yet.</p>"
+    recent_backup_gates_html = (
+        '<p class="table-empty">No prod backup-gate history recorded yet.</p>'
+    )
     if recent_backup_gates:
         recent_backup_gates_html = (
             "<table><thead><tr><th>Backup gate</th><th>Status</th><th>Source</th><th>Created</th></tr></thead><tbody>"
@@ -3984,8 +4205,8 @@ def _render_launchplane_promotion_status_page_html(
         </dl>
       </article>
       <div class=\"promotion-lane-grid\">
-        {render_live_lane_card('Testing lane', testing_live)}
-        {render_live_lane_card('Prod lane', prod_live)}
+        {render_live_lane_card("Testing lane", testing_live)}
+        {render_live_lane_card("Prod lane", prod_live)}
       </div>
     </section>
 
@@ -4237,14 +4458,24 @@ def _render_launchplane_environment_status_page_html(
     context_name = str(payload.get("context", "")).strip()
     instance_name = str(payload.get("instance", "")).strip() or "environment"
     live_payload = payload.get("live") if isinstance(payload.get("live"), dict) else {}
-    live_promotion = payload.get("live_promotion") if isinstance(payload.get("live_promotion"), dict) else None
+    live_promotion = (
+        payload.get("live_promotion") if isinstance(payload.get("live_promotion"), dict) else None
+    )
     authorized_backup_gate = (
         payload.get("authorized_backup_gate")
         if isinstance(payload.get("authorized_backup_gate"), dict)
         else None
     )
-    latest_promotion = payload.get("latest_promotion") if isinstance(payload.get("latest_promotion"), dict) else None
-    latest_deployment = payload.get("latest_deployment") if isinstance(payload.get("latest_deployment"), dict) else None
+    latest_promotion = (
+        payload.get("latest_promotion")
+        if isinstance(payload.get("latest_promotion"), dict)
+        else None
+    )
+    latest_deployment = (
+        payload.get("latest_deployment")
+        if isinstance(payload.get("latest_deployment"), dict)
+        else None
+    )
     recent_promotions_payload = payload.get("recent_promotions")
     recent_promotions = (
         list(recent_promotions_payload)
@@ -4264,10 +4495,14 @@ def _render_launchplane_environment_status_page_html(
         if instance_name == "testing"
         else "Prod is the customer-facing lane Launchplane protects and promotes into deliberately."
     )
-    live_tone = _status_tone(str(live_payload.get("destination_health_status", "pending") or "pending"))
+    live_tone = _status_tone(
+        str(live_payload.get("destination_health_status", "pending") or "pending")
+    )
     deploy_status = str(live_payload.get("deploy_status", "pending") or "pending")
     health_status = str(live_payload.get("destination_health_status", "pending") or "pending")
-    action_status = str(action_payload.get("status", "")) if isinstance(action_payload, dict) else ""
+    action_status = (
+        str(action_payload.get("status", "")) if isinstance(action_payload, dict) else ""
+    )
 
     live_promotion_html = ""
     if live_promotion is not None:
@@ -4276,10 +4511,10 @@ def _render_launchplane_environment_status_page_html(
           <div class=\"section-label\">Attached promotion</div>
           <h3>Current lane inventory is backed by a promotion record.</h3>
           <dl class=\"detail-meta\">
-            <div><dt>Promotion record</dt><dd><code>{escape(str(live_promotion.get('record_id', '')) or 'Unavailable')}</code></dd></div>
-            <div><dt>Artifact</dt><dd><code>{escape(str(live_promotion.get('artifact_id', '')) or 'Unavailable')}</code></dd></div>
-            <div><dt>Backup gate</dt><dd><code>{escape(str(live_promotion.get('backup_record_id', '')) or 'Unavailable')}</code></dd></div>
-            <div><dt>Finished</dt><dd>{escape(str(live_promotion.get('finished_at', '')) or 'Unavailable')}</dd></div>
+            <div><dt>Promotion record</dt><dd><code>{escape(str(live_promotion.get("record_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Artifact</dt><dd><code>{escape(str(live_promotion.get("artifact_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Backup gate</dt><dd><code>{escape(str(live_promotion.get("backup_record_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Finished</dt><dd>{escape(str(live_promotion.get("finished_at", "")) or "Unavailable")}</dd></div>
           </dl>
         </article>
         """
@@ -4297,7 +4532,11 @@ def _render_launchplane_environment_status_page_html(
         evidence_entries = "".join(
             f"<li><code>{escape(str(key))}</code> {escape(str(value))}</li>"
             for key, value in sorted(
-                (authorized_backup_gate.get("evidence") if isinstance(authorized_backup_gate.get("evidence"), dict) else {}).items()
+                (
+                    authorized_backup_gate.get("evidence")
+                    if isinstance(authorized_backup_gate.get("evidence"), dict)
+                    else {}
+                ).items()
             )
         )
         backup_gate_html = f"""
@@ -4305,12 +4544,12 @@ def _render_launchplane_environment_status_page_html(
           <div class=\"section-label\">Authorized backup gate</div>
           <h3>Launchplane has a recorded backup gate for this lane.</h3>
           <dl class=\"detail-meta\">
-            <div><dt>Record</dt><dd><code>{escape(str(authorized_backup_gate.get('record_id', '')) or 'Unavailable')}</code></dd></div>
-            <div><dt>Status</dt><dd>{escape(str(authorized_backup_gate.get('status', 'unknown')) or 'unknown')}</dd></div>
-            <div><dt>Source</dt><dd>{escape(str(authorized_backup_gate.get('source', '')) or 'Unavailable')}</dd></div>
-            <div><dt>Created</dt><dd>{escape(str(authorized_backup_gate.get('created_at', '')) or 'Unavailable')}</dd></div>
+            <div><dt>Record</dt><dd><code>{escape(str(authorized_backup_gate.get("record_id", "")) or "Unavailable")}</code></dd></div>
+            <div><dt>Status</dt><dd>{escape(str(authorized_backup_gate.get("status", "unknown")) or "unknown")}</dd></div>
+            <div><dt>Source</dt><dd>{escape(str(authorized_backup_gate.get("source", "")) or "Unavailable")}</dd></div>
+            <div><dt>Created</dt><dd>{escape(str(authorized_backup_gate.get("created_at", "")) or "Unavailable")}</dd></div>
           </dl>
-          <ul class=\"detail-list\">{evidence_entries or '<li>No backup evidence fields recorded.</li>'}</ul>
+          <ul class=\"detail-list\">{evidence_entries or "<li>No backup evidence fields recorded.</li>"}</ul>
         </article>
         """
     else:
@@ -4332,7 +4571,9 @@ def _render_launchplane_environment_status_page_html(
     if isinstance(action_payload, dict):
         if action_status == "actionable":
             action_html = _render_launchplane_action_recipe(
-                title=str(action_payload.get("headline", f"Re-ship current {instance_name} artifact")),
+                title=str(
+                    action_payload.get("headline", f"Re-ship current {instance_name} artifact")
+                ),
                 summary=str(action_payload.get("summary", "")),
                 tone=str(action_payload.get("tone", "neutral")),
                 script=str(action_payload.get("recipe", "")),
@@ -4343,15 +4584,17 @@ def _render_launchplane_environment_status_page_html(
             action_html = f"""
             <article class=\"detail-note detail-note-muted\">
               <div class=\"section-label\">Lane action</div>
-              <h3>{escape(str(action_payload.get('headline', 'No typed lane action is available.')))}</h3>
-              <p>{escape(str(action_payload.get('summary', 'Launchplane does not have enough environment evidence to build a re-ship recipe for this lane yet.')))}</p>
+              <h3>{escape(str(action_payload.get("headline", "No typed lane action is available.")))}</h3>
+              <p>{escape(str(action_payload.get("summary", "Launchplane does not have enough environment evidence to build a re-ship recipe for this lane yet.")))}</p>
             </article>
             """
 
     def render_activity_table(rows: list[dict[str, object]], *, table_kind: str) -> str:
         if table_kind == "deployments":
             if not rows:
-                return "<p class=\"table-empty\">No deployment history recorded for this lane yet.</p>"
+                return (
+                    '<p class="table-empty">No deployment history recorded for this lane yet.</p>'
+                )
             table_rows = "".join(
                 "<tr>"
                 f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
@@ -4369,7 +4612,7 @@ def _render_launchplane_environment_status_page_html(
                 f"<tbody>{table_rows}</tbody></table>"
             )
         if not rows:
-            return "<p class=\"table-empty\">No promotion history recorded into this lane yet.</p>"
+            return '<p class="table-empty">No promotion history recorded into this lane yet.</p>'
         table_rows = "".join(
             "<tr>"
             f"<td><code>{escape(str(row.get('record_id', '')) or 'Unavailable')}</code></td>"
@@ -4420,14 +4663,14 @@ def _render_launchplane_environment_status_page_html(
         <div class=\"section-label\">Live lane snapshot</div>
         <h3>Current environment evidence</h3>
         <dl class=\"detail-meta\">
-          <div><dt>Artifact</dt><dd><code>{escape(str(live_payload.get('artifact_id', '')) or 'Unavailable')}</code></dd></div>
-          <div><dt>Source ref</dt><dd><code>{escape(str(live_payload.get('source_git_ref', '')) or 'Unavailable')}</code></dd></div>
-          <div><dt>Updated</dt><dd>{escape(str(live_payload.get('updated_at', '')) or 'Unavailable')}</dd></div>
-          <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get('deployment_record_id', '')) or 'Unavailable')}</code></dd></div>
+          <div><dt>Artifact</dt><dd><code>{escape(str(live_payload.get("artifact_id", "")) or "Unavailable")}</code></dd></div>
+          <div><dt>Source ref</dt><dd><code>{escape(str(live_payload.get("source_git_ref", "")) or "Unavailable")}</code></dd></div>
+          <div><dt>Updated</dt><dd>{escape(str(live_payload.get("updated_at", "")) or "Unavailable")}</dd></div>
+          <div><dt>Deploy record</dt><dd><code>{escape(str(live_payload.get("deployment_record_id", "")) or "Unavailable")}</code></dd></div>
           <div><dt>Deploy status</dt><dd>{escape(_status_label(deploy_status))}</dd></div>
           <div><dt>Health status</dt><dd>{escape(_status_label(health_status))}</dd></div>
-          <div><dt>Promoted from</dt><dd>{escape(str(live_payload.get('promoted_from_instance', '')) or 'Unavailable')}</dd></div>
-          <div><dt>Promotion record</dt><dd><code>{escape(str(live_payload.get('promotion_record_id', '')) or 'Unavailable')}</code></dd></div>
+          <div><dt>Promoted from</dt><dd>{escape(str(live_payload.get("promoted_from_instance", "")) or "Unavailable")}</dd></div>
+          <div><dt>Promotion record</dt><dd><code>{escape(str(live_payload.get("promotion_record_id", "")) or "Unavailable")}</code></dd></div>
         </dl>
       </article>
       <article class=\"detail-card\">
@@ -4447,13 +4690,13 @@ def _render_launchplane_environment_status_page_html(
     <section class=\"environment-history\">
       <div class=\"section-label\">Deployment history</div>
       <h3>Recent deployments</h3>
-      {render_activity_table([row for row in recent_deployments if isinstance(row, dict)], table_kind='deployments')}
+      {render_activity_table([row for row in recent_deployments if isinstance(row, dict)], table_kind="deployments")}
     </section>
 
     <section class=\"environment-history\">
       <div class=\"section-label\">Promotion history</div>
       <h3>Recent promotions into this lane</h3>
-      {render_activity_table([row for row in recent_promotions if isinstance(row, dict)], table_kind='promotions')}
+      {render_activity_table([row for row in recent_promotions if isinstance(row, dict)], table_kind="promotions")}
     </section>
     """
 
@@ -4699,23 +4942,41 @@ def _render_launchplane_preview_status_page_html(
     nav_links: dict[str, str] | None = None,
 ) -> str:
     preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
-    trust_summary = payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
-    health_summary = payload.get("health_summary") if isinstance(payload.get("health_summary"), dict) else {}
-    input_summary = payload.get("input_summary") if isinstance(payload.get("input_summary"), dict) else {}
+    trust_summary = (
+        payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
+    )
+    health_summary = (
+        payload.get("health_summary") if isinstance(payload.get("health_summary"), dict) else {}
+    )
+    input_summary = (
+        payload.get("input_summary") if isinstance(payload.get("input_summary"), dict) else {}
+    )
     lifecycle_summary = (
-        payload.get("lifecycle_summary") if isinstance(payload.get("lifecycle_summary"), dict) else {}
+        payload.get("lifecycle_summary")
+        if isinstance(payload.get("lifecycle_summary"), dict)
+        else {}
     )
     links = payload.get("links") if isinstance(payload.get("links"), dict) else {}
     recent_generations = (
-        payload.get("recent_generations") if isinstance(payload.get("recent_generations"), list) else []
+        payload.get("recent_generations")
+        if isinstance(payload.get("recent_generations"), list)
+        else []
     )
-    source_map = input_summary.get("source_map") if isinstance(input_summary.get("source_map"), list) else []
-    companions = input_summary.get("companions") if isinstance(input_summary.get("companions"), list) else []
+    source_map = (
+        input_summary.get("source_map") if isinstance(input_summary.get("source_map"), list) else []
+    )
+    companions = (
+        input_summary.get("companions") if isinstance(input_summary.get("companions"), list) else []
+    )
     serving_generation = (
-        payload.get("serving_generation") if isinstance(payload.get("serving_generation"), dict) else {}
+        payload.get("serving_generation")
+        if isinstance(payload.get("serving_generation"), dict)
+        else {}
     )
     latest_generation = (
-        payload.get("latest_generation") if isinstance(payload.get("latest_generation"), dict) else {}
+        payload.get("latest_generation")
+        if isinstance(payload.get("latest_generation"), dict)
+        else {}
     )
 
     preview_label = escape(str(preview.get("preview_label", "Launchplane preview")))
@@ -4725,7 +4986,9 @@ def _render_launchplane_preview_status_page_html(
     canonical_url = escape(str(links.get("canonical_url", preview.get("canonical_url", ""))))
     anchor_pr_url = escape(str(links.get("anchor_pr_url", "")))
     preview_state = str(preview.get("state", "unknown"))
-    status_summary = escape(str(health_summary.get("status_summary", "No Launchplane preview summary available.")))
+    status_summary = escape(
+        str(health_summary.get("status_summary", "No Launchplane preview summary available."))
+    )
     next_action = escape(str(lifecycle_summary.get("next_action", "")))
     artifact_id = escape(str(trust_summary.get("artifact_id", "")))
     manifest_fingerprint = escape(str(trust_summary.get("manifest_fingerprint", "")))
@@ -4734,8 +4997,12 @@ def _render_launchplane_preview_status_page_html(
         str(trust_summary.get("active_generation_id", preview.get("active_generation_id", "")))
     )
     paused_at = escape(str(preview.get("paused_at", "")))
-    destroyed_at = escape(str(lifecycle_summary.get("destroyed_at", preview.get("destroyed_at", ""))))
-    destroy_reason = escape(str(lifecycle_summary.get("destroy_reason", preview.get("destroy_reason", ""))))
+    destroyed_at = escape(
+        str(lifecycle_summary.get("destroyed_at", preview.get("destroyed_at", "")))
+    )
+    destroy_reason = escape(
+        str(lifecycle_summary.get("destroy_reason", preview.get("destroy_reason", "")))
+    )
     overall_health_status = str(health_summary.get("overall_health_status", "pending"))
     raw_payload_json = escape(json.dumps(payload, indent=2, sort_keys=True))
     serving_matches_latest = bool(health_summary.get("serving_matches_latest", False))
@@ -4809,8 +5076,14 @@ def _render_launchplane_preview_status_page_html(
         banner_note = "Preview record created; no generation requested"
         banner_tone = "neutral"
     elif _generation_in_progress(latest_generation_state):
-        banner_label = "REPLACEMENT IN FLIGHT" if serving_generation_id else "FIRST GENERATION IN FLIGHT"
-        banner_note = "Current preview still serving" if serving_generation_id else "Launchplane is preparing the first preview"
+        banner_label = (
+            "REPLACEMENT IN FLIGHT" if serving_generation_id else "FIRST GENERATION IN FLIGHT"
+        )
+        banner_note = (
+            "Current preview still serving"
+            if serving_generation_id
+            else "Launchplane is preparing the first preview"
+        )
         banner_tone = "warn"
     elif no_serving_preview:
         banner_label = "AVAILABILITY GAP"
@@ -4888,7 +5161,10 @@ def _render_launchplane_preview_status_page_html(
             if serving_generation_id
             else "The first preview generation is in progress. Launchplane is preparing this preview now."
         )
-        callout_summary = summary_text or "Launchplane is advancing the latest generation toward a reviewable preview."
+        callout_summary = (
+            summary_text
+            or "Launchplane is advancing the latest generation toward a reviewable preview."
+        )
         callout_items = [
             ("Current stage", escape(_status_label(latest_generation_state)) or "Unavailable"),
             (
@@ -4900,7 +5176,9 @@ def _render_launchplane_preview_status_page_html(
         callout_tone = "warn"
     elif no_serving_preview:
         callout_eyebrow = "Availability gap"
-        callout_title = "Launchplane has generation evidence for this preview, but nothing is serving yet."
+        callout_title = (
+            "Launchplane has generation evidence for this preview, but nothing is serving yet."
+        )
         callout_summary = summary_text
         callout_items = [
             ("Latest generation", f"<code>{latest_generation_id or 'Unavailable'}</code>"),
@@ -4936,7 +5214,9 @@ def _render_launchplane_preview_status_page_html(
     callout_rows = "".join(
         f"<div><dt>{label}</dt><dd>{value}</dd></div>" for label, value in callout_items
     )
-    callout_detail_html = f"<p class=\"callout-detail\">{callout_detail}</p>" if callout_detail else ""
+    callout_detail_html = (
+        f'<p class="callout-detail">{callout_detail}</p>' if callout_detail else ""
+    )
     callout_html = f"""
     <article class=\"preview-condition-card detail-card tone-{callout_tone}\">
       <div class=\"section-label\">{callout_eyebrow}</div>
@@ -4990,22 +5270,26 @@ def _render_launchplane_preview_status_page_html(
         if generation_id_value and generation_id_value == active_generation_id:
             role_parts.append("active")
         role_label = escape(" / ".join(role_parts) if role_parts else "historical")
-        serving_marker = "&bull; " if generation_id_value and generation_id_value == serving_generation_id else ""
+        serving_marker = (
+            "&bull; "
+            if generation_id_value and generation_id_value == serving_generation_id
+            else ""
+        )
         state_class = f"state-{_status_tone(generation_state_value)}"
         generation_rows.append(
             "<tr>"
-            f"<td><code title=\"{generation_id_value}\">{serving_marker}{generation_id_value or 'Unavailable'}</code></td>"
+            f'<td><code title="{generation_id_value}">{serving_marker}{generation_id_value or "Unavailable"}</code></td>'
             f"<td>{role_label}</td>"
-            f"<td class=\"{state_class}\">{state_label}</td>"
+            f'<td class="{state_class}">{state_label}</td>'
             f"<td>{requested_at_value}</td>"
             "</tr>"
         )
         failure_stage_value = escape(str(item.get("failure_stage", "")))
         if generation_state_value.strip().lower() == "failed" and failure_stage_value:
             generation_rows.append(
-                "<tr class=\"row-note\">"
+                '<tr class="row-note">'
                 "<td></td>"
-                f"<td colspan=\"3\">Failure stage {failure_stage_value}.</td>"
+                f'<td colspan="3">Failure stage {failure_stage_value}.</td>'
                 "</tr>"
             )
     recent_generation_rows = "".join(generation_rows)
@@ -5023,13 +5307,15 @@ def _render_launchplane_preview_status_page_html(
     route_line_items = []
     if canonical_url:
         route_line_items.append(
-            f"<div class=\"route-item\"><span>Stable route</span><a href=\"{canonical_url}\">{canonical_url}</a></div>"
+            f'<div class="route-item"><span>Stable route</span><a href="{canonical_url}">{canonical_url}</a></div>'
         )
     if anchor_pr_url:
         route_line_items.append(
-            f"<div class=\"route-item\"><span>Anchor PR</span><a href=\"{anchor_pr_url}\">{anchor_pr_url}</a></div>"
+            f'<div class="route-item"><span>Anchor PR</span><a href="{anchor_pr_url}">{anchor_pr_url}</a></div>'
         )
-    route_line = "".join(route_line_items) or "<div class=\"route-item\">No preview route recorded.</div>"
+    route_line = (
+        "".join(route_line_items) or '<div class="route-item">No preview route recorded.</div>'
+    )
     mast_title = preview_label
     if anchor_repo_name and anchor_pr_number:
         mast_title = f"{anchor_repo_name} PR {anchor_pr_number}"
@@ -5043,7 +5329,11 @@ def _render_launchplane_preview_status_page_html(
         identity_html = f'<p class="identity-line">{"<span>&bull;</span>".join(identity_bits)}</p>'
 
     action_slug = _launchplane_action_slug(preview_label)
-    raw_anchor_head_sha = str(input_summary.get("anchor", {}).get("head_sha", "")).strip() if isinstance(input_summary.get("anchor"), dict) else ""
+    raw_anchor_head_sha = (
+        str(input_summary.get("anchor", {}).get("head_sha", "")).strip()
+        if isinstance(input_summary.get("anchor"), dict)
+        else ""
+    )
     raw_baseline_release_tuple_id = str(input_summary.get("baseline_release_tuple_id", "")).strip()
     raw_source_map = [item for item in source_map if isinstance(item, dict)]
     raw_companions = [item for item in companions if isinstance(item, dict)]
@@ -5054,7 +5344,9 @@ def _render_launchplane_preview_status_page_html(
     raw_latest_requested_reason = str(latest_generation.get("requested_reason", "")).strip()
     raw_latest_requested_at = str(latest_generation.get("requested_at", "")).strip()
     raw_latest_artifact_id = str(latest_generation.get("artifact_id", "")).strip()
-    raw_latest_manifest_fingerprint = str(latest_generation.get("resolved_manifest_fingerprint", "")).strip()
+    raw_latest_manifest_fingerprint = str(
+        latest_generation.get("resolved_manifest_fingerprint", "")
+    ).strip()
     operator_actions: list[str] = []
     if preview_state.strip().lower() != "destroyed":
         destroy_payload = {
@@ -5067,7 +5359,13 @@ def _render_launchplane_preview_status_page_html(
         }
         destroy_script = _build_launchplane_action_script(
             command_name="destroy-preview",
-            file_payloads=(("ACTION_FILE", f"/tmp/launchplane-{action_slug}-destroy-preview.json", destroy_payload),),
+            file_payloads=(
+                (
+                    "ACTION_FILE",
+                    f"/tmp/launchplane-{action_slug}-destroy-preview.json",
+                    destroy_payload,
+                ),
+            ),
             command_args=("--input-file", '"$ACTION_FILE"'),
         )
         operator_actions.append(
@@ -5099,7 +5397,8 @@ def _render_launchplane_preview_status_page_html(
             "state": "resolving",
             "requested_reason": "operator_requested_refresh",
             "requested_at": "<utc-timestamp>",
-            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint or "<manifest-fingerprint>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint
+            or "<manifest-fingerprint>",
             "artifact_id": raw_latest_artifact_id,
             "baseline_release_tuple_id": raw_baseline_release_tuple_id,
             "source_map": raw_source_map,
@@ -5111,8 +5410,16 @@ def _render_launchplane_preview_status_page_html(
         request_script = _build_launchplane_action_script(
             command_name="request-generation",
             file_payloads=(
-                ("PREVIEW_FILE", f"/tmp/launchplane-{action_slug}-preview.json", request_generation_payload),
-                ("GENERATION_FILE", f"/tmp/launchplane-{action_slug}-generation.json", generation_request_payload),
+                (
+                    "PREVIEW_FILE",
+                    f"/tmp/launchplane-{action_slug}-preview.json",
+                    request_generation_payload,
+                ),
+                (
+                    "GENERATION_FILE",
+                    f"/tmp/launchplane-{action_slug}-generation.json",
+                    generation_request_payload,
+                ),
             ),
             command_args=(
                 "--preview-input-file",
@@ -5146,7 +5453,8 @@ def _render_launchplane_preview_status_page_html(
             "requested_at": raw_latest_requested_at or "<requested-at>",
             "ready_at": "<utc-timestamp>",
             "finished_at": "<utc-timestamp>",
-            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint or "<manifest-fingerprint>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint
+            or "<manifest-fingerprint>",
             "artifact_id": raw_latest_artifact_id or "<artifact-id>",
             "baseline_release_tuple_id": raw_baseline_release_tuple_id,
             "source_map": raw_source_map,
@@ -5157,7 +5465,9 @@ def _render_launchplane_preview_status_page_html(
         }
         ready_script = _build_launchplane_action_script(
             command_name="mark-generation-ready",
-            file_payloads=(("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-ready.json", ready_payload),),
+            file_payloads=(
+                ("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-ready.json", ready_payload),
+            ),
             command_args=("--input-file", '"$ACTION_FILE"'),
         )
         failed_payload = {
@@ -5173,7 +5483,8 @@ def _render_launchplane_preview_status_page_html(
             "requested_at": raw_latest_requested_at or "<requested-at>",
             "failed_at": "<utc-timestamp>",
             "finished_at": "<utc-timestamp>",
-            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint or "<manifest-fingerprint>",
+            "resolved_manifest_fingerprint": raw_latest_manifest_fingerprint
+            or "<manifest-fingerprint>",
             "artifact_id": raw_latest_artifact_id,
             "baseline_release_tuple_id": raw_baseline_release_tuple_id,
             "source_map": raw_source_map,
@@ -5186,7 +5497,9 @@ def _render_launchplane_preview_status_page_html(
         }
         failed_script = _build_launchplane_action_script(
             command_name="mark-generation-failed",
-            file_payloads=(("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-failed.json", failed_payload),),
+            file_payloads=(
+                ("ACTION_FILE", f"/tmp/launchplane-{action_slug}-mark-failed.json", failed_payload),
+            ),
             command_args=("--input-file", '"$ACTION_FILE"'),
         )
         operator_actions.insert(
@@ -5213,7 +5526,7 @@ def _render_launchplane_preview_status_page_html(
         )
     operator_actions_html = "".join(operator_actions)
     if not operator_actions_html:
-        operator_actions_html = "<p class=\"action-empty\">No write-side recipe is exposed for this retained preview state.</p>"
+        operator_actions_html = '<p class="action-empty">No write-side recipe is exposed for this retained preview state.</p>'
     operator_actions_section_html = f"""
     <section class=\"preview-detail-section\" id=\"operator-actions\">
       <div class=\"section-label\">Operator actions</div>
@@ -5723,7 +6036,9 @@ def _verify_healthcheck_urls(*, health_urls: tuple[str, ...], timeout_seconds: i
     if not health_urls:
         raise click.ClickException("At least one Launchplane service health URL is required.")
     if timeout_seconds <= 0:
-        raise click.ClickException("Launchplane service health timeout must be greater than zero seconds.")
+        raise click.ClickException(
+            "Launchplane service health timeout must be greater than zero seconds."
+        )
     healthcheck_errors: list[str] = []
     for healthcheck_url in health_urls:
         try:
@@ -5741,7 +6056,9 @@ def _launchplane_service_env_key_present(*, env_map: dict[str, str], env_key: st
     return bool(env_map.get(env_key, "").strip())
 
 
-def _launchplane_service_env_alias_value(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> str:
+def _launchplane_service_env_alias_value(
+    *, env_map: dict[str, str], env_keys: tuple[str, ...]
+) -> str:
     for env_key in env_keys:
         configured_value = str(env_map.get(env_key, "")).strip()
         if configured_value:
@@ -5749,16 +6066,29 @@ def _launchplane_service_env_alias_value(*, env_map: dict[str, str], env_keys: t
     return ""
 
 
-def _launchplane_service_env_alias_present(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> bool:
+def _launchplane_service_env_alias_present(
+    *, env_map: dict[str, str], env_keys: tuple[str, ...]
+) -> bool:
     return bool(_launchplane_service_env_alias_value(env_map=env_map, env_keys=env_keys))
 
 
-def _launchplane_service_any_env_keys_present(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> bool:
-    return any(_launchplane_service_env_key_present(env_map=env_map, env_key=env_key) for env_key in env_keys)
+def _launchplane_service_any_env_keys_present(
+    *, env_map: dict[str, str], env_keys: tuple[str, ...]
+) -> bool:
+    return any(
+        _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
+        for env_key in env_keys
+    )
 
 
-def _launchplane_present_env_keys(*, env_map: dict[str, str], env_keys: tuple[str, ...]) -> list[str]:
-    return [env_key for env_key in env_keys if _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)]
+def _launchplane_present_env_keys(
+    *, env_map: dict[str, str], env_keys: tuple[str, ...]
+) -> list[str]:
+    return [
+        env_key
+        for env_key in env_keys
+        if _launchplane_service_env_key_present(env_map=env_map, env_key=env_key)
+    ]
 
 
 def _launchplane_path_payload(path: Path, *, kind: str) -> dict[str, object]:
@@ -5767,19 +6097,31 @@ def _launchplane_path_payload(path: Path, *, kind: str) -> dict[str, object]:
 
 def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> dict[str, object]:
     env_map = dict(os.environ)
-    database_url = _launchplane_service_env_alias_value(env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS)
+    database_url = _launchplane_service_env_alias_value(
+        env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS
+    )
     managed_store_status = _launchplane_managed_store_status(database_url=database_url)
     managed_secret_bindings = managed_store_status.get("dokploy_secret_bindings", {})
     assert isinstance(managed_secret_bindings, dict)
 
     repo_env_file = control_plane_root / ".env"
-    repo_runtime_env_file = control_plane_root / control_plane_runtime_environments.DEFAULT_RUNTIME_ENVIRONMENTS_FILE
-    repo_dokploy_source_file = control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
-    repo_target_ids_file = control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
+    repo_runtime_env_file = (
+        control_plane_root / control_plane_runtime_environments.DEFAULT_RUNTIME_ENVIRONMENTS_FILE
+    )
+    repo_dokploy_source_file = (
+        control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE
+    )
+    repo_target_ids_file = (
+        control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
+    )
 
-    runtime_environment_record_count = int(managed_store_status.get("runtime_environment_record_count") or 0)
+    runtime_environment_record_count = int(
+        managed_store_status.get("runtime_environment_record_count") or 0
+    )
     dokploy_target_record_count = int(managed_store_status.get("dokploy_target_record_count") or 0)
-    dokploy_target_id_record_count = int(managed_store_status.get("dokploy_target_id_record_count") or 0)
+    dokploy_target_id_record_count = int(
+        managed_store_status.get("dokploy_target_id_record_count") or 0
+    )
     release_tuple_record_count = int(managed_store_status.get("release_tuple_record_count") or 0)
     dokploy_host_managed = bool(managed_secret_bindings.get("DOKPLOY_HOST"))
     dokploy_token_managed = bool(managed_secret_bindings.get("DOKPLOY_TOKEN"))
@@ -5858,7 +6200,9 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
         },
         "authority": {
             "dokploy_credentials": dokploy_credentials_status,
-            "runtime_environments": "db_only" if runtime_environment_record_count > 0 else "missing",
+            "runtime_environments": "db_only"
+            if runtime_environment_record_count > 0
+            else "missing",
             "dokploy_target_ids": "db_only" if dokploy_target_id_record_count > 0 else "missing",
             "stable_targets": "db_only" if dokploy_target_record_count > 0 else "missing",
             "release_tuples_catalog": "db_only" if release_tuple_record_count > 0 else "missing",
@@ -5935,7 +6279,9 @@ def _build_launchplane_service_target_preflight(
     custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
     compose_path = str(target_payload.get("composePath") or "").strip()
     compose_status = str(target_payload.get("composeStatus") or "").strip()
-    database_url = _launchplane_service_env_alias_value(env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS)
+    database_url = _launchplane_service_env_alias_value(
+        env_map=env_map, env_keys=_DATABASE_URL_ENV_KEYS
+    )
     database_scheme = ""
     database_host = ""
     if database_url:
@@ -5977,11 +6323,21 @@ def _build_launchplane_service_target_preflight(
             env_keys=_LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS,
         ),
         "target_ids_env_configured": False,
-        "target_ids_record_count": int(managed_store_status.get("dokploy_target_id_record_count") or 0),
-        "target_ids_configured": int(managed_store_status.get("dokploy_target_id_record_count") or 0) > 0,
+        "target_ids_record_count": int(
+            managed_store_status.get("dokploy_target_id_record_count") or 0
+        ),
+        "target_ids_configured": int(
+            managed_store_status.get("dokploy_target_id_record_count") or 0
+        )
+        > 0,
         "runtime_environments_env_configured": False,
-        "runtime_environment_record_count": int(managed_store_status.get("runtime_environment_record_count") or 0),
-        "runtime_environments_configured": int(managed_store_status.get("runtime_environment_record_count") or 0) > 0,
+        "runtime_environment_record_count": int(
+            managed_store_status.get("runtime_environment_record_count") or 0
+        ),
+        "runtime_environments_configured": int(
+            managed_store_status.get("runtime_environment_record_count") or 0
+        )
+        > 0,
         "docker_image_reference_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key=ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
@@ -6008,9 +6364,7 @@ def _build_launchplane_service_target_preflight(
         blockers.append("Launchplane service target database URL is missing a database host.")
 
     if not runtime_contract["master_encryption_key_present"]:
-        blockers.append(
-            "Launchplane service target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY."
-        )
+        blockers.append("Launchplane service target is missing LAUNCHPLANE_MASTER_ENCRYPTION_KEY.")
     if runtime_contract["managed_store_inspectable"]:
         if not runtime_contract["dokploy_managed_host_present"]:
             blockers.append(
@@ -6094,7 +6448,9 @@ def _inspect_launchplane_service_dokploy_target(
     return target_payload, preflight_payload
 
 
-def _launchplane_service_target_preflight_error_message(*, preflight_payload: dict[str, object]) -> str:
+def _launchplane_service_target_preflight_error_message(
+    *, preflight_payload: dict[str, object]
+) -> str:
     blockers = preflight_payload.get("blockers")
     if not isinstance(blockers, list) or not blockers:
         return "Launchplane service Dokploy target preflight failed."
@@ -6113,7 +6469,9 @@ def _apply_dokploy_image_reference(
 ) -> dict[str, object]:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
-        raise click.ClickException("Launchplane service deploy requires a non-empty image reference.")
+        raise click.ClickException(
+            "Launchplane service deploy requires a non-empty image reference."
+        )
     resolved_target_payload = target_payload or control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -6192,7 +6550,9 @@ def _trigger_and_wait_for_dokploy_target_deploy(
     no_cache: bool,
 ) -> dict[str, str]:
     if deploy_timeout_seconds <= 0:
-        raise click.ClickException("Launchplane service deploy timeout must be greater than zero seconds.")
+        raise click.ClickException(
+            "Launchplane service deploy timeout must be greater than zero seconds."
+        )
     latest_before = control_plane_dokploy.latest_deployment_for_target(
         host=host,
         token=token,
@@ -6600,13 +6960,21 @@ def _run_compose_post_deploy_update(
     )
     workflow_environment_overrides: dict[str, str] = {}
     required_workflow_environment_keys: tuple[str, ...] = ()
+    protected_shopify_store_keys = (
+        control_plane_dokploy.protected_shopify_store_keys_for_target_definition(target_definition)
+    )
     if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
         try:
-            post_deploy_environment = control_plane_odoo_instance_overrides.build_post_deploy_environment(
-                odoo_override_record
+            post_deploy_environment = (
+                control_plane_odoo_instance_overrides.build_post_deploy_environment(
+                    odoo_override_record,
+                    protected_shopify_store_keys=protected_shopify_store_keys,
+                )
             )
             workflow_environment_overrides = post_deploy_environment.inline_environment
-            required_workflow_environment_keys = post_deploy_environment.required_container_environment_keys
+            required_workflow_environment_keys = (
+                post_deploy_environment.required_container_environment_keys
+            )
         except click.ClickException as error:
             _write_odoo_instance_override_apply_result(
                 record=odoo_override_record,
@@ -6622,6 +6990,7 @@ def _run_compose_post_deploy_update(
             env_file=env_file,
             workflow_environment_overrides=workflow_environment_overrides,
             required_workflow_environment_keys=required_workflow_environment_keys,
+            protected_shopify_store_keys=protected_shopify_store_keys,
         )
     except click.ClickException as error:
         if odoo_override_record is not None:
@@ -6634,7 +7003,9 @@ def _run_compose_post_deploy_update(
     if odoo_override_record is not None:
         _write_odoo_instance_override_apply_result(
             record=odoo_override_record,
-            status="pass" if workflow_environment_overrides or required_workflow_environment_keys else "skipped",
+            status="pass"
+            if workflow_environment_overrides or required_workflow_environment_keys
+            else "skipped",
             detail=(
                 "Applied Odoo instance overrides through the compose post-deploy workflow."
                 if workflow_environment_overrides or required_workflow_environment_keys
@@ -6772,10 +7143,15 @@ def _execute_ship(
             deploy_timeout_seconds=deploy_timeout_seconds,
         )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
-                                               deployment_id="control-plane-dokploy", deployment_status="fail",
-                                               started_at=started_at, finished_at=utc_now_timestamp(),
-                                               resolved_target=resolved_target)
+        final_record = build_deployment_record(
+            request=resolved_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+        )
         record_store.write_deployment_record(final_record)
         raise
 
@@ -6786,18 +7162,24 @@ def _execute_ship(
                 request=resolved_request,
             )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
-                                               deployment_id="control-plane-dokploy", deployment_status="pass",
-                                               started_at=started_at, finished_at=utc_now_timestamp(),
-                                               resolved_target=resolved_target,
-                                               post_deploy_update=PostDeployUpdateEvidence(
-                                                   attempted=True,
-                                                   status="fail",
-                                                   detail=(
-                                                       "Odoo-specific post-deploy update failed through the native "
-                                                       "control-plane Dokploy schedule workflow."
-                                                   ),
-                                               ), destination_health=_skipped_destination_health(resolved_request))
+        final_record = build_deployment_record(
+            request=resolved_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            post_deploy_update=PostDeployUpdateEvidence(
+                attempted=True,
+                status="fail",
+                detail=(
+                    "Odoo-specific post-deploy update failed through the native "
+                    "control-plane Dokploy schedule workflow."
+                ),
+            ),
+            destination_health=_skipped_destination_health(resolved_request),
+        )
         record_store.write_deployment_record(final_record)
         raise
 
@@ -6814,19 +7196,28 @@ def _execute_ship(
 
     try:
         _verify_ship_healthchecks(request=resolved_request)
-        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
-                                               deployment_id="control-plane-dokploy", deployment_status="pass",
-                                               started_at=started_at, finished_at=utc_now_timestamp(),
-                                               resolved_target=resolved_target,
-                                               post_deploy_update=post_deploy_update_evidence)
+        final_record = build_deployment_record(
+            request=resolved_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            post_deploy_update=post_deploy_update_evidence,
+        )
     except (subprocess.CalledProcessError, click.ClickException):
-        final_record = build_deployment_record(request=resolved_request, record_id=record_id,
-                                               deployment_id="control-plane-dokploy", deployment_status="pass",
-                                               started_at=started_at, finished_at=utc_now_timestamp(),
-                                               resolved_target=resolved_target,
-                                               post_deploy_update=post_deploy_update_evidence,
-                                               destination_health=_skipped_destination_health(resolved_request,
-                                                                                              detail_status="fail"))
+        final_record = build_deployment_record(
+            request=resolved_request,
+            record_id=record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pass",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            post_deploy_update=post_deploy_update_evidence,
+            destination_health=_skipped_destination_health(resolved_request, detail_status="fail"),
+        )
         record_store.write_deployment_record(final_record)
         raise
 
@@ -6989,9 +7380,7 @@ def _artifact_target_runtime_contract_findings(
             "Target still references legacy monorepo source(s): " + ", ".join(legacy_source_values)
         )
     if mutable_addon_entries:
-        blockers.append(
-            "Target still has mutable addon refs: " + ", ".join(mutable_addon_entries)
-        )
+        blockers.append("Target still has mutable addon refs: " + ", ".join(mutable_addon_entries))
 
     return {
         "artifact_ready": not blockers,
@@ -7151,8 +7540,12 @@ def _sync_live_target_from_tracked_contract(
         "custom_git_url": str(target_payload.get("customGitUrl") or "").strip(),
         "custom_git_branch": str(target_payload.get("customGitBranch") or "").strip(),
         "compose_path": str(target_payload.get("composePath") or "").strip(),
-        "watch_paths": list(target_payload.get("watchPaths")) if isinstance(target_payload.get("watchPaths"), list) else [],
-        "enable_submodules": bool(target_payload.get("enableSubmodules")) if target_payload.get("enableSubmodules") is not None else None,
+        "watch_paths": list(target_payload.get("watchPaths"))
+        if isinstance(target_payload.get("watchPaths"), list)
+        else [],
+        "enable_submodules": bool(target_payload.get("enableSubmodules"))
+        if target_payload.get("enableSubmodules") is not None
+        else None,
     }
     for field_name, desired_value in tracked_source_fields.items():
         if desired_value in ("", (), [], None):
@@ -7184,7 +7577,9 @@ def _sync_live_target_from_tracked_contract(
                 target_type=target_definition.target_type,
                 target_id=target_definition.target_id,
             )
-            refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(str(refreshed_payload.get("env") or ""))
+            refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+                str(refreshed_payload.get("env") or "")
+            )
             for env_key, env_value in target_definition.env.items():
                 refreshed_env_map[env_key] = env_value
             control_plane_dokploy.update_dokploy_target_env(
@@ -7314,7 +7709,9 @@ def _write_release_tuple_from_deployment(
     deployment_record: DeploymentRecord,
     artifact_manifest: ArtifactIdentityManifest,
 ) -> Path | None:
-    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(deployment_record.instance):
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        deployment_record.instance
+    ):
         return None
     release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
         context_name=deployment_record.context,
@@ -7331,7 +7728,9 @@ def _read_source_release_tuple_for_promotion(
     record_store: FilesystemRecordStore,
     request: PromotionRequest,
 ) -> ReleaseTupleRecord | None:
-    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(request.from_instance):
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        request.from_instance
+    ):
         return None
     try:
         source_tuple = record_store.read_release_tuple_record(
@@ -7388,7 +7787,9 @@ def _write_promoted_release_tuple(
 ) -> Path | None:
     if source_tuple is None:
         return None
-    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(promotion_record.to_instance):
+    if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
+        promotion_record.to_instance
+    ):
         return None
     promoted_tuple = control_plane_release_tuples.build_promoted_release_tuple_record(
         source_tuple=source_tuple,
@@ -7627,15 +8028,21 @@ def _validate_runtime_environment_scope_route(
 ) -> None:
     if scope == "global":
         if context_name or instance_name:
-            raise click.ClickException("Global runtime environment records do not accept --context or --instance.")
+            raise click.ClickException(
+                "Global runtime environment records do not accept --context or --instance."
+            )
         return
     if scope == "context":
         if not context_name or instance_name:
-            raise click.ClickException("Context runtime environment records require --context and do not accept --instance.")
+            raise click.ClickException(
+                "Context runtime environment records require --context and do not accept --instance."
+            )
         return
     if scope == "instance":
         if not context_name or not instance_name:
-            raise click.ClickException("Instance runtime environment records require --context and --instance.")
+            raise click.ClickException(
+                "Instance runtime environment records require --context and --instance."
+            )
         return
     raise click.ClickException(f"Unsupported runtime environment scope: {scope}")
 
@@ -7647,7 +8054,11 @@ def _runtime_environment_record_matches(
     context_name: str,
     instance_name: str,
 ) -> bool:
-    return record.scope == scope and record.context == context_name and record.instance == instance_name
+    return (
+        record.scope == scope
+        and record.context == context_name
+        and record.instance == instance_name
+    )
 
 
 def _build_runtime_environment_record_for_put(
@@ -7735,7 +8146,9 @@ def _build_runtime_environment_record_for_unset(
         instance_name=instance_name,
     )
     if target_record is None:
-        raise click.ClickException("Missing DB-backed runtime environment record for the requested scope.")
+        raise click.ClickException(
+            "Missing DB-backed runtime environment record for the requested scope."
+        )
 
     requested_keys = tuple(_normalize_runtime_environment_key(key_name) for key_name in keys)
     env_values = dict(target_record.env)
@@ -7784,7 +8197,9 @@ def _build_runtime_environment_record_for_relabel(
         instance_name=instance_name,
     )
     if target_record is None:
-        raise click.ClickException("Missing DB-backed runtime environment record for the requested scope.")
+        raise click.ClickException(
+            "Missing DB-backed runtime environment record for the requested scope."
+        )
     return RuntimeEnvironmentRecord(
         scope=target_record.scope,
         context=target_record.context,
@@ -7795,7 +8210,9 @@ def _build_runtime_environment_record_for_relabel(
     )
 
 
-def _summarize_odoo_instance_override_record(record: OdooInstanceOverrideRecord) -> dict[str, object]:
+def _summarize_odoo_instance_override_record(
+    record: OdooInstanceOverrideRecord,
+) -> dict[str, object]:
     return {
         "context": record.context,
         "instance": record.instance,
@@ -7805,10 +8222,218 @@ def _summarize_odoo_instance_override_record(record: OdooInstanceOverrideRecord)
         "last_apply_status": record.last_apply.status,
         "last_apply_at": record.last_apply.applied_at,
         "config_parameter_keys": sorted(override.key for override in record.config_parameters),
-        "addon_settings": sorted(f"{override.addon}.{override.setting}" for override in record.addon_settings),
+        "addon_settings": sorted(
+            f"{override.addon}.{override.setting}" for override in record.addon_settings
+        ),
         "config_parameter_count": len(record.config_parameters),
         "addon_setting_count": len(record.addon_settings),
     }
+
+
+def _normalize_dokploy_target_route_value(*, value: str, option_name: str) -> str:
+    normalized_value = value.strip().lower()
+    if not normalized_value:
+        raise click.ClickException(f"Dokploy target {option_name} must be non-empty.")
+    return normalized_value
+
+
+def _normalize_shopify_protected_store_key(raw_value: str) -> str:
+    normalized_value = raw_value.strip().lower()
+    if not normalized_value:
+        raise click.ClickException("Shopify protected store keys must be non-empty.")
+    return normalized_value
+
+
+def _dokploy_target_route(record: DokployTargetRecord | DokployTargetIdRecord) -> tuple[str, str]:
+    return (record.context.strip().lower(), record.instance.strip().lower())
+
+
+def _find_dokploy_target_record(
+    *,
+    existing_records: tuple[DokployTargetRecord, ...],
+    context_name: str,
+    instance_name: str,
+) -> DokployTargetRecord | None:
+    normalized_route = (context_name.strip().lower(), instance_name.strip().lower())
+    for record in existing_records:
+        if _dokploy_target_route(record) == normalized_route:
+            return record
+    return None
+
+
+def _target_id_map(
+    target_id_records: tuple[DokployTargetIdRecord, ...],
+) -> dict[tuple[str, str], str]:
+    return {_dokploy_target_route(record): record.target_id for record in target_id_records}
+
+
+def _summarize_dokploy_target_record(
+    record: DokployTargetRecord,
+    *,
+    target_id: str = "",
+) -> dict[str, object]:
+    return {
+        "context": record.context,
+        "instance": record.instance,
+        "target_id": target_id,
+        "target_type": record.target_type,
+        "project_name": record.project_name,
+        "target_name": record.target_name,
+        "source_git_ref": record.source_git_ref,
+        "compose_path": record.compose_path,
+        "watch_paths": list(record.watch_paths),
+        "domains": list(record.domains),
+        "require_test_gate": record.require_test_gate,
+        "require_prod_gate": record.require_prod_gate,
+        "healthcheck_enabled": record.healthcheck_enabled,
+        "healthcheck_path": record.healthcheck_path,
+        "env_keys": sorted(record.env.keys()),
+        "env_value_count": len(record.env),
+        "shopify_protected_store_keys": sorted(record.policies.shopify.protected_store_keys),
+        "updated_at": record.updated_at,
+        "source_label": record.source_label,
+    }
+
+
+def _clone_dokploy_target_record(
+    *,
+    target_record: DokployTargetRecord,
+    source_label: str,
+    policies_payload: dict[str, object] | None = None,
+) -> DokployTargetRecord:
+    payload = target_record.model_dump(mode="python")
+    if policies_payload is not None:
+        payload["policies"] = policies_payload
+    payload["updated_at"] = utc_now_timestamp()
+    payload["source_label"] = source_label.strip() or "cli"
+    return DokployTargetRecord.model_validate(payload)
+
+
+def _build_dokploy_target_record_with_shopify_protected_store_keys_added(
+    *,
+    existing_records: tuple[DokployTargetRecord, ...],
+    context_name: str,
+    instance_name: str,
+    keys: tuple[str, ...],
+    source_label: str,
+) -> tuple[DokployTargetRecord, tuple[str, ...], tuple[str, ...]]:
+    normalized_context = _normalize_dokploy_target_route_value(
+        value=context_name, option_name="--context"
+    )
+    normalized_instance = _normalize_dokploy_target_route_value(
+        value=instance_name, option_name="--instance"
+    )
+    target_record = _find_dokploy_target_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    if target_record is None:
+        raise click.ClickException(
+            "Missing DB-backed tracked Dokploy target record for the requested route."
+        )
+
+    requested_keys = tuple(_normalize_shopify_protected_store_key(raw_value) for raw_value in keys)
+    current_keys = list(target_record.policies.shopify.protected_store_keys)
+    current_key_set = {key.strip().lower() for key in current_keys}
+    added_keys: list[str] = []
+    already_present_keys: list[str] = []
+    for requested_key in requested_keys:
+        if requested_key in current_key_set:
+            already_present_keys.append(requested_key)
+            continue
+        current_keys.append(requested_key)
+        current_key_set.add(requested_key)
+        added_keys.append(requested_key)
+
+    record = _clone_dokploy_target_record(
+        target_record=target_record,
+        source_label=source_label,
+        policies_payload={
+            "shopify": {
+                "protected_store_keys": current_keys,
+            }
+        },
+    )
+    return record, tuple(sorted(added_keys)), tuple(sorted(already_present_keys))
+
+
+def _build_dokploy_target_record_with_shopify_protected_store_keys_removed(
+    *,
+    existing_records: tuple[DokployTargetRecord, ...],
+    context_name: str,
+    instance_name: str,
+    keys: tuple[str, ...],
+    source_label: str,
+) -> tuple[DokployTargetRecord, tuple[str, ...], tuple[str, ...]]:
+    normalized_context = _normalize_dokploy_target_route_value(
+        value=context_name, option_name="--context"
+    )
+    normalized_instance = _normalize_dokploy_target_route_value(
+        value=instance_name, option_name="--instance"
+    )
+    target_record = _find_dokploy_target_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    if target_record is None:
+        raise click.ClickException(
+            "Missing DB-backed tracked Dokploy target record for the requested route."
+        )
+
+    requested_keys = tuple(_normalize_shopify_protected_store_key(raw_value) for raw_value in keys)
+    current_keys = list(target_record.policies.shopify.protected_store_keys)
+    current_key_set = {key.strip().lower() for key in current_keys}
+    removed_keys: list[str] = []
+    missing_keys: list[str] = []
+    for requested_key in requested_keys:
+        if requested_key not in current_key_set:
+            missing_keys.append(requested_key)
+            continue
+        current_keys = [
+            existing_key
+            for existing_key in current_keys
+            if existing_key.strip().lower() != requested_key
+        ]
+        current_key_set.remove(requested_key)
+        removed_keys.append(requested_key)
+
+    record = _clone_dokploy_target_record(
+        target_record=target_record,
+        source_label=source_label,
+        policies_payload={
+            "shopify": {
+                "protected_store_keys": current_keys,
+            }
+        },
+    )
+    return record, tuple(sorted(removed_keys)), tuple(sorted(missing_keys))
+
+
+def _build_dokploy_target_record_for_relabel(
+    *,
+    existing_records: tuple[DokployTargetRecord, ...],
+    context_name: str,
+    instance_name: str,
+    source_label: str,
+) -> DokployTargetRecord:
+    normalized_context = _normalize_dokploy_target_route_value(
+        value=context_name, option_name="--context"
+    )
+    normalized_instance = _normalize_dokploy_target_route_value(
+        value=instance_name, option_name="--instance"
+    )
+    target_record = _find_dokploy_target_record(
+        existing_records=existing_records,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+    if target_record is None:
+        raise click.ClickException(
+            "Missing DB-backed tracked Dokploy target record for the requested route."
+        )
+    return _clone_dokploy_target_record(target_record=target_record, source_label=source_label)
 
 
 def _odoo_override_name_requires_secret_store(key_name: str) -> bool:
@@ -7833,7 +8458,9 @@ def _build_odoo_override_value(
                 f"Odoo override {value_name!r} looks secret-shaped and must use --secret-binding-id."
             )
         return OdooOverrideValue(source="literal", value=value)
-    return OdooOverrideValue(source="secret_binding", secret_binding_id=normalized_secret_binding_id)
+    return OdooOverrideValue(
+        source="secret_binding", secret_binding_id=normalized_secret_binding_id
+    )
 
 
 def _find_odoo_instance_override_record(
@@ -7861,7 +8488,9 @@ def _build_odoo_instance_override_record_with_config_parameter(
     normalized_instance = instance_name.strip().lower()
     normalized_key = key_name.strip().lower()
     if not normalized_context or not normalized_instance:
-        raise click.ClickException("Odoo instance override records require --context and --instance.")
+        raise click.ClickException(
+            "Odoo instance override records require --context and --instance."
+        )
     if not normalized_key:
         raise click.ClickException("Odoo config parameter overrides require --key.")
     target_record = _find_odoo_instance_override_record(
@@ -7870,10 +8499,13 @@ def _build_odoo_instance_override_record_with_config_parameter(
         instance_name=normalized_instance,
     )
     config_parameters = {
-        override.key: override for override in (target_record.config_parameters if target_record is not None else ())
+        override.key: override
+        for override in (target_record.config_parameters if target_record is not None else ())
     }
     addon_settings = target_record.addon_settings if target_record is not None else ()
-    config_parameters[normalized_key] = OdooConfigParameterOverride(key=normalized_key, value=override_value)
+    config_parameters[normalized_key] = OdooConfigParameterOverride(
+        key=normalized_key, value=override_value
+    )
     return OdooInstanceOverrideRecord(
         context=normalized_context,
         instance=normalized_instance,
@@ -7899,7 +8531,9 @@ def _build_odoo_instance_override_record_with_addon_setting(
     normalized_addon = addon_name.strip().lower()
     normalized_setting = setting_name.strip().lower()
     if not normalized_context or not normalized_instance:
-        raise click.ClickException("Odoo instance override records require --context and --instance.")
+        raise click.ClickException(
+            "Odoo instance override records require --context and --instance."
+        )
     if not normalized_addon or not normalized_setting:
         raise click.ClickException("Odoo addon setting overrides require --addon and --setting.")
     target_record = _find_odoo_instance_override_record(
@@ -7940,14 +8574,18 @@ def _build_odoo_instance_override_record_with_apply_result(
     normalized_context = context_name.strip().lower()
     normalized_instance = instance_name.strip().lower()
     if not normalized_context or not normalized_instance:
-        raise click.ClickException("Odoo instance override records require --context and --instance.")
+        raise click.ClickException(
+            "Odoo instance override records require --context and --instance."
+        )
     target_record = _find_odoo_instance_override_record(
         existing_records=existing_records,
         context_name=normalized_context,
         instance_name=normalized_instance,
     )
     if target_record is None:
-        raise click.ClickException("Missing DB-backed Odoo instance override record for the requested instance.")
+        raise click.ClickException(
+            "Missing DB-backed Odoo instance override record for the requested instance."
+        )
     normalized_status = status.strip().lower()
     attempted = normalized_status in {"pending", "pass", "fail"}
     return target_record.model_copy(
@@ -7955,7 +8593,8 @@ def _build_odoo_instance_override_record_with_apply_result(
             "last_apply": OdooOverrideApplyResult(
                 attempted=attempted,
                 status=normalized_status,
-                applied_at=applied_at.strip() or (utc_now_timestamp() if normalized_status in {"pass", "fail"} else ""),
+                applied_at=applied_at.strip()
+                or (utc_now_timestamp() if normalized_status in {"pass", "fail"} else ""),
                 detail=detail,
             ),
             "updated_at": utc_now_timestamp(),
@@ -8014,7 +8653,9 @@ def storage_import_core_records(state_dir: Path, database_url: str) -> None:
     required=True,
     help="Postgres connection string for Launchplane managed secrets.",
 )
-@click.option("--scope", type=click.Choice(["global", "context", "context_instance"]), required=True)
+@click.option(
+    "--scope", type=click.Choice(["global", "context", "context_instance"]), required=True
+)
 @click.option("--integration", required=True)
 @click.option("--name", required=True)
 @click.option("--binding-key", required=True)
@@ -8050,10 +8691,14 @@ def secrets_put(
             description=description,
             actor=actor,
         )
-        payload = control_plane_secrets.build_secret_status(postgres_store, secret_id=result["secret_id"])
+        payload = control_plane_secrets.build_secret_status(
+            postgres_store, secret_id=result["secret_id"]
+        )
     finally:
         postgres_store.close()
-    click.echo(json.dumps({"status": "ok", "result": result, "secret": payload}, indent=2, sort_keys=True))
+    click.echo(
+        json.dumps({"status": "ok", "result": result, "secret": payload}, indent=2, sort_keys=True)
+    )
 
 
 @secrets.command("list")
@@ -8066,7 +8711,9 @@ def secrets_put(
 @click.option("--integration", default="")
 @click.option("--context", "context_name", default="")
 @click.option("--instance", "instance_name", default="")
-def secrets_list(database_url: str, integration: str, context_name: str, instance_name: str) -> None:
+def secrets_list(
+    database_url: str, integration: str, context_name: str, instance_name: str
+) -> None:
     postgres_store = PostgresRecordStore(database_url=database_url)
     try:
         payload = control_plane_secrets.list_secret_statuses(
@@ -8148,7 +8795,11 @@ def service_serve(
     required=True,
     help="Dokploy target id for the live Launchplane service.",
 )
-@click.option("--image-reference", required=True, help="Immutable image reference to deploy, usually repo@sha256:...")
+@click.option(
+    "--image-reference",
+    required=True,
+    help="Immutable image reference to deploy, usually repo@sha256:...",
+)
 @click.option(
     "--health-url",
     "health_urls",
@@ -8159,7 +8810,12 @@ def service_serve(
 @click.option("--deploy-timeout-seconds", type=int, default=600, show_default=True)
 @click.option("--health-timeout-seconds", type=int, default=180, show_default=True)
 @click.option("--rollback-on-failure/--no-rollback-on-failure", default=True, show_default=True)
-@click.option("--no-cache", is_flag=True, default=False, help="Request Dokploy no-cache redeploy semantics when supported.")
+@click.option(
+    "--no-cache",
+    is_flag=True,
+    default=False,
+    help="Request Dokploy no-cache redeploy semantics when supported.",
+)
 @click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path),
@@ -8224,7 +8880,9 @@ def service_deploy_dokploy_image(
                 no_cache=no_cache,
             )
         )
-        _verify_healthcheck_urls(health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds)
+        _verify_healthcheck_urls(
+            health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds
+        )
         payload["status"] = "ok"
         click.echo(json.dumps(payload, indent=2, sort_keys=True))
         return
@@ -8258,7 +8916,9 @@ def service_deploy_dokploy_image(
                         no_cache=no_cache,
                     )
                 )
-                _verify_healthcheck_urls(health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds)
+                _verify_healthcheck_urls(
+                    health_urls=normalized_health_urls, timeout_seconds=health_timeout_seconds
+                )
                 rollback_payload["status"] = "ok"
             except click.ClickException as rollback_error:
                 rollback_payload["status"] = "failed"
@@ -8725,9 +9385,7 @@ def launchplane_previews_write_enablement(state_dir: Path, input_file: Path) -> 
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
-@click.option(
-    "--preview-input-file", type=click.Path(exists=True, path_type=Path), required=True
-)
+@click.option("--preview-input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option(
     "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
 )
@@ -8754,9 +9412,7 @@ def launchplane_previews_request_generation(
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
-@click.option(
-    "--preview-input-file", type=click.Path(exists=True, path_type=Path), required=True
-)
+@click.option("--preview-input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option(
     "--generation-input-file", type=click.Path(exists=True, path_type=Path), required=True
 )
@@ -8927,7 +9583,11 @@ def launchplane_previews_ingest_pr_event(
 @click.option("--event-name", default="pull_request", show_default=True)
 @click.option("--delivery-id", default="", help="Optional GitHub delivery id for traceability.")
 @click.option("--signature-256", default="", help="Raw X-Hub-Signature-256 header value.")
-@click.option("--allow-unsigned", is_flag=True, help="Explicit local/manual bypass for signature verification.")
+@click.option(
+    "--allow-unsigned",
+    is_flag=True,
+    help="Explicit local/manual bypass for signature verification.",
+)
 @click.option("--apply", "apply_intent", is_flag=True)
 @click.option("--deliver-feedback", is_flag=True)
 def launchplane_previews_ingest_github_webhook(
@@ -9001,7 +9661,10 @@ def _github_webhook_capture_metadata_headers(headers: dict[str, str]) -> dict[st
     metadata_headers: dict[str, str] = {}
     for header_name, header_value in headers.items():
         normalized_header_name = header_name.strip().lower()
-        if normalized_header_name in exact_redacted_header_names or normalized_header_name == "forwarded":
+        if (
+            normalized_header_name in exact_redacted_header_names
+            or normalized_header_name == "forwarded"
+        ):
             metadata_headers[header_name] = "[redacted]"
             continue
         if normalized_header_name.startswith("x-forwarded-"):
@@ -9025,7 +9688,9 @@ def _parse_github_webhook_http_capture(input_file: Path) -> tuple[str, dict[str,
     try:
         http_capture_text = input_file.read_text(encoding="utf-8")
     except UnicodeDecodeError as exc:
-        raise click.ClickException(f"GitHub webhook HTTP capture must be valid UTF-8 text: {exc}") from exc
+        raise click.ClickException(
+            f"GitHub webhook HTTP capture must be valid UTF-8 text: {exc}"
+        ) from exc
     header_text, body_text = _split_http_capture_text(http_capture_text)
     header_lines = header_text.splitlines()
     if not header_lines:
@@ -9186,7 +9851,9 @@ def _merge_github_webhook_capture_evidence(
 @click.option("--delivery-source", default="", help="Optional top-level delivery source override.")
 @click.option("--allow-unsigned", is_flag=True, help="Emit an explicit unsigned replay envelope.")
 @click.option("--recorded-at", default="", help="Optional capture timestamp for traceability.")
-@click.option("--capture-source", default="", help="Optional capture source label for replay metadata.")
+@click.option(
+    "--capture-source", default="", help="Optional capture source label for replay metadata."
+)
 @click.option("--evidence-file", type=click.Path(exists=True, path_type=Path))
 @click.option("--output-file", type=click.Path(path_type=Path))
 def launchplane_previews_build_github_webhook_replay_envelope(
@@ -9215,10 +9882,12 @@ def launchplane_previews_build_github_webhook_replay_envelope(
     capture_headers: dict[str, str] = {}
     captured_request_line = ""
     if http_capture_file is not None:
-        captured_request_line, capture_headers, raw_payload_bytes = _parse_github_webhook_http_capture(
-            http_capture_file
+        captured_request_line, capture_headers, raw_payload_bytes = (
+            _parse_github_webhook_http_capture(http_capture_file)
         )
-        _load_github_webhook_json_bytes(raw_payload_bytes, description="GitHub webhook HTTP capture body")
+        _load_github_webhook_json_bytes(
+            raw_payload_bytes, description="GitHub webhook HTTP capture body"
+        )
     else:
         assert payload_file is not None
         raw_payload_bytes, _ = _load_github_webhook_json_file(payload_file)
@@ -9238,7 +9907,12 @@ def launchplane_previews_build_github_webhook_replay_envelope(
     raw_payload_text = raw_payload_bytes.decode("utf-8")
 
     capture_payload: dict[str, object] | None = None
-    if capture_headers or recorded_at.strip() or capture_source.strip() or evidence_payload is not None:
+    if (
+        capture_headers
+        or recorded_at.strip()
+        or capture_source.strip()
+        or evidence_payload is not None
+    ):
         capture_payload = {}
         if recorded_at.strip():
             capture_payload["recorded_at"] = recorded_at.strip()
@@ -9338,7 +10012,9 @@ def _ingest_launchplane_pr_event_payload(
     )
     decision_payload = payload.get("decision")
     resolved_context = (
-        str(decision_payload.get("resolved_context", "")).strip() if isinstance(decision_payload, dict) else ""
+        str(decision_payload.get("resolved_context", "")).strip()
+        if isinstance(decision_payload, dict)
+        else ""
     )
     preview_payload = payload.get("preview")
     if not resolved_context and isinstance(preview_payload, dict):
@@ -9379,7 +10055,9 @@ def _ingest_launchplane_pr_event_payload(
             event=event,
             action=action if isinstance(action, str) else "",
             preview=None,
-            request_metadata=LaunchplanePreviewRequestParseResult.model_validate(request_metadata_payload),
+            request_metadata=LaunchplanePreviewRequestParseResult.model_validate(
+                request_metadata_payload
+            ),
             resolved_manifest=(
                 LaunchplaneResolvedPreviewManifest.model_validate(payload["manifest"])
                 if isinstance(payload.get("manifest"), dict)
@@ -9389,7 +10067,9 @@ def _ingest_launchplane_pr_event_payload(
         )
     if deliver_feedback:
         resolved_context = (
-            decision_payload.get("resolved_context", "") if isinstance(decision_payload, dict) else ""
+            decision_payload.get("resolved_context", "")
+            if isinstance(decision_payload, dict)
+            else ""
         )
         feedback_payload = payload.get("feedback")
         if not isinstance(feedback_payload, dict):
@@ -9522,7 +10202,9 @@ def _verify_launchplane_github_webhook_signature(
     }
 
 
-def _resolve_launchplane_github_webhook_context(*, event_name: str, webhook_payload: dict[str, object]) -> str:
+def _resolve_launchplane_github_webhook_context(
+    *, event_name: str, webhook_payload: dict[str, object]
+) -> str:
     if event_name.strip() != "pull_request":
         return ""
     repository_payload = webhook_payload.get("repository")
@@ -9565,7 +10247,9 @@ def launchplane_previews_show_tenant(
         anchor_repo=anchor_repo,
     )
     if payload is None:
-        raise click.ClickException("No Launchplane tenant environment evidence found for the requested scope.")
+        raise click.ClickException(
+            "No Launchplane tenant environment evidence found for the requested scope."
+        )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -9590,7 +10274,9 @@ def launchplane_previews_render_index_page(
         record_store=record_store,
         context_name=context_name,
     )
-    html_output = _render_launchplane_preview_index_page_html(payload, tenant_payload=tenant_payload)
+    html_output = _render_launchplane_preview_index_page_html(
+        payload, tenant_payload=tenant_payload
+    )
     if output_file is not None:
         output_file.write_text(html_output, encoding="utf-8")
         return
@@ -9832,7 +10518,9 @@ def _apply_launchplane_pr_event_intent(
     intent = LaunchplanePullRequestMutationIntent.model_validate(mutation_payload)
     if intent.command == "request-generation":
         if intent.preview_request is None:
-            raise click.ClickException("Resolved Launchplane PR-event request-generation intent is missing preview_request.")
+            raise click.ClickException(
+                "Resolved Launchplane PR-event request-generation intent is missing preview_request."
+            )
         if intent.generation_request is None:
             return {
                 "applied": False,
@@ -9850,7 +10538,9 @@ def _apply_launchplane_pr_event_intent(
             "result": result_payload,
         }
     if intent.destroy_request is None:
-        raise click.ClickException("Resolved Launchplane PR-event destroy intent is missing destroy_request.")
+        raise click.ClickException(
+            "Resolved Launchplane PR-event destroy intent is missing destroy_request."
+        )
     result_payload = _apply_launchplane_destroy_preview(
         record_store=record_store,
         request=intent.destroy_request,
@@ -9877,7 +10567,13 @@ def environments() -> None:
 @click.option("--scope", type=click.Choice(["global", "context", "instance"]), required=True)
 @click.option("--context", "context_name", default="")
 @click.option("--instance", "instance_name", default="")
-@click.option("--set", "assignments", multiple=True, required=True, help="Runtime value assignment as KEY=VALUE.")
+@click.option(
+    "--set",
+    "assignments",
+    multiple=True,
+    required=True,
+    help="Runtime value assignment as KEY=VALUE.",
+)
 @click.option("--source-label", default="cli", show_default=True)
 def environments_put(
     database_url: str,
@@ -9924,7 +10620,13 @@ def environments_put(
 @click.option("--scope", type=click.Choice(["global", "context", "instance"]), required=True)
 @click.option("--context", "context_name", default="")
 @click.option("--instance", "instance_name", default="")
-@click.option("--key", "keys", multiple=True, required=True, help="Runtime value key to remove from the record.")
+@click.option(
+    "--key",
+    "keys",
+    multiple=True,
+    required=True,
+    help="Runtime value key to remove from the record.",
+)
 @click.option("--source-label", default="cli", show_default=True)
 def environments_unset(
     database_url: str,
@@ -10025,9 +10727,7 @@ def environments_list(database_url: str) -> None:
             {
                 "status": "ok",
                 "count": len(records),
-                "records": [
-                    _summarize_runtime_environment_record(record) for record in records
-                ],
+                "records": [_summarize_runtime_environment_record(record) for record in records],
             },
             indent=2,
             sort_keys=True,
@@ -10073,6 +10773,243 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
+@main.group("dokploy-targets")
+def dokploy_targets() -> None:
+    """Tracked Dokploy target record commands."""
+
+
+@dokploy_targets.command("list")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+def dokploy_targets_list(database_url: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        records = postgres_store.list_dokploy_target_records()
+        target_id_records = postgres_store.list_dokploy_target_id_records()
+    finally:
+        postgres_store.close()
+    target_ids_by_route = _target_id_map(target_id_records)
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [
+                    _summarize_dokploy_target_record(
+                        record,
+                        target_id=target_ids_by_route.get(_dokploy_target_route(record), ""),
+                    )
+                    for record in records
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@dokploy_targets.command("show")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+def dokploy_targets_show(database_url: str, context_name: str, instance_name: str) -> None:
+    normalized_context = _normalize_dokploy_target_route_value(
+        value=context_name, option_name="--context"
+    )
+    normalized_instance = _normalize_dokploy_target_route_value(
+        value=instance_name, option_name="--instance"
+    )
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        record = postgres_store.read_dokploy_target_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+        target_id_record = postgres_store.read_dokploy_target_id_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            _summarize_dokploy_target_record(record, target_id=target_id_record.target_id),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@dokploy_targets.command("put-shopify-protected-store-key")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--key",
+    "keys",
+    multiple=True,
+    required=True,
+    help="Protected Shopify store key to add for this tracked Dokploy target.",
+)
+@click.option("--source-label", default="cli", show_default=True)
+def dokploy_targets_put_shopify_protected_store_key(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    keys: tuple[str, ...],
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_dokploy_target_records()
+        target_id_records = postgres_store.list_dokploy_target_id_records()
+        record, added_keys, already_present_keys = (
+            _build_dokploy_target_record_with_shopify_protected_store_keys_added(
+                existing_records=existing_records,
+                context_name=context_name,
+                instance_name=instance_name,
+                keys=keys,
+                source_label=source_label,
+            )
+        )
+        postgres_store.write_dokploy_target_record(record)
+    finally:
+        postgres_store.close()
+    target_ids_by_route = _target_id_map(target_id_records)
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "record": _summarize_dokploy_target_record(
+                    record,
+                    target_id=target_ids_by_route.get(_dokploy_target_route(record), ""),
+                ),
+                "added_keys": added_keys,
+                "already_present_keys": already_present_keys,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@dokploy_targets.command("unset-shopify-protected-store-key")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--key",
+    "keys",
+    multiple=True,
+    required=True,
+    help="Protected Shopify store key to remove from this tracked Dokploy target.",
+)
+@click.option("--source-label", default="cli", show_default=True)
+def dokploy_targets_unset_shopify_protected_store_key(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    keys: tuple[str, ...],
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_dokploy_target_records()
+        target_id_records = postgres_store.list_dokploy_target_id_records()
+        record, removed_keys, missing_keys = (
+            _build_dokploy_target_record_with_shopify_protected_store_keys_removed(
+                existing_records=existing_records,
+                context_name=context_name,
+                instance_name=instance_name,
+                keys=keys,
+                source_label=source_label,
+            )
+        )
+        postgres_store.write_dokploy_target_record(record)
+    finally:
+        postgres_store.close()
+    target_ids_by_route = _target_id_map(target_id_records)
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "record": _summarize_dokploy_target_record(
+                    record,
+                    target_id=target_ids_by_route.get(_dokploy_target_route(record), ""),
+                ),
+                "removed_keys": removed_keys,
+                "missing_keys": missing_keys,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@dokploy_targets.command("relabel")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--source-label", required=True)
+def dokploy_targets_relabel(
+    database_url: str, context_name: str, instance_name: str, source_label: str
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        existing_records = postgres_store.list_dokploy_target_records()
+        target_id_records = postgres_store.list_dokploy_target_id_records()
+        record = _build_dokploy_target_record_for_relabel(
+            existing_records=existing_records,
+            context_name=context_name,
+            instance_name=instance_name,
+            source_label=source_label,
+        )
+        postgres_store.write_dokploy_target_record(record)
+    finally:
+        postgres_store.close()
+    target_ids_by_route = _target_id_map(target_id_records)
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "record": _summarize_dokploy_target_record(
+                    record,
+                    target_id=target_ids_by_route.get(_dokploy_target_route(record), ""),
+                ),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
 @main.group("odoo-overrides")
 def odoo_overrides() -> None:
     """Odoo instance override record commands."""
@@ -10089,7 +11026,9 @@ def odoo_overrides() -> None:
 @click.option("--instance", "instance_name", required=True)
 @click.option("--key", "key_name", required=True, help="Odoo ir.config_parameter key.")
 @click.option("--value", default=None, help="Non-secret literal value.")
-@click.option("--secret-binding-id", default="", help="Managed secret binding id for secret values.")
+@click.option(
+    "--secret-binding-id", default="", help="Managed secret binding id for secret values."
+)
 @click.option("--source-label", default="cli", show_default=True)
 def odoo_overrides_put_config_param(
     database_url: str,
@@ -10141,7 +11080,9 @@ def odoo_overrides_put_config_param(
 @click.option("--addon", "addon_name", required=True, help="Odoo addon or integration name.")
 @click.option("--setting", "setting_name", required=True, help="Addon setting name.")
 @click.option("--value", default=None, help="Non-secret literal value.")
-@click.option("--secret-binding-id", default="", help="Managed secret binding id for secret values.")
+@click.option(
+    "--secret-binding-id", default="", help="Managed secret binding id for secret values."
+)
 @click.option("--source-label", default="cli", show_default=True)
 def odoo_overrides_put_addon_setting(
     database_url: str,
@@ -10228,7 +11169,9 @@ def odoo_overrides_show(database_url: str, context_name: str, instance_name: str
         )
     finally:
         postgres_store.close()
-    click.echo(json.dumps(_summarize_odoo_instance_override_record(record), indent=2, sort_keys=True))
+    click.echo(
+        json.dumps(_summarize_odoo_instance_override_record(record), indent=2, sort_keys=True)
+    )
 
 
 @odoo_overrides.command("mark-apply")
@@ -10282,7 +11225,9 @@ def odoo_overrides_mark_apply(
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
 @click.option("--apply", "apply_changes", is_flag=True, default=False)
-def environments_sync_live_target(context_name: str, instance_name: str, apply_changes: bool) -> None:
+def environments_sync_live_target(
+    context_name: str, instance_name: str, apply_changes: bool
+) -> None:
     payload = _sync_live_target_from_tracked_contract(
         context_name=context_name,
         instance_name=instance_name,

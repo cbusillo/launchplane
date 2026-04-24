@@ -91,6 +91,14 @@ lane catalog is now `testing` plus `prod`; pull requests use Launchplane-managed
 preview identities and ephemeral preview stacks instead of a durable shared
 `dev` lane.
 
+Use `uv run launchplane dokploy-targets list` or `show` to inspect the tracked
+DB-backed target catalog without reading legacy TOML files. Use
+`uv run launchplane dokploy-targets put-shopify-protected-store-key --context ... --instance ... --key ...`
+and `unset-shopify-protected-store-key` to update the Shopify protected-store-key
+policy carried by a tracked target record. Those commands mutate the shared
+Postgres-backed target record directly; they do not write repo-local fallback
+files.
+
 ## Service Container Deploy
 
 The repo now includes a containerized Launchplane service entrypoint for Dokploy or

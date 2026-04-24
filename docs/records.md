@@ -156,6 +156,24 @@ state/
   authority comes from the same release-tuple record shape in Postgres-backed
   storage. Neither path rewrites any tracked TOML catalog implicitly.
 
+## Dokploy Target Record
+
+- One record per tracked stable Dokploy route (`context` plus `instance`).
+- Record the stable target definition fields Launchplane owns for that route,
+  such as target type, project/target names, source metadata, env keys,
+  domains, health policy, and typed product policies.
+- Live `target_id` values remain a sibling DB-backed record so operators can
+  update route metadata and route identity independently when needed.
+- Shopify guard values such as protected store keys now belong in
+  `policies.shopify.protected_store_keys` on this record instead of a route map
+  hardcoded in Python.
+- The operator write path for this record family is the Launchplane CLI,
+  including `dokploy-targets list`, `show`,
+  `put-shopify-protected-store-key`, and
+  `unset-shopify-protected-store-key`.
+- Repo-local Dokploy target TOML files are not a supported runtime authority or
+  mutation surface for these records.
+
 ## Odoo Instance Override Record
 
 - One record per Odoo context and stable instance.

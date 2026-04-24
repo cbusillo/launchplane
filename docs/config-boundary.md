@@ -135,3 +135,19 @@ uv run launchplane service inspect-config-boundary --control-plane-root .
 
 That payload is intended to make DB-backed authority and stale legacy files
 visible without treating those files as runtime inputs.
+
+When operators need to inspect or mutate tracked Dokploy target records, use the
+DB-backed Launchplane CLI surface rather than editing any repo-local file:
+
+```bash
+uv run launchplane dokploy-targets list
+uv run launchplane dokploy-targets show --context opw --instance testing
+uv run launchplane dokploy-targets put-shopify-protected-store-key \
+  --context opw \
+  --instance testing \
+  --key yps-your-part-supplier
+```
+
+That command family edits the shared `launchplane_dokploy_targets` record set
+directly and keeps target policies in the same DB-backed authority as the rest
+of the tracked stable-lane target definition.

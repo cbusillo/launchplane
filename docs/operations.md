@@ -181,6 +181,12 @@ DB-backed Launchplane records:
   product-specific worker config into Launchplane runtime-environment records
 - use target-id records in the shared store when possible instead of relying on
   env-carried target-id catalogs
+- inspect tracked stable-lane Dokploy target records with
+  `uv run launchplane dokploy-targets list` / `show`
+- mutate tracked target Shopify guard policy with
+  `uv run launchplane dokploy-targets put-shopify-protected-store-key ...` and
+  `unset-shopify-protected-store-key ...` instead of editing repo-local target
+  catalogs or ad-hoc DB rows
 
 Two deployment prerequisites remain Dokploy-side operational contracts rather
 than Launchplane CLI validations:

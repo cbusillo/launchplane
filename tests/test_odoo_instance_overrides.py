@@ -250,10 +250,16 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                         target_type="compose",
                         target_name="opw-prod",
                         target_id="compose-123",
+                        policies={
+                            "shopify": {
+                                "protected_store_keys": ["yps-your-part-supplier"],
+                            }
+                        },
                     ),
                 ),
             )
             captured_workflow_environment: dict[str, str] = {}
+            captured_protected_shopify_store_keys: list[str] = []
 
             with patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False), patch(
                 "control_plane.dokploy.read_dokploy_config",
@@ -263,8 +269,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 return_value=source_of_truth,
             ), patch(
                 "control_plane.dokploy.run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: captured_workflow_environment.update(
-                    kwargs["workflow_environment_overrides"]
+                side_effect=lambda **kwargs: (
+                    captured_workflow_environment.update(kwargs["workflow_environment_overrides"]),
+                    captured_protected_shopify_store_keys.extend(kwargs["protected_shopify_store_keys"]),
                 ),
             ):
                 _run_compose_post_deploy_update(env_file=None, request=_ship_request())
@@ -291,6 +298,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             captured_workflow_environment["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
             "https://opw-prod.example.com",
         )
+        self.assertEqual(captured_protected_shopify_store_keys, ["yps-your-part-supplier"])
         self.assertEqual(stored_record.last_apply.status, "pass")
 
     def test_post_deploy_update_requires_container_env_for_secret_backed_odoo_overrides(self) -> None:
@@ -305,11 +313,26 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     addon_settings=(
                         OdooAddonSettingOverride(
                             addon="shopify",
+                            setting="shop_url_key",
+                            value=OdooOverrideValue(source="literal", value="candidate-store"),
+                        ),
+                        OdooAddonSettingOverride(
+                            addon="shopify",
                             setting="api_token",
                             value=OdooOverrideValue(
                                 source="secret_binding",
                                 secret_binding_id="secret-binding-shopify-token",
                             ),
+                        ),
+                        OdooAddonSettingOverride(
+                            addon="shopify",
+                            setting="webhook_key",
+                            value=OdooOverrideValue(source="literal", value="hook"),
+                        ),
+                        OdooAddonSettingOverride(
+                            addon="shopify",
+                            setting="api_version",
+                            value=OdooOverrideValue(source="literal", value="2025-01"),
                         ),
                     ),
                     updated_at="2026-04-23T12:00:00Z",

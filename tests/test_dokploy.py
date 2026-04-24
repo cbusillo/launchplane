@@ -74,6 +74,201 @@ def _seed_dokploy_target_records(
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_dokploy_targets_list_and_show_include_shopify_policy_metadata(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "compose-123"
+target_type = "compose"
+project_name = "opw-testing"
+target_name = "opw-testing"
+
+[targets.policies.shopify]
+protected_store_keys = ["yps-your-part-supplier"]
+""",
+            )
+
+            list_result = runner.invoke(
+                main, ["dokploy-targets", "list", "--database-url", database_url]
+            )
+            show_result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "show",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "OPW",
+                    "--instance",
+                    "Testing",
+                ],
+            )
+            store.close()
+
+        self.assertEqual(list_result.exit_code, 0, msg=list_result.output)
+        self.assertEqual(show_result.exit_code, 0, msg=show_result.output)
+        list_payload = json.loads(list_result.output)
+        show_payload = json.loads(show_result.output)
+        self.assertEqual(list_payload["count"], 1)
+        self.assertEqual(list_payload["records"][0]["target_id"], "compose-123")
+        self.assertEqual(
+            list_payload["records"][0]["shopify_protected_store_keys"], ["yps-your-part-supplier"]
+        )
+        self.assertEqual(show_payload["target_id"], "compose-123")
+        self.assertEqual(show_payload["shopify_protected_store_keys"], ["yps-your-part-supplier"])
+
+    def test_dokploy_targets_put_shopify_protected_store_key_updates_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "compose-123"
+target_type = "compose"
+""",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "put-shopify-protected-store-key",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "OPW",
+                    "--instance",
+                    "Testing",
+                    "--key",
+                    " YPS-Your-Part-Supplier ",
+                    "--key",
+                    "yps-your-part-supplier",
+                    "--source-label",
+                    "policy:test",
+                ],
+            )
+            stored_record = store.read_dokploy_target_record(
+                context_name="opw", instance_name="testing"
+            )
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["added_keys"], ["yps-your-part-supplier"])
+        self.assertEqual(payload["already_present_keys"], ["yps-your-part-supplier"])
+        self.assertEqual(
+            payload["record"]["shopify_protected_store_keys"], ["yps-your-part-supplier"]
+        )
+        self.assertEqual(
+            stored_record.policies.shopify.protected_store_keys, ("yps-your-part-supplier",)
+        )
+        self.assertEqual(stored_record.source_label, "policy:test")
+
+    def test_dokploy_targets_unset_shopify_protected_store_key_reports_missing_keys(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "compose-123"
+target_type = "compose"
+
+[targets.policies.shopify]
+protected_store_keys = ["yps-your-part-supplier", "spare-store"]
+""",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "unset-shopify-protected-store-key",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--key",
+                    "yps-your-part-supplier",
+                    "--key",
+                    "missing-store",
+                ],
+            )
+            stored_record = store.read_dokploy_target_record(
+                context_name="opw", instance_name="testing"
+            )
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["removed_keys"], ["yps-your-part-supplier"])
+        self.assertEqual(payload["missing_keys"], ["missing-store"])
+        self.assertEqual(payload["record"]["shopify_protected_store_keys"], ["spare-store"])
+        self.assertEqual(stored_record.policies.shopify.protected_store_keys, ("spare-store",))
+
+    def test_dokploy_targets_put_shopify_protected_store_key_requires_existing_record(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.close()
+
+            result = runner.invoke(
+                main,
+                [
+                    "dokploy-targets",
+                    "put-shopify-protected-store-key",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--key",
+                    "yps-your-part-supplier",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Missing DB-backed tracked Dokploy target record", result.output)
+
     def test_service_inspect_config_boundary_reports_db_only_authority(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
@@ -149,16 +344,16 @@ class DokployConfigTests(unittest.TestCase):
             )
             (config_directory / "runtime-environments.toml").write_text(
                 (
-                    'schema_version = 1\n\n'
-                    '[shared_env]\n'
+                    "schema_version = 1\n\n"
+                    "[shared_env]\n"
                     'LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.file.example.com"\n'
                 ),
                 encoding="utf-8",
             )
             (config_directory / "dokploy.toml").write_text(
                 (
-                    'schema_version = 2\n\n'
-                    '[[targets]]\n'
+                    "schema_version = 2\n\n"
+                    "[[targets]]\n"
                     'context = "cm"\n'
                     'instance = "prod"\n'
                     'target_id = "compose-file"\n'
@@ -167,8 +362,8 @@ class DokployConfigTests(unittest.TestCase):
             )
             (config_directory / "dokploy-targets.toml").write_text(
                 (
-                    'schema_version = 1\n\n'
-                    '[[targets]]\n'
+                    "schema_version = 1\n\n"
+                    "[[targets]]\n"
                     'context = "cm"\n'
                     'instance = "prod"\n'
                     'target_id = "compose-override"\n'
@@ -274,26 +469,30 @@ class DokployConfigTests(unittest.TestCase):
             }
         )
 
-        with patch(
-            "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
-            return_value=source_of_truth,
-        ), patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={
-                "name": "opw-testing",
-                "appName": "compose-opw-testing",
-                "sourceType": "git",
-                "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
-                "customGitBranch": "opw-testing",
-                "composePath": "./docker-compose.yml",
-                "env": (
-                    "ODOO_BASE_RUNTIME_IMAGE=ghcr.io/cbusillo/odoo-enterprise-docker:19.0-runtime\n"
-                    "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
-                ),
-            },
+        with (
+            patch(
+                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source_of_truth,
+            ),
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "opw-testing",
+                    "appName": "compose-opw-testing",
+                    "sourceType": "git",
+                    "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
+                    "customGitBranch": "opw-testing",
+                    "composePath": "./docker-compose.yml",
+                    "env": (
+                        "ODOO_BASE_RUNTIME_IMAGE=ghcr.io/cbusillo/odoo-enterprise-docker:19.0-runtime\n"
+                        "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
+                    ),
+                },
+            ),
         ):
             result = runner.invoke(
                 main,
@@ -310,7 +509,9 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["tracked_target"]["target_id"], "compose-123")
-        self.assertEqual(payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-ai.git")
+        self.assertEqual(
+            payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-ai.git"
+        )
         self.assertFalse(payload["artifact_runtime_contract"]["artifact_ready"])
         self.assertIn(
             "git@github.com:cbusillo/odoo-ai.git",
@@ -391,21 +592,27 @@ class DokployConfigTests(unittest.TestCase):
         captured_source_updates: list[dict[str, object]] = []
         captured_env_updates: list[dict[str, object]] = []
 
-        with patch(
-            "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
-            return_value=source_of_truth,
-        ), patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            side_effect=fetch_payloads,
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_source",
-            side_effect=lambda **kwargs: captured_source_updates.append(kwargs),
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-            side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+        with (
+            patch(
+                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source_of_truth,
+            ),
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                side_effect=fetch_payloads,
+            ),
+            patch(
+                "control_plane.dokploy.update_dokploy_target_source",
+                side_effect=lambda **kwargs: captured_source_updates.append(kwargs),
+            ),
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+            ),
         ):
             result = runner.invoke(
                 main,
@@ -423,13 +630,22 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(len(captured_source_updates), 1)
         self.assertEqual(len(captured_env_updates), 1)
-        self.assertIn("411f6b8e85cac72dc7aa2e2dc5540001043c327d", str(captured_env_updates[0]["env_text"]))
+        self.assertIn(
+            "411f6b8e85cac72dc7aa2e2dc5540001043c327d", str(captured_env_updates[0]["env_text"])
+        )
         payload = json.loads(result.output)
         self.assertTrue(payload["artifact_runtime_contract"]["artifact_ready"])
-        self.assertEqual(payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-devkit.git")
-        self.assertEqual(payload["sync_preview"]["source_changes"]["custom_git_url"]["tracked"], "git@github.com:cbusillo/odoo-devkit.git")
+        self.assertEqual(
+            payload["live_target"]["custom_git_url"], "git@github.com:cbusillo/odoo-devkit.git"
+        )
+        self.assertEqual(
+            payload["sync_preview"]["source_changes"]["custom_git_url"]["tracked"],
+            "git@github.com:cbusillo/odoo-devkit.git",
+        )
 
-    def test_read_control_plane_dokploy_source_of_truth_prefers_postgres_target_ids_without_file_fallback(self) -> None:
+    def test_read_control_plane_dokploy_source_of_truth_prefers_postgres_target_ids_without_file_fallback(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -480,11 +696,16 @@ target_type = "compose"
             store.close()
 
         self.assertEqual(
-            [(target.context, target.instance, target.target_id) for target in source_of_truth.targets],
+            [
+                (target.context, target.instance, target.target_id)
+                for target in source_of_truth.targets
+            ],
             [("cm", "testing", "compose-cm-db"), ("opw", "prod", "compose-db")],
         )
 
-    def test_read_control_plane_dokploy_source_of_truth_requires_database_target_ids_without_file_fallback(self) -> None:
+    def test_read_control_plane_dokploy_source_of_truth_requires_database_target_ids_without_file_fallback(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -511,7 +732,9 @@ target_type = "compose"
 
             store.close()
 
-        self.assertIn("Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception))
+        self.assertIn(
+            "Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception)
+        )
 
     def test_read_control_plane_dokploy_source_of_truth_reads_database_target_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -542,7 +765,43 @@ target_type = "compose"
         self.assertEqual(len(source_of_truth.targets), 1)
         self.assertEqual(source_of_truth.targets[0].target_id, "compose-123")
 
-    def test_read_control_plane_dokploy_source_of_truth_fails_closed_when_target_id_missing(self) -> None:
+    def test_read_control_plane_dokploy_source_of_truth_preserves_target_policies(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "prod"
+target_id = "compose-123"
+target_type = "compose"
+
+[targets.policies.shopify]
+protected_store_keys = ["yps-your-part-supplier"]
+""",
+            )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                    control_plane_root=control_plane_root
+                )
+
+            store.close()
+
+        self.assertEqual(
+            source_of_truth.targets[0].policies.shopify.protected_store_keys,
+            ("yps-your-part-supplier",),
+        )
+
+    def test_read_control_plane_dokploy_source_of_truth_fails_closed_when_target_id_missing(
+        self,
+    ) -> None:
         with self.assertRaises(click.ClickException) as raised_error:
             control_plane_dokploy.build_dokploy_source_of_truth_from_records(
                 (
@@ -560,9 +819,13 @@ target_type = "compose"
                 (),
             )
 
-        self.assertIn("Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception))
+        self.assertIn(
+            "Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception)
+        )
 
-    def test_read_control_plane_dokploy_source_of_truth_rejects_duplicate_context_instance_targets(self) -> None:
+    def test_read_control_plane_dokploy_source_of_truth_rejects_duplicate_context_instance_targets(
+        self,
+    ) -> None:
         duplicate_records = (
             control_plane_dokploy.build_dokploy_target_record_from_definition(
                 control_plane_dokploy.DokployTargetDefinition(
@@ -596,9 +859,13 @@ target_type = "compose"
         )
 
         with self.assertRaises(ValidationError) as raised_error:
-            control_plane_dokploy.build_dokploy_source_of_truth_from_records(duplicate_records, target_id_records)
+            control_plane_dokploy.build_dokploy_source_of_truth_from_records(
+                duplicate_records, target_id_records
+            )
 
-        self.assertIn("Duplicate Dokploy target definition for opw/prod", str(raised_error.exception))
+        self.assertIn(
+            "Duplicate Dokploy target definition for opw/prod", str(raised_error.exception)
+        )
 
     def test_read_control_plane_dokploy_source_of_truth_rejects_dev_lane_targets(self) -> None:
         with self.assertRaises(ValidationError) as raised_error:
@@ -650,7 +917,9 @@ target_type = "compose"
                     host="https://dokploy.db.example",
                     token="db-token",
                 )
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+                host, token = control_plane_dokploy.read_dokploy_config(
+                    control_plane_root=control_plane_root
+                )
 
             store.close()
 
@@ -681,7 +950,9 @@ target_type = "compose"
                     host="https://dokploy.db.example",
                     token="db-token",
                 )
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+                host, token = control_plane_dokploy.read_dokploy_config(
+                    control_plane_root=control_plane_root
+                )
 
             store.close()
 
@@ -710,7 +981,9 @@ target_type = "compose"
                     host="https://dokploy.db.example",
                     token="db-token",
                 )
-                host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+                host, token = control_plane_dokploy.read_dokploy_config(
+                    control_plane_root=control_plane_root
+                )
 
             store.close()
 
@@ -733,7 +1006,10 @@ target_type = "compose"
                 with self.assertRaises(click.ClickException) as raised_error:
                     control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
 
-        self.assertIn("Configure Launchplane-managed Dokploy secrets in the shared store", str(raised_error.exception))
+        self.assertIn(
+            "Configure Launchplane-managed Dokploy secrets in the shared store",
+            str(raised_error.exception),
+        )
 
     def test_read_dokploy_config_fails_closed_with_only_process_environment_bootstrap(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -750,7 +1026,10 @@ target_type = "compose"
                 with self.assertRaises(click.ClickException) as raised_error:
                     control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
 
-        self.assertIn("Configure Launchplane-managed Dokploy secrets in the shared store", str(raised_error.exception))
+        self.assertIn(
+            "Configure Launchplane-managed Dokploy secrets in the shared store",
+            str(raised_error.exception),
+        )
 
     def test_read_control_plane_environment_values_reads_managed_secrets_only(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -801,7 +1080,9 @@ target_type = "compose"
 
         self.assertIn("DOKPLOY_HOST or DOKPLOY_TOKEN", str(raised_error.exception))
 
-    def test_run_compose_post_deploy_update_applies_explicit_env_file_without_control_plane_secrets(self) -> None:
+    def test_run_compose_post_deploy_update_applies_explicit_env_file_without_control_plane_secrets(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             env_file = Path(temporary_directory_name) / "post-deploy.env"
             env_file.write_text(
@@ -814,44 +1095,61 @@ target_type = "compose"
                 ),
                 encoding="utf-8",
             )
-            target_definition = control_plane_dokploy.DokployTargetDefinition(context="opw", instance="prod",
-                                                                              target_id="compose-123",
-                                                                              target_name="opw-prod")
+            target_definition = control_plane_dokploy.DokployTargetDefinition(
+                context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+            )
             updated_env_payloads: list[str] = []
             schedule_payloads: list[dict[str, object]] = []
             request_paths: list[str] = []
 
-            with patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
-                return_value={
-                    "env": "ODOO_DB_NAME=old_db\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
-                    "appName": "opw-prod-app",
-                    "serverId": "server-123",
-                },
-            ), patch(
-                "control_plane.dokploy.update_dokploy_target_env",
-                side_effect=lambda **kwargs: updated_env_payloads.append(str(kwargs["env_text"])),
-            ), patch(
-                "control_plane.dokploy.latest_deployment_for_target",
-                return_value={"deploymentId": "deployment-before"},
-            ), patch(
-                "control_plane.dokploy.wait_for_target_deployment",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.dokploy.find_matching_dokploy_schedule",
-                return_value=None,
-            ), patch(
-                "control_plane.dokploy.upsert_dokploy_schedule",
-                side_effect=lambda **kwargs: schedule_payloads.append(kwargs["schedule_payload"]) or {"scheduleId": "schedule-123"},
-            ), patch(
-                "control_plane.dokploy.latest_deployment_for_schedule",
-                return_value={"deploymentId": "schedule-before"},
-            ), patch(
-                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.dokploy.dokploy_request",
-                side_effect=lambda **kwargs: request_paths.append(str(kwargs["path"])) or {"ok": True},
+            with (
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "env": "ODOO_DB_NAME=old_db\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                        "appName": "opw-prod-app",
+                        "serverId": "server-123",
+                    },
+                ),
+                patch(
+                    "control_plane.dokploy.update_dokploy_target_env",
+                    side_effect=lambda **kwargs: updated_env_payloads.append(
+                        str(kwargs["env_text"])
+                    ),
+                ),
+                patch(
+                    "control_plane.dokploy.latest_deployment_for_target",
+                    return_value={"deploymentId": "deployment-before"},
+                ),
+                patch(
+                    "control_plane.dokploy.wait_for_target_deployment",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.dokploy.find_matching_dokploy_schedule",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.dokploy.upsert_dokploy_schedule",
+                    side_effect=lambda **kwargs: (
+                        schedule_payloads.append(kwargs["schedule_payload"])
+                        or {"scheduleId": "schedule-123"}
+                    ),
+                ),
+                patch(
+                    "control_plane.dokploy.latest_deployment_for_schedule",
+                    return_value={"deploymentId": "schedule-before"},
+                ),
+                patch(
+                    "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.dokploy.dokploy_request",
+                    side_effect=lambda **kwargs: (
+                        request_paths.append(str(kwargs["path"])) or {"ok": True}
+                    ),
+                ),
             ):
                 control_plane_dokploy.run_compose_post_deploy_update(
                     host="https://dokploy.example.com",
@@ -870,9 +1168,9 @@ target_type = "compose"
         self.assertIn("/api/schedule.runManually", request_paths)
 
     def test_run_compose_post_deploy_update_requires_database_name(self) -> None:
-        target_definition = control_plane_dokploy.DokployTargetDefinition(context="opw", instance="prod",
-                                                                          target_id="compose-123",
-                                                                          target_name="opw-prod")
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+        )
 
         with patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
@@ -904,9 +1202,9 @@ target_type = "compose"
                 ),
                 encoding="utf-8",
             )
-            target_definition = control_plane_dokploy.DokployTargetDefinition(context="opw", instance="prod",
-                                                                              target_id="compose-123",
-                                                                              target_name="opw-prod")
+            target_definition = control_plane_dokploy.DokployTargetDefinition(
+                context="opw", instance="prod", target_id="compose-123", target_name="opw-prod"
+            )
 
             with patch(
                 "control_plane.dokploy.fetch_dokploy_target_payload",
@@ -930,7 +1228,9 @@ target_type = "compose"
 
 class LaunchplaneServiceDeployTests(unittest.TestCase):
     @staticmethod
-    def _target_payload(*, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123") -> dict[str, object]:
+    def _target_payload(
+        *, env_text: str, custom_git_ssh_key_id: str = "ssh-key-123"
+    ) -> dict[str, object]:
         return {
             "name": "launchplane",
             "appName": "compose-launchplane",
@@ -964,6 +1264,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                 "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com",
             },
             required_workflow_environment_keys=("ENV_OVERRIDE_SHOPIFY__API_TOKEN",),
+            protected_shopify_store_keys=("yps-your-part-supplier",),
         )
 
         self.assertIn(
@@ -974,8 +1275,15 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             "workflow_environment+=(-e ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=https://opw-prod.example.com)",
             script,
         )
-        self.assertIn("required_workflow_environment_keys+=(ENV_OVERRIDE_SHOPIFY__API_TOKEN)", script)
+        self.assertIn(
+            "required_workflow_environment_keys+=(ENV_OVERRIDE_SHOPIFY__API_TOKEN)", script
+        )
+        self.assertIn("protected_shopify_store_keys+=(yps-your-part-supplier)", script)
         self.assertIn("Missing required Odoo override environment key", script)
+        self.assertIn("Protected Shopify store key is not allowed on this Dokploy lane.", script)
+        self.assertIn(
+            'if [ "${exit_status}" -eq 0 ] && [ "${restart_web_on_success}" = "1" ]', script
+        )
         self.assertIn('"${workflow_environment[@]}"', script)
 
     def test_service_deploy_dokploy_image_rolls_forward_and_verifies_health(self) -> None:
@@ -983,36 +1291,44 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         captured_env_updates: list[dict[str, object]] = []
         captured_trigger_calls: list[dict[str, object]] = []
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value=self._target_payload(
-                env_text=(
-                    "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
-                    "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
-                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
-                    "DOKPLOY_HOST=https://dokploy.example.com\n"
-                    "DOKPLOY_TOKEN=token-123\n"
-                    "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value=self._target_payload(
+                    env_text=(
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
+                        "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
+                        "DOKPLOY_HOST=https://dokploy.example.com\n"
+                        "DOKPLOY_TOKEN=token-123\n"
+                        "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                    ),
                 ),
             ),
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-            side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
-        ), patch(
-            "control_plane.dokploy.latest_deployment_for_target",
-            return_value={"deploymentId": "deploy-old"},
-        ), patch(
-            "control_plane.dokploy.trigger_deployment",
-            side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
-        ), patch(
-            "control_plane.dokploy.wait_for_target_deployment",
-            return_value="deployment=deploy-new status=done",
-        ), patch(
-            "control_plane.cli._wait_for_ship_healthcheck",
-            return_value=None,
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-old"},
+            ),
+            patch(
+                "control_plane.dokploy.trigger_deployment",
+                side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_target_deployment",
+                return_value="deployment=deploy-new status=done",
+            ),
+            patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                return_value=None,
+            ),
         ):
             result = runner.invoke(
                 main,
@@ -1036,7 +1352,9 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn("sha256:new", str(captured_env_updates[0]["env_text"]))
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["previous_image_reference"], "ghcr.io/every/launchplane@sha256:old")
+        self.assertEqual(
+            payload["previous_image_reference"], "ghcr.io/every/launchplane@sha256:old"
+        )
         self.assertEqual(payload["deployment_result"], "deployment=deploy-new status=done")
         self.assertEqual(payload["preflight"]["runtime_contract"]["database_host"], "db.internal")
         self.assertTrue(payload["preflight"]["custom_git_ssh_key_configured"])
@@ -1046,57 +1364,67 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         captured_env_updates: list[dict[str, object]] = []
         captured_trigger_calls: list[dict[str, object]] = []
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            side_effect=[
-                self._target_payload(
-                    env_text=(
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
-                        "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
-                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
-                        "DOKPLOY_HOST=https://dokploy.example.com\n"
-                        "DOKPLOY_TOKEN=token-123\n"
-                        "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                side_effect=[
+                    self._target_payload(
+                        env_text=(
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
+                            "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+                            "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
+                            "DOKPLOY_HOST=https://dokploy.example.com\n"
+                            "DOKPLOY_TOKEN=token-123\n"
+                            "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                        ),
                     ),
-                ),
-                self._target_payload(
-                    env_text=(
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:new\n"
-                        "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
-                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
-                        "DOKPLOY_HOST=https://dokploy.example.com\n"
-                        "DOKPLOY_TOKEN=token-123\n"
-                        "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                    self._target_payload(
+                        env_text=(
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:new\n"
+                            "LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://launchplane:test@db.internal:5432/launchplane\n"
+                            "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
+                            "DOKPLOY_HOST=https://dokploy.example.com\n"
+                            "DOKPLOY_TOKEN=token-123\n"
+                            "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                        ),
                     ),
-                ),
-            ],
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-            side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
-        ), patch(
-            "control_plane.dokploy.latest_deployment_for_target",
-            side_effect=[
-                {"deploymentId": "deploy-old"},
-                {"deploymentId": "deploy-new"},
-            ],
-        ), patch(
-            "control_plane.dokploy.trigger_deployment",
-            side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
-        ), patch(
-            "control_plane.dokploy.wait_for_target_deployment",
-            side_effect=[
-                "deployment=deploy-new status=done",
-                "deployment=deploy-rollback status=done",
-            ],
-        ), patch(
-            "control_plane.cli._wait_for_ship_healthcheck",
-            side_effect=[
-                click.ClickException("Healthcheck failed for https://launchplane.example.com/v1/health: http 503"),
-                None,
-            ],
+                ],
+            ),
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_target",
+                side_effect=[
+                    {"deploymentId": "deploy-old"},
+                    {"deploymentId": "deploy-new"},
+                ],
+            ),
+            patch(
+                "control_plane.dokploy.trigger_deployment",
+                side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_target_deployment",
+                side_effect=[
+                    "deployment=deploy-new status=done",
+                    "deployment=deploy-rollback status=done",
+                ],
+            ),
+            patch(
+                "control_plane.cli._wait_for_ship_healthcheck",
+                side_effect=[
+                    click.ClickException(
+                        "Healthcheck failed for https://launchplane.example.com/v1/health: http 503"
+                    ),
+                    None,
+                ],
+            ),
         ):
             result = runner.invoke(
                 main,
@@ -1128,14 +1456,17 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
     def test_service_inspect_dokploy_target_fails_closed_on_missing_runtime_contract(self) -> None:
         runner = CliRunner()
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value=self._target_payload(
-                env_text="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
-                custom_git_ssh_key_id="",
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value=self._target_payload(
+                    env_text="DOCKER_IMAGE_REFERENCE=ghcr.io/example/launchplane@sha256:old\n",
+                    custom_git_ssh_key_id="",
+                ),
             ),
         ):
             result = runner.invoke(
@@ -1167,26 +1498,33 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         )
         self.assertIn("Launchplane service Dokploy target preflight failed", result.output)
 
-    def test_service_deploy_dokploy_image_stops_before_env_change_when_preflight_fails(self) -> None:
+    def test_service_deploy_dokploy_image_stops_before_env_change_when_preflight_fails(
+        self,
+    ) -> None:
         runner = CliRunner()
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value=self._target_payload(
-                env_text=(
-                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
-                    "DOKPLOY_HOST=https://dokploy.example.com\n"
-                    "DOKPLOY_TOKEN=token-123\n"
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value=self._target_payload(
+                    env_text=(
+                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY=test-key\n"
+                        "DOKPLOY_HOST=https://dokploy.example.com\n"
+                        "DOKPLOY_TOKEN=token-123\n"
+                    ),
                 ),
             ),
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-        ) as update_target_env, patch(
-            "control_plane.dokploy.trigger_deployment",
-        ) as trigger_deployment:
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+            ) as update_target_env,
+            patch(
+                "control_plane.dokploy.trigger_deployment",
+            ) as trigger_deployment,
+        ):
             result = runner.invoke(
                 main,
                 [
@@ -1206,7 +1544,9 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertNotEqual(result.exit_code, 0, msg=result.output)
         update_target_env.assert_not_called()
         trigger_deployment.assert_not_called()
-        self.assertIn("Launchplane service target is missing LAUNCHPLANE_DATABASE_URL.", result.output)
+        self.assertIn(
+            "Launchplane service target is missing LAUNCHPLANE_DATABASE_URL.", result.output
+        )
         self.assertIn(
             "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE.",
             result.output,

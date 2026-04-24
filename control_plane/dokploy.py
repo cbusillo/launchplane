@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetPolicies
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -71,6 +72,7 @@ class DokployTargetDefinition(BaseModel):
     healthcheck_timeout_seconds: int | None = Field(default=None, ge=1)
     env: dict[str, str] = Field(default_factory=dict)
     domains: tuple[str, ...] = ()
+    policies: DokployTargetPolicies = Field(default_factory=DokployTargetPolicies)
 
     @model_validator(mode="after")
     def _validate_identity_fields(self) -> "DokployTargetDefinition":
@@ -125,6 +127,12 @@ def find_dokploy_target_definition(
         if target.context == context_name and target.instance == instance_name:
             return target
     return None
+
+
+def protected_shopify_store_keys_for_target_definition(
+    target_definition: DokployTargetDefinition,
+) -> tuple[str, ...]:
+    return target_definition.policies.shopify.protected_store_keys
 
 
 def resolve_ship_timeout_seconds(
@@ -267,6 +275,7 @@ def build_dokploy_target_record_from_definition(
         healthcheck_timeout_seconds=definition.healthcheck_timeout_seconds,
         env=dict(definition.env),
         domains=definition.domains,
+        policies=definition.policies,
         updated_at=updated_at,
         source_label=source_label,
     )
@@ -315,6 +324,7 @@ def build_dokploy_source_of_truth_from_records(
                 "healthcheck_timeout_seconds": record.healthcheck_timeout_seconds,
                 "env": dict(record.env),
                 "domains": list(record.domains),
+                "policies": record.policies.model_dump(mode="python"),
             }
         )
     if remaining_target_id_routes:
@@ -778,6 +788,7 @@ def run_compose_post_deploy_update(
     env_file: Path | None,
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
+    protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> None:
     compose_id = target_definition.target_id.strip()
     compose_name = target_definition.target_name.strip() or f"{target_definition.context}-{target_definition.instance}"
@@ -870,6 +881,7 @@ def run_compose_post_deploy_update(
         data_workflow_lock_path=data_workflow_lock_path,
         workflow_environment_overrides=workflow_environment_overrides or {},
         required_workflow_environment_keys=required_workflow_environment_keys,
+        protected_shopify_store_keys=protected_shopify_store_keys,
     )
     schedule_payload: JsonObject = {
         "name": schedule_name,
@@ -1093,6 +1105,7 @@ def _build_dokploy_data_workflow_script(
     data_workflow_lock_path: str,
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
+    protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> str:
     normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
     quoted_compose_app_name = shlex.quote(compose_app_name)
@@ -1101,6 +1114,10 @@ def _build_dokploy_data_workflow_script(
     quoted_lock_path = shlex.quote(data_workflow_lock_path)
     workflow_environment_lines = _render_docker_exec_environment_lines(workflow_environment_overrides or {})
     required_workflow_environment_lines = _render_required_environment_key_lines(required_workflow_environment_keys)
+    protected_shopify_store_key_lines = _render_bash_array_assignment_lines(
+        "protected_shopify_store_keys",
+        protected_shopify_store_keys,
+    )
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -1113,8 +1130,12 @@ workflow_environment=()
 {workflow_environment_lines}
 required_workflow_environment_keys=()
 {required_workflow_environment_lines}
+protected_shopify_store_keys=()
+{protected_shopify_store_key_lines}
 clear_stale_lock={'1' if clear_stale_lock else '0'}
 data_workflow_lock_path={quoted_lock_path}
+restart_web_on_success=0
+web_was_running=0
 
 resolve_container_id() {{
     local service_name="$1"
@@ -1141,12 +1162,23 @@ ensure_running() {{
 }}
 
 start_web_container() {{
+    if [ "${{web_was_running}}" != "1" ]; then
+        return
+    fi
     local current_status
     current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}" 2>/dev/null || true)
     if [ "${{current_status}}" != "running" ]; then
         echo "Starting web container ${{web_container_id}}"
         docker start "${{web_container_id}}" >/dev/null || true
     fi
+}}
+
+exit_trap() {{
+    local exit_status="$?"
+    if [ "${{exit_status}}" -eq 0 ] && [ "${{restart_web_on_success}}" = "1" ]; then
+        start_web_container
+    fi
+    exit "${{exit_status}}"
 }}
 
 database_container_id=$(resolve_container_id "database")
@@ -1163,10 +1195,11 @@ if [ "${{clear_stale_lock}}" = "1" ]; then
     docker exec -u root "${{script_runner_container_id}}" rm -f "${{data_workflow_lock_path}}"
 fi
 
-trap start_web_container EXIT
+trap exit_trap EXIT
 
 web_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")
 if [ "${{web_status}}" = "running" ]; then
+    web_was_running=1
     echo "Stopping web container ${{web_container_id}}"
     docker stop "${{web_container_id}}" >/dev/null
 fi
@@ -1238,7 +1271,50 @@ docker exec \
     "${{script_runner_container_id}}" \
     python3 -u /volumes/scripts/run_odoo_data_workflows.py "${{workflow_arguments[@]}}"
 
+if [ "${{#protected_shopify_store_keys[@]}}" -gt 0 ]; then
+    echo "Checking protected Shopify store keys for ${{database_name}}"
+    docker exec "${{script_runner_container_id}}" python3 - "${{database_name}}" "${{protected_shopify_store_keys[@]}}" <<'PY'
+import os
+import sys
+
+import psycopg2
+
+database_name = sys.argv[1]
+protected_store_keys = {{value.strip().lower() for value in sys.argv[2:] if value.strip()}}
+
+connection = psycopg2.connect(
+    host=(os.environ.get("ODOO_DB_HOST") or "database").strip(),
+    port=(os.environ.get("ODOO_DB_PORT") or "5432").strip(),
+    user=(os.environ.get("ODOO_DB_USER") or "odoo").strip(),
+    password=os.environ.get("ODOO_DB_PASSWORD") or "",
+    dbname=database_name,
+)
+try:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            "SELECT value FROM ir_config_parameter WHERE key = %s LIMIT 1",
+            ("shopify.shop_url_key",),
+        )
+        row = cursor.fetchone()
+finally:
+    connection.close()
+
+current_store_key = str(row[0]).strip() if row and row[0] is not None else ""
+normalized_store_key = current_store_key.lower()
+if normalized_store_key in protected_store_keys:
+    protected_list = ", ".join(sorted(protected_store_keys))
+    raise SystemExit(
+        "Protected Shopify store key is not allowed on this Dokploy lane. "
+        f"db={{database_name}} current={{current_store_key or '<empty>'}} protected={{protected_list}}"
+    )
+
+print(f"shopify_store_key_guard_pass db={{database_name}} value={{current_store_key or '<empty>'}}")
+PY
+fi
+
+restart_web_on_success=1
 start_web_container
+restart_web_on_success=0
 trap - EXIT
 """
 
@@ -1265,6 +1341,16 @@ def _render_required_environment_key_lines(environment_keys: tuple[str, ...]) ->
         if not normalized_key.replace("_", "A").isalnum() or normalized_key[0].isdigit():
             raise click.ClickException(f"Invalid required post-deploy workflow environment key: {normalized_key!r}.")
         lines.append(f"required_workflow_environment_keys+=({shlex.quote(normalized_key)})")
+    return "\n".join(lines)
+
+
+def _render_bash_array_assignment_lines(array_name: str, values: tuple[str, ...]) -> str:
+    lines: list[str] = []
+    for raw_value in values:
+        normalized_value = raw_value.strip()
+        if not normalized_value:
+            raise click.ClickException(f"{array_name} values must be non-empty.")
+        lines.append(f"{array_name}+=({shlex.quote(normalized_value)})")
     return "\n".join(lines)
 
 
