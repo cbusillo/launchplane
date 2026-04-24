@@ -1,5 +1,5 @@
 [build-system]
-requires = ["hatchling>=1.25"]
+requires = ["hatchling>=1.29.0"]
 build-backend = "hatchling.build"
 
 [project]
@@ -8,17 +8,17 @@ version = "0.1.0"
 description = "Launchplane control-plane contracts and workflows for deployment truth and promotion"
 requires-python = ">=3.13"
 dependencies = [
-    "click>=8.1",
-    "pydantic>=2.8",
-    "psycopg[binary]>=3.2",
-    "pyjwt[crypto]>=2.10",
+    "click>=8.3.3",
+    "pydantic>=2.13.3",
+    "psycopg[binary]>=3.3.3",
+    "pyjwt[crypto]>=2.12.1",
     "sqlalchemy>=2.0",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=1.11",
-    "ruff>=0.12",
+    "mypy>=1.20.2",
+    "ruff>=0.15.11",
 ]
 
 [project.scripts]
