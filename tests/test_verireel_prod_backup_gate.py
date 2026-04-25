@@ -1,5 +1,5 @@
 import unittest
-from subprocess import CompletedProcess
+from subprocess import CompletedProcess, TimeoutExpired
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -12,6 +12,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_backup_gate_worker
 from control_plane.workflows.verireel_prod_backup_gate import (
+    DEFAULT_TIMEOUT_SECONDS,
     VeriReelProdBackupGateRequest,
     VeriReelProdBackupGateWorkerRequest,
     VeriReelProdBackupGateWorkerResult,
@@ -121,6 +122,45 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
         self.assertEqual(worker_env["VERIREEL_PROD_BACKUP_STORAGE"], "pbs-runtime")
         self.assertEqual(worker_env["VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS"], "25000")
+
+    def test_prod_backup_gate_default_timeout_allows_longer_vzdump_backup(self) -> None:
+        self.assertEqual(DEFAULT_TIMEOUT_SECONDS, 900)
+
+        request = VeriReelProdBackupGateRequest(
+            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+        )
+
+        self.assertEqual(request.timeout_seconds, 900)
+
+    def test_run_delegated_worker_reports_timeout_as_click_exception(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_backup_gate._worker_environment",
+                    return_value={
+                        "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "worker"
+                    },
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_backup_gate.subprocess.run",
+                    side_effect=TimeoutExpired(cmd=["worker"], timeout=12),
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    click.ClickException,
+                    "VeriReel prod backup gate worker timed out after 12 seconds",
+                ):
+                    _run_delegated_worker(
+                        control_plane_root=root,
+                        request=VeriReelProdBackupGateWorkerRequest(
+                            context="verireel",
+                            instance="prod",
+                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                            timeout_seconds=12,
+                        ),
+                    )
 
     def test_worker_uses_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
         captured_commands: list[list[str]] = []

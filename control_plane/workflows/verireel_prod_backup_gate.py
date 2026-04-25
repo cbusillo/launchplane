@@ -15,7 +15,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-DEFAULT_TIMEOUT_SECONDS = 300
+DEFAULT_TIMEOUT_SECONDS = 900
 WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND"
 WORKER_RUNTIME_ENV_KEYS = (
     WORKER_COMMAND_ENV_VAR,
@@ -148,15 +148,22 @@ def _run_delegated_worker(
         control_plane_root=control_plane_root,
         request=request,
     )
-    completed = subprocess.run(
-        _worker_command(environment=worker_environment),
-        input=request.model_dump_json(),
-        text=True,
-        capture_output=True,
-        timeout=max(request.timeout_seconds, 1),
-        check=False,
-        env=worker_environment,
-    )
+    timeout_seconds = max(request.timeout_seconds, 1)
+    try:
+        completed = subprocess.run(
+            _worker_command(environment=worker_environment),
+            input=request.model_dump_json(),
+            text=True,
+            capture_output=True,
+            timeout=timeout_seconds,
+            check=False,
+            env=worker_environment,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise click.ClickException(
+            "VeriReel prod backup gate worker timed out after "
+            f"{timeout_seconds} seconds."
+        ) from exc
     stdout = completed.stdout.strip()
     if not stdout:
         detail = (
