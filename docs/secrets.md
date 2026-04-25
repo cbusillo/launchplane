@@ -32,6 +32,14 @@ title: Secrets
   The worker also requires `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` and
   `VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS`; the private key must come from a
   managed runtime-environment secret binding.
+- VeriReel prod backup-gate dispatch resolves
+  `LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND` from the same
+  `verireel/prod` runtime-environment contract and shares the Proxmox SSH
+  secret surface with rollback. Non-secret backup-shape values such as
+  `VERIREEL_PROD_BACKUP_MODE`, `VERIREEL_PROD_BACKUP_STORAGE`,
+  `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
+  `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` also belong in DB-backed
+  runtime-environment records instead of repo or host env.
 
 ## DB-Backed Secret Resolution
 
@@ -65,6 +73,11 @@ title: Secrets
     `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
     `VERIREEL_PROD_CT_ID`, with `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` stored
     as a managed secret
+  - backup-gate worker values such as
+    `LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND`,
+    `VERIREEL_PROD_BACKUP_MODE`, `VERIREEL_PROD_BACKUP_STORAGE`,
+    `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
+    `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS`
 
 ## Rules
 

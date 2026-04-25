@@ -112,6 +112,12 @@ live authority across DB, files, and process env:
 - VeriReel prod rollback dispatch resolves worker/runtime-action config from
   `verireel/prod` runtime-environment records, then passes those values to the
   delegated worker process
+- VeriReel prod backup-gate dispatch resolves the same `verireel/prod`
+  delegated-worker runtime contract plus backup-shape values such as
+  `VERIREEL_PROD_BACKUP_MODE`, `VERIREEL_PROD_BACKUP_STORAGE`,
+  `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
+  `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` from DB-backed runtime-environment
+  records before it captures the backup gate
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.

@@ -88,6 +88,7 @@ Current implementation scope:
 - `POST /v1/drivers/verireel/preview-destroy`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
+- `POST /v1/drivers/verireel/prod-backup-gate`
 - `POST /v1/drivers/verireel/prod-promotion`
 - `POST /v1/drivers/verireel/prod-rollback`
 
@@ -231,8 +232,11 @@ Current derived-state behavior:
 - Launchplane can now execute the first explicit VeriReel driver actions
   directly: `POST /v1/drivers/verireel/testing-deploy` and
   `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
-  deploys, write initial deployment records, and return deploy timing/status for
-  the caller to thread into later verification or promotion evidence.
+  deploys, `POST /v1/drivers/verireel/prod-backup-gate` captures the prod
+  backup gate and writes the backup-gate record, and the promotion / rollback
+  drivers own the remaining stable-lane execution path. Those routes return the
+  durable record identifiers plus timing/status for the caller to thread into
+  later verification or promotion evidence.
 
 ## Core Rules
 

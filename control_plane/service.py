@@ -46,6 +46,10 @@ from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
 )
+from control_plane.workflows.verireel_prod_backup_gate import (
+    VeriReelProdBackupGateRequest,
+    execute_verireel_prod_backup_gate,
+)
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
     execute_verireel_prod_promotion,
@@ -188,6 +192,20 @@ class VeriReelProdPromotionEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelProdPromotionEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel prod promotion requires product 'verireel'.")
+        return self
+
+
+class VeriReelProdBackupGateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    backup_gate: VeriReelProdBackupGateRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelProdBackupGateEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel prod backup gate requires product 'verireel'.")
         return self
 
 
@@ -701,6 +719,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/testing-deploy",
         "/v1/drivers/verireel/prod-deploy",
+        "/v1/drivers/verireel/prod-backup-gate",
         "/v1/drivers/verireel/prod-promotion",
         "/v1/drivers/verireel/prod-rollback",
     }
@@ -1278,6 +1297,46 @@ def create_launchplane_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/verireel/prod-backup-gate":
+                request = VeriReelProdBackupGateEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_prod_backup_gate.execute",
+                    product=request.product,
+                    context=request.backup_gate.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel prod backup gate driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_prod_backup_gate(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.backup_gate,
+                )
+                result = {"backup_gate_record_id": driver_result.backup_record_id}
             elif path == "/v1/drivers/verireel/prod-promotion":
                 request = VeriReelProdPromotionEnvelope.model_validate(payload)
                 if not authz_policy.allows(

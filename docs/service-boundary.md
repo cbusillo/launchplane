@@ -240,6 +240,7 @@ The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
+- `POST /v1/drivers/verireel/prod-backup-gate`
 - `POST /v1/drivers/verireel/prod-promotion`
 - `POST /v1/drivers/verireel/prod-rollback`
 - `POST /v1/drivers/verireel/preview-refresh`
@@ -300,6 +301,8 @@ retries do not collide. The regular cleanup workflow uses
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel prod deploy driver:
   `verireel-prod-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel prod backup gate driver:
+  `verireel-prod-backup-gate:<product>:<context>:<instance>:<backup_record_id>`
 - VeriReel prod promotion driver:
   `verireel-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>:<backup_record_id>:<promotion_record_id>:<expected_build_revision>:<expected_build_tag>`
 

@@ -35,6 +35,7 @@ from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyResult,
     VeriReelPreviewRefreshResult,
 )
+from control_plane.workflows.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
@@ -1550,6 +1551,120 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "rollback": {
                         "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
                         "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_prod_backup_gate_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_prod_backup_gate.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_prod_backup_gate",
+                return_value=VeriReelProdBackupGateResult(
+                    backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                    backup_status="pass",
+                    backup_started_at="2026-04-25T00:15:00Z",
+                    backup_finished_at="2026-04-25T00:16:00Z",
+                    snapshot_name="ver-predeploy-20260425-001500",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-backup-gate",
+                    payload={
+                        "product": "verireel",
+                        "backup_gate": {
+                            "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1"
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "backup_gate_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                },
+            )
+            self.assertEqual(payload["result"]["backup_status"], "pass")
+            execute_mock.assert_called_once()
+
+    def test_verireel_prod_backup_gate_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": ["promotion.write"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/prod-backup-gate",
+                payload={
+                    "product": "verireel",
+                    "backup_gate": {
+                        "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1"
                     },
                 },
             )
