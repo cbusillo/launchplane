@@ -180,6 +180,10 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertIn("runtime-user@proxmox.runtime.example", command)
         remote_command_start = command.index("runtime-user@proxmox.runtime.example") + 1
         self.assertEqual(command[remote_command_start:remote_command_start + 3], ["pct", "snapshot", "211"])
+        self.assertRegex(
+            command[remote_command_start + 3],
+            r"^ver-predeploy-\d{8}-\d{6}-[0-9a-f]{6}$",
+        )
 
     def test_worker_requires_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
         with patch.dict(

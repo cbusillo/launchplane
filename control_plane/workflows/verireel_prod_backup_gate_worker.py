@@ -7,6 +7,7 @@ from tempfile import TemporaryDirectory
 import subprocess
 import sys
 import time
+import uuid
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -92,7 +93,8 @@ def _normalize_backup_modes(raw_value: str) -> tuple[str, ...]:
 
 def _format_snapshot_name(prefix: str) -> str:
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    return f"{prefix}-{timestamp}"
+    entropy = uuid.uuid4().hex[:6]
+    return f"{prefix}-{timestamp}-{entropy}"
 
 
 def _snapshot_timestamp(snapshot_name: str, prefixes: tuple[str, ...]) -> tuple[str, int]:
