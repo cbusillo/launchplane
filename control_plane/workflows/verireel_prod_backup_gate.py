@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import threading
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -15,8 +16,11 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-DEFAULT_TIMEOUT_SECONDS = 900
+DEFAULT_TIMEOUT_SECONDS = 1800
 WORKER_COMMAND_ENV_VAR = "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND"
+ASYNC_SOURCE = "launchplane-verireel-prod-backup-gate"
+_ACTIVE_BACKUP_GATES: set[str] = set()
+_ACTIVE_BACKUP_GATES_LOCK = threading.Lock()
 WORKER_RUNTIME_ENV_KEYS = (
     WORKER_COMMAND_ENV_VAR,
     "VERIREEL_PROD_PROXMOX_HOST",
@@ -204,11 +208,125 @@ def _build_backup_gate_record(
         context=request.context,
         instance=request.instance,
         created_at=worker_result.finished_at or utc_now_timestamp(),
-        source="launchplane-verireel-prod-backup-gate",
+        source=ASYNC_SOURCE,
         required=True,
         status="pass" if worker_result.status == "pass" else "fail",
         evidence=evidence if worker_result.status == "pass" else {},
     )
+
+
+def _pending_backup_gate_record(*, request: VeriReelProdBackupGateRequest) -> BackupGateRecord:
+    return BackupGateRecord(
+        record_id=request.backup_record_id,
+        context=request.context,
+        instance=request.instance,
+        created_at=utc_now_timestamp(),
+        source=ASYNC_SOURCE,
+        required=True,
+        status="pending",
+        evidence={},
+    )
+
+
+def _failed_backup_gate_record(
+    *,
+    request: VeriReelProdBackupGateRequest,
+    error_message: str,
+) -> BackupGateRecord:
+    return BackupGateRecord(
+        record_id=request.backup_record_id,
+        context=request.context,
+        instance=request.instance,
+        created_at=utc_now_timestamp(),
+        source=ASYNC_SOURCE,
+        required=True,
+        status="fail",
+        evidence={"error_message": error_message} if error_message else {},
+    )
+
+
+def _result_from_backup_gate_record(
+    *,
+    request: VeriReelProdBackupGateRequest,
+    record: BackupGateRecord,
+) -> VeriReelProdBackupGateResult:
+    evidence = dict(record.evidence)
+    snapshot_name = evidence.get("snapshot_name", "")
+    error_message = ""
+    if record.status == "fail":
+        error_message = evidence.get("error_message", "VeriReel prod backup gate failed.")
+    return VeriReelProdBackupGateResult(
+        backup_record_id=request.backup_record_id,
+        backup_status=record.status,
+        backup_started_at=evidence.get("started_at", ""),
+        backup_finished_at=record.created_at if record.status in {"pass", "fail"} else "",
+        snapshot_name=snapshot_name,
+        error_message=error_message,
+    )
+
+
+def _read_existing_backup_gate_record(
+    *,
+    record_store: FilesystemRecordStore,
+    record_id: str,
+) -> BackupGateRecord | None:
+    try:
+        return record_store.read_backup_gate_record(record_id)
+    except FileNotFoundError:
+        return None
+
+
+def _run_backup_gate_worker_and_store(
+    *,
+    control_plane_root: Path,
+    record_store: FilesystemRecordStore,
+    request: VeriReelProdBackupGateRequest,
+) -> None:
+    try:
+        try:
+            worker_result = _run_delegated_worker(
+                control_plane_root=control_plane_root,
+                request=VeriReelProdBackupGateWorkerRequest(
+                    context=request.context,
+                    instance=request.instance,
+                    backup_record_id=request.backup_record_id,
+                    timeout_seconds=request.timeout_seconds,
+                ),
+            )
+        except click.ClickException as exc:
+            record_store.write_backup_gate_record(
+                _failed_backup_gate_record(request=request, error_message=str(exc))
+            )
+            return
+        record_store.write_backup_gate_record(
+            _build_backup_gate_record(request=request, worker_result=worker_result)
+        )
+    finally:
+        with _ACTIVE_BACKUP_GATES_LOCK:
+            _ACTIVE_BACKUP_GATES.discard(request.backup_record_id)
+
+
+def _ensure_async_backup_gate_worker(
+    *,
+    control_plane_root: Path,
+    record_store: FilesystemRecordStore,
+    request: VeriReelProdBackupGateRequest,
+) -> None:
+    with _ACTIVE_BACKUP_GATES_LOCK:
+        if request.backup_record_id in _ACTIVE_BACKUP_GATES:
+            return
+        _ACTIVE_BACKUP_GATES.add(request.backup_record_id)
+    worker_thread = threading.Thread(
+        target=_run_backup_gate_worker_and_store,
+        kwargs={
+            "control_plane_root": control_plane_root,
+            "record_store": record_store,
+            "request": request,
+        },
+        daemon=True,
+        name=f"verireel-prod-backup-gate-{request.backup_record_id}",
+    )
+    worker_thread.start()
 
 
 def execute_verireel_prod_backup_gate(
@@ -216,7 +334,24 @@ def execute_verireel_prod_backup_gate(
     control_plane_root: Path,
     record_store: FilesystemRecordStore,
     request: VeriReelProdBackupGateRequest,
+    run_async: bool = False,
 ) -> VeriReelProdBackupGateResult:
+    if run_async:
+        existing_record = _read_existing_backup_gate_record(
+            record_store=record_store,
+            record_id=request.backup_record_id,
+        )
+        if existing_record is None:
+            existing_record = _pending_backup_gate_record(request=request)
+            record_store.write_backup_gate_record(existing_record)
+        if existing_record.status == "pending":
+            _ensure_async_backup_gate_worker(
+                control_plane_root=control_plane_root,
+                record_store=record_store,
+                request=request,
+            )
+        return _result_from_backup_gate_record(request=request, record=existing_record)
+
     try:
         worker_result = _run_delegated_worker(
             control_plane_root=control_plane_root,
@@ -235,10 +370,10 @@ def execute_verireel_prod_backup_gate(
                 context=request.context,
                 instance=request.instance,
                 created_at=finished_at,
-                source="launchplane-verireel-prod-backup-gate",
+                source=ASYNC_SOURCE,
                 required=True,
                 status="fail",
-                evidence={},
+                evidence={"error_message": str(exc)},
             )
         )
         return VeriReelProdBackupGateResult(

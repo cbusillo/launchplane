@@ -6,13 +6,15 @@ import hashlib
 import io
 import json
 import os
+from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
 from typing import Callable
-from wsgiref.simple_server import make_server
+from wsgiref.simple_server import WSGIServer, make_server
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from jwt import InvalidTokenError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import secrets as control_plane_secrets
@@ -239,6 +241,10 @@ class VeriReelProdBackupGateEnvelope(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     backup_gate: VeriReelProdBackupGateRequest
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelProdBackupGateEnvelope":
@@ -1335,17 +1341,6 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
                 driver_result = resolve_verireel_stable_environment(
                     control_plane_root=resolved_root,
                     request=request.environment,
@@ -1468,6 +1463,7 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     record_store=record_store,
                     request=request.backup_gate,
+                    run_async=True,
                 )
                 result = {"backup_gate_record_id": driver_result.backup_record_id}
             elif path == "/v1/drivers/verireel/prod-promotion":
@@ -1789,7 +1785,7 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=request.destroy,
                 )
-        except PermissionError as exc:
+        except (PermissionError, InvalidTokenError) as exc:
             return _json_response(
                 start_response=start_response,
                 status_code=401,
@@ -1830,7 +1826,17 @@ def create_launchplane_service_app(
             result=result,
             driver_result=driver_result,
         )
-        if method == "POST" and request_idempotency_key:
+        should_store_idempotency = True
+        if path == "/v1/drivers/verireel/stable-environment":
+            should_store_idempotency = False
+        if path == "/v1/drivers/verireel/prod-backup-gate":
+            driver_result_status = ""
+            if isinstance(driver_result, dict):
+                driver_result_status = str(driver_result.get("backup_status") or "")
+            elif driver_result is not None:
+                driver_result_status = str(getattr(driver_result, "backup_status", "") or "")
+            should_store_idempotency = driver_result_status != "pending"
+        if method == "POST" and request_idempotency_key and should_store_idempotency:
             _write_idempotency_record(
                 record_store=record_store,
                 scope=request_scope,
@@ -1869,6 +1875,6 @@ def serve_launchplane_service(
         authz_policy=authz_policy,
         database_url=database_url,
     )
-    with make_server(host, port, application) as server:
+    with make_server(host, port, application, server_class=ThreadingWSGIServer) as server:
         click.echo(f"Launchplane service listening on http://{host}:{port}")
         server.serve_forever()

@@ -1869,6 +1869,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             self.assertEqual(payload["result"]["backup_status"], "pass")
             execute_mock.assert_called_once()
+            self.assertTrue(execute_mock.call_args.kwargs["run_async"])
 
     def test_verireel_prod_backup_gate_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

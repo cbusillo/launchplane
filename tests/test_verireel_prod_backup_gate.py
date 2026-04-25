@@ -124,13 +124,64 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS"], "25000")
 
     def test_prod_backup_gate_default_timeout_allows_longer_vzdump_backup(self) -> None:
-        self.assertEqual(DEFAULT_TIMEOUT_SECONDS, 900)
+        self.assertEqual(DEFAULT_TIMEOUT_SECONDS, 1800)
 
         request = VeriReelProdBackupGateRequest(
             backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
         )
 
-        self.assertEqual(request.timeout_seconds, 900)
+        self.assertEqual(request.timeout_seconds, 1800)
+
+    def test_execute_verireel_prod_backup_gate_async_records_pending_and_completes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            record_store = self._record_store(root)
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate._ensure_async_backup_gate_worker"
+            ) as worker_mock:
+                result = execute_verireel_prod_backup_gate(
+                    control_plane_root=root,
+                    record_store=record_store,
+                    request=VeriReelProdBackupGateRequest(
+                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+                    ),
+                    run_async=True,
+                )
+
+            self.assertEqual(result.backup_status, "pending")
+            worker_mock.assert_called_once()
+            record = record_store.read_backup_gate_record(result.backup_record_id)
+            self.assertEqual(record.status, "pending")
+
+            record_store.write_backup_gate_record(
+                BackupGateRecord(
+                    record_id=result.backup_record_id,
+                    context="verireel",
+                    instance="prod",
+                    created_at="2026-04-25T00:16:00Z",
+                    source="launchplane-verireel-prod-backup-gate",
+                    required=True,
+                    status="pass",
+                    evidence={"snapshot_name": "ver-predeploy-20260425-001500"},
+                )
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_prod_backup_gate._ensure_async_backup_gate_worker"
+            ) as worker_mock:
+                completed_result = execute_verireel_prod_backup_gate(
+                    control_plane_root=root,
+                    record_store=record_store,
+                    request=VeriReelProdBackupGateRequest(
+                        backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1"
+                    ),
+                    run_async=True,
+                )
+
+            self.assertEqual(completed_result.backup_status, "pass")
+            self.assertEqual(completed_result.snapshot_name, "ver-predeploy-20260425-001500")
+            worker_mock.assert_not_called()
 
     def test_run_delegated_worker_reports_timeout_as_click_exception(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
