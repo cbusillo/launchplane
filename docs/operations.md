@@ -238,8 +238,11 @@ Current derived-state behavior:
   operations that need Dokploy authority, such as testing migrations, preview
   owner-admin verification helpers, reset-testing, and preview inventory, also
   flow through Launchplane driver routes instead of product-repo workflow
-  secrets. Those routes return durable record identifiers or timing/status for
-  the caller to thread into later verification or promotion evidence.
+  secrets. Stable testing/prod base URLs and target identity are resolved from
+  Launchplane's DB-backed target/runtime records through the stable-environment
+  route. Those routes return durable record identifiers, topology metadata, or
+  timing/status for the caller to thread into later verification or promotion
+  evidence.
 
 ## Core Rules
 

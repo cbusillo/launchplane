@@ -239,6 +239,7 @@ These use the same authn/authz boundary as evidence ingress:
 The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/stable-environment`
 - `POST /v1/drivers/verireel/app-maintenance`
 - `POST /v1/drivers/verireel/prod-deploy`
 - `POST /v1/drivers/verireel/prod-backup-gate`
@@ -251,8 +252,9 @@ The first explicit driver routes now in service are:
 The first preview driver cut stays intentionally narrow: Launchplane owns preview
 runtime refresh, inventory, and teardown, while VeriReel still owns image
 build/publish, browser verification, and the follow-up preview evidence write.
-Browser verification can request allow-listed app maintenance actions through
-Launchplane when it needs remote owner-admin setup or cleanup.
+Browser verification can request Launchplane-resolved stable environment
+metadata plus allow-listed app maintenance actions when it needs base URLs,
+target identity, or remote owner-admin setup/cleanup.
 
 VeriReel prod rollback now has a dedicated Launchplane driver route, but it
 still depends on a privileged delegated-worker runtime contract for Proxmox

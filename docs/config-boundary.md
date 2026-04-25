@@ -122,6 +122,10 @@ live authority across DB, files, and process env:
   token, and target identity from Launchplane-managed secrets and DB-backed
   target records. Product-repo workflows may pass operation intent, preview app
   identity, and GitHub OIDC identity, but not Dokploy credentials.
+- VeriReel stable environment metadata, including testing/prod target names,
+  target ids, base URLs, and health URLs, is served by Launchplane from
+  DB-backed target/runtime records. Product-repo workflows should ask
+  Launchplane for those values instead of hard-coding stable lane topology.
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.

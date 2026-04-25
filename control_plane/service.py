@@ -46,6 +46,10 @@ from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
 )
+from control_plane.workflows.verireel_environment import (
+    VeriReelStableEnvironmentRequest,
+    resolve_verireel_stable_environment,
+)
 from control_plane.workflows.verireel_app_maintenance import (
     VeriReelAppMaintenanceRequest,
     execute_verireel_app_maintenance,
@@ -198,6 +202,20 @@ class VeriReelAppMaintenanceEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelAppMaintenanceEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel app maintenance requires product 'verireel'.")
+        return self
+
+
+class VeriReelStableEnvironmentEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    environment: VeriReelStableEnvironmentRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelStableEnvironmentEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel stable environment requires product 'verireel'.")
         return self
 
 
@@ -753,6 +771,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/preview-inventory",
         "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/testing-deploy",
+        "/v1/drivers/verireel/stable-environment",
         "/v1/drivers/verireel/app-maintenance",
         "/v1/drivers/verireel/prod-deploy",
         "/v1/drivers/verireel/prod-backup-gate",
@@ -1293,6 +1312,45 @@ def create_launchplane_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/verireel/stable-environment":
+                request = VeriReelStableEnvironmentEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_stable_environment.read",
+                    product=request.product,
+                    context=request.environment.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot read the VeriReel stable environment"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = resolve_verireel_stable_environment(
+                    control_plane_root=resolved_root,
+                    request=request.environment,
+                )
+                result = {}
             elif path == "/v1/drivers/verireel/app-maintenance":
                 request = VeriReelAppMaintenanceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
