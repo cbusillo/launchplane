@@ -50,7 +50,7 @@ fi
 
 if [ -z "$policy_file" ]; then
   echo "Launchplane service requires an explicit policy input via LAUNCHPLANE_POLICY_TOML, LAUNCHPLANE_POLICY_B64, or LAUNCHPLANE_POLICY_FILE." >&2
-  echo "Copy $launchplane_app_root/config/launchplane-authz.toml.example to a real policy file and point LAUNCHPLANE_POLICY_FILE at that copy." >&2
+  echo "Use $launchplane_app_root/config/launchplane-authz.toml for this repo's tracked bootstrap policy, or copy $launchplane_app_root/config/launchplane-authz.toml.example to a real policy file and point LAUNCHPLANE_POLICY_FILE at that copy." >&2
   exit 1
 fi
 

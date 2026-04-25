@@ -153,6 +153,19 @@ allowed actions:
   - preview_destroyed.write
 ```
 
+Janitor backstop example:
+
+```text
+repository: example-org/verireel
+workflow_ref: example-org/verireel/.github/workflows/preview-janitor.yml@refs/heads/main
+event_name: schedule or workflow_dispatch
+allowed product: verireel
+allowed contexts: verireel-testing
+allowed actions:
+  - verireel_preview_destroy.execute
+  - preview_destroyed.write
+```
+
 Stable-lane examples:
 
 ```text
@@ -275,6 +288,11 @@ Current VeriReel key shapes:
   `verireel-preview-refresh:<product>:<context>:<anchor_repo>:<pr_number>:<sha>`
 - VeriReel preview destroy driver:
   `verireel-preview-destroy:<product>:<context>:<anchor_repo>:<pr_number>:<destroy_reason>`
+
+For VeriReel, `destroy_reason` should stay stable per destroy lane so idempotent
+retries do not collide. The regular cleanup workflow uses
+`external_preview_cleanup_completed`; the janitor backstop uses
+`external_preview_janitor_cleanup_completed`.
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`

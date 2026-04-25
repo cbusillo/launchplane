@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import io
 import json
 import os
@@ -11,11 +13,22 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
-from control_plane.contracts.preview_generation_record import PreviewGenerationRecord, PreviewPullRequestSummary
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
 from control_plane.contracts.preview_record import PreviewRecord
-from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, PromotionRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    PromotionRecord,
+)
 from control_plane.service import create_launchplane_service_app
-from control_plane.service_auth import GitHubActionsIdentity, GitHubOidcVerifier, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    GitHubOidcVerifier,
+    LaunchplaneAuthzPolicy,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_preview_driver import (
@@ -168,7 +181,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=Path(temporary_directory_name),
             )
 
-            status_code, payload = _invoke_app(app, method="GET", path="/v1/health", authorization="")
+            status_code, payload = _invoke_app(
+                app, method="GET", path="/v1/health", authorization=""
+            )
 
             self.assertEqual(status_code, 200)
             self.assertEqual(payload["status"], "ok")
@@ -192,11 +207,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ]
                 }
             )
+            policy_text = "schema_version = 1\n"
             with patch.dict(
                 os.environ,
                 {
                     "DOCKER_IMAGE_REFERENCE": "ghcr.io/cbusillo/launchplane@sha256:test",
                     "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane.shinycomputers.com",
+                    "LAUNCHPLANE_POLICY_B64": base64.b64encode(policy_text.encode("utf-8")).decode(
+                        "ascii"
+                    ),
                 },
                 clear=True,
             ):
@@ -223,10 +242,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
             payload["runtime"]["docker_image_reference"],
             "ghcr.io/cbusillo/launchplane@sha256:test",
         )
+        self.assertEqual(
+            payload["runtime"]["authz_policy_sha256"],
+            hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
+        )
         self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
 
     def test_self_deploy_endpoint_updates_target_env_and_triggers_dokploy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
+            policy_text = "schema_version = 1\n"
+            policy_b64 = base64.b64encode(policy_text.encode("utf-8")).decode("ascii")
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -265,7 +290,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.service.control_plane_dokploy.fetch_dokploy_target_payload",
-                    return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:old\n"},
+                    return_value={
+                        "env": (
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:old\n"
+                            "LAUNCHPLANE_POLICY_TOML=schema_version = 1\n"
+                            "LAUNCHPLANE_POLICY_FILE=/etc/launchplane/policy.toml\n"
+                        )
+                    },
                 ),
                 patch(
                     "control_plane.service.control_plane_dokploy.update_dokploy_target_env"
@@ -284,6 +315,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "target_type": "compose",
                             "target_id": "compose-123",
                             "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                            "policy_b64": policy_b64,
                         },
                     },
                     headers={"Idempotency-Key": "launchplane-self-deploy:test"},
@@ -299,7 +331,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         update_env_mock.assert_called_once()
         updated_env_text = update_env_mock.call_args.kwargs["env_text"]
-        self.assertIn("DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new", updated_env_text)
+        self.assertIn(
+            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new", updated_env_text
+        )
+        self.assertIn(f"LAUNCHPLANE_POLICY_B64={policy_b64}", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", updated_env_text)
+        self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", updated_env_text)
         trigger_mock.assert_called_once_with(
             host="https://dokploy.example.com",
             token="token-123",
@@ -632,8 +669,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             }
             second_request_payload = json.loads(json.dumps(first_request_payload))
-            second_request_payload["deployment"]["record_id"] = "deployment-20260420T153100Z-opw-testing"
-            second_request_payload["deployment"]["artifact_identity"]["artifact_id"] = "artifact-20260420-e5f6g7h8"
+            second_request_payload["deployment"]["record_id"] = (
+                "deployment-20260420T153100Z-opw-testing"
+            )
+            second_request_payload["deployment"]["artifact_identity"]["artifact_id"] = (
+                "artifact-20260420-e5f6g7h8"
+            )
 
             first_status_code, _ = _invoke_app(
                 app,
@@ -944,6 +985,91 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 preview.latest_generation_id,
                 "preview-verireel-testing-verireel-pr-123-generation-0001",
             )
+
+    def test_preview_destroyed_endpoint_writes_records_for_authorized_janitor_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-72",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=72,
+                    anchor_pr_url="https://github.com/every/verireel/pull/72",
+                    preview_label="verireel-testing/verireel/pr-72",
+                    state="active",
+                    canonical_url="https://pr-72.ver-preview.shinycomputers.com",
+                    created_at="2026-04-24T12:59:00Z",
+                    updated_at="2026-04-24T12:59:00Z",
+                    eligible_at="2026-04-24T12:59:00Z",
+                    active_generation_id="preview-verireel-testing-verireel-pr-72-generation-0001",
+                    serving_generation_id="preview-verireel-testing-verireel-pr-72-generation-0001",
+                    latest_generation_id="preview-verireel-testing-verireel-pr-72-generation-0001",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["schedule", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_destroyed.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="schedule",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/evidence/previews/destroyed",
+                payload={
+                    "product": "verireel",
+                    "destroy": {
+                        "context": "verireel-testing",
+                        "anchor_repo": "verireel",
+                        "anchor_pr_number": 72,
+                        "destroyed_at": "2026-04-24T13:01:00Z",
+                        "destroy_reason": "external_preview_janitor_cleanup_completed",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "preview_id": "preview-verireel-testing-verireel-pr-72",
+                    "transition": "destroyed",
+                },
+            )
+            preview = store.read_preview_record("preview-verireel-testing-verireel-pr-72")
+            self.assertEqual(preview.state, "destroyed")
+            self.assertEqual(preview.destroyed_at, "2026-04-24T13:01:00Z")
+            self.assertEqual(preview.destroy_reason, "external_preview_janitor_cleanup_completed")
 
     def test_verireel_testing_deploy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1601,6 +1727,74 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["application_id"], "preview-app-123")
             execute_mock.assert_called_once()
 
+    def test_verireel_preview_destroy_driver_executes_for_authorized_janitor_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["schedule", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": [
+                                "verireel_preview_destroy.execute",
+                                "preview_destroyed.write",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="schedule",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_preview_destroy",
+                return_value=VeriReelPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-04-24T13:00:00Z",
+                    destroy_finished_at="2026-04-24T13:01:00Z",
+                    application_name="ver-preview-pr-72-app",
+                    application_id="preview-app-72",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-destroy",
+                    payload={
+                        "product": "verireel",
+                        "destroy": {
+                            "context": "verireel-testing",
+                            "anchor_repo": "verireel",
+                            "anchor_pr_number": 72,
+                            "preview_slug": "pr-72",
+                            "destroy_reason": "external_preview_janitor_cleanup_completed",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["destroy_status"], "pass")
+            self.assertEqual(payload["result"]["application_name"], "ver-preview-pr-72-app")
+            execute_mock.assert_called_once()
+
     def test_verireel_preview_destroy_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -1658,7 +1852,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260420T153000Z-opw-testing",
-                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
                     context="opw",
                     instance="testing",
                     source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
@@ -1708,10 +1904,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 200)
             self.assertEqual(payload["status"], "ok")
-            self.assertEqual(payload["record"]["record_id"], "deployment-20260420T153000Z-opw-testing")
+            self.assertEqual(
+                payload["record"]["record_id"], "deployment-20260420T153000Z-opw-testing"
+            )
             self.assertEqual(payload["record"]["resolved_target"]["target_id"], "compose-123")
 
-    def test_preview_history_and_recent_operations_endpoints_return_operator_read_models(self) -> None:
+    def test_preview_history_and_recent_operations_endpoints_return_operator_read_models(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -1757,7 +1957,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260420T153000Z-verireel-testing",
-                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
                     context="verireel-testing",
                     instance="testing",
                     source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
@@ -1780,7 +1982,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             store.write_promotion_record(
                 PromotionRecord(
                     record_id="promotion-20260420T160500Z-verireel-testing-to-prod",
-                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
                     deployment_record_id="deployment-20260420T153000Z-verireel-testing",
                     backup_record_id="backup-verireel-prod-20260420T160000Z",
                     context="verireel-testing",
@@ -1801,7 +2005,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 EnvironmentInventory(
                     context="verireel-testing",
                     instance="testing",
-                    artifact_identity=ArtifactIdentityReference(artifact_id="artifact-20260420-a1b2c3d4"),
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
                     source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
                     deploy=DeploymentEvidence(
                         target_name="verireel-testing",
@@ -1850,7 +2056,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(history_status_code, 200)
-            self.assertEqual(history_payload["preview"]["preview_id"], "preview-verireel-testing-verireel-pr-123")
+            self.assertEqual(
+                history_payload["preview"]["preview_id"], "preview-verireel-testing-verireel-pr-123"
+            )
             self.assertEqual(len(history_payload["generations"]), 1)
             self.assertEqual(history_payload["generations"][0]["state"], "ready")
 
@@ -1940,7 +2148,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(len(list_payload["secrets"]), 2)
             self.assertEqual(show_status_code, 200)
             self.assertEqual(show_payload["secret"]["secret_id"], context_secret["secret_id"])
-            self.assertEqual(show_payload["secret"]["binding"]["binding_key"], "GITHUB_WEBHOOK_SECRET")
+            self.assertEqual(
+                show_payload["secret"]["binding"]["binding_key"], "GITHUB_WEBHOOK_SECRET"
+            )
 
     def test_preview_generation_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

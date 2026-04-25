@@ -1,12 +1,13 @@
 schema_version = 1
 
-# Copy this file to a non-.example path and replace every example-org/... value
-# before using it for a real Launchplane service.
+# Tracked bootstrap authz policy source for the live Launchplane service.
+# Deploy automation renders this file into LAUNCHPLANE_POLICY_B64 so policy
+# changes follow the same reviewable workflow as image rollouts.
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/preview-control-plane.yml@*",
+  "cbusillo/verireel/.github/workflows/preview-control-plane.yml@*",
 ]
 event_names = ["pull_request"]
 products = ["verireel"]
@@ -14,9 +15,9 @@ contexts = ["verireel-testing"]
 actions = ["verireel_preview_refresh.execute", "preview_generation.write"]
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/preview-cleanup.yml@*",
+  "cbusillo/verireel/.github/workflows/preview-cleanup.yml@*",
 ]
 event_names = ["pull_request"]
 products = ["verireel"]
@@ -24,9 +25,9 @@ contexts = ["verireel-testing"]
 actions = ["verireel_preview_destroy.execute", "preview_destroyed.write"]
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/preview-janitor.yml@refs/heads/main",
+  "cbusillo/verireel/.github/workflows/preview-janitor.yml@refs/heads/main",
 ]
 event_names = ["schedule", "workflow_dispatch"]
 products = ["verireel"]
@@ -34,9 +35,9 @@ contexts = ["verireel-testing"]
 actions = ["verireel_preview_destroy.execute", "preview_destroyed.write"]
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main",
+  "cbusillo/verireel/.github/workflows/publish-image.yml@refs/heads/main",
 ]
 event_names = ["push", "workflow_dispatch"]
 products = ["verireel"]
@@ -44,9 +45,9 @@ contexts = ["verireel"]
 actions = ["deployment.write"]
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main",
+  "cbusillo/verireel/.github/workflows/publish-image.yml@refs/heads/main",
 ]
 event_names = ["push", "workflow_dispatch"]
 products = ["verireel"]
@@ -54,9 +55,9 @@ contexts = ["verireel"]
 actions = ["verireel_testing_deploy.execute"]
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main",
+  "cbusillo/verireel/.github/workflows/promote-image.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
@@ -64,9 +65,9 @@ contexts = ["verireel"]
 actions = ["deployment.write", "backup_gate.write"]
 
 [[github_actions]]
-repository = "example-org/verireel"
+repository = "cbusillo/verireel"
 workflow_refs = [
-  "example-org/verireel/.github/workflows/promote-image.yml@refs/heads/main",
+  "cbusillo/verireel/.github/workflows/promote-image.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
@@ -74,9 +75,9 @@ contexts = ["verireel"]
 actions = ["promotion.write", "verireel_prod_deploy.execute", "verireel_prod_promotion.execute", "verireel_prod_rollback.execute"]
 
 [[github_actions]]
-repository = "example-org/tenant-opw"
+repository = "cbusillo/tenant-opw"
 workflow_refs = [
-  "example-org/tenant-opw/.github/workflows/launchplane-preview.yml@refs/heads/main",
+  "cbusillo/tenant-opw/.github/workflows/launchplane-preview.yml@refs/heads/main",
 ]
 event_names = ["pull_request"]
 products = ["odoo"]
@@ -84,9 +85,9 @@ contexts = ["opw"]
 actions = ["preview_generation.write"]
 
 [[github_actions]]
-repository = "example-org/launchplane"
+repository = "cbusillo/launchplane"
 workflow_refs = [
-  "example-org/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
+  "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
 ]
 event_names = ["workflow_run", "workflow_dispatch"]
 products = ["launchplane"]

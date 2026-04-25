@@ -15,7 +15,8 @@ Launchplane's long-term config model is:
 
 - bootstrap/root-of-trust stays outside the database
 - all other live mutable config is DB-backed
-- checked-in repo files are examples, docs, schemas, or tests only
+- checked-in repo files are examples, docs, schemas, tests, or the reviewed
+  bootstrap authz policy source
 - local files under `~/.config/launchplane/` are not Launchplane config
   authority and should be archived or deleted when found
 - the service never silently falls back across multiple live authorities
@@ -64,7 +65,8 @@ These stay in git, but not as live mutable runtime authority.
 
 | Class | Examples |
 | --- | --- |
-| Examples/templates | `config/launchplane-authz.toml.example` for bootstrap policy only |
+| Bootstrap policy source | `config/launchplane-authz.toml` for this repo's reviewed service policy |
+| Examples/templates | `config/launchplane-authz.toml.example` for bootstrap policy placeholders only |
 | Docs/specs | `docs/*`, `README.md` |
 | Schemas/tests | storage schema code, tests, fixtures |
 

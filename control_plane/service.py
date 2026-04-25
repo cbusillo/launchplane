@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -30,7 +31,12 @@ from control_plane.launchplane_mutations import (
     apply_launchplane_generation_evidence,
     control_plane_root,
 )
-from control_plane.service_auth import LaunchplaneAuthzPolicy, TokenVerifier, load_authz_policy
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    TokenVerifier,
+    load_authz_policy,
+    parse_authz_policy_toml,
+)
 from control_plane.storage.factory import build_record_store, storage_backend_name
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
@@ -233,20 +239,33 @@ class LaunchplaneSelfDeployRequest(BaseModel):
     target_type: str
     target_id: str
     image_reference: str
+    policy_b64: str = ""
     no_cache: bool = False
 
     @model_validator(mode="after")
     def _validate_values(self) -> "LaunchplaneSelfDeployRequest":
         normalized_target_type = self.target_type.strip()
         if normalized_target_type not in {"compose", "application"}:
-            raise ValueError("Launchplane self deploy requires target_type 'compose' or 'application'.")
+            raise ValueError(
+                "Launchplane self deploy requires target_type 'compose' or 'application'."
+            )
         if not self.target_id.strip():
             raise ValueError("Launchplane self deploy requires target_id.")
         if not self.image_reference.strip():
             raise ValueError("Launchplane self deploy requires image_reference.")
+        normalized_policy_b64 = self.policy_b64.strip()
+        if normalized_policy_b64:
+            try:
+                policy_text = base64.b64decode(normalized_policy_b64, validate=True).decode("utf-8")
+            except Exception as error:
+                raise ValueError(
+                    "Launchplane self deploy requires valid base64 policy_b64."
+                ) from error
+            parse_authz_policy_toml(policy_text)
         self.target_type = normalized_target_type
         self.target_id = self.target_id.strip()
         self.image_reference = self.image_reference.strip()
+        self.policy_b64 = normalized_policy_b64
         return self
 
 
@@ -337,9 +356,18 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "secret.read", {"secret_id": segments[2]}
     if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "secrets":
         return "secret.list", {"context": segments[2]}
-    if len(segments) == 6 and segments[:2] == ["v1", "contexts"] and segments[3] == "instances" and segments[5] == "secrets":
+    if (
+        len(segments) == 6
+        and segments[:2] == ["v1", "contexts"]
+        and segments[3] == "instances"
+        and segments[5] == "secrets"
+    ):
         return "secret.list", {"context": segments[2], "instance": segments[4]}
-    if len(segments) == 5 and segments[:2] == ["v1", "contexts"] and segments[3:] == ["operations", "recent"]:
+    if (
+        len(segments) == 5
+        and segments[:2] == ["v1", "contexts"]
+        and segments[3:] == ["operations", "recent"]
+    ):
         return "operations.read", {"context": segments[2]}
     if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
         return "launchplane_service.read", {}
@@ -353,7 +381,9 @@ def _secret_capable_store(record_store: object):
 
 
 def _idempotency_capable_store(record_store: object):
-    if hasattr(record_store, "read_idempotency_record") and hasattr(record_store, "write_idempotency_record"):
+    if hasattr(record_store, "read_idempotency_record") and hasattr(
+        record_store, "write_idempotency_record"
+    ):
         return record_store
     return None
 
@@ -560,8 +590,31 @@ def _bearer_token(environ: dict[str, object]) -> str:
     return token.strip()
 
 
+def _launchplane_policy_sha256_from_env() -> str:
+    policy_toml = os.environ.get("LAUNCHPLANE_POLICY_TOML", "").strip()
+    if policy_toml:
+        return hashlib.sha256(policy_toml.encode("utf-8")).hexdigest()
+
+    policy_b64 = os.environ.get("LAUNCHPLANE_POLICY_B64", "").strip()
+    if policy_b64:
+        try:
+            policy_bytes = base64.b64decode(policy_b64, validate=True)
+        except Exception:
+            return ""
+        return hashlib.sha256(policy_bytes).hexdigest()
+
+    policy_file = os.environ.get("LAUNCHPLANE_POLICY_FILE", "").strip()
+    if not policy_file:
+        return ""
+    try:
+        return hashlib.sha256(Path(policy_file).read_bytes()).hexdigest()
+    except OSError:
+        return ""
+
+
 def _launchplane_runtime_payload(*, storage_backend: str) -> dict[str, object]:
     return {
+        "authz_policy_sha256": _launchplane_policy_sha256_from_env(),
         "docker_image_reference": os.environ.get(_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "").strip(),
         "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
         "storage_backend": storage_backend,
@@ -573,7 +626,9 @@ def _request_launchplane_self_deploy(
     control_plane_root_path: Path,
     request: LaunchplaneSelfDeployRequest,
 ) -> dict[str, object]:
-    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root_path)
+    host, token = control_plane_dokploy.read_dokploy_config(
+        control_plane_root=control_plane_root_path
+    )
     target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -581,9 +636,16 @@ def _request_launchplane_self_deploy(
         target_id=request.target_id,
     )
     raw_env_text = str(target_payload.get("env") or "")
+    previous_env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
+    updates = {_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference}
+    removals: tuple[str, ...] = ()
+    if request.policy_b64:
+        updates["LAUNCHPLANE_POLICY_B64"] = request.policy_b64
+        removals = ("LAUNCHPLANE_POLICY_TOML", "LAUNCHPLANE_POLICY_FILE")
     updated_env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
         raw_env_text,
-        updates={_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference},
+        updates=updates,
+        removals=removals,
     )
     if updated_env_text != raw_env_text:
         control_plane_dokploy.update_dokploy_target_env(
@@ -605,7 +667,15 @@ def _request_launchplane_self_deploy(
         "target_type": request.target_type,
         "target_id": request.target_id,
         "image_reference": request.image_reference,
-        "image_reference_changed": updated_env_text != raw_env_text,
+        "image_reference_changed": previous_env_map.get(_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "")
+        != request.image_reference,
+        "authz_policy_changed": bool(request.policy_b64)
+        and previous_env_map.get("LAUNCHPLANE_POLICY_B64", "") != request.policy_b64,
+        "authz_policy_sha256": (
+            hashlib.sha256(base64.b64decode(request.policy_b64, validate=True)).hexdigest()
+            if request.policy_b64
+            else ""
+        ),
     }
 
 
@@ -646,7 +716,11 @@ def create_launchplane_service_app(
             return _json_response(
                 start_response=start_response,
                 status_code=200,
-                payload={"status": "ok", "trace_id": request_trace_id, "storage_backend": storage_backend},
+                payload={
+                    "status": "ok",
+                    "trace_id": request_trace_id,
+                    "storage_backend": storage_backend,
+                },
             )
         read_route = _match_read_route(path)
         if path not in write_routes and read_route is None:
@@ -811,7 +885,9 @@ def create_launchplane_service_app(
                             },
                         )
                     if params.get("include_history") == "true":
-                        generations = record_store.list_preview_generation_records(preview_id=preview.preview_id)
+                        generations = record_store.list_preview_generation_records(
+                            preview_id=preview.preview_id
+                        )
                         return _json_response(
                             start_response=start_response,
                             status_code=200,
@@ -954,7 +1030,9 @@ def create_launchplane_service_app(
                         payload={
                             "status": "ok",
                             "trace_id": request_trace_id,
-                            "runtime": _launchplane_runtime_payload(storage_backend=storage_backend),
+                            "runtime": _launchplane_runtime_payload(
+                                storage_backend=storage_backend
+                            ),
                         },
                     )
                 context_name = params["context"]
@@ -976,8 +1054,12 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                deployments = record_store.list_deployment_records(context_name=context_name, limit=10)
-                promotions = record_store.list_promotion_records(context_name=context_name, limit=10)
+                deployments = record_store.list_deployment_records(
+                    context_name=context_name, limit=10
+                )
+                promotions = record_store.list_promotion_records(
+                    context_name=context_name, limit=10
+                )
                 previews = record_store.list_preview_records(context_name=context_name, limit=10)
                 inventory = [
                     record
@@ -993,8 +1075,12 @@ def create_launchplane_service_app(
                         "context": context_name,
                         "storage_backend": storage_backend,
                         "inventory": [record.model_dump(mode="json") for record in inventory],
-                        "recent_deployments": [record.model_dump(mode="json") for record in deployments],
-                        "recent_promotions": [record.model_dump(mode="json") for record in promotions],
+                        "recent_deployments": [
+                            record.model_dump(mode="json") for record in deployments
+                        ],
+                        "recent_promotions": [
+                            record.model_dump(mode="json") for record in promotions
+                        ],
                         "recent_previews": [record.model_dump(mode="json") for record in previews],
                     },
                 )

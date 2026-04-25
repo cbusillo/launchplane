@@ -79,11 +79,9 @@ unset --scope ... --key KEY` to remove stale runtime keys without reading or
 printing plaintext values. Use `uv run launchplane environments relabel` to
 correct stale record metadata without changing runtime values.
 
-For the first local Launchplane service run, copy
-`config/launchplane-authz.toml.example` to a real local policy file such as
-`${XDG_CONFIG_HOME:-$HOME/.config}/launchplane/launchplane-authz.toml`, then replace the
-example repo/workflow values and adjust the product, context, and action
-allow-lists to match the workflows you want Launchplane to trust.
+The tracked bootstrap authz policy source for this repo now lives at
+`config/launchplane-authz.toml`. `config/launchplane-authz.toml.example`
+remains the placeholder template for other installs or future variants.
 
 Steady-state tracked Dokploy route definitions and target IDs should come from
 Launchplane DB-backed target records and target-id records. The stable remote
@@ -121,9 +119,10 @@ reach DB-backed runtime authority:
 - `LAUNCHPLANE_POLICY_TOML` or `LAUNCHPLANE_POLICY_B64`
 
 Launchplane now fails closed at startup when no explicit policy input is provided.
-Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example`; copy
-the example to a non-`.example` path first and replace the placeholder repo
-identities.
+Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example`.
+Use `config/launchplane-authz.toml` for this repo's reviewed bootstrap policy,
+or copy the example to a non-`.example` path first and replace the placeholder
+repo identities.
 
 `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` must be present whenever Launchplane needs
 to read or write DB-backed managed secrets. Dokploy credentials now resolve
@@ -156,8 +155,11 @@ Configure these GitHub settings before enabling it:
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
 
 The deploy workflow now uses GitHub OIDC plus Launchplane's own service API to
-request a self-deploy. Dokploy credentials should live in Launchplane-managed
-secrets inside the shared store, not in GitHub repository secrets.
+request a self-deploy. It renders `config/launchplane-authz.toml` into
+`LAUNCHPLANE_POLICY_B64` during the same rollout so bootstrap policy changes and
+image changes follow one reviewed deploy contract. Dokploy credentials should
+live in Launchplane-managed secrets inside the shared store, not in GitHub
+repository secrets.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must point at Launchplane URLs that GitHub-hosted
 runners can reach, typically the public `https://.../v1/health` endpoint.

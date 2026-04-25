@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import os
 import tomllib
@@ -1251,6 +1253,120 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         )
 
         self.assertEqual(rendered, "KEEP=1\nADD=2")
+
+    def test_service_render_authz_policy_uses_tracked_policy_source(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            policy_dir = control_plane_root / "config"
+            policy_dir.mkdir(parents=True)
+            policy_file = policy_dir / "launchplane-authz.toml"
+            policy_text = """
+schema_version = 1
+
+[[github_actions]]
+repository = "cbusillo/launchplane"
+workflow_refs = ["cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"]
+event_names = ["workflow_dispatch"]
+products = ["launchplane"]
+contexts = ["launchplane"]
+actions = ["launchplane_service_deploy.execute"]
+""".strip()
+            policy_file.write_text(policy_text, encoding="utf-8")
+
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "render-authz-policy",
+                    "--control-plane-root",
+                    str(control_plane_root),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["policy_file"], str(policy_file))
+        self.assertEqual(
+            payload["policy_b64"],
+            base64.b64encode(policy_text.encode("utf-8")).decode("ascii"),
+        )
+        self.assertEqual(
+            payload["policy_sha256"], hashlib.sha256(policy_text.encode("utf-8")).hexdigest()
+        )
+        self.assertEqual(payload["github_actions_rule_count"], 1)
+
+    def test_service_sync_bootstrap_policy_updates_live_target_env(self) -> None:
+        runner = CliRunner()
+        captured_env_updates: list[dict[str, object]] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            policy_dir = control_plane_root / "config"
+            policy_dir.mkdir(parents=True)
+            policy_file = policy_dir / "launchplane-authz.toml"
+            policy_text = """
+schema_version = 1
+
+[[github_actions]]
+repository = "cbusillo/launchplane"
+workflow_refs = ["cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"]
+event_names = ["workflow_dispatch"]
+products = ["launchplane"]
+contexts = ["launchplane"]
+actions = ["launchplane_service_deploy.execute"]
+""".strip()
+            policy_file.write_text(policy_text, encoding="utf-8")
+            policy_b64 = base64.b64encode(policy_text.encode("utf-8")).decode("ascii")
+
+            with (
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value=self._target_payload(
+                        env_text=(
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/every/launchplane@sha256:old\n"
+                            "LAUNCHPLANE_POLICY_B64=dGVzdA==\n"
+                            "LAUNCHPLANE_POLICY_TOML=schema_version = 1\n"
+                            "LAUNCHPLANE_POLICY_FILE=/etc/launchplane/policy.toml\n"
+                        ),
+                    ),
+                ),
+                patch(
+                    "control_plane.dokploy.update_dokploy_target_env",
+                    side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "service",
+                        "sync-bootstrap-policy",
+                        "--target-type",
+                        "compose",
+                        "--target-id",
+                        "compose-123",
+                        "--control-plane-root",
+                        str(control_plane_root),
+                        "--apply",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(len(captured_env_updates), 1)
+        self.assertIn(f"LAUNCHPLANE_POLICY_B64={policy_b64}", captured_env_updates[0]["env_text"])
+        self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", captured_env_updates[0]["env_text"])
+        self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", captured_env_updates[0]["env_text"])
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["changed"])
+        self.assertEqual(payload["desired_policy_file"], str(policy_file))
+        self.assertEqual(
+            payload["desired_policy_sha256"],
+            hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
+        )
 
     def test_build_dokploy_data_workflow_script_injects_workflow_environment(self) -> None:
         script = control_plane_dokploy._build_dokploy_data_workflow_script(

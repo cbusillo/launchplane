@@ -97,12 +97,18 @@ class GitHubActionsPolicyRule(BaseModel):
         normalized_value = value.strip()
         return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
 
-    def allows(self, *, identity: GitHubActionsIdentity, action: str, product: str, context: str) -> bool:
+    def allows(
+        self, *, identity: GitHubActionsIdentity, action: str, product: str, context: str
+    ) -> bool:
         if self.repository.strip() != identity.repository:
             return False
-        if self.workflow_refs and not self._matches_claim(identity.workflow_ref, self.workflow_refs):
+        if self.workflow_refs and not self._matches_claim(
+            identity.workflow_ref, self.workflow_refs
+        ):
             return False
-        if self.job_workflow_refs and not self._matches_claim(identity.job_workflow_ref, self.job_workflow_refs):
+        if self.job_workflow_refs and not self._matches_claim(
+            identity.job_workflow_ref, self.job_workflow_refs
+        ):
             return False
         if self.event_names and identity.event_name not in self.event_names:
             return False
@@ -125,14 +131,18 @@ class LaunchplaneAuthzPolicy(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     github_actions: tuple[GitHubActionsPolicyRule, ...] = ()
 
-    def allows(self, *, identity: GitHubActionsIdentity, action: str, product: str, context: str) -> bool:
+    def allows(
+        self, *, identity: GitHubActionsIdentity, action: str, product: str, context: str
+    ) -> bool:
         return any(
             rule.allows(identity=identity, action=action, product=product, context=context)
             for rule in self.github_actions
         )
 
 
+def parse_authz_policy_toml(policy_toml: str) -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(tomllib.loads(policy_toml))
+
+
 def load_authz_policy(policy_file: Path) -> LaunchplaneAuthzPolicy:
-    with policy_file.open("rb") as handle:
-        payload = tomllib.load(handle)
-    return LaunchplaneAuthzPolicy.model_validate(payload)
+    return parse_authz_policy_toml(policy_file.read_text(encoding="utf-8"))

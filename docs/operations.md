@@ -72,9 +72,9 @@ uv run launchplane service serve \
   --policy-file ./config/launchplane-authz.toml
 ```
 
-Start from `config/launchplane-authz.toml.example` when creating the first local
-policy file, but copy it to a non-`.example` path and replace the placeholder
-repo/workflow values before using it.
+`config/launchplane-authz.toml` is the tracked bootstrap authz policy source for
+this repo's live service. `config/launchplane-authz.toml.example` remains the
+placeholder template for other installs.
 
 Current implementation scope:
 
@@ -84,6 +84,8 @@ Current implementation scope:
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
+- `POST /v1/drivers/verireel/preview-refresh`
+- `POST /v1/drivers/verireel/preview-destroy`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/prod-deploy`
 - `POST /v1/drivers/verireel/prod-promotion`
@@ -98,6 +100,28 @@ posture is documented in
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz
 boundary rather than creating separate ad hoc ingress patterns.
+
+Render the tracked bootstrap policy or inspect the encoded deploy artifact with:
+
+```bash
+uv run launchplane service render-authz-policy
+uv run launchplane service render-authz-policy --format b64
+```
+
+When operators need to preview or apply the current tracked bootstrap policy to
+the live Launchplane Dokploy target without editing any rendered host-side env
+file, use:
+
+```bash
+uv run launchplane service sync-bootstrap-policy \
+  --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+  --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID"
+
+uv run launchplane service sync-bootstrap-policy \
+  --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+  --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+  --apply
+```
 
 Preview workflows should normally authorize by workflow path with a wildcard
 ref suffix such as `.../preview-control-plane.yml@*`, because pull-request runs
@@ -143,9 +167,11 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
 
-The workflow should use GitHub OIDC to call Launchplane's own service API.
-Keep Dokploy host/token authority in Launchplane-managed secrets instead of
-duplicating those credentials in GitHub repository secrets.
+The workflow should use GitHub OIDC to call Launchplane's own service API,
+render `config/launchplane-authz.toml`, and update `LAUNCHPLANE_POLICY_B64`
+during the same reviewed rollout as the image digest change. Keep Dokploy
+host/token authority in Launchplane-managed secrets instead of duplicating
+those credentials in GitHub repository secrets.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from GitHub-hosted runners. Use the
 public Launchplane `GET /v1/health` endpoint rather than an internal-only Dokploy
@@ -371,11 +397,14 @@ evidence without requiring a Launchplane-managed preview base-url contract.
 
 VeriReel already computes the route, PR slug, image tags, and workflow run URL
 inside `.github/workflows/preview-control-plane.yml` and
-`.github/workflows/preview-cleanup.yml`. Launchplane's handoff contract should stay
-at that evidence layer instead of asking VeriReel to adopt Launchplane-owned preview
-provisioning first. The target integration is OIDC-authenticated HTTP into
-Launchplane. The local CLI examples below exist only to pin the payload shape while
-the Launchplane service ingress is still under construction.
+`.github/workflows/preview-cleanup.yml`. The scheduled orphan backstop in
+`.github/workflows/preview-janitor.yml` should use the same Launchplane destroy
+and evidence contract rather than keeping a second repo-local teardown path.
+Launchplane's handoff contract should stay at that evidence and driver layer
+instead of asking VeriReel to adopt Launchplane-owned preview provisioning
+first. The target integration is OIDC-authenticated HTTP into Launchplane. The
+local CLI examples below exist only to pin the payload shape while the
+Launchplane service ingress is still under construction.
 
 For a successful or failed preview refresh, emit two JSON payloads and hand
 them to Launchplane's preview-generation evidence ingress. The current local adapter
@@ -442,6 +471,10 @@ That cleanup payload should be written only after the preview URL, Dokploy app,
 and backing database teardown has succeeded. If cleanup fails, Launchplane should
 keep the preview record live and instead receive a failed generation or workflow
 signal later, rather than a premature destroyed transition.
+
+The scheduled janitor backstop uses the same payload shape with
+`destroy_reason: external_preview_janitor_cleanup_completed` so its retries stay
+separate from the pull-request cleanup workflow's idempotency key.
 
 Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an operator is ready to review and

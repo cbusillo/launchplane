@@ -1,4 +1,6 @@
+import base64
 from collections.abc import Callable
+import hashlib
 from html import escape
 import json
 import os
@@ -70,6 +72,7 @@ from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.service_auth import load_authz_policy
 from control_plane.workflows.launchplane import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
@@ -123,6 +126,7 @@ _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_B64",
     "LAUNCHPLANE_POLICY_FILE",
 )
+_DEFAULT_BOOTSTRAP_POLICY_FILE = Path("config/launchplane-authz.toml")
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
 _SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
@@ -135,6 +139,95 @@ def _store(state_dir: Path) -> FilesystemRecordStore:
 
 def _control_plane_root() -> Path:
     return shared_control_plane_root()
+
+
+def _resolve_bootstrap_policy_file(*, control_plane_root: Path, policy_file: Path | None) -> Path:
+    resolved = policy_file or _DEFAULT_BOOTSTRAP_POLICY_FILE
+    if not resolved.is_absolute():
+        resolved = control_plane_root / resolved
+    if resolved.name.endswith(".example"):
+        raise click.ClickException(
+            f"Refusing to use example authz policy file as live bootstrap source: {resolved}"
+        )
+    if not resolved.is_file():
+        raise click.ClickException(f"Launchplane bootstrap policy file does not exist: {resolved}")
+    return resolved
+
+
+def _build_bootstrap_policy_payload(
+    *,
+    control_plane_root: Path,
+    policy_file: Path | None,
+) -> dict[str, object]:
+    resolved_policy_file = _resolve_bootstrap_policy_file(
+        control_plane_root=control_plane_root,
+        policy_file=policy_file,
+    )
+    policy_text = resolved_policy_file.read_text(encoding="utf-8")
+    policy = load_authz_policy(resolved_policy_file)
+    policy_bytes = policy_text.encode("utf-8")
+    return {
+        "policy_file": str(resolved_policy_file),
+        "policy_b64": base64.b64encode(policy_bytes).decode("ascii"),
+        "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
+        "github_actions_rule_count": len(policy.github_actions),
+    }
+
+
+def _sync_launchplane_bootstrap_policy(
+    *,
+    target_type: str,
+    target_id: str,
+    control_plane_root: Path,
+    policy_file: Path | None,
+    apply_changes: bool,
+) -> dict[str, object]:
+    policy_payload = _build_bootstrap_policy_payload(
+        control_plane_root=control_plane_root,
+        policy_file=policy_file,
+    )
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+    raw_env_text = str(target_payload.get("env") or "")
+    env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
+    current_policy_b64 = env_map.get("LAUNCHPLANE_POLICY_B64", "")
+    changed = current_policy_b64 != str(policy_payload["policy_b64"])
+    if apply_changes and changed:
+        env_map["LAUNCHPLANE_POLICY_B64"] = str(policy_payload["policy_b64"])
+        env_map.pop("LAUNCHPLANE_POLICY_TOML", None)
+        env_map.pop("LAUNCHPLANE_POLICY_FILE", None)
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_type,
+            target_id=target_id,
+            target_payload=target_payload,
+            env_text=control_plane_dokploy.serialize_dokploy_env_text(env_map),
+        )
+    current_policy_sha256 = ""
+    if current_policy_b64:
+        try:
+            current_policy_sha256 = hashlib.sha256(
+                base64.b64decode(current_policy_b64, validate=True)
+            ).hexdigest()
+        except Exception:
+            current_policy_sha256 = ""
+    return {
+        "status": "ok",
+        "target_type": target_type,
+        "target_id": target_id,
+        "apply_changes": apply_changes,
+        "changed": changed,
+        "current_policy_sha256": current_policy_sha256,
+        "desired_policy_sha256": policy_payload["policy_sha256"],
+        "desired_policy_file": policy_payload["policy_file"],
+        "github_actions_rule_count": policy_payload["github_actions_rule_count"],
+    }
 
 
 def _require_launchplane_preview_status_payload(
@@ -8779,6 +8872,85 @@ def service_serve(
         audience=audience,
         database_url=database_url,
     )
+
+
+@service.command("render-authz-policy")
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Bootstrap authz policy source. Defaults to config/launchplane-authz.toml.",
+)
+@click.option(
+    "--format",
+    "output_format",
+    type=click.Choice(["json", "b64"]),
+    default="json",
+    show_default=True,
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve the default policy file.",
+)
+def service_render_authz_policy(
+    policy_file: Path | None,
+    output_format: str,
+    control_plane_root: Path | None,
+) -> None:
+    payload = _build_bootstrap_policy_payload(
+        control_plane_root=control_plane_root or _control_plane_root(),
+        policy_file=policy_file,
+    )
+    if output_format == "b64":
+        click.echo(str(payload["policy_b64"]))
+        return
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@service.command("sync-bootstrap-policy")
+@click.option(
+    "--target-type",
+    type=click.Choice(["compose", "application"]),
+    envvar=_SERVICE_TARGET_TYPE_ENV_KEYS,
+    required=True,
+    help="Dokploy target type for the live Launchplane service.",
+)
+@click.option(
+    "--target-id",
+    envvar=_SERVICE_TARGET_ID_ENV_KEYS,
+    required=True,
+    help="Dokploy target id for the live Launchplane service.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Bootstrap authz policy source. Defaults to config/launchplane-authz.toml.",
+)
+@click.option("--apply", "apply_changes", is_flag=True, default=False)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials and policy file.",
+)
+def service_sync_bootstrap_policy(
+    target_type: str,
+    target_id: str,
+    policy_file: Path | None,
+    apply_changes: bool,
+    control_plane_root: Path | None,
+) -> None:
+    payload = _sync_launchplane_bootstrap_policy(
+        target_type=target_type,
+        target_id=target_id,
+        control_plane_root=control_plane_root or _control_plane_root(),
+        policy_file=policy_file,
+        apply_changes=apply_changes,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @service.command("deploy-dokploy-image")

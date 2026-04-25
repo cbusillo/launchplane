@@ -24,6 +24,10 @@ PREVIEW_APP_PREFIX = "ver-preview"
 PREVIEW_DATABASE_PREFIX = "verireel_preview_"
 
 
+def _expected_preview_slug(anchor_pr_number: int) -> str:
+    return f"pr-{anchor_pr_number}"
+
+
 class VeriReelPreviewRefreshRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -50,6 +54,10 @@ class VeriReelPreviewRefreshRequest(BaseModel):
             raise ValueError("VeriReel preview refresh requires anchor_head_sha.")
         if not self.preview_slug.strip():
             raise ValueError("VeriReel preview refresh requires preview_slug.")
+        if self.preview_slug.strip() != _expected_preview_slug(self.anchor_pr_number):
+            raise ValueError(
+                "VeriReel preview refresh requires preview_slug to match anchor_pr_number."
+            )
         if not self.image_reference.strip():
             raise ValueError("VeriReel preview refresh requires image_reference.")
         _preview_url_host(self.preview_url)
@@ -75,6 +83,10 @@ class VeriReelPreviewDestroyRequest(BaseModel):
             raise ValueError("VeriReel preview destroy requires anchor_repo 'verireel'.")
         if not self.preview_slug.strip():
             raise ValueError("VeriReel preview destroy requires preview_slug.")
+        if self.preview_slug.strip() != _expected_preview_slug(self.anchor_pr_number):
+            raise ValueError(
+                "VeriReel preview destroy requires preview_slug to match anchor_pr_number."
+            )
         if not self.destroy_reason.strip():
             raise ValueError("VeriReel preview destroy requires destroy_reason.")
         return self
@@ -167,7 +179,11 @@ def _parse_database_url(database_url: str) -> _DatabaseParts:
 
 def _build_admin_database_url(database_url: str) -> str:
     parsed = urlparse(database_url.strip())
-    query_items = [(key, value) for key, value in parse_qsl(parsed.query, keep_blank_values=True) if key != "schema"]
+    query_items = [
+        (key, value)
+        for key, value in parse_qsl(parsed.query, keep_blank_values=True)
+        if key != "schema"
+    ]
     return urlunparse(
         parsed._replace(
             path="/postgres",
@@ -176,20 +192,22 @@ def _build_admin_database_url(database_url: str) -> str:
     )
 
 
-def _build_preview_database_url(*, host: str, port: int, database_name: str, role_name: str, password: str) -> str:
+def _build_preview_database_url(
+    *, host: str, port: int, database_name: str, role_name: str, password: str
+) -> str:
     encoded_role = quote(role_name, safe="")
     encoded_password = quote(password, safe="")
     encoded_database = quote(database_name, safe="")
-    return (
-        f"postgresql://{encoded_role}:{encoded_password}@{host}:{port}/{encoded_database}?schema=public"
-    )
+    return f"postgresql://{encoded_role}:{encoded_password}@{host}:{port}/{encoded_database}?schema=public"
 
 
 def _random_password(length: int = 32) -> str:
     return secrets.token_hex(length)[:length]
 
 
-def _template_application_payload(*, control_plane_root: Path, host: str, token: str) -> tuple[control_plane_dokploy.DokployTargetDefinition, JsonObject]:
+def _template_application_payload(
+    *, control_plane_root: Path, host: str, token: str
+) -> tuple[control_plane_dokploy.DokployTargetDefinition, JsonObject]:
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
@@ -201,9 +219,13 @@ def _template_application_payload(*, control_plane_root: Path, host: str, token:
     if target_definition is None:
         raise click.ClickException("No Dokploy target definition found for verireel/testing.")
     if target_definition.target_type != "application":
-        raise click.ClickException("VeriReel preview driver requires the testing target to be a Dokploy application.")
+        raise click.ClickException(
+            "VeriReel preview driver requires the testing target to be a Dokploy application."
+        )
     if not target_definition.target_id.strip():
-        raise click.ClickException("VeriReel testing target requires a Dokploy target_id before preview execution.")
+        raise click.ClickException(
+            "VeriReel testing target requires a Dokploy target_id before preview execution."
+        )
     payload = control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -253,7 +275,9 @@ def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObj
     )
     application = control_plane_dokploy.as_json_object(payload)
     if application is None:
-        raise click.ClickException(f"Dokploy application {application_id!r} returned an invalid payload.")
+        raise click.ClickException(
+            f"Dokploy application {application_id!r} returned an invalid payload."
+        )
     return application
 
 
@@ -278,9 +302,13 @@ def _ensure_application(
     environment_id = str(template_application.get("environmentId") or "").strip()
     server_id = str(template_application.get("serverId") or "").strip()
     if not environment_id:
-        raise click.ClickException("VeriReel preview driver could not resolve the Dokploy testing environmentId.")
+        raise click.ClickException(
+            "VeriReel preview driver could not resolve the Dokploy testing environmentId."
+        )
     if not server_id:
-        raise click.ClickException("VeriReel preview driver could not resolve the Dokploy testing serverId.")
+        raise click.ClickException(
+            "VeriReel preview driver could not resolve the Dokploy testing serverId."
+        )
     created = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -416,7 +444,9 @@ def _restore_existing_application(
     )
 
 
-def _ensure_domain(*, host: str, token: str, application_id: str, preview_host: str) -> tuple[str, tuple[str, ...]]:
+def _ensure_domain(
+    *, host: str, token: str, application_id: str, preview_host: str
+) -> tuple[str, tuple[str, ...]]:
     raw_domains = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -493,7 +523,9 @@ def _delete_application(*, host: str, token: str, application_id: str) -> None:
     )
 
 
-def _find_application_schedule(*, host: str, token: str, application_id: str, schedule_name: str) -> JsonObject | None:
+def _find_application_schedule(
+    *, host: str, token: str, application_id: str, schedule_name: str
+) -> JsonObject | None:
     for schedule in control_plane_dokploy.list_dokploy_schedules(
         host=host,
         token=token,
@@ -634,70 +666,81 @@ def _run_application_command_with_retries(
 def _preview_database_admin_module_source() -> str:
     return "".join(
         (
-            '#!/usr/bin/env node\n',
+            "#!/usr/bin/env node\n",
             'import { createRequire } from "node:module";\n',
             'import { pathToFileURL } from "node:url";\n',
-            'const require = createRequire(`${process.cwd()}/package.json`);\n',
+            "const require = createRequire(`${process.cwd()}/package.json`);\n",
             'const { Client } = require("pg");\n',
-            'function quoteIdentifier(value) { return "\\\"" + String(value).split("\\\"").join("\\\"\\\"") + "\\\""; }\n',
+            'function quoteIdentifier(value) { return "\\"" + String(value).split("\\"").join("\\"\\"") + "\\""; }\n',
             'function quoteLiteral(value) { return "\'" + String(value).split("\'").join("\'\'") + "\'"; }\n',
-            'function parseArgs(argv) {\n',
+            "function shouldFallbackToLegacyDrop(error) {\n",
+            '  const message = String(error?.message || "").toLowerCase();\n',
+            '  return message.includes("syntax error") || message.includes("with (force)") || message.includes("force)");\n',
+            "}\n",
+            "function parseArgs(argv) {\n",
             '  const options = { action: "", adminDatabaseUrl: "", databaseName: "", roleName: "", password: "" };\n',
-            '  for (let index = 0; index < argv.length; index += 1) {\n',
-            '    const arg = argv[index];\n',
+            "  for (let index = 0; index < argv.length; index += 1) {\n",
+            "    const arg = argv[index];\n",
             '    const value = argv[index + 1] ?? "";\n',
             '    if (arg === "--action") { options.action = value; index += 1; continue; }\n',
             '    if (arg === "--admin-database-url") { options.adminDatabaseUrl = value; index += 1; continue; }\n',
             '    if (arg === "--database-name") { options.databaseName = value; index += 1; continue; }\n',
             '    if (arg === "--role-name") { options.roleName = value; index += 1; continue; }\n',
             '    if (arg === "--password") { options.password = value; index += 1; continue; }\n',
-            '    throw new Error(`Unknown option: ${arg}`);\n',
-            '  }\n',
+            "    throw new Error(`Unknown option: ${arg}`);\n",
+            "  }\n",
             '  if (!["ensure", "drop"].includes(options.action)) { throw new Error("--action must be one of ensure or drop."); }\n',
             '  if (!options.adminDatabaseUrl) { throw new Error("Missing required --admin-database-url value."); }\n',
             '  if (!options.databaseName) { throw new Error("Missing required --database-name value."); }\n',
             '  if (!options.roleName) { throw new Error("Missing required --role-name value."); }\n',
             '  if (options.action === "ensure" && !options.password) { throw new Error("Missing required --password value for ensure."); }\n',
-            '  return options;\n',
-            '}\n',
-            'async function ensureDatabase(client, databaseName, roleName, password) {\n',
+            "  return options;\n",
+            "}\n",
+            "async function ensureDatabase(client, databaseName, roleName, password) {\n",
             '  const existingRole = await client.query("SELECT 1 FROM pg_roles WHERE rolname = $1", [roleName]);\n',
-            '  if (existingRole.rowCount === 0) {\n',
-            '    await client.query(`CREATE ROLE ${quoteIdentifier(roleName)} LOGIN PASSWORD ${quoteLiteral(password)}`);\n',
-            '  } else {\n',
-            '    await client.query(`ALTER ROLE ${quoteIdentifier(roleName)} WITH LOGIN PASSWORD ${quoteLiteral(password)}`);\n',
-            '  }\n',
+            "  if (existingRole.rowCount === 0) {\n",
+            "    await client.query(`CREATE ROLE ${quoteIdentifier(roleName)} LOGIN PASSWORD ${quoteLiteral(password)}`);\n",
+            "  } else {\n",
+            "    await client.query(`ALTER ROLE ${quoteIdentifier(roleName)} WITH LOGIN PASSWORD ${quoteLiteral(password)}`);\n",
+            "  }\n",
             '  const existingDatabase = await client.query("SELECT 1 FROM pg_database WHERE datname = $1", [databaseName]);\n',
-            '  if (existingDatabase.rowCount === 0) {\n',
-            '    await client.query(`CREATE DATABASE ${quoteIdentifier(databaseName)} OWNER ${quoteIdentifier(roleName)}`);\n',
-            '  }\n',
-            '  await client.query(`GRANT ALL PRIVILEGES ON DATABASE ${quoteIdentifier(databaseName)} TO ${quoteIdentifier(roleName)}`);\n',
-            '}\n',
-            'async function dropDatabase(client, databaseName, roleName) {\n',
-            '  await client.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [databaseName]);\n',
-            '  await client.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)}`);\n',
-            '  await client.query(`DROP ROLE IF EXISTS ${quoteIdentifier(roleName)}`);\n',
-            '}\n',
-            'export async function main(argv = process.argv.slice(2)) {\n',
-            '  const options = parseArgs(argv);\n',
-            '  const client = new Client({ connectionString: options.adminDatabaseUrl });\n',
-            '  await client.connect();\n',
-            '  try {\n',
+            "  if (existingDatabase.rowCount === 0) {\n",
+            "    await client.query(`CREATE DATABASE ${quoteIdentifier(databaseName)} OWNER ${quoteIdentifier(roleName)}`);\n",
+            "  }\n",
+            "  await client.query(`GRANT ALL PRIVILEGES ON DATABASE ${quoteIdentifier(databaseName)} TO ${quoteIdentifier(roleName)}`);\n",
+            "}\n",
+            "async function dropDatabase(client, databaseName, roleName) {\n",
+            "  try {\n",
+            "    await client.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)} WITH (FORCE)`);\n",
+            "  } catch (error) {\n",
+            "    if (!shouldFallbackToLegacyDrop(error)) {\n",
+            "      throw error;\n",
+            "    }\n",
+            '    await client.query("SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()", [databaseName]);\n',
+            "    await client.query(`DROP DATABASE IF EXISTS ${quoteIdentifier(databaseName)}`);\n",
+            "  }\n",
+            "  await client.query(`DROP ROLE IF EXISTS ${quoteIdentifier(roleName)}`);\n",
+            "}\n",
+            "export async function main(argv = process.argv.slice(2)) {\n",
+            "  const options = parseArgs(argv);\n",
+            "  const client = new Client({ connectionString: options.adminDatabaseUrl });\n",
+            "  await client.connect();\n",
+            "  try {\n",
             '    if (options.action === "ensure") {\n',
-            '      await ensureDatabase(client, options.databaseName, options.roleName, options.password);\n',
-            '      return;\n',
-            '    }\n',
-            '    await dropDatabase(client, options.databaseName, options.roleName);\n',
-            '  } finally {\n',
-            '    await client.end();\n',
-            '  }\n',
-            '}\n',
-            'if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {\n',
-            '  main().catch((error) => {\n',
-            '    console.error(error instanceof Error ? error.message : String(error));\n',
-            '    process.exit(1);\n',
-            '  });\n',
-            '}\n',
+            "      await ensureDatabase(client, options.databaseName, options.roleName, options.password);\n",
+            "      return;\n",
+            "    }\n",
+            "    await dropDatabase(client, options.databaseName, options.roleName);\n",
+            "  } finally {\n",
+            "    await client.end();\n",
+            "  }\n",
+            "}\n",
+            "if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {\n",
+            "  main().catch((error) => {\n",
+            "    console.error(error instanceof Error ? error.message : String(error));\n",
+            "    process.exit(1);\n",
+            "  });\n",
+            "}\n",
         )
     )
 
@@ -707,16 +750,23 @@ def _preview_database_admin_runner_source() -> str:
         (
             'import { pathToFileURL } from "node:url";\n',
             'const argv = JSON.parse(Buffer.from(process.env.PREVIEW_DB_ARGS_BASE64 || "", "base64").toString("utf8"));\n',
-            'const bundledScriptPath = process.argv[2];\n',
+            "const bundledScriptPath = process.argv[2];\n",
             'process.argv[1] = "";\n',
-            'const bundled = await import(pathToFileURL(bundledScriptPath).href);\n',
-            'process.argv[1] = bundledScriptPath;\n',
-            'await bundled.main(argv);\n',
+            "const bundled = await import(pathToFileURL(bundledScriptPath).href);\n",
+            "process.argv[1] = bundledScriptPath;\n",
+            "await bundled.main(argv);\n",
         )
     )
 
 
-def _build_preview_database_command(*, action: Literal["ensure", "drop"], admin_database_url: str, database_name: str, role_name: str, password: str = "") -> str:
+def _build_preview_database_command(
+    *,
+    action: Literal["ensure", "drop"],
+    admin_database_url: str,
+    database_name: str,
+    role_name: str,
+    password: str = "",
+) -> str:
     suffix = secrets.token_hex(6)
     temp_script = f"/tmp/.preview-db-admin-{suffix}.mjs"
     temp_runner = f"/tmp/.preview-db-admin-runner-{suffix}.mjs"
@@ -736,13 +786,15 @@ def _build_preview_database_command(*, action: Literal["ensure", "drop"], admin_
     ]
     if action == "ensure":
         argv.extend(["--password", password])
-    argv_b64 = base64.b64encode(json.dumps(argv, separators=(",", ":")).encode("utf-8")).decode("ascii")
+    argv_b64 = base64.b64encode(json.dumps(argv, separators=(",", ":")).encode("utf-8")).decode(
+        "ascii"
+    )
     return (
         f'temp_script="{temp_script}"; '
         f'temp_runner="{temp_runner}"; '
-        f'status=0; '
+        f"status=0; "
         f'printf "%s" {shlex.quote(module_b64)} | base64 -d > "$temp_script"; '
-        f'status=$?; '
+        f"status=$?; "
         f'if [ "$status" -eq 0 ]; then printf "%s" {shlex.quote(runner_b64)} | base64 -d > "$temp_runner"; status=$?; fi; '
         f'if [ "$status" -eq 0 ]; then PREVIEW_DB_ARGS_BASE64={shlex.quote(argv_b64)} node "$temp_runner" "$temp_script"; status=$?; fi; '
         f'rm -f "$temp_script" "$temp_runner" || true; '
@@ -774,10 +826,14 @@ def _wait_for_preview_health(*, preview_url: str, timeout_seconds: int) -> None:
     raise click.ClickException(f"Timed out waiting for {health_url} to report ok=true.")
 
 
-def _resolve_existing_preview_database(existing_application: JsonObject | None) -> _DatabaseParts | None:
+def _resolve_existing_preview_database(
+    existing_application: JsonObject | None,
+) -> _DatabaseParts | None:
     if existing_application is None:
         return None
-    database_url = control_plane_dokploy.parse_dokploy_env_text(str(existing_application.get("env") or "")).get(
+    database_url = control_plane_dokploy.parse_dokploy_env_text(
+        str(existing_application.get("env") or "")
+    ).get(
         "DATABASE_URL",
         "",
     )
@@ -797,7 +853,9 @@ def execute_verireel_preview_refresh(
         host=host,
         token=token,
     )
-    template_env_map = control_plane_dokploy.parse_dokploy_env_text(str(template_application.get("env") or ""))
+    template_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        str(template_application.get("env") or "")
+    )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
     if not template_database_url:
         raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
@@ -808,11 +866,15 @@ def execute_verireel_preview_refresh(
     app_name = _preview_app_name(request.preview_slug)
     preview_host = _preview_url_host(request.preview_url)
     preview_domain = _preview_domain_from_url(request.preview_url)
-    existing_application = _find_application_by_name(host=host, token=token, application_name=application_name)
+    existing_application = _find_application_by_name(
+        host=host, token=token, application_name=application_name
+    )
     existing_snapshot = None
     if existing_application is not None:
         application_id = str(existing_application.get("applicationId") or "").strip()
-        existing_snapshot = _fetch_application(host=host, token=token, application_id=application_id)
+        existing_snapshot = _fetch_application(
+            host=host, token=token, application_id=application_id
+        )
     existing_database = _resolve_existing_preview_database(existing_snapshot)
     database_name, role_name = _preview_database_identifiers(request.preview_slug)
     database_parts = existing_database or _DatabaseParts(
@@ -923,7 +985,9 @@ def execute_verireel_preview_refresh(
             command="node prisma/seed.mjs",
             timeout_seconds=request.timeout_seconds,
         )
-        _wait_for_preview_health(preview_url=request.preview_url, timeout_seconds=request.timeout_seconds)
+        _wait_for_preview_health(
+            preview_url=request.preview_url, timeout_seconds=request.timeout_seconds
+        )
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
     except click.ClickException as exc:
@@ -974,13 +1038,16 @@ def execute_verireel_preview_refresh(
             refresh_started_at=started_at,
             refresh_finished_at=finished_at,
             application_name=application_name,
-            application_id=created_application_id or str((existing_snapshot or {}).get("applicationId") or "").strip(),
+            application_id=created_application_id
+            or str((existing_snapshot or {}).get("applicationId") or "").strip(),
             preview_url=request.preview_url,
             error_message=message,
         )
 
     finished_at = utc_now_timestamp()
-    resolved_application = _find_application_by_name(host=host, token=token, application_name=application_name)
+    resolved_application = _find_application_by_name(
+        host=host, token=token, application_name=application_name
+    )
     return VeriReelPreviewRefreshResult(
         refresh_status="pass",
         refresh_started_at=started_at,
@@ -1002,19 +1069,25 @@ def execute_verireel_preview_destroy(
         host=host,
         token=token,
     )
-    template_env_map = control_plane_dokploy.parse_dokploy_env_text(str(template_application.get("env") or ""))
+    template_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        str(template_application.get("env") or "")
+    )
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
     if not template_database_url:
         raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
 
     started_at = utc_now_timestamp()
     application_name = _preview_application_name(request.preview_slug)
-    application = _find_application_by_name(host=host, token=token, application_name=application_name)
+    application = _find_application_by_name(
+        host=host, token=token, application_name=application_name
+    )
     application_id = str((application or {}).get("applicationId") or "").strip()
     database_name, role_name = _preview_database_identifiers(request.preview_slug)
     existing_database = None
     if application_id:
-        application_payload = _fetch_application(host=host, token=token, application_id=application_id)
+        application_payload = _fetch_application(
+            host=host, token=token, application_id=application_id
+        )
         existing_database = _resolve_existing_preview_database(application_payload)
     database_parts = existing_database or _DatabaseParts(
         host=_parse_database_url(template_database_url).host,
@@ -1048,7 +1121,7 @@ def execute_verireel_preview_destroy(
         except click.ClickException as exc:
             cleanup_errors.append(f"application cleanup failed: {exc}")
     try:
-        _run_application_command(
+        _run_application_command_with_retries(
             host=host,
             token=token,
             application_id=template_target.target_id,
