@@ -46,6 +46,10 @@ from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
 )
+from control_plane.workflows.verireel_app_maintenance import (
+    VeriReelAppMaintenanceRequest,
+    execute_verireel_app_maintenance,
+)
 from control_plane.workflows.verireel_prod_backup_gate import (
     VeriReelProdBackupGateRequest,
     execute_verireel_prod_backup_gate,
@@ -60,8 +64,10 @@ from control_plane.workflows.verireel_prod_rollback import (
 )
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
+    VeriReelPreviewInventoryRequest,
     VeriReelPreviewRefreshRequest,
     execute_verireel_preview_destroy,
+    execute_verireel_preview_inventory,
     execute_verireel_preview_refresh,
 )
 
@@ -181,6 +187,20 @@ class VeriReelProdDeployEnvelope(BaseModel):
         return self
 
 
+class VeriReelAppMaintenanceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    maintenance: VeriReelAppMaintenanceRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelAppMaintenanceEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel app maintenance requires product 'verireel'.")
+        return self
+
+
 class VeriReelProdPromotionEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -248,6 +268,20 @@ class VeriReelPreviewDestroyEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelPreviewDestroyEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel preview destroy requires product 'verireel'.")
+        return self
+
+
+class VeriReelPreviewInventoryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    inventory: VeriReelPreviewInventoryRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelPreviewInventoryEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel preview inventory requires product 'verireel'.")
         return self
 
 
@@ -716,8 +750,10 @@ def create_launchplane_service_app(
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/verireel/preview-refresh",
+        "/v1/drivers/verireel/preview-inventory",
         "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/testing-deploy",
+        "/v1/drivers/verireel/app-maintenance",
         "/v1/drivers/verireel/prod-deploy",
         "/v1/drivers/verireel/prod-backup-gate",
         "/v1/drivers/verireel/prod-promotion",
@@ -1257,6 +1293,45 @@ def create_launchplane_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/verireel/app-maintenance":
+                request = VeriReelAppMaintenanceEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_app_maintenance.execute",
+                    product=request.product,
+                    context=request.maintenance.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel app maintenance driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_app_maintenance(
+                    control_plane_root=resolved_root,
+                    request=request.maintenance,
+                )
+                result = driver_result.model_dump(mode="json")
             elif path == "/v1/drivers/verireel/prod-deploy":
                 request = VeriReelProdDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -1460,6 +1535,45 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_preview_refresh(
                     control_plane_root=resolved_root,
                     request=request.refresh,
+                )
+                result = {}
+            elif path == "/v1/drivers/verireel/preview-inventory":
+                request = VeriReelPreviewInventoryEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_preview_inventory.read",
+                    product=request.product,
+                    context=request.inventory.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot read the VeriReel preview inventory"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_verireel_preview_inventory(
+                    control_plane_root=resolved_root,
+                    request=request.inventory,
                 )
                 result = {}
             elif path == "/v1/drivers/verireel/preview-destroy":

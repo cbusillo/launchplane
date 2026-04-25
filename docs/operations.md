@@ -234,9 +234,12 @@ Current derived-state behavior:
   `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
   deploys, `POST /v1/drivers/verireel/prod-backup-gate` captures the prod
   backup gate and writes the backup-gate record, and the promotion / rollback
-  drivers own the remaining stable-lane execution path. Those routes return the
-  durable record identifiers plus timing/status for the caller to thread into
-  later verification or promotion evidence.
+  drivers own the remaining stable-lane execution path. VeriReel maintenance
+  operations that need Dokploy authority, such as testing migrations, preview
+  owner-admin verification helpers, reset-testing, and preview inventory, also
+  flow through Launchplane driver routes instead of product-repo workflow
+  secrets. Those routes return durable record identifiers or timing/status for
+  the caller to thread into later verification or promotion evidence.
 
 ## Core Rules
 

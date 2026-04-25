@@ -118,6 +118,10 @@ live authority across DB, files, and process env:
   `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
   `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` from DB-backed runtime-environment
   records before it captures the backup gate
+- VeriReel app maintenance and preview inventory routes resolve Dokploy host,
+  token, and target identity from Launchplane-managed secrets and DB-backed
+  target records. Product-repo workflows may pass operation intent, preview app
+  identity, and GitHub OIDC identity, but not Dokploy credentials.
 
 The remaining transition surface is legacy-path visibility, not runtime fallback
 authority or supported import compatibility.

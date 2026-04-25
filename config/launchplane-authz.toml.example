@@ -11,7 +11,7 @@ workflow_refs = [
 event_names = ["pull_request"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["verireel_preview_refresh.execute", "preview_generation.write"]
+actions = ["verireel_preview_refresh.execute", "verireel_app_maintenance.execute", "preview_generation.write"]
 
 [[github_actions]]
 repository = "example-org/verireel"
@@ -21,7 +21,7 @@ workflow_refs = [
 event_names = ["pull_request"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["verireel_preview_destroy.execute", "preview_destroyed.write"]
+actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write"]
 
 [[github_actions]]
 repository = "example-org/verireel"
@@ -51,7 +51,17 @@ workflow_refs = [
 event_names = ["push", "workflow_dispatch"]
 products = ["verireel"]
 contexts = ["verireel"]
-actions = ["verireel_testing_deploy.execute"]
+actions = ["verireel_testing_deploy.execute", "verireel_app_maintenance.execute"]
+
+[[github_actions]]
+repository = "example-org/verireel"
+workflow_refs = [
+  "example-org/verireel/.github/workflows/reset-testing.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel"]
+actions = ["verireel_app_maintenance.execute"]
 
 [[github_actions]]
 repository = "example-org/verireel"
@@ -71,7 +81,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
 contexts = ["verireel"]
-actions = ["promotion.write", "verireel_prod_backup_gate.execute", "verireel_prod_deploy.execute", "verireel_prod_promotion.execute", "verireel_prod_rollback.execute"]
+actions = ["promotion.write", "verireel_app_maintenance.execute", "verireel_prod_backup_gate.execute", "verireel_prod_deploy.execute", "verireel_prod_promotion.execute", "verireel_prod_rollback.execute"]
 
 [[github_actions]]
 repository = "example-org/tenant-opw"

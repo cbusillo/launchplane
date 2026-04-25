@@ -115,6 +115,34 @@ class VeriReelPreviewDestroyResult(BaseModel):
     error_message: str = ""
 
 
+class VeriReelPreviewInventoryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str = "verireel-testing"
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "VeriReelPreviewInventoryRequest":
+        if self.context != "verireel-testing":
+            raise ValueError("VeriReel preview inventory requires context 'verireel-testing'.")
+        return self
+
+
+class VeriReelPreviewInventoryItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    applicationId: str
+    applicationName: str
+    previewSlug: str
+
+
+class VeriReelPreviewInventoryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    context: str
+    previews: tuple[VeriReelPreviewInventoryItem, ...]
+
+
 class _DatabaseParts(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -131,6 +159,14 @@ def _preview_app_name(preview_slug: str) -> str:
 
 def _preview_application_name(preview_slug: str) -> str:
     return f"{_preview_app_name(preview_slug)}-app"
+
+
+def _preview_slug_from_application_name(application_name: str) -> str:
+    prefix = f"{PREVIEW_APP_PREFIX}-"
+    suffix = "-app"
+    if not application_name.startswith(prefix) or not application_name.endswith(suffix):
+        return ""
+    return application_name[len(prefix) : -len(suffix)]
 
 
 def _preview_database_identifiers(preview_slug: str) -> tuple[str, str]:
@@ -264,6 +300,58 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
                 if str(application.get("name") or "").strip() == application_name:
                     return application
     return None
+
+
+def execute_verireel_preview_inventory(
+    *,
+    control_plane_root: Path,
+    request: VeriReelPreviewInventoryRequest,
+) -> VeriReelPreviewInventoryResult:
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    raw_projects = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/project.all",
+    )
+    if not isinstance(raw_projects, list):
+        raise click.ClickException("Dokploy project inventory returned an invalid response payload.")
+    preview_items: list[VeriReelPreviewInventoryItem] = []
+    for raw_project in raw_projects:
+        project = control_plane_dokploy.as_json_object(raw_project)
+        if project is None:
+            continue
+        raw_environments = project.get("environments")
+        if not isinstance(raw_environments, list):
+            continue
+        for raw_environment in raw_environments:
+            environment = control_plane_dokploy.as_json_object(raw_environment)
+            if environment is None:
+                continue
+            raw_applications = environment.get("applications")
+            if not isinstance(raw_applications, list):
+                continue
+            for raw_application in raw_applications:
+                application = control_plane_dokploy.as_json_object(raw_application)
+                if application is None:
+                    continue
+                application_name = str(application.get("name") or "").strip()
+                preview_slug = _preview_slug_from_application_name(application_name)
+                if not preview_slug:
+                    continue
+                application_id = str(application.get("applicationId") or application.get("id") or "").strip()
+                if not application_id:
+                    continue
+                preview_items.append(
+                    VeriReelPreviewInventoryItem(
+                        applicationId=application_id,
+                        applicationName=application_name,
+                        previewSlug=preview_slug,
+                    )
+                )
+    return VeriReelPreviewInventoryResult(
+        context=request.context,
+        previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
+    )
 
 
 def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:

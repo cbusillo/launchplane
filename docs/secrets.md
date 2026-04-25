@@ -40,6 +40,10 @@ title: Secrets
   `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
   `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` also belong in DB-backed
   runtime-environment records instead of repo or host env.
+- VeriReel app maintenance and preview inventory drivers use Launchplane-managed
+  Dokploy secret bindings. GitHub workflows should not carry `DOKPLOY_HOST`,
+  `DOKPLOY_TOKEN`, or `DOKPLOY_PROJECT_NAME`; they should call Launchplane with
+  OIDC and operation intent.
 
 ## DB-Backed Secret Resolution
 

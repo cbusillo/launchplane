@@ -33,8 +33,11 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyResult,
+    VeriReelPreviewInventoryItem,
+    VeriReelPreviewInventoryResult,
     VeriReelPreviewRefreshResult,
 )
+from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintenanceResult
 from control_plane.workflows.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
@@ -1189,6 +1192,184 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_app_maintenance_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_app_maintenance.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_app_maintenance",
+                return_value=VeriReelAppMaintenanceResult(
+                    maintenance_status="pass",
+                    action="migrate",
+                    context="verireel",
+                    instance="testing",
+                    application_name="ver-testing-app",
+                    application_id="testing-app-123",
+                    schedule_name="ver-apply-prisma-migrations",
+                    started_at="2026-04-25T19:00:00Z",
+                    finished_at="2026-04-25T19:01:00Z",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/app-maintenance",
+                    payload={
+                        "product": "verireel",
+                        "maintenance": {
+                            "context": "verireel",
+                            "instance": "testing",
+                            "action": "migrate",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["maintenance_status"], "pass")
+            self.assertEqual(payload["result"]["application_id"], "testing-app-123")
+            execute_mock.assert_called_once()
+
+    def test_verireel_app_maintenance_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_testing_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/app-maintenance",
+                payload={
+                    "product": "verireel",
+                    "maintenance": {
+                        "context": "verireel",
+                        "instance": "testing",
+                        "action": "migrate",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_verireel_preview_inventory_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["verireel_preview_inventory.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_preview_inventory",
+                return_value=VeriReelPreviewInventoryResult(
+                    context="verireel-testing",
+                    previews=(
+                        VeriReelPreviewInventoryItem(
+                            applicationId="app-42",
+                            applicationName="ver-preview-pr-42-app",
+                            previewSlug="pr-42",
+                        ),
+                    ),
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-inventory",
+                    payload={
+                        "product": "verireel",
+                        "inventory": {"context": "verireel-testing"},
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["previews"][0]["previewSlug"], "pr-42")
+            execute_mock.assert_called_once()
 
     def test_verireel_prod_deploy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
