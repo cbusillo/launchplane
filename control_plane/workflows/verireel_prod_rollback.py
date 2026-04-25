@@ -47,6 +47,10 @@ class VeriReelProdRollbackRequest(BaseModel):
     rollout_interval_seconds: int = Field(default=DEFAULT_ROLLOUT_INTERVAL_SECONDS, ge=1)
     start_after_rollback: bool = True
 
+    @property
+    def to_instance(self) -> str:
+        return self.instance
+
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelProdRollbackRequest":
         if self.context != "verireel":

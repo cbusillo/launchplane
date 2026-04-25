@@ -23,7 +23,10 @@ from control_plane.workflows.verireel_prod_rollback import (
     _run_delegated_worker,
     execute_verireel_prod_rollback,
 )
-from control_plane.workflows.verireel_prod_promotion import VeriReelRolloutVerificationResult
+from control_plane.workflows.verireel_prod_promotion import (
+    VeriReelRolloutVerificationResult,
+    _resolve_rollout_base_urls,
+)
 
 
 class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
@@ -163,6 +166,49 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_CT_ID"], "211")
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"], "runtime-private-key")
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
+
+    def test_rollout_base_url_resolution_accepts_rollback_request_shape(self) -> None:
+        request = VeriReelProdRollbackRequest(
+            promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+        )
+        source_of_truth = object()
+        target_definition = object()
+
+        with (
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source_of_truth,
+            ),
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.control_plane_dokploy.find_dokploy_target_definition",
+                return_value=target_definition,
+            ) as find_target,
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"VERIREEL_PROD_OPERATOR_BASE_URL": "https://ver-prod.shinycomputers.com"},
+            ) as resolve_environment,
+            patch(
+                "control_plane.workflows.verireel_prod_promotion.control_plane_dokploy.resolve_healthcheck_base_urls",
+                return_value=("https://ver-prod.shinycomputers.com",),
+            ),
+        ):
+            base_urls = _resolve_rollout_base_urls(
+                control_plane_root=Path("/launchplane"),
+                request=request,
+            )
+
+        self.assertEqual(base_urls, ("https://ver-prod.shinycomputers.com",))
+        find_target.assert_called_once_with(
+            source_of_truth,
+            context_name="verireel",
+            instance_name="prod",
+        )
+        resolve_environment.assert_called_once_with(
+            control_plane_root=Path("/launchplane"),
+            context_name="verireel",
+            instance_name="prod",
+        )
 
     def test_worker_uses_explicit_ssh_material_for_remote_proxmox_commands(self) -> None:
         captured: dict[str, object] = {}
