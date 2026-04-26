@@ -97,6 +97,9 @@ privileged Proxmox path is still intended to stay behind a narrow delegated
 worker contract rather than being absorbed into the main API host. That runtime
 posture is documented in
 [`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
+The constrained Proxmox forced-command guard lives with Launchplane at
+[`../scripts/proxmox-prod-gate-filter.sh`](../scripts/proxmox-prod-gate-filter.sh)
+so product repos do not carry privileged backup or rollback shell contracts.
 
 The service currently uses a static authz policy file and GitHub OIDC bearer
 tokens. Additional evidence routes should land against the same authn/authz

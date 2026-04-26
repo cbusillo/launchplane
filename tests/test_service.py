@@ -1803,6 +1803,63 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_driver_unexpected_error_returns_json_response(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/verireel",
+                                "workflow_refs": [
+                                    "every/verireel/.github/workflows/promote-image.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["verireel"],
+                                "contexts": ["verireel"],
+                                "actions": ["verireel_prod_rollback.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.execute_verireel_prod_rollback",
+                    side_effect=RuntimeError("driver exploded"),
+                ),
+                patch("control_plane.service.traceback.print_exc"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-rollback",
+                    payload={
+                        "product": "verireel",
+                        "rollback": {
+                            "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                            "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 500)
+            self.assertEqual(payload["status"], "rejected")
+            self.assertEqual(payload["error"]["code"], "internal_error")
+            self.assertIn("trace_id", payload)
+
     def test_verireel_prod_backup_gate_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -7,6 +7,7 @@ import io
 import json
 import os
 from socketserver import ThreadingMixIn
+import traceback
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -1819,6 +1820,20 @@ def create_launchplane_service_app(
                     "status": "rejected",
                     "trace_id": request_trace_id,
                     "error": {"code": "invalid_request", "message": str(exc)},
+                },
+            )
+        except Exception:  # noqa: BLE001
+            traceback.print_exc()
+            return _json_response(
+                start_response=start_response,
+                status_code=500,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "internal_error",
+                        "message": "Unexpected Launchplane service error. Use trace_id to inspect service logs.",
+                    },
                 },
             )
         accepted_payload = _accepted_payload(
