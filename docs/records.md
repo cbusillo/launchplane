@@ -126,6 +126,12 @@ state/
 - Deployment records make the native follow-up step explicit by
   recording whether the Odoo-specific compose post-deploy update was skipped,
   pending, passed, or failed.
+- Odoo prod rollback writes a normal deployment record for the rollback deploy,
+  refreshes prod inventory, mints the prod release tuple from the selected
+  artifact manifest, and annotates the current prod promotion record's
+  `rollback` and `rollback_health` fields. The selected rollback source is the
+  DB-backed `testing` release tuple; operators must not supply unrecorded image
+  refs or source SHAs.
 - Direct `ship` and `promote` execution fail closed if the referenced artifact
   id does not already have a stored manifest in control-plane state.
 - Artifact manifests may also carry `addon_selectors` metadata so operators can
