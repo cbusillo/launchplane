@@ -61,7 +61,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["verireel"]
 contexts = ["verireel"]
-actions = ["verireel_stable_environment.read", "verireel_app_maintenance.execute"]
+actions = ["verireel_stable_environment.read"]
 
 [[github_actions]]
 repository = "example-org/verireel"
