@@ -97,6 +97,10 @@ from control_plane.workflows.launchplane import (
     verify_github_webhook_signature,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.odoo_artifact_publish import (
+    OdooArtifactPublishRequest,
+    execute_odoo_artifact_publish,
+)
 from control_plane.workflows.promote import (
     build_executed_promotion_record,
     build_promotion_record,
@@ -8711,6 +8715,11 @@ def artifacts() -> None:
     """Artifact manifest commands."""
 
 
+@main.group("odoo-artifacts")
+def odoo_artifacts() -> None:
+    """Odoo artifact publish driver commands."""
+
+
 @main.group()
 def service() -> None:
     """Launchplane service commands."""
@@ -9191,6 +9200,52 @@ def artifacts_ingest(state_dir: Path, database_url: str, input_file: Path) -> No
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
     record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
     click.echo(record_path)
+
+
+@odoo_artifacts.command("publish")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane artifact and runtime-environment records.",
+)
+@click.option("--context", required=True)
+@click.option("--instance", default="testing", show_default=True)
+@click.option("--manifest", "manifest_path", type=click.Path(path_type=Path), required=True)
+@click.option("--devkit-root", type=click.Path(path_type=Path), required=True)
+@click.option("--image-repository", required=True)
+@click.option("--image-tag", required=True)
+@click.option("--output-file", type=click.Path(path_type=Path), default=None)
+@click.option("--no-cache", is_flag=True, default=False)
+def odoo_artifacts_publish(
+    database_url: str,
+    context: str,
+    instance: str,
+    manifest_path: Path,
+    devkit_root: Path,
+    image_repository: str,
+    image_tag: str,
+    output_file: Path | None,
+    no_cache: bool,
+) -> None:
+    record_store = _store(Path("state"), database_url=database_url)
+    result = execute_odoo_artifact_publish(
+        control_plane_root=_control_plane_root(),
+        record_store=record_store,
+        request=OdooArtifactPublishRequest(
+            context=context,
+            instance=instance,
+            manifest_path=manifest_path,
+            devkit_root=devkit_root,
+            image_repository=image_repository,
+            image_tag=image_tag,
+            output_file=output_file,
+            no_cache=no_cache,
+        ),
+    )
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    if result.status != "pass":
+        raise click.ClickException(result.error_message or "Odoo artifact publish failed.")
 
 
 @main.group("release-tuples")

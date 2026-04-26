@@ -402,16 +402,22 @@ Current derived-state behavior:
 Artifact handoff example:
 
 ```bash
-uv --directory ../odoo-devkit run platform runtime publish \
-  --manifest ./workspace.toml \
+uv run launchplane odoo-artifacts publish \
+  --context opw \
   --instance testing \
+  --manifest ../odoo-workspaces/migration/sources/tenant-opw/workspace.toml \
+  --devkit-root ../odoo-workspaces/migration/sources/devkit \
   --image-repository ghcr.io/example/odoo-opw \
-  --image-tag opw-20260416-deadbeef \
-  --output-file /tmp/opw-artifact.json
-uv run launchplane artifacts write \
-  --state-dir ./state \
-  --input-file /tmp/opw-artifact.json
+  --image-tag opw-20260416-deadbeef
 ```
+
+The Odoo artifact publish driver is the control-plane-owned handoff. It
+resolves the DB-backed runtime environment and managed secrets in Launchplane,
+passes them to `odoo-devkit` as a one-shot runtime payload for the publish
+subprocess, validates the returned artifact belongs to the requested context,
+and writes the artifact manifest back to Launchplane records. Do not point a
+local devkit checkout directly at the live Launchplane database or recreate
+runtime env files to publish artifacts.
 
 ## Launchplane Preview Operations
 
