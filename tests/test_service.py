@@ -1435,6 +1435,80 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["previews"][0]["previewSlug"], "pr-42")
             execute_mock.assert_called_once()
 
+    def test_verireel_preview_inventory_driver_does_not_replay_cached_inventory(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["verireel_preview_inventory.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "verireel",
+                "inventory": {"context": "verireel-testing"},
+            }
+
+            with patch(
+                "control_plane.service.execute_verireel_preview_inventory",
+                side_effect=[
+                    VeriReelPreviewInventoryResult(
+                        context="verireel-testing",
+                        previews=(
+                            VeriReelPreviewInventoryItem(
+                                applicationId="app-93",
+                                applicationName="ver-preview-pr-93-app",
+                                previewSlug="pr-93",
+                            ),
+                        ),
+                    ),
+                    VeriReelPreviewInventoryResult(context="verireel-testing", previews=()),
+                ],
+            ) as execute_mock:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-inventory",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "verireel-preview-inventory:verireel-testing"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/preview-inventory",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "verireel-preview-inventory:verireel-testing"},
+                )
+
+            self.assertEqual(first_status_code, 202)
+            self.assertEqual(second_status_code, 202)
+            self.assertEqual(first_payload["result"]["previews"][0]["previewSlug"], "pr-93")
+            self.assertEqual(second_payload["result"]["previews"], [])
+            self.assertEqual(execute_mock.call_count, 2)
+
     def test_verireel_prod_deploy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -1615,17 +1615,6 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
                 driver_result = execute_verireel_preview_inventory(
                     control_plane_root=resolved_root,
                     request=request.inventory,
@@ -1842,7 +1831,10 @@ def create_launchplane_service_app(
             driver_result=driver_result,
         )
         should_store_idempotency = True
-        if path == "/v1/drivers/verireel/stable-environment":
+        if path in {
+            "/v1/drivers/verireel/stable-environment",
+            "/v1/drivers/verireel/preview-inventory",
+        }:
             should_store_idempotency = False
         if path == "/v1/drivers/verireel/prod-backup-gate":
             driver_result_status = ""
