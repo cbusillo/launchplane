@@ -93,7 +93,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          python - <<'PY'
+          python3 - <<'PY'
           import os
           from urllib.parse import urlsplit
 
