@@ -95,6 +95,16 @@ contexts = ["verireel"]
 actions = ["verireel_stable_environment.read", "verireel_prod_rollback.execute"]
 
 [[github_actions]]
+repository = "cbusillo/verireel"
+workflow_refs = [
+  "cbusillo/verireel/.github/workflows/prod-launch-readiness.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel"]
+actions = ["verireel_stable_environment.read", "verireel_app_maintenance.execute"]
+
+[[github_actions]]
 repository = "cbusillo/tenant-opw"
 workflow_refs = [
   "cbusillo/tenant-opw/.github/workflows/launchplane-preview.yml@refs/heads/main",
