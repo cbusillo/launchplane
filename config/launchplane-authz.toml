@@ -125,6 +125,16 @@ contexts = ["opw"]
 actions = ["odoo_post_deploy.execute"]
 
 [[github_actions]]
+repository = "cbusillo/odoo-tenant-cm"
+workflow_refs = [
+  "cbusillo/odoo-tenant-cm/.github/workflows/odoo-post-deploy.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["cm"]
+actions = ["odoo_post_deploy.execute"]
+
+[[github_actions]]
 repository = "cbusillo/launchplane"
 workflow_refs = [
   "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
