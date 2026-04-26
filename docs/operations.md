@@ -377,6 +377,24 @@ Current derived-state behavior:
   routes should not be inserted into the local PyCharm or local container loop;
   use them only for remote stable lanes and promotion/deploy evidence.
 
+## Odoo Rollback And Re-Promote Waterfall
+
+- Confirm Launchplane health reports `storage_backend=postgres`.
+- Confirm the target context has DB-backed artifact manifests, `testing` and
+  `prod` release tuples, Dokploy target records, target-id records, and current
+  prod inventory.
+- For the first harmless drill, call the Odoo prod rollback driver with no
+  explicit artifact id. The driver selects the current `testing` release tuple
+  for that context and fails closed if the tuple or artifact manifest is missing.
+- A passing rollback writes deployment, inventory, prod release tuple,
+  promotion rollback, and rollback-health evidence. Verify the target
+  `/web/health` endpoint and `inventory status` before taking another action.
+- A real destructive rollback drill requires a second known-good artifact tuple.
+  Do not synthesize artifact ids or source SHAs to create one.
+- A re-promote drill should use the normal prod promotion path with a fresh
+  backup gate for the current prod-named lane. Do not reuse old bootstrap backup
+  gates as authorization for a new re-promote.
+
 Artifact handoff example:
 
 ```bash
