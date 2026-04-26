@@ -117,10 +117,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version: "3.13"
+      - name: Install Python
+        run: uv python install 3.13
 
       - name: Render bootstrap authz policy
         id: policy
