@@ -2,6 +2,7 @@ services:
   launchplane:
     image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
     pull_policy: always
+    restart: unless-stopped
     env_file:
       - .env
     command:
