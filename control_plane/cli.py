@@ -70,7 +70,7 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.factory import resolve_database_url
+from control_plane.storage.factory import build_record_store, resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_auth import load_authz_policy
 from control_plane.workflows.launchplane import (
@@ -133,7 +133,11 @@ _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
-def _store(state_dir: Path) -> FilesystemRecordStore:
+def _store(
+    state_dir: Path, *, database_url: str | None = None
+) -> FilesystemRecordStore | PostgresRecordStore:
+    if database_url is not None and database_url.strip():
+        return build_record_store(state_dir=state_dir, database_url=database_url)
     return FilesystemRecordStore(state_dir=state_dir)
 
 
@@ -7167,11 +7171,12 @@ def _skipped_destination_health(
 def _execute_ship(
     *,
     state_dir: Path,
+    database_url: str | None = None,
     env_file: Path | None,
     request: ShipRequest,
     mint_release_tuple: bool = True,
 ) -> tuple[Path | None, DeploymentRecord | ShipRequest]:
-    record_store = _store(state_dir)
+    record_store = _store(state_dir, database_url=database_url)
     resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
     artifact_manifest = _read_artifact_manifest(
         record_store=record_store,
@@ -9157,10 +9162,11 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def artifacts_write(state_dir: Path, input_file: Path) -> None:
+def artifacts_write(state_dir: Path, database_url: str, input_file: Path) -> None:
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir).write_artifact_manifest(manifest)
+    record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
     click.echo(record_path)
 
 
@@ -9168,9 +9174,10 @@ def artifacts_write(state_dir: Path, input_file: Path) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--artifact-id", required=True)
-def artifacts_show(state_dir: Path, artifact_id: str) -> None:
-    manifest = _store(state_dir).read_artifact_manifest(artifact_id)
+def artifacts_show(state_dir: Path, database_url: str, artifact_id: str) -> None:
+    manifest = _store(state_dir, database_url=database_url).read_artifact_manifest(artifact_id)
     click.echo(json.dumps(manifest.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
@@ -9178,10 +9185,11 @@ def artifacts_show(state_dir: Path, artifact_id: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def artifacts_ingest(state_dir: Path, input_file: Path) -> None:
+def artifacts_ingest(state_dir: Path, database_url: str, input_file: Path) -> None:
     manifest = ArtifactIdentityManifest.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir).write_artifact_manifest(manifest)
+    record_path = _store(state_dir, database_url=database_url).write_artifact_manifest(manifest)
     click.echo(record_path)
 
 
@@ -9194,8 +9202,9 @@ def release_tuples() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
-def release_tuples_list(state_dir: Path) -> None:
-    records = _store(state_dir).list_release_tuple_records()
+@click.option("--database-url", default="", show_default=False)
+def release_tuples_list(state_dir: Path, database_url: str) -> None:
+    records = _store(state_dir, database_url=database_url).list_release_tuple_records()
     click.echo(
         json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True)
     )
@@ -9205,10 +9214,13 @@ def release_tuples_list(state_dir: Path) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", required=True)
 @click.option("--channel", "channel_name", required=True)
-def release_tuples_show(state_dir: Path, context_name: str, channel_name: str) -> None:
-    record = _store(state_dir).read_release_tuple_record(
+def release_tuples_show(
+    state_dir: Path, database_url: str, context_name: str, channel_name: str
+) -> None:
+    record = _store(state_dir, database_url=database_url).read_release_tuple_record(
         context_name=context_name,
         channel_name=channel_name,
     )
@@ -9219,9 +9231,12 @@ def release_tuples_show(state_dir: Path, context_name: str, channel_name: str) -
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--output-file", type=click.Path(path_type=Path), default=None)
-def release_tuples_export_catalog(state_dir: Path, output_file: Path | None) -> None:
-    records = _store(state_dir).list_release_tuple_records()
+def release_tuples_export_catalog(
+    state_dir: Path, database_url: str, output_file: Path | None
+) -> None:
+    records = _store(state_dir, database_url=database_url).list_release_tuple_records()
     if not records:
         raise click.ClickException("No release tuple records found to export.")
     rendered_catalog = control_plane_release_tuples.render_release_tuple_catalog_toml(records)
@@ -9237,9 +9252,10 @@ def release_tuples_export_catalog(state_dir: Path, output_file: Path | None) -> 
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
-def release_tuples_write_from_promotion(state_dir: Path, record_id: str) -> None:
-    record_store = _store(state_dir)
+def release_tuples_write_from_promotion(state_dir: Path, database_url: str, record_id: str) -> None:
+    record_store = _store(state_dir, database_url=database_url)
     promotion_record = record_store.read_promotion_record(record_id)
     if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
         promotion_record.from_instance
@@ -9282,10 +9298,11 @@ def backup_gates() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def backup_gates_write(state_dir: Path, input_file: Path) -> None:
+def backup_gates_write(state_dir: Path, database_url: str, input_file: Path) -> None:
     record = BackupGateRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir).write_backup_gate_record(record)
+    record_path = _store(state_dir, database_url=database_url).write_backup_gate_record(record)
     click.echo(record_path)
 
 
@@ -9293,9 +9310,10 @@ def backup_gates_write(state_dir: Path, input_file: Path) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
-def backup_gates_show(state_dir: Path, record_id: str) -> None:
-    record = _store(state_dir).read_backup_gate_record(record_id)
+def backup_gates_show(state_dir: Path, database_url: str, record_id: str) -> None:
+    record = _store(state_dir, database_url=database_url).read_backup_gate_record(record_id)
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
@@ -9303,11 +9321,14 @@ def backup_gates_show(state_dir: Path, record_id: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", default="")
 @click.option("--instance", "instance_name", default="")
 @click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
-def backup_gates_list(state_dir: Path, context_name: str, instance_name: str, limit: int) -> None:
-    records = _store(state_dir).list_backup_gate_records(
+def backup_gates_list(
+    state_dir: Path, database_url: str, context_name: str, instance_name: str, limit: int
+) -> None:
+    records = _store(state_dir, database_url=database_url).list_backup_gate_records(
         context_name=context_name,
         instance_name=instance_name,
         limit=limit,
@@ -9328,10 +9349,11 @@ def promotions() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def promotions_write(state_dir: Path, input_file: Path) -> None:
+def promotions_write(state_dir: Path, database_url: str, input_file: Path) -> None:
     record = PromotionRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir).write_promotion_record(record)
+    record_path = _store(state_dir, database_url=database_url).write_promotion_record(record)
     click.echo(record_path)
 
 
@@ -9339,9 +9361,10 @@ def promotions_write(state_dir: Path, input_file: Path) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
-def promotions_show(state_dir: Path, record_id: str) -> None:
-    record = _store(state_dir).read_promotion_record(record_id)
+def promotions_show(state_dir: Path, database_url: str, record_id: str) -> None:
+    record = _store(state_dir, database_url=database_url).read_promotion_record(record_id)
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
@@ -9349,18 +9372,20 @@ def promotions_show(state_dir: Path, record_id: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", default="")
 @click.option("--from-instance", "from_instance_name", default="")
 @click.option("--to-instance", "to_instance_name", default="")
 @click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
 def promotions_list(
     state_dir: Path,
+    database_url: str,
     context_name: str,
     from_instance_name: str,
     to_instance_name: str,
     limit: int,
 ) -> None:
-    records = _store(state_dir).list_promotion_records(
+    records = _store(state_dir, database_url=database_url).list_promotion_records(
         context_name=context_name,
         from_instance_name=from_instance_name,
         to_instance_name=to_instance_name,
@@ -9382,10 +9407,11 @@ def deployments() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
-def deployments_write(state_dir: Path, input_file: Path) -> None:
+def deployments_write(state_dir: Path, database_url: str, input_file: Path) -> None:
     record = DeploymentRecord.model_validate(_load_json_file(input_file))
-    record_path = _store(state_dir).write_deployment_record(record)
+    record_path = _store(state_dir, database_url=database_url).write_deployment_record(record)
     click.echo(record_path)
 
 
@@ -9393,9 +9419,10 @@ def deployments_write(state_dir: Path, input_file: Path) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
-def deployments_show(state_dir: Path, record_id: str) -> None:
-    record = _store(state_dir).read_deployment_record(record_id)
+def deployments_show(state_dir: Path, database_url: str, record_id: str) -> None:
+    record = _store(state_dir, database_url=database_url).read_deployment_record(record_id)
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
@@ -9403,11 +9430,14 @@ def deployments_show(state_dir: Path, record_id: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", default="")
 @click.option("--instance", "instance_name", default="")
 @click.option("--limit", type=click.IntRange(min=1), default=20, show_default=True)
-def deployments_list(state_dir: Path, context_name: str, instance_name: str, limit: int) -> None:
-    records = _store(state_dir).list_deployment_records(
+def deployments_list(
+    state_dir: Path, database_url: str, context_name: str, instance_name: str, limit: int
+) -> None:
+    records = _store(state_dir, database_url=database_url).list_deployment_records(
         context_name=context_name,
         instance_name=instance_name,
         limit=limit,
@@ -9428,9 +9458,10 @@ def inventory() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
-def inventory_write_from_deployment(state_dir: Path, record_id: str) -> None:
-    record_store = _store(state_dir)
+def inventory_write_from_deployment(state_dir: Path, database_url: str, record_id: str) -> None:
+    record_store = _store(state_dir, database_url=database_url)
     deployment_record = record_store.read_deployment_record(record_id)
     inventory_path = _write_environment_inventory(
         record_store=record_store,
@@ -9443,9 +9474,10 @@ def inventory_write_from_deployment(state_dir: Path, record_id: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
-def inventory_write_from_promotion(state_dir: Path, record_id: str) -> None:
-    record_store = _store(state_dir)
+def inventory_write_from_promotion(state_dir: Path, database_url: str, record_id: str) -> None:
+    record_store = _store(state_dir, database_url=database_url)
     promotion_record = record_store.read_promotion_record(record_id)
     inventory_path = _write_environment_inventory_from_promotion(
         record_store=record_store,
@@ -9458,10 +9490,13 @@ def inventory_write_from_promotion(state_dir: Path, record_id: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
-def inventory_show(state_dir: Path, context_name: str, instance_name: str) -> None:
-    record = _store(state_dir).read_environment_inventory(
+def inventory_show(
+    state_dir: Path, database_url: str, context_name: str, instance_name: str
+) -> None:
+    record = _store(state_dir, database_url=database_url).read_environment_inventory(
         context_name=context_name, instance_name=instance_name
     )
     click.echo(json.dumps(record.model_dump(mode="json"), indent=2, sort_keys=True))
@@ -9471,8 +9506,9 @@ def inventory_show(state_dir: Path, context_name: str, instance_name: str) -> No
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
-def inventory_list(state_dir: Path) -> None:
-    records = _store(state_dir).list_environment_inventory()
+@click.option("--database-url", default="", show_default=False)
+def inventory_list(state_dir: Path, database_url: str) -> None:
+    records = _store(state_dir, database_url=database_url).list_environment_inventory()
     click.echo(
         json.dumps([record.model_dump(mode="json") for record in records], indent=2, sort_keys=True)
     )
@@ -9482,10 +9518,11 @@ def inventory_list(state_dir: Path) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", default="")
-def inventory_overview(state_dir: Path, context_name: str) -> None:
+def inventory_overview(state_dir: Path, database_url: str, context_name: str) -> None:
     payload = _build_environment_overview_payloads(
-        record_store=_store(state_dir),
+        record_store=_store(state_dir, database_url=database_url),
         context_name=context_name,
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
@@ -9495,11 +9532,14 @@ def inventory_overview(state_dir: Path, context_name: str) -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", required=True)
-def inventory_status(state_dir: Path, context_name: str, instance_name: str) -> None:
+def inventory_status(
+    state_dir: Path, database_url: str, context_name: str, instance_name: str
+) -> None:
     payload = _build_environment_status_payload(
-        record_store=_store(state_dir),
+        record_store=_store(state_dir, database_url=database_url),
         context_name=context_name,
         instance_name=instance_name,
     )
@@ -11417,6 +11457,7 @@ def promote() -> None:
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--record-id", required=True)
 @click.option("--artifact-id", required=True)
 @click.option("--backup-record-id", default="", show_default=False)
@@ -11429,6 +11470,7 @@ def promote() -> None:
 @click.option("--deployment-id", default="", show_default=False)
 def promote_record(
     state_dir: Path,
+    database_url: str,
     record_id: str,
     artifact_id: str,
     backup_record_id: str,
@@ -11452,7 +11494,7 @@ def promote_record(
         deploy_mode=deploy_mode,
         deployment_id=deployment_id,
     )
-    record_path = _store(state_dir).write_promotion_record(record)
+    record_path = _store(state_dir, database_url=database_url).write_promotion_record(record)
     click.echo(record_path)
 
 
@@ -11507,15 +11549,17 @@ def promote_resolve(
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def promote_execute(
     state_dir: Path,
+    database_url: str,
     input_file: Path,
     env_file: Path | None,
 ) -> None:
     request = PromotionRequest.model_validate(_load_json_file(input_file))
-    record_store = _store(state_dir)
+    record_store = _store(state_dir, database_url=database_url)
     resolved_artifact_id = _require_artifact_id(requested_artifact_id=request.artifact_id)
     _read_artifact_manifest(
         record_store=record_store,
@@ -11563,6 +11607,7 @@ def promote_execute(
         ship_request = _resolve_ship_request_for_promotion(request=resolved_request)
         _record_path, deployment_record = _execute_ship(
             state_dir=state_dir,
+            database_url=database_url,
             env_file=env_file,
             request=ship_request,
             mint_release_tuple=False,
@@ -11662,16 +11707,19 @@ def ship_resolve(
 @click.option(
     "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
 )
+@click.option("--database-url", default="", show_default=False)
 @click.option("--input-file", type=click.Path(exists=True, path_type=Path), required=True)
 @click.option("--env-file", type=click.Path(exists=True, path_type=Path), default=None)
 def ship_execute(
     state_dir: Path,
+    database_url: str,
     input_file: Path,
     env_file: Path | None,
 ) -> None:
     request = ShipRequest.model_validate(_load_json_file(input_file))
     record_path, _record = _execute_ship(
         state_dir=state_dir,
+        database_url=database_url,
         env_file=env_file,
         request=request,
     )

@@ -6,6 +6,10 @@ from unittest.mock import Mock, patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.artifact_identity import (
+    ArtifactIdentityManifest,
+    ArtifactImageReference,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -28,7 +32,12 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord, SecretVersion
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretVersion,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -57,6 +66,18 @@ def _deployment_record(*, record_id: str, started_at: str, finished_at: str) -> 
             status="pass",
             started_at=started_at,
             finished_at=finished_at,
+        ),
+    )
+
+
+def _artifact_manifest() -> ArtifactIdentityManifest:
+    return ArtifactIdentityManifest(
+        artifact_id="artifact-20260420-a1b2c3d4",
+        source_commit="a1b2c3d4",
+        enterprise_base_digest="sha256:enterprisebase123",
+        image=ArtifactImageReference(
+            repository="ghcr.io/cbusillo/odoo-tenant-opw",
+            digest="sha256:image123",
         ),
     )
 
@@ -102,7 +123,9 @@ def _inventory_record() -> EnvironmentInventory:
     )
 
 
-def _dokploy_target_id_record(*, context: str = "opw", instance: str = "prod", target_id: str = "compose-123") -> DokployTargetIdRecord:
+def _dokploy_target_id_record(
+    *, context: str = "opw", instance: str = "prod", target_id: str = "compose-123"
+) -> DokployTargetIdRecord:
     return DokployTargetIdRecord(
         context=context,
         instance=instance,
@@ -146,14 +169,18 @@ def _runtime_environment_record(
     )
 
 
-def _odoo_instance_override_record(*, context: str = "opw", instance: str = "prod") -> OdooInstanceOverrideRecord:
+def _odoo_instance_override_record(
+    *, context: str = "opw", instance: str = "prod"
+) -> OdooInstanceOverrideRecord:
     return OdooInstanceOverrideRecord(
         context=context,
         instance=instance,
         config_parameters=(
             OdooConfigParameterOverride(
                 key="web.base.url",
-                value=OdooOverrideValue(source="literal", value=f"https://{context}-{instance}.example.com"),
+                value=OdooOverrideValue(
+                    source="literal", value=f"https://{context}-{instance}.example.com"
+                ),
             ),
         ),
         updated_at="2026-04-21T18:30:00Z",
@@ -278,6 +305,61 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_artifact_manifests_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            manifest = _artifact_manifest()
+            store.write_artifact_manifest(manifest)
+            loaded = store.read_artifact_manifest(manifest.artifact_id)
+            listed = store.list_artifact_manifests()
+
+            self.assertEqual(loaded.artifact_id, manifest.artifact_id)
+            self.assertEqual(loaded.image.repository, "ghcr.io/cbusillo/odoo-tenant-opw")
+            self.assertEqual(len(listed), 1)
+            self.assertEqual(listed[0].image.digest, "sha256:image123")
+
+    def test_artifacts_cli_uses_database_store_when_configured(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            input_path = Path(temporary_directory_name) / "artifact.json"
+            input_path.write_text(
+                _artifact_manifest().model_dump_json(),
+                encoding="utf-8",
+            )
+            runner = CliRunner()
+
+            write_result = runner.invoke(
+                main,
+                [
+                    "artifacts",
+                    "write",
+                    "--database-url",
+                    database_url,
+                    "--input-file",
+                    str(input_path),
+                ],
+            )
+            self.assertEqual(write_result.exit_code, 0, write_result.output)
+
+            show_result = runner.invoke(
+                main,
+                [
+                    "artifacts",
+                    "show",
+                    "--database-url",
+                    database_url,
+                    "--artifact-id",
+                    "artifact-20260420-a1b2c3d4",
+                ],
+            )
+            self.assertEqual(show_result.exit_code, 0, show_result.output)
+            self.assertIn("ghcr.io/cbusillo/odoo-tenant-opw", show_result.output)
+
     def test_dokploy_target_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -342,7 +424,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
         }
 
         with TemporaryDirectory() as temporary_directory_name:
-            with patch("control_plane.cli.PostgresRecordStore", return_value=postgres_store) as store_class:
+            with patch(
+                "control_plane.cli.PostgresRecordStore", return_value=postgres_store
+            ) as store_class:
                 result = runner.invoke(
                     main,
                     [
@@ -356,7 +440,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 )
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
-        store_class.assert_called_once_with(database_url="postgresql://launchplane:test@db/launchplane")
+        store_class.assert_called_once_with(
+            database_url="postgresql://launchplane:test@db/launchplane"
+        )
         postgres_store.ensure_schema.assert_called_once_with()
         postgres_store.import_core_records_from_filesystem.assert_called_once()
         self.assertIn('"deployments": 1', result.output)
@@ -364,7 +450,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_write_and_read_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
 
             store.ensure_schema()
@@ -385,7 +473,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_list_preview_records_filters_and_limits(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
             store.ensure_schema()
 
@@ -429,7 +519,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
             store.ensure_schema()
             store.write_dokploy_target_id_record(
@@ -438,24 +530,38 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.write_dokploy_target_id_record(
                 _dokploy_target_id_record(context="cm", instance="testing", target_id="compose-456")
             )
-            loaded_record = store.read_dokploy_target_id_record(context_name="opw", instance_name="prod")
+            loaded_record = store.read_dokploy_target_id_record(
+                context_name="opw", instance_name="prod"
+            )
             listed_records = store.list_dokploy_target_id_records()
             store.close()
 
         self.assertEqual(loaded_record.target_id, "compose-123")
-        self.assertEqual([(record.context, record.instance) for record in listed_records], [("cm", "testing"), ("opw", "prod")])
+        self.assertEqual(
+            [(record.context, record.instance) for record in listed_records],
+            [("cm", "testing"), ("opw", "prod")],
+        )
 
     def test_write_and_list_runtime_environment_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
             store.ensure_schema()
             store.write_runtime_environment_record(
-                _runtime_environment_record(scope="global", env={"ODOO_MASTER_PASSWORD": "shared-master"})
+                _runtime_environment_record(
+                    scope="global", env={"ODOO_MASTER_PASSWORD": "shared-master"}
+                )
             )
             store.write_runtime_environment_record(
-                _runtime_environment_record(scope="instance", context="opw", instance="local", env={"ODOO_DB_PASSWORD": "local-secret"})
+                _runtime_environment_record(
+                    scope="instance",
+                    context="opw",
+                    instance="local",
+                    env={"ODOO_DB_PASSWORD": "local-secret"},
+                )
             )
             listed_records = store.list_runtime_environment_records()
             store.close()
@@ -468,12 +574,20 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_write_read_and_list_odoo_instance_override_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
             store.ensure_schema()
-            store.write_odoo_instance_override_record(_odoo_instance_override_record(context="opw", instance="prod"))
-            store.write_odoo_instance_override_record(_odoo_instance_override_record(context="cm", instance="testing"))
-            loaded_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            store.write_odoo_instance_override_record(
+                _odoo_instance_override_record(context="opw", instance="prod")
+            )
+            store.write_odoo_instance_override_record(
+                _odoo_instance_override_record(context="cm", instance="testing")
+            )
+            loaded_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
             listed_records = store.list_odoo_instance_override_records()
             store.close()
 
@@ -486,7 +600,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
     def test_secret_records_round_trip_and_find_latest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
             store.ensure_schema()
 
@@ -535,7 +651,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 context="opw",
                 instance="testing",
             )
-            listed_records = store.list_secret_records(integration="dokploy", context_name="opw", instance_name="testing")
+            listed_records = store.list_secret_records(
+                integration="dokploy", context_name="opw", instance_name="testing"
+            )
             listed_versions = store.list_secret_versions(secret_id=newer_record.secret_id)
             listed_bindings = store.list_secret_bindings(
                 integration="dokploy",
@@ -546,21 +664,39 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertIsNotNone(found_record)
             assert found_record is not None
             self.assertEqual(found_record.secret_id, newer_record.secret_id)
-            self.assertEqual(store.read_secret_record(newer_record.secret_id).current_version_id, "secret-version-0002")
-            self.assertEqual(store.read_secret_version("secret-version-0002").secret_id, newer_record.secret_id)
-            self.assertEqual([record.secret_id for record in listed_records], [newer_record.secret_id])
-            self.assertEqual([version.version_id for version in listed_versions], ["secret-version-0002", "secret-version-0001"])
-            self.assertEqual([item.binding_id for item in listed_bindings], ["binding-dokploy-token"])
-            self.assertEqual([item.event_id for item in listed_events], ["audit-secret-import-0001"])
+            self.assertEqual(
+                store.read_secret_record(newer_record.secret_id).current_version_id,
+                "secret-version-0002",
+            )
+            self.assertEqual(
+                store.read_secret_version("secret-version-0002").secret_id, newer_record.secret_id
+            )
+            self.assertEqual(
+                [record.secret_id for record in listed_records], [newer_record.secret_id]
+            )
+            self.assertEqual(
+                [version.version_id for version in listed_versions],
+                ["secret-version-0002", "secret-version-0001"],
+            )
+            self.assertEqual(
+                [item.binding_id for item in listed_bindings], ["binding-dokploy-token"]
+            )
+            self.assertEqual(
+                [item.event_id for item in listed_events], ["audit-secret-import-0001"]
+            )
             store.close()
 
     def test_import_core_records_from_filesystem(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
-                database_url=_sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
             )
             store.ensure_schema()
-            filesystem_store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            filesystem_store = FilesystemRecordStore(
+                state_dir=Path(temporary_directory_name) / "state"
+            )
             filesystem_store.write_backup_gate_record(_backup_gate_record())
             filesystem_store.write_deployment_record(
                 _deployment_record(
@@ -573,6 +709,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 _promotion_record(record_id="promotion-20260420T160500Z-opw-testing-to-prod")
             )
             filesystem_store.write_environment_inventory(_inventory_record())
+            filesystem_store.write_artifact_manifest(_artifact_manifest())
             filesystem_store.write_odoo_instance_override_record(_odoo_instance_override_record())
             filesystem_store.write_preview_record(
                 _preview_record(
@@ -593,6 +730,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
             self.assertEqual(
                 counts,
                 {
+                    "artifacts": 1,
                     "backup_gates": 1,
                     "deployments": 1,
                     "promotions": 1,
@@ -604,7 +742,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 },
             )
             self.assertEqual(
-                store.read_promotion_record("promotion-20260420T160500Z-opw-testing-to-prod").to_instance,
+                store.read_promotion_record(
+                    "promotion-20260420T160500Z-opw-testing-to-prod"
+                ).to_instance,
                 "prod",
             )
             self.assertEqual(

@@ -8,6 +8,7 @@ from sqlalchemy import JSON, Index, Integer, String, create_engine, desc, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -21,7 +22,12 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord, SecretVersion
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretVersion,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -37,7 +43,12 @@ class Base(DeclarativeBase):
 class LaunchplaneBackupGateRow(Base):
     __tablename__ = "launchplane_backup_gates"
     __table_args__ = (
-        Index("launchplane_backup_gates_context_instance_idx", "context", "instance", desc("created_at")),
+        Index(
+            "launchplane_backup_gates_context_instance_idx",
+            "context",
+            "instance",
+            desc("created_at"),
+        ),
     )
 
     record_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -45,6 +56,17 @@ class LaunchplaneBackupGateRow(Base):
     instance: Mapped[str] = mapped_column(String, nullable=False)
     created_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneArtifactManifestRow(Base):
+    __tablename__ = "launchplane_artifact_manifests"
+    __table_args__ = (Index("launchplane_artifact_manifests_artifact_idx", desc("artifact_id")),)
+
+    artifact_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source_commit: Mapped[str] = mapped_column(String, nullable=False)
+    image_repository: Mapped[str] = mapped_column(String, nullable=False)
+    image_digest: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -240,7 +262,13 @@ class LaunchplaneSecretRow(Base):
             "instance",
             unique=True,
         ),
-        Index("launchplane_secrets_lookup_idx", "integration", "context", "instance", desc("updated_at")),
+        Index(
+            "launchplane_secrets_lookup_idx",
+            "integration",
+            "context",
+            "instance",
+            desc("updated_at"),
+        ),
     )
 
     secret_id: Mapped[str] = mapped_column(String, primary_key=True)
@@ -368,7 +396,9 @@ class PostgresRecordStore:
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
-                raise FileNotFoundError(f"No Launchplane record found in {orm_model.__tablename__} for {tuple(filters)!r}")
+                raise FileNotFoundError(
+                    f"No Launchplane record found in {orm_model.__tablename__} for {tuple(filters)!r}"
+                )
             return self._read_payload(model_type=model_type, payload=getattr(row, "payload"))
 
     def _list_models(
@@ -388,7 +418,34 @@ class PostgresRecordStore:
             statement = statement.limit(limit)
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
-            return tuple(self._read_payload(model_type=model_type, payload=row.payload) for row in rows)
+            return tuple(
+                self._read_payload(model_type=model_type, payload=row.payload) for row in rows
+            )
+
+    def write_artifact_manifest(self, manifest: ArtifactIdentityManifest) -> None:
+        self._write_row(
+            LaunchplaneArtifactManifestRow(
+                artifact_id=manifest.artifact_id,
+                source_commit=manifest.source_commit,
+                image_repository=manifest.image.repository,
+                image_digest=manifest.image.digest,
+                payload=self._payload_dict(manifest),
+            )
+        )
+
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest:
+        return self._read_model(
+            model_type=ArtifactIdentityManifest,
+            orm_model=LaunchplaneArtifactManifestRow,
+            filters=(LaunchplaneArtifactManifestRow.artifact_id == artifact_id,),
+        )
+
+    def list_artifact_manifests(self) -> tuple[ArtifactIdentityManifest, ...]:
+        return self._list_models(
+            model_type=ArtifactIdentityManifest,
+            orm_model=LaunchplaneArtifactManifestRow,
+            order_by=(LaunchplaneArtifactManifestRow.artifact_id.desc(),),
+        )
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> None:
         self._write_row(
@@ -425,7 +482,10 @@ class PostgresRecordStore:
             model_type=BackupGateRecord,
             orm_model=LaunchplaneBackupGateRow,
             filters=filters,
-            order_by=(LaunchplaneBackupGateRow.created_at.desc(), LaunchplaneBackupGateRow.record_id.desc()),
+            order_by=(
+                LaunchplaneBackupGateRow.created_at.desc(),
+                LaunchplaneBackupGateRow.record_id.desc(),
+            ),
             limit=limit,
         )
 
@@ -456,7 +516,11 @@ class PostgresRecordStore:
             route_path=route_path,
             idempotency_key=idempotency_key,
         )
-        statement = select(LaunchplaneIdempotencyRow).where(LaunchplaneIdempotencyRow.record_id == record_id).limit(1)
+        statement = (
+            select(LaunchplaneIdempotencyRow)
+            .where(LaunchplaneIdempotencyRow.record_id == record_id)
+            .limit(1)
+        )
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
@@ -571,18 +635,26 @@ class PostgresRecordStore:
             )
         )
 
-    def read_environment_inventory(self, *, context_name: str, instance_name: str) -> EnvironmentInventory:
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory:
         return self._read_model(
             model_type=EnvironmentInventory,
             orm_model=LaunchplaneInventoryRow,
-            filters=(LaunchplaneInventoryRow.context == context_name, LaunchplaneInventoryRow.instance == instance_name),
+            filters=(
+                LaunchplaneInventoryRow.context == context_name,
+                LaunchplaneInventoryRow.instance == instance_name,
+            ),
         )
 
     def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
         return self._list_models(
             model_type=EnvironmentInventory,
             orm_model=LaunchplaneInventoryRow,
-            order_by=(LaunchplaneInventoryRow.context.asc(), LaunchplaneInventoryRow.instance.asc()),
+            order_by=(
+                LaunchplaneInventoryRow.context.asc(),
+                LaunchplaneInventoryRow.instance.asc(),
+            ),
         )
 
     def write_preview_record(self, record: PreviewRecord) -> None:
@@ -624,7 +696,10 @@ class PostgresRecordStore:
             model_type=PreviewRecord,
             orm_model=LaunchplanePreviewRow,
             filters=filters,
-            order_by=(LaunchplanePreviewRow.updated_at.desc(), LaunchplanePreviewRow.preview_id.desc()),
+            order_by=(
+                LaunchplanePreviewRow.updated_at.desc(),
+                LaunchplanePreviewRow.preview_id.desc(),
+            ),
             limit=limit,
         )
 
@@ -683,18 +758,26 @@ class PostgresRecordStore:
             )
         )
 
-    def read_release_tuple_record(self, *, context_name: str, channel_name: str) -> ReleaseTupleRecord:
+    def read_release_tuple_record(
+        self, *, context_name: str, channel_name: str
+    ) -> ReleaseTupleRecord:
         return self._read_model(
             model_type=ReleaseTupleRecord,
             orm_model=LaunchplaneReleaseTupleRow,
-            filters=(LaunchplaneReleaseTupleRow.context == context_name, LaunchplaneReleaseTupleRow.channel == channel_name),
+            filters=(
+                LaunchplaneReleaseTupleRow.context == context_name,
+                LaunchplaneReleaseTupleRow.channel == channel_name,
+            ),
         )
 
     def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]:
         return self._list_models(
             model_type=ReleaseTupleRecord,
             orm_model=LaunchplaneReleaseTupleRow,
-            order_by=(LaunchplaneReleaseTupleRow.context.asc(), LaunchplaneReleaseTupleRow.channel.asc()),
+            order_by=(
+                LaunchplaneReleaseTupleRow.context.asc(),
+                LaunchplaneReleaseTupleRow.channel.asc(),
+            ),
         )
 
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
@@ -708,7 +791,9 @@ class PostgresRecordStore:
             )
         )
 
-    def read_dokploy_target_id_record(self, *, context_name: str, instance_name: str) -> DokployTargetIdRecord:
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord:
         return self._read_model(
             model_type=DokployTargetIdRecord,
             orm_model=LaunchplaneDokployTargetIdRow,
@@ -722,7 +807,10 @@ class PostgresRecordStore:
         return self._list_models(
             model_type=DokployTargetIdRecord,
             orm_model=LaunchplaneDokployTargetIdRow,
-            order_by=(LaunchplaneDokployTargetIdRow.context.asc(), LaunchplaneDokployTargetIdRow.instance.asc()),
+            order_by=(
+                LaunchplaneDokployTargetIdRow.context.asc(),
+                LaunchplaneDokployTargetIdRow.instance.asc(),
+            ),
         )
 
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
@@ -735,7 +823,9 @@ class PostgresRecordStore:
             )
         )
 
-    def read_dokploy_target_record(self, *, context_name: str, instance_name: str) -> DokployTargetRecord:
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord:
         return self._read_model(
             model_type=DokployTargetRecord,
             orm_model=LaunchplaneDokployTargetRow,
@@ -749,7 +839,10 @@ class PostgresRecordStore:
         return self._list_models(
             model_type=DokployTargetRecord,
             orm_model=LaunchplaneDokployTargetRow,
-            order_by=(LaunchplaneDokployTargetRow.context.asc(), LaunchplaneDokployTargetRow.instance.asc()),
+            order_by=(
+                LaunchplaneDokployTargetRow.context.asc(),
+                LaunchplaneDokployTargetRow.instance.asc(),
+            ),
         )
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
@@ -784,7 +877,9 @@ class PostgresRecordStore:
             )
         )
 
-    def read_odoo_instance_override_record(self, *, context_name: str, instance_name: str) -> OdooInstanceOverrideRecord:
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord:
         return self._read_model(
             model_type=OdooInstanceOverrideRecord,
             orm_model=LaunchplaneOdooInstanceOverrideRow,
@@ -846,7 +941,10 @@ class PostgresRecordStore:
                 LaunchplaneSecretRow.context == context,
                 LaunchplaneSecretRow.instance == instance,
             ),
-            order_by=(LaunchplaneSecretRow.updated_at.desc(), LaunchplaneSecretRow.secret_id.desc()),
+            order_by=(
+                LaunchplaneSecretRow.updated_at.desc(),
+                LaunchplaneSecretRow.secret_id.desc(),
+            ),
             limit=1,
         )
         return records[0] if records else None
@@ -870,7 +968,10 @@ class PostgresRecordStore:
             model_type=SecretRecord,
             orm_model=LaunchplaneSecretRow,
             filters=filters,
-            order_by=(LaunchplaneSecretRow.updated_at.desc(), LaunchplaneSecretRow.secret_id.desc()),
+            order_by=(
+                LaunchplaneSecretRow.updated_at.desc(),
+                LaunchplaneSecretRow.secret_id.desc(),
+            ),
             limit=limit,
         )
 
@@ -896,7 +997,10 @@ class PostgresRecordStore:
             model_type=SecretVersion,
             orm_model=LaunchplaneSecretVersionRow,
             filters=(LaunchplaneSecretVersionRow.secret_id == secret_id,),
-            order_by=(LaunchplaneSecretVersionRow.created_at.desc(), LaunchplaneSecretVersionRow.version_id.desc()),
+            order_by=(
+                LaunchplaneSecretVersionRow.created_at.desc(),
+                LaunchplaneSecretVersionRow.version_id.desc(),
+            ),
         )
 
     def write_secret_binding(self, binding: SecretBinding) -> None:
@@ -933,7 +1037,10 @@ class PostgresRecordStore:
             model_type=SecretBinding,
             orm_model=LaunchplaneSecretBindingRow,
             filters=filters,
-            order_by=(LaunchplaneSecretBindingRow.updated_at.desc(), LaunchplaneSecretBindingRow.binding_id.desc()),
+            order_by=(
+                LaunchplaneSecretBindingRow.updated_at.desc(),
+                LaunchplaneSecretBindingRow.binding_id.desc(),
+            ),
             limit=limit,
         )
 
@@ -953,11 +1060,17 @@ class PostgresRecordStore:
             model_type=SecretAuditEvent,
             orm_model=LaunchplaneSecretAuditEventRow,
             filters=(LaunchplaneSecretAuditEventRow.secret_id == secret_id,),
-            order_by=(LaunchplaneSecretAuditEventRow.recorded_at.desc(), LaunchplaneSecretAuditEventRow.event_id.desc()),
+            order_by=(
+                LaunchplaneSecretAuditEventRow.recorded_at.desc(),
+                LaunchplaneSecretAuditEventRow.event_id.desc(),
+            ),
         )
 
-    def import_core_records_from_filesystem(self, filesystem_store: FilesystemRecordStore) -> dict[str, int]:
+    def import_core_records_from_filesystem(
+        self, filesystem_store: FilesystemRecordStore
+    ) -> dict[str, int]:
         counts = {
+            "artifacts": 0,
             "backup_gates": 0,
             "deployments": 0,
             "promotions": 0,
@@ -967,6 +1080,9 @@ class PostgresRecordStore:
             "preview_generations": 0,
             "release_tuples": 0,
         }
+        for record in filesystem_store.list_artifact_manifests():
+            self.write_artifact_manifest(record)
+            counts["artifacts"] += 1
         for record in filesystem_store.list_backup_gate_records():
             self.write_backup_gate_record(record)
             counts["backup_gates"] += 1
