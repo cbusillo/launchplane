@@ -264,6 +264,9 @@ Current derived-state behavior:
 - Deploy execution prefers immutable artifact image references by syncing
   `DOCKER_IMAGE_REFERENCE=<repo>@<digest>` to Dokploy when a stored artifact
   manifest is available.
+- VeriReel stable deploys update the Dokploy Application docker provider to the
+  exact immutable artifact id before triggering deploy; product workflows do not
+  publish mutable prod tags as the promotion authority.
 - Direct `ship` and `promote` execution fail closed when the referenced
   artifact manifest is missing.
 - Direct artifact-backed execution also fails closed when the Dokploy target

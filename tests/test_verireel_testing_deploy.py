@@ -11,6 +11,7 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
+    _execute_dokploy_deploy,
     execute_verireel_stable_deploy,
 )
 
@@ -133,3 +134,74 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             deployment = store.read_deployment_record("deployment-verireel-testing-run-12345-attempt-1")
             self.assertEqual(deployment.deploy.status, "fail")
             self.assertEqual(deployment.resolved_target.target_id, "testing-app-123")
+
+    def test_execute_dokploy_deploy_updates_application_image_before_triggering_deploy(self) -> None:
+        captured_dokploy_requests: list[dict[str, object]] = []
+        captured_trigger_calls: list[dict[str, object]] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ship_request = ShipRequest(
+                artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                context="verireel",
+                instance="testing",
+                source_git_ref="abcdef1234567890",
+                target_name="ver-testing-app",
+                target_type="application",
+                deploy_mode="dokploy-application-api",
+                wait=True,
+                verify_health=False,
+                destination_health=HealthcheckEvidence(status="skipped"),
+            )
+
+            with patch(
+                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ), patch(
+                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-old"},
+            ), patch(
+                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": "testing-app-123",
+                    "dockerImage": "ghcr.io/every/verireel-app:prod",
+                    "username": "every",
+                    "password": "ghp_test",
+                    "registryUrl": "ghcr.io",
+                },
+            ), patch(
+                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.dokploy_request",
+                side_effect=lambda **kwargs: captured_dokploy_requests.append(kwargs),
+            ), patch(
+                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.trigger_deployment",
+                side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
+            ), patch(
+                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.wait_for_target_deployment",
+                return_value="deployment=deploy-new status=done",
+            ):
+                _execute_dokploy_deploy(
+                    control_plane_root=root,
+                    ship_request=ship_request,
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application",
+                        target_id="testing-app-123",
+                        target_name="ver-testing-app",
+                    ),
+                    deploy_timeout_seconds=300,
+                )
+
+            self.assertEqual(len(captured_dokploy_requests), 1)
+            self.assertEqual(
+                captured_dokploy_requests[0]["path"],
+                "/api/application.saveDockerProvider",
+            )
+            self.assertEqual(
+                captured_dokploy_requests[0]["payload"],
+                {
+                    "applicationId": "testing-app-123",
+                    "dockerImage": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                    "username": "every",
+                    "password": "ghp_test",
+                    "registryUrl": "ghcr.io",
+                },
+            )
+            self.assertEqual(len(captured_trigger_calls), 1)
