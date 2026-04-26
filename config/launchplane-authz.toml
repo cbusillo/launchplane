@@ -32,7 +32,7 @@ workflow_refs = [
 event_names = ["schedule", "workflow_dispatch"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["verireel_preview_destroy.execute", "preview_destroyed.write"]
+actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write"]
 
 [[github_actions]]
 repository = "cbusillo/verireel"
