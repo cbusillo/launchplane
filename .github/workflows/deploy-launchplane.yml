@@ -35,7 +35,9 @@ jobs:
        github.event.workflow_run.event == 'push' &&
        github.event.workflow_run.head_branch == 'main') ||
       github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
+    runs-on:
+      - self-hosted
+      - chris-testing
     env:
       LAUNCHPLANE_DOKPLOY_TARGET_ID: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_DOKPLOY_TARGET_TYPE: ${{ vars.LAUNCHPLANE_DOKPLOY_TARGET_TYPE }}
@@ -115,10 +117,8 @@ jobs:
       - name: Install uv
         uses: astral-sh/setup-uv@v7
 
-      - name: Set up Python
-        uses: actions/setup-python@v6
-        with:
-          python-version-file: pyproject.toml
+      - name: Install Python
+        run: uv python install 3.13
 
       - name: Render bootstrap authz policy
         id: policy
