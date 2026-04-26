@@ -49,6 +49,10 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
 )
+from control_plane.workflows.odoo_prod_rollback import (
+    OdooProdRollbackRequest,
+    execute_odoo_prod_rollback,
+)
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
@@ -177,6 +181,20 @@ class OdooPostDeployEnvelope(BaseModel):
     def _validate_alignment(self) -> "OdooPostDeployEnvelope":
         if self.product.strip() != "odoo":
             raise ValueError("Odoo post-deploy requires product 'odoo'.")
+        return self
+
+
+class OdooProdRollbackEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    rollback: OdooProdRollbackRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdRollbackEnvelope":
+        if self.product.strip() != "odoo":
+            raise ValueError("Odoo prod rollback requires product 'odoo'.")
         return self
 
 
@@ -793,6 +811,7 @@ def create_launchplane_service_app(
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/odoo/post-deploy",
+        "/v1/drivers/odoo/prod-rollback",
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-inventory",
         "/v1/drivers/verireel/preview-destroy",
@@ -1341,6 +1360,51 @@ def create_launchplane_service_app(
                     "transition": (
                         f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
                     )
+                }
+            elif path == "/v1/drivers/odoo/prod-rollback":
+                request = OdooProdRollbackEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="odoo_prod_rollback.execute",
+                    product=request.product,
+                    context=request.rollback.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the Odoo prod rollback driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_prod_rollback(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.rollback,
+                )
+                result = {
+                    "promotion_record_id": driver_result.promotion_record_id,
+                    "deployment_record_id": driver_result.deployment_record_id,
+                    "rollback_status": driver_result.rollback_status,
+                    "rollback_health_status": driver_result.rollback_health_status,
                 }
             elif path == "/v1/drivers/verireel/testing-deploy":
                 request = VeriReelTestingDeployEnvelope.model_validate(payload)

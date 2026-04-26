@@ -340,6 +340,15 @@ Current derived-state behavior:
   driver route. It executes the remote compose post-deploy data-workflow runner
   for a stable Odoo target and applies DB-backed instance override records when
   the requested phase matches `apply_on`.
+- `POST /v1/drivers/odoo/prod-rollback` rolls a prod-named Odoo lane back to
+  the DB-backed `testing` release tuple for the same context. The driver updates
+  the Dokploy `DOCKER_IMAGE_REFERENCE`, deploys the compose target, runs the
+  Odoo post-deploy workflow, verifies `/web/health`, writes deployment,
+  inventory, release tuple, and rollback evidence, and annotates the current prod
+  promotion record.
+- Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
+  invent artifact ids, source commits, backup gates, or env-file overlays to make
+  a rollback proceed; write or import the real Launchplane records first.
 - `odoo-overrides put-config-param` writes a typed Odoo `ir.config_parameter`
   override for a context and instance.
 - `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
