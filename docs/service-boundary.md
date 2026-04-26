@@ -275,15 +275,18 @@ allow-listed app maintenance actions keyed by preview slug when it needs remote
 owner-admin setup/cleanup.
 
 The first Odoo driver cuts are intentionally narrow as well: Launchplane owns the
-remote post-deploy data-workflow trigger and prod rollback for stable Odoo
-compose targets. Post-deploy reads DB-backed Odoo instance override records,
-renders the typed override payload, invokes the Dokploy data-workflow runner, and
-writes `last_apply` evidence back to Launchplane. Prod rollback reads DB-backed
-release tuples, artifact manifests, target records, and current inventory,
-deploys the selected artifact-backed image, verifies health, and writes durable
-rollback/deployment/inventory/release tuple evidence. Local Odoo runtime commands
-remain in `odoo-devkit`; these routes are for remote control-plane execution
-only.
+artifact publish handoff, remote post-deploy data-workflow trigger, and prod
+rollback for stable Odoo compose targets. Artifact publish resolves DB-backed
+runtime records and managed secrets in Launchplane, invokes `odoo-devkit` as the
+build engine with a one-shot runtime payload, validates the returned artifact
+manifest, and writes it to Launchplane records. Post-deploy reads DB-backed Odoo
+instance override records, renders the typed override payload, invokes the
+Dokploy data-workflow runner, and writes `last_apply` evidence back to
+Launchplane. Prod rollback reads DB-backed release tuples, artifact manifests,
+target records, and current inventory, deploys the selected artifact-backed
+image, verifies health, and writes durable rollback/deployment/inventory/release
+tuple evidence. Local Odoo runtime commands remain in `odoo-devkit`; these
+drivers are for remote control-plane execution only.
 
 VeriReel prod rollback now has a dedicated Launchplane driver route, but it
 still depends on a privileged delegated-worker runtime contract for Proxmox
