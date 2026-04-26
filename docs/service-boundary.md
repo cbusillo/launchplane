@@ -249,12 +249,14 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/verireel/preview-inventory`
 - `POST /v1/drivers/verireel/preview-destroy`
 
-The first preview driver cut stays intentionally narrow: Launchplane owns preview
-runtime refresh, inventory, and teardown, while VeriReel still owns image
+The preview driver cut stays intentionally narrow but keeps topology in
+Launchplane: Launchplane owns preview URL derivation from the
+`LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment value, preview app naming,
+runtime refresh, inventory, and teardown. VeriReel still owns image
 build/publish, browser verification, and the follow-up preview evidence write.
-Browser verification can request Launchplane-resolved stable environment
-metadata plus allow-listed app maintenance actions when it needs base URLs,
-target identity, or remote owner-admin setup/cleanup.
+Browser verification uses the preview URL returned by the driver plus
+allow-listed app maintenance actions keyed by preview slug when it needs remote
+owner-admin setup/cleanup.
 
 VeriReel prod rollback now has a dedicated Launchplane driver route, but it
 still depends on a privileged delegated-worker runtime contract for Proxmox

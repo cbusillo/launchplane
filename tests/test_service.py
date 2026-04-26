@@ -2122,6 +2122,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     destroy_finished_at="2026-04-21T01:36:00Z",
                     application_name="ver-preview-pr-123-app",
                     application_id="preview-app-123",
+                    preview_url="https://pr-123.ver-preview.shinycomputers.com",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(
@@ -2189,6 +2190,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     destroy_finished_at="2026-04-24T13:01:00Z",
                     application_name="ver-preview-pr-72-app",
                     application_id="preview-app-72",
+                    preview_url="https://pr-72.ver-preview.shinycomputers.com",
                 ),
             ) as execute_mock:
                 status_code, payload = _invoke_app(

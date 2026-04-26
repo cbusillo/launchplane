@@ -399,12 +399,11 @@ runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
-are the current local preview-evidence ingest adapters for products whose
-preview runtime already exists outside Launchplane. They mirror the payload shape
-Launchplane should later accept through its service ingress. When the preview
-request carries an explicit `canonical_url`, Launchplane can store the live preview
-route, generation status, and cleanup outcome directly from external workflow
-evidence without requiring a Launchplane-managed preview base-url contract.
+are local preview-evidence ingest adapters that mirror the service ingress
+payload shape. VeriReel preview runtime now flows through Launchplane drivers:
+the app repo sends PR/image intent, Launchplane derives the live preview URL
+from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that returned URL with
+generation status and cleanup outcome.
 
 ### VeriReel Preview Evidence Handoff
 

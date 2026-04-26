@@ -35,7 +35,7 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
             "node scripts/ops/remote-owner-admin.mjs --action grant-sponsored --email creator+e2e@example.com",
         )
 
-    def test_rejects_preview_request_without_preview_application_name(self) -> None:
+    def test_rejects_preview_request_with_invalid_preview_application_name(self) -> None:
         with self.assertRaises(ValueError):
             VeriReelAppMaintenanceRequest(
                 context="verireel-testing",
@@ -51,8 +51,20 @@ class VeriReelAppMaintenanceTests(unittest.TestCase):
                 context="verireel-testing",
                 instance="preview",
                 action="migrate",
-                application_name="ver-preview-pr-42-app",
+                preview_slug="pr-42",
             )
+
+    def test_accepts_preview_slug_for_preview_owner_admin_request(self) -> None:
+        request = VeriReelAppMaintenanceRequest(
+            context="verireel-testing",
+            instance="preview",
+            action="grant-sponsored",
+            email="creator@example.com",
+            preview_slug="pr-42",
+        )
+
+        self.assertEqual(request.preview_slug, "pr-42")
+        self.assertEqual(request.application_name, "")
 
     def test_builds_testing_reset_command(self) -> None:
         request = VeriReelAppMaintenanceRequest(action="reset-testing")

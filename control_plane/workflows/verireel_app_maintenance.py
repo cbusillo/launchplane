@@ -26,6 +26,7 @@ DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_ATTEMPTS = 4
 DEFAULT_RETRY_DELAY_SECONDS = 5.0
 PREVIEW_APPLICATION_NAME_PATTERN = re.compile(r"^ver-preview-pr-[1-9][0-9]*-app$")
+PREVIEW_SLUG_PATTERN = re.compile(r"^pr-[1-9][0-9]*$")
 
 
 class VeriReelAppMaintenanceRequest(BaseModel):
@@ -37,23 +38,38 @@ class VeriReelAppMaintenanceRequest(BaseModel):
     action: VeriReelAppMaintenanceAction
     email: str = ""
     application_name: str = ""
+    preview_slug: str = ""
     timeout_seconds: int = Field(default=DEFAULT_TIMEOUT_SECONDS, ge=1)
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelAppMaintenanceRequest":
         self.email = self.email.strip()
         self.application_name = self.application_name.strip()
+        self.preview_slug = self.preview_slug.strip()
 
         if self.context == "verireel" and self.instance != "testing":
             raise ValueError("VeriReel stable app maintenance only supports instance 'testing'.")
         if self.context == "verireel-testing" and self.instance != "preview":
             raise ValueError("VeriReel preview app maintenance requires instance 'preview'.")
-        if self.context == "verireel-testing" and not PREVIEW_APPLICATION_NAME_PATTERN.fullmatch(
-            self.application_name
-        ):
-            raise ValueError("VeriReel preview app maintenance requires a ver-preview-pr-*-app application_name.")
+        if self.context == "verireel-testing":
+            if self.application_name and self.preview_slug:
+                raise ValueError(
+                    "VeriReel preview app maintenance accepts preview_slug or application_name, not both."
+                )
+            if self.application_name and not PREVIEW_APPLICATION_NAME_PATTERN.fullmatch(
+                self.application_name
+            ):
+                raise ValueError(
+                    "VeriReel preview app maintenance requires a ver-preview-pr-*-app application_name."
+                )
+            if self.preview_slug and not PREVIEW_SLUG_PATTERN.fullmatch(self.preview_slug):
+                raise ValueError("VeriReel preview app maintenance requires a pr-*-shaped preview_slug.")
+            if not self.application_name and not self.preview_slug:
+                raise ValueError("VeriReel preview app maintenance requires preview_slug.")
         if self.context == "verireel" and self.application_name:
             raise ValueError("VeriReel stable app maintenance resolves application_name from Launchplane records.")
+        if self.context == "verireel" and self.preview_slug:
+            raise ValueError("VeriReel stable app maintenance does not accept preview_slug.")
         if self.action in {"migrate", "reset-testing"} and self.context != "verireel":
             raise ValueError(
                 f"VeriReel app maintenance action '{self.action}' is only supported for the stable testing instance."
@@ -181,6 +197,10 @@ def _resolve_preview_application(*, host: str, token: str, application_name: str
     if not application_id:
         raise click.ClickException(f"Preview app {application_name!r} did not expose an application id.")
     return application_name, application_id
+
+
+def _preview_application_name(preview_slug: str) -> str:
+    return f"ver-preview-{preview_slug}-app"
 
 
 def _find_application_schedule(*, host: str, token: str, application_id: str, schedule_name: str) -> JsonObject | None:
@@ -327,7 +347,7 @@ def execute_verireel_app_maintenance(
             application_name, application_id = _resolve_preview_application(
                 host=host,
                 token=token,
-                application_name=request.application_name,
+                application_name=request.application_name or _preview_application_name(request.preview_slug),
             )
         schedule_name, command = _command_for_request(request)
         _run_application_command_with_retries(

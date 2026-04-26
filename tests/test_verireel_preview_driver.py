@@ -10,6 +10,7 @@ from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestr
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
+from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
 
 
@@ -60,6 +61,35 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
                     "image_reference": "ghcr.io/every/verireel-app:pr-71-sha-6b3c9d7",
                 }
             )
+
+    def test_preview_refresh_can_derive_preview_url_from_runtime_records(self) -> None:
+        request = VeriReelPreviewRefreshRequest.model_validate(
+            {
+                "anchor_pr_number": 71,
+                "anchor_pr_url": "https://github.com/every/verireel/pull/71",
+                "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
+                "preview_slug": "pr-71",
+                "image_reference": "ghcr.io/every/verireel-app:pr-71-sha-6b3c9d7",
+            }
+        )
+
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_runtime_environments.resolve_runtime_context_values",
+                return_value={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://ver-preview.shinycomputers.com"},
+            ) as resolve_values,
+        ):
+            preview_url = _resolve_preview_url(
+                control_plane_root=Path(temporary_directory_name),
+                request=request,
+            )
+
+        self.assertEqual(preview_url, "https://pr-71.ver-preview.shinycomputers.com")
+        resolve_values.assert_called_once_with(
+            control_plane_root=Path(temporary_directory_name),
+            context_name="verireel-testing",
+        )
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):

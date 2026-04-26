@@ -15,6 +15,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.dokploy import JsonObject
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -22,6 +23,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
 PREVIEW_APP_PREFIX = "ver-preview"
 PREVIEW_DATABASE_PREFIX = "verireel_preview_"
+PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 
 
 def _expected_preview_slug(anchor_pr_number: int) -> str:
@@ -38,7 +40,7 @@ class VeriReelPreviewRefreshRequest(BaseModel):
     anchor_pr_url: str
     anchor_head_sha: str
     preview_slug: str
-    preview_url: str
+    preview_url: str = ""
     image_reference: str
     timeout_seconds: int = Field(default=DEFAULT_PREVIEW_TIMEOUT_SECONDS, ge=1)
 
@@ -60,7 +62,8 @@ class VeriReelPreviewRefreshRequest(BaseModel):
             )
         if not self.image_reference.strip():
             raise ValueError("VeriReel preview refresh requires image_reference.")
-        _preview_url_host(self.preview_url)
+        if self.preview_url.strip():
+            _preview_url_host(self.preview_url)
         return self
 
 
@@ -112,6 +115,7 @@ class VeriReelPreviewDestroyResult(BaseModel):
     destroy_finished_at: str
     application_name: str
     application_id: str
+    preview_url: str
     error_message: str = ""
 
 
@@ -182,6 +186,64 @@ def _preview_url_host(preview_url: str) -> str:
     if not parsed.hostname:
         raise ValueError("Preview URL requires a hostname.")
     return parsed.hostname
+
+
+def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> str:
+    parsed = urlparse(preview_base_url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise click.ClickException(f"{PREVIEW_BASE_URL_ENV_KEY} must use http or https.")
+    if not parsed.hostname:
+        raise click.ClickException(f"{PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise click.ClickException(
+            f"{PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
+        )
+    return urlunparse(
+        parsed._replace(
+            netloc=f"{preview_slug}.{parsed.hostname}",
+            path="",
+            params="",
+            query="",
+            fragment="",
+        )
+    )
+
+
+def _resolve_preview_base_url(*, control_plane_root: Path, context_name: str) -> str:
+    resolved_values = control_plane_runtime_environments.resolve_runtime_context_values(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+    )
+    preview_base_url = str(resolved_values.get(PREVIEW_BASE_URL_ENV_KEY) or "").strip()
+    if not preview_base_url:
+        raise click.ClickException(
+            f"Missing {PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {context_name}."
+        )
+    return preview_base_url
+
+
+def _resolve_preview_url(*, control_plane_root: Path, request: VeriReelPreviewRefreshRequest) -> str:
+    if request.preview_url.strip():
+        return request.preview_url.strip()
+    return _preview_url_from_base_url(
+        preview_slug=request.preview_slug.strip(),
+        preview_base_url=_resolve_preview_base_url(
+            control_plane_root=control_plane_root,
+            context_name=request.context,
+        ),
+    )
+
+
+def _resolve_preview_url_for_destroy(
+    *, control_plane_root: Path, request: VeriReelPreviewDestroyRequest
+) -> str:
+    return _preview_url_from_base_url(
+        preview_slug=request.preview_slug.strip(),
+        preview_base_url=_resolve_preview_base_url(
+            control_plane_root=control_plane_root,
+            context_name=request.context,
+        ),
+    )
 
 
 def _preview_domain_from_url(preview_url: str) -> str:
@@ -950,10 +1012,11 @@ def execute_verireel_preview_refresh(
     template_database = _parse_database_url(template_database_url)
 
     started_at = utc_now_timestamp()
+    preview_url = _resolve_preview_url(control_plane_root=control_plane_root, request=request)
     application_name = _preview_application_name(request.preview_slug)
     app_name = _preview_app_name(request.preview_slug)
-    preview_host = _preview_url_host(request.preview_url)
-    preview_domain = _preview_domain_from_url(request.preview_url)
+    preview_host = _preview_url_host(preview_url)
+    preview_domain = _preview_domain_from_url(preview_url)
     existing_application = _find_application_by_name(
         host=host, token=token, application_name=application_name
     )
@@ -997,8 +1060,8 @@ def execute_verireel_preview_refresh(
         env_text = control_plane_dokploy.render_dokploy_env_text_with_overrides(
             str(template_application.get("env") or ""),
             updates={
-                "VERIREEL_APP_URL": request.preview_url,
-                "BETTER_AUTH_URL": request.preview_url,
+                "VERIREEL_APP_URL": preview_url,
+                "BETTER_AUTH_URL": preview_url,
                 "DOKPLOY_PREVIEW_DOMAIN": preview_domain,
                 "NEXT_PUBLIC_DOKPLOY_PREVIEW_DOMAIN": preview_domain,
                 "DATABASE_URL": _build_preview_database_url(
@@ -1073,9 +1136,7 @@ def execute_verireel_preview_refresh(
             command="node prisma/seed.mjs",
             timeout_seconds=request.timeout_seconds,
         )
-        _wait_for_preview_health(
-            preview_url=request.preview_url, timeout_seconds=request.timeout_seconds
-        )
+        _wait_for_preview_health(preview_url=preview_url, timeout_seconds=request.timeout_seconds)
         for stale_domain_id in stale_domain_ids:
             _delete_domain(host=host, token=token, domain_id=stale_domain_id)
     except click.ClickException as exc:
@@ -1128,7 +1189,7 @@ def execute_verireel_preview_refresh(
             application_name=application_name,
             application_id=created_application_id
             or str((existing_snapshot or {}).get("applicationId") or "").strip(),
-            preview_url=request.preview_url,
+            preview_url=preview_url,
             error_message=message,
         )
 
@@ -1142,7 +1203,7 @@ def execute_verireel_preview_refresh(
         refresh_finished_at=finished_at,
         application_name=application_name,
         application_id=str((resolved_application or {}).get("applicationId") or "").strip(),
-        preview_url=request.preview_url,
+        preview_url=preview_url,
     )
 
 
@@ -1165,6 +1226,7 @@ def execute_verireel_preview_destroy(
         raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
 
     started_at = utc_now_timestamp()
+    preview_url = _resolve_preview_url_for_destroy(control_plane_root=control_plane_root, request=request)
     application_name = _preview_application_name(request.preview_slug)
     application = _find_application_by_name(
         host=host, token=token, application_name=application_name
@@ -1233,6 +1295,7 @@ def execute_verireel_preview_destroy(
             destroy_finished_at=finished_at,
             application_name=application_name,
             application_id=application_id,
+            preview_url=preview_url,
             error_message="; ".join(cleanup_errors),
         )
     return VeriReelPreviewDestroyResult(
@@ -1241,4 +1304,5 @@ def execute_verireel_preview_destroy(
         destroy_finished_at=finished_at,
         application_name=application_name,
         application_id=application_id,
+        preview_url=preview_url,
     )
