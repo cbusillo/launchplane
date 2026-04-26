@@ -84,6 +84,16 @@ contexts = ["verireel"]
 actions = ["promotion.write", "verireel_stable_environment.read", "verireel_app_maintenance.execute", "verireel_prod_backup_gate.execute", "verireel_prod_deploy.execute", "verireel_prod_promotion.execute", "verireel_prod_rollback.execute"]
 
 [[github_actions]]
+repository = "example-org/verireel"
+workflow_refs = [
+  "example-org/verireel/.github/workflows/prod-rollback-drill.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel"]
+actions = ["verireel_stable_environment.read", "verireel_prod_rollback.execute"]
+
+[[github_actions]]
 repository = "example-org/tenant-opw"
 workflow_refs = [
   "example-org/tenant-opw/.github/workflows/launchplane-preview.yml@refs/heads/main",
