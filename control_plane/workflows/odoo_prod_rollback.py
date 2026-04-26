@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 from urllib.error import HTTPError, URLError
@@ -34,6 +35,16 @@ from control_plane.workflows.ship import (
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
+
+
+@dataclass(frozen=True)
+class _RollbackSource:
+    artifact_id: str
+    source_git_ref: str
+    result_source_channel: str
+    promoted_from_instance: str
+    snapshot_name: str
+    detail: str
 
 
 class OdooProdRollbackRequest(BaseModel):
@@ -118,6 +129,40 @@ def _read_artifact_manifest(
         raise click.ClickException(
             f"Odoo prod rollback requires artifact manifest {artifact_id!r} in Launchplane records."
         ) from exc
+
+
+def _resolve_rollback_source(
+    *,
+    request: OdooProdRollbackRequest,
+    artifact_manifest: ArtifactIdentityManifest,
+    source_tuple: ReleaseTupleRecord | None,
+) -> _RollbackSource:
+    if source_tuple is not None:
+        source_git_ref = source_tuple.repo_shas.get(
+            f"tenant-{request.context}", artifact_manifest.source_commit
+        )
+        return _RollbackSource(
+            artifact_id=source_tuple.artifact_id,
+            source_git_ref=source_git_ref,
+            result_source_channel=request.source_channel,
+            promoted_from_instance=request.source_channel,
+            snapshot_name=f"release-tuple:{source_tuple.tuple_id}",
+            detail=(
+                f"Rolled {request.context}/{request.instance} back to "
+                f"{request.source_channel} release tuple {source_tuple.tuple_id}."
+            ),
+        )
+    return _RollbackSource(
+        artifact_id=artifact_manifest.artifact_id,
+        source_git_ref=artifact_manifest.source_commit,
+        result_source_channel="artifact",
+        promoted_from_instance="explicit-artifact",
+        snapshot_name=f"artifact:{artifact_manifest.artifact_id}",
+        detail=(
+            f"Rolled {request.context}/{request.instance} back to explicit "
+            f"Launchplane artifact {artifact_manifest.artifact_id}."
+        ),
+    )
 
 
 def _read_prod_inventory(
@@ -220,7 +265,7 @@ def _build_dokploy_target_definition(
 def _resolve_ship_request(
     *,
     request: OdooProdRollbackRequest,
-    source_tuple: ReleaseTupleRecord,
+    rollback_source: _RollbackSource,
     artifact_manifest: ArtifactIdentityManifest,
     target_definition: control_plane_dokploy.DokployTargetDefinition,
 ) -> ShipRequest:
@@ -248,12 +293,10 @@ def _resolve_ship_request(
         else f"dokploy-{configured_ship_mode}-api"
     )
     return ShipRequest(
-        artifact_id=source_tuple.artifact_id,
+        artifact_id=rollback_source.artifact_id,
         context=request.context,
         instance=request.instance,
-        source_git_ref=source_tuple.repo_shas.get(
-            f"tenant-{request.context}", artifact_manifest.source_commit
-        ),
+        source_git_ref=rollback_source.source_git_ref,
         target_name=target_definition.target_name.strip()
         or f"{request.context}-{request.instance}",
         target_type=target_definition.target_type,
@@ -393,7 +436,7 @@ def _write_rollback_state(
     *,
     record_store: FilesystemRecordStore,
     promotion_record: PromotionRecord,
-    source_tuple: ReleaseTupleRecord,
+    snapshot_name: str,
     request: ShipRequest,
     status: str,
     health_status: str,
@@ -407,7 +450,7 @@ def _write_rollback_state(
                 attempted=True,
                 status=status,
                 detail=detail,
-                snapshot_name=f"release-tuple:{source_tuple.tuple_id}",
+                snapshot_name=snapshot_name,
                 started_at=started_at,
                 finished_at=finished_at,
             ),
@@ -424,21 +467,28 @@ def execute_odoo_prod_rollback(
     record_store: FilesystemRecordStore,
     request: OdooProdRollbackRequest,
 ) -> OdooProdRollbackResult:
-    source_tuple = _read_source_release_tuple(record_store=record_store, request=request)
-    if request.artifact_id and request.artifact_id != source_tuple.artifact_id:
-        raise click.ClickException(
-            "Odoo prod rollback explicit artifact_id must match the selected source release tuple. "
-            f"Request={request.artifact_id} tuple={source_tuple.artifact_id}."
+    source_tuple: ReleaseTupleRecord | None = None
+    if request.artifact_id:
+        artifact_manifest = _read_artifact_manifest(
+            record_store=record_store,
+            artifact_id=request.artifact_id,
         )
-    artifact_manifest = _read_artifact_manifest(
-        record_store=record_store,
-        artifact_id=source_tuple.artifact_id,
+    else:
+        source_tuple = _read_source_release_tuple(record_store=record_store, request=request)
+        artifact_manifest = _read_artifact_manifest(
+            record_store=record_store,
+            artifact_id=source_tuple.artifact_id,
+        )
+    rollback_source = _resolve_rollback_source(
+        request=request,
+        artifact_manifest=artifact_manifest,
+        source_tuple=source_tuple,
     )
     promotion_record = _resolve_promotion_record(record_store=record_store, request=request)
     target_definition = _read_target_definition(record_store=record_store, request=request)
     ship_request = _resolve_ship_request(
         request=request,
-        source_tuple=source_tuple,
+        rollback_source=rollback_source,
         artifact_manifest=artifact_manifest,
         target_definition=target_definition,
     )
@@ -467,7 +517,7 @@ def execute_odoo_prod_rollback(
     _write_rollback_state(
         record_store=record_store,
         promotion_record=promotion_record,
-        source_tuple=source_tuple,
+        snapshot_name=rollback_source.snapshot_name,
         request=ship_request,
         status="pending",
         health_status="skipped",
@@ -528,7 +578,7 @@ def execute_odoo_prod_rollback(
         _write_rollback_state(
             record_store=record_store,
             promotion_record=promotion_record,
-            source_tuple=source_tuple,
+            snapshot_name=rollback_source.snapshot_name,
             request=ship_request,
             status="fail",
             health_status=health_status,
@@ -539,8 +589,8 @@ def execute_odoo_prod_rollback(
         return OdooProdRollbackResult(
             context=request.context,
             instance=request.instance,
-            source_channel=request.source_channel,
-            artifact_id=source_tuple.artifact_id,
+            source_channel=rollback_source.result_source_channel,
+            artifact_id=rollback_source.artifact_id,
             promotion_record_id=promotion_record.record_id,
             deployment_record_id=deployment_record_id,
             rollback_status="fail",
@@ -570,7 +620,7 @@ def execute_odoo_prod_rollback(
         deployment_record=final_deployment,
         updated_at=finished_at,
         promotion_record_id=promotion_record.record_id,
-        promoted_from_instance=request.source_channel,
+        promoted_from_instance=rollback_source.promoted_from_instance,
     )
     record_store.write_environment_inventory(inventory_record)
     release_tuple = build_release_tuple_record_from_artifact_manifest(
@@ -584,22 +634,19 @@ def execute_odoo_prod_rollback(
     _write_rollback_state(
         record_store=record_store,
         promotion_record=promotion_record,
-        source_tuple=source_tuple,
+        snapshot_name=rollback_source.snapshot_name,
         request=ship_request,
         status="pass",
         health_status=health_status,
         started_at=started_at,
         finished_at=finished_at,
-        detail=(
-            f"Rolled {request.context}/{request.instance} back to "
-            f"{request.source_channel} release tuple {source_tuple.tuple_id}."
-        ),
+        detail=rollback_source.detail,
     )
     return OdooProdRollbackResult(
         context=request.context,
         instance=request.instance,
-        source_channel=request.source_channel,
-        artifact_id=source_tuple.artifact_id,
+        source_channel=rollback_source.result_source_channel,
+        artifact_id=rollback_source.artifact_id,
         promotion_record_id=promotion_record.record_id,
         deployment_record_id=deployment_record_id,
         release_tuple_id=release_tuple.tuple_id,

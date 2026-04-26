@@ -386,11 +386,15 @@ Current derived-state behavior:
 - For the first harmless drill, call the Odoo prod rollback driver with no
   explicit artifact id. The driver selects the current `testing` release tuple
   for that context and fails closed if the tuple or artifact manifest is missing.
+- For a real rollback after `testing` has advanced, call the same driver with
+  an explicit DB-backed artifact id for the previous known-good prod artifact.
+  The driver reads the artifact manifest directly from Launchplane records and
+  writes rollback evidence with an `artifact:<artifact_id>` source marker.
 - A passing rollback writes deployment, inventory, prod release tuple,
   promotion rollback, and rollback-health evidence. Verify the target
   `/web/health` endpoint and `inventory status` before taking another action.
-- A real destructive rollback drill requires a second known-good artifact tuple.
-  Do not synthesize artifact ids or source SHAs to create one.
+- A real destructive rollback drill requires a second known-good artifact
+  manifest. Do not synthesize artifact ids or source SHAs to create one.
 - A re-promote drill should use the normal prod promotion path with a fresh
   backup gate for the current prod-named lane. Do not reuse old bootstrap backup
   gates as authorization for a new re-promote.
