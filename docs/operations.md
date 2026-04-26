@@ -336,6 +336,10 @@ Current derived-state behavior:
 
 ## Odoo Instance Override Contracts
 
+- `POST /v1/drivers/odoo/post-deploy` is the first Launchplane-owned Odoo
+  driver route. It executes the remote compose post-deploy data-workflow runner
+  for a stable Odoo target and applies DB-backed instance override records when
+  the requested phase matches `apply_on`.
 - `odoo-overrides put-config-param` writes a typed Odoo `ir.config_parameter`
   override for a context and instance.
 - `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
@@ -360,6 +364,9 @@ Current derived-state behavior:
   typed payload contract. The remaining literal `ENV_OVERRIDE_*` bridge is now
   compatibility-only and can be deleted once the typed consumer is deployed
   everywhere.
+- `odoo-devkit` remains the local runtime/workspace surface. Launchplane driver
+  routes should not be inserted into the local PyCharm or local container loop;
+  use them only for remote stable lanes and promotion/deploy evidence.
 
 Artifact handoff example:
 

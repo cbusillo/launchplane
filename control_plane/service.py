@@ -45,6 +45,10 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.odoo_post_deploy import (
+    OdooPostDeployRequest,
+    execute_odoo_post_deploy,
+)
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
@@ -159,6 +163,20 @@ class PromotionEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "PromotionEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("promotion evidence requires product")
+        return self
+
+
+class OdooPostDeployEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    post_deploy: OdooPostDeployRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooPostDeployEnvelope":
+        if self.product.strip() != "odoo":
+            raise ValueError("Odoo post-deploy requires product 'odoo'.")
         return self
 
 
@@ -774,6 +792,7 @@ def create_launchplane_service_app(
         "/v1/evidence/previews/destroyed",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
+        "/v1/drivers/odoo/post-deploy",
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-inventory",
         "/v1/drivers/verireel/preview-destroy",
@@ -1279,6 +1298,50 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=request.deploy,
                 )
+            elif path == "/v1/drivers/odoo/post-deploy":
+                request = OdooPostDeployEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="odoo_post_deploy.execute",
+                    product=request.product,
+                    context=request.post_deploy.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the Odoo post-deploy driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_post_deploy(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.post_deploy,
+                )
+                result = {
+                    "transition": (
+                        f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
+                    )
+                }
             elif path == "/v1/drivers/verireel/testing-deploy":
                 request = VeriReelTestingDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(

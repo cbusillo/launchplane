@@ -194,6 +194,18 @@ allowed actions:
   - promotion.write
 ```
 
+Odoo stable-lane example:
+
+```text
+repository: example-org/tenant-opw
+workflow_ref: example-org/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main
+event_name: workflow_dispatch
+allowed product: odoo
+allowed contexts: opw
+allowed actions:
+  - odoo_post_deploy.execute
+```
+
 The initial policy engine can be config-backed and static. It does not need a
 full RBAC system yet.
 
@@ -233,7 +245,7 @@ boundary.
 
 These use the same authn/authz boundary as evidence ingress:
 
-- `POST /v1/drivers/odoo/...`
+- `POST /v1/drivers/odoo/post-deploy`
 - `POST /v1/drivers/verireel/...`
 
 The first explicit driver routes now in service are:
@@ -257,6 +269,13 @@ build/publish, browser verification, and the follow-up preview evidence write.
 Browser verification uses the preview URL returned by the driver plus
 allow-listed app maintenance actions keyed by preview slug when it needs remote
 owner-admin setup/cleanup.
+
+The first Odoo driver cut is intentionally narrow as well: Launchplane owns the
+remote post-deploy data-workflow trigger for a stable Odoo compose target. The
+driver reads DB-backed Odoo instance override records, renders the typed
+override payload, invokes the Dokploy data-workflow runner, and writes
+`last_apply` evidence back to Launchplane. Local Odoo runtime commands remain in
+`odoo-devkit`; this route is for remote control-plane execution only.
 
 VeriReel prod rollback now has a dedicated Launchplane driver route, but it
 still depends on a privileged delegated-worker runtime contract for Proxmox

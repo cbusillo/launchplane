@@ -43,6 +43,7 @@ from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotio
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 from control_plane.workflows.verireel_environment import VeriReelStableEnvironmentResult
+from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 
 
 class _StubVerifier:
@@ -1254,7 +1255,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 202)
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(payload["result"]["target_name"], "ver-testing-app")
-            self.assertEqual(payload["result"]["primary_base_url"], "https://ver-testing.shinycomputers.com")
+            self.assertEqual(
+                payload["result"]["primary_base_url"], "https://ver-testing.shinycomputers.com"
+            )
             resolve_mock.assert_called_once()
 
     def test_verireel_app_maintenance_driver_executes_for_authorized_workflow(self) -> None:
@@ -1707,6 +1710,127 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1",
             )
             execute_mock.assert_called_once()
+
+    def test_odoo_post_deploy_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["odoo_post_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="opw",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                    override_status="pass",
+                    override_record_found=True,
+                    override_payload_rendered=True,
+                    applied_at="2026-04-26T12:05:00Z",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/post-deploy",
+                    payload={
+                        "product": "odoo",
+                        "post_deploy": {
+                            "context": "opw",
+                            "instance": "testing",
+                            "phase": "deploy",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"transition": "odoo-post-deploy:opw:testing:deploy"},
+            )
+            self.assertEqual(payload["result"]["post_deploy_status"], "pass")
+            self.assertEqual(payload["result"]["override_status"], "pass")
+            execute_mock.assert_called_once()
+
+    def test_odoo_post_deploy_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/tenant-opw",
+                                "workflow_refs": [
+                                    "every/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo"],
+                                "contexts": ["opw"],
+                                "actions": ["deployment.write"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/post-deploy",
+                payload={
+                    "product": "odoo",
+                    "post_deploy": {
+                        "context": "opw",
+                        "instance": "testing",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_verireel_prod_promotion_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
