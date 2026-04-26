@@ -177,9 +177,9 @@ during the same reviewed rollout as the image digest change. Keep Dokploy
 host/token authority in Launchplane-managed secrets instead of duplicating
 those credentials in GitHub repository secrets.
 
-`LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from GitHub-hosted runners. Use the
-public Launchplane `GET /v1/health` endpoint rather than an internal-only Dokploy
-network hostname.
+`LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the `chris-testing`
+self-hosted GitHub runner. Use the public Launchplane `GET /v1/health` endpoint
+rather than an internal-only Dokploy network hostname.
 
 The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and
