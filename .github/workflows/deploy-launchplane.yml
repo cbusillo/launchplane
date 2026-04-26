@@ -120,7 +120,7 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
-          python-version-file: pyproject.toml
+          python-version: "3.13"
 
       - name: Render bootstrap authz policy
         id: policy
