@@ -105,9 +105,9 @@ contexts = ["verireel"]
 actions = ["verireel_stable_environment.read", "verireel_app_maintenance.execute"]
 
 [[github_actions]]
-repository = "cbusillo/tenant-opw"
+repository = "cbusillo/odoo-tenant-opw"
 workflow_refs = [
-  "cbusillo/tenant-opw/.github/workflows/launchplane-preview.yml@refs/heads/main",
+  "cbusillo/odoo-tenant-opw/.github/workflows/launchplane-preview.yml@refs/heads/main",
 ]
 event_names = ["pull_request"]
 products = ["odoo"]
@@ -115,9 +115,9 @@ contexts = ["opw"]
 actions = ["preview_generation.write"]
 
 [[github_actions]]
-repository = "cbusillo/tenant-opw"
+repository = "cbusillo/odoo-tenant-opw"
 workflow_refs = [
-  "cbusillo/tenant-opw/.github/workflows/odoo-post-deploy.yml@refs/heads/main",
+  "cbusillo/odoo-tenant-opw/.github/workflows/odoo-post-deploy.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
