@@ -121,7 +121,27 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["opw"]
-actions = ["odoo_post_deploy.execute", "odoo_prod_backup_gate.execute", "odoo_prod_promotion.execute", "odoo_prod_rollback.execute"]
+actions = ["odoo_post_deploy.execute"]
+
+[[github_actions]]
+repository = "example-org/odoo-tenant-opw"
+workflow_refs = [
+  "example-org/odoo-tenant-opw/.github/workflows/odoo-prod-promotion.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["opw"]
+actions = ["odoo_prod_backup_gate.execute", "odoo_prod_promotion.execute"]
+
+[[github_actions]]
+repository = "example-org/odoo-tenant-opw"
+workflow_refs = [
+  "example-org/odoo-tenant-opw/.github/workflows/odoo-prod-rollback.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["opw"]
+actions = ["odoo_prod_rollback.execute"]
 
 [[github_actions]]
 repository = "example-org/odoo-tenant-cm"
@@ -131,7 +151,27 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["cm"]
-actions = ["odoo_post_deploy.execute", "odoo_prod_backup_gate.execute", "odoo_prod_promotion.execute", "odoo_prod_rollback.execute"]
+actions = ["odoo_post_deploy.execute"]
+
+[[github_actions]]
+repository = "example-org/odoo-tenant-cm"
+workflow_refs = [
+  "example-org/odoo-tenant-cm/.github/workflows/odoo-prod-promotion.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["cm"]
+actions = ["odoo_prod_backup_gate.execute", "odoo_prod_promotion.execute"]
+
+[[github_actions]]
+repository = "example-org/odoo-tenant-cm"
+workflow_refs = [
+  "example-org/odoo-tenant-cm/.github/workflows/odoo-prod-rollback.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["cm"]
+actions = ["odoo_prod_rollback.execute"]
 
 [[github_actions]]
 repository = "example-org/launchplane"
