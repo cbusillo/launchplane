@@ -303,8 +303,21 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "control_plane.dokploy.read_dokploy_config",
             return_value=("https://dokploy.example.com", "token-123"),
         ), patch(
+            "control_plane.runtime_environments.resolve_runtime_environment_values",
+            return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
+        ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+            side_effect=[
+                {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+                {
+                    "env": (
+                        "DOCKER_IMAGE=odoo-runtime\n"
+                        "DOCKER_IMAGE_TAG=latest\n"
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
+                        "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons/shared"
+                    )
+                },
+            ],
         ), patch(
             "control_plane.dokploy.sync_dokploy_compose_raw_source",
             return_value={"source_type": "raw", "compose_sha256": "abc123"},
@@ -313,6 +326,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             side_effect=lambda **kwargs: captured_update.update(kwargs),
         ):
             _sync_artifact_image_reference_for_target(
+                context_name="opw",
+                instance_name="prod",
                 artifact_manifest=artifact_manifest,
                 resolved_target=resolved_target,
             )
@@ -324,6 +339,69 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456",
             str(captured_update["env_text"]),
         )
+        self.assertIn(
+            "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons/shared",
+            str(captured_update["env_text"]),
+        )
+
+    def test_sync_artifact_image_reference_updates_stale_env_even_when_image_matches(self) -> None:
+        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="cm-testing")
+        artifact_manifest = ArtifactIdentityManifest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "source_commit": "abc1234",
+                "enterprise_base_digest": "sha256:enterprise123",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-private",
+                    "digest": "sha256:image456",
+                    "tags": ["sha-abc123"],
+                },
+            }
+        )
+        captured_update: dict[str, object] = {}
+        stale_env = (
+            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
+            "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons"
+        )
+
+        with patch(
+            "control_plane.dokploy.read_dokploy_config",
+            return_value=("https://dokploy.example.com", "token-123"),
+        ), patch(
+            "control_plane.runtime_environments.resolve_runtime_environment_values",
+            return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons,/opt/project/addons/shared"},
+        ), patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            side_effect=[
+                {"env": stale_env},
+                {
+                    "env": (
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
+                        "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared"
+                    )
+                },
+            ],
+        ), patch(
+            "control_plane.dokploy.sync_dokploy_compose_raw_source",
+            return_value={"source_type": "raw", "compose_sha256": "abc123"},
+        ), patch(
+            "control_plane.dokploy.update_dokploy_target_env",
+            side_effect=lambda **kwargs: captured_update.update(kwargs),
+        ):
+            runtime_source = _sync_artifact_image_reference_for_target(
+                context_name="cm",
+                instance_name="testing",
+                artifact_manifest=artifact_manifest,
+                resolved_target=resolved_target,
+            )
+
+        self.assertIn(
+            "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared",
+            str(captured_update["env_text"]),
+        )
+        self.assertEqual(runtime_source["runtime_env_source"], "launchplane-db")
+        self.assertEqual(runtime_source["runtime_env_changed"], "true")
+        self.assertEqual(runtime_source["runtime_env_verified"], "true")
 
     def test_sync_artifact_image_reference_rejects_legacy_monorepo_target_source(self) -> None:
         resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-testing")
@@ -344,6 +422,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "control_plane.dokploy.read_dokploy_config",
             return_value=("https://dokploy.example.com", "token-123"),
         ), patch(
+            "control_plane.runtime_environments.resolve_runtime_environment_values",
+            return_value={},
+        ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value={
                 "sourceType": "git",
@@ -354,6 +435,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         ):
             with self.assertRaises(click.ClickException) as error_context:
                 _sync_artifact_image_reference_for_target(
+                    context_name="opw",
+                    instance_name="testing",
                     artifact_manifest=artifact_manifest,
                     resolved_target=resolved_target,
                 )
@@ -380,6 +463,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "control_plane.dokploy.read_dokploy_config",
             return_value=("https://dokploy.example.com", "token-123"),
         ), patch(
+            "control_plane.runtime_environments.resolve_runtime_environment_values",
+            return_value={},
+        ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value={
                 "env": (
@@ -391,6 +477,8 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         ):
             with self.assertRaises(click.ClickException) as error_context:
                 _sync_artifact_image_reference_for_target(
+                    context_name="opw",
+                    instance_name="testing",
                     artifact_manifest=artifact_manifest,
                     resolved_target=resolved_target,
                 )
@@ -406,19 +494,27 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "control_plane.dokploy.read_dokploy_config",
             return_value=("https://dokploy.example.com", "token-123"),
         ), patch(
+            "control_plane.runtime_environments.resolve_runtime_environment_values",
+            return_value={},
+        ), patch(
             "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={
-                "env": (
-                    "DOCKER_IMAGE=odoo-runtime\n"
-                    "DOCKER_IMAGE_TAG=latest\n"
-                    "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:stale"
-                )
-            },
+            side_effect=[
+                {
+                    "env": (
+                        "DOCKER_IMAGE=odoo-runtime\n"
+                        "DOCKER_IMAGE_TAG=latest\n"
+                        "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:stale"
+                    )
+                },
+                {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+            ],
         ), patch(
             "control_plane.dokploy.update_dokploy_target_env",
             side_effect=lambda **kwargs: captured_update.update(kwargs),
         ):
             _sync_artifact_image_reference_for_target(
+                context_name="opw",
+                instance_name="prod",
                 artifact_manifest=None,
                 resolved_target=resolved_target,
             )

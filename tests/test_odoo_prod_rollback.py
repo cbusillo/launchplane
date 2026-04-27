@@ -165,7 +165,19 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                side_effect=[
+                    {"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                    {
+                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-opw@sha256:847c71c1db61785c0aa265949f45a74c5dd9535e62c89db26d5650684c340100"
+                    },
+                ],
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
@@ -222,7 +234,19 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                side_effect=[
+                    {"env": "DOCKER_IMAGE_REFERENCE=old\n"},
+                    {
+                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-opw@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+                    },
+                ],
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
@@ -300,7 +324,19 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={"env": ""},
+                side_effect=[
+                    {"env": ""},
+                    {
+                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-opw@sha256:847c71c1db61785c0aa265949f45a74c5dd9535e62c89db26d5650684c340100"
+                    },
+                ],
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
             ),
             patch(
                 "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
