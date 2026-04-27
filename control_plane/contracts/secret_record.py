@@ -5,7 +5,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 SecretScope = Literal["global", "context", "context_instance"]
 SecretPolicy = Literal["write_only"]
 SecretStatus = Literal["configured", "disabled"]
-SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled"]
+SecretEventType = Literal["created", "rotated", "imported", "validated", "disabled", "relabelled"]
 
 
 class SecretRecord(BaseModel):

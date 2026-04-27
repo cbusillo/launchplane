@@ -381,17 +381,17 @@ Current derived-state behavior:
   record, giving the future Odoo driver a tested result-write path.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to the Odoo data-workflow runner as one typed payload env var.
-- During the rollout window, Launchplane also emits legacy literal
-  `ENV_OVERRIDE_*` values for non-secret overrides so older Odoo consumers keep
-  applying the same settings until the typed payload path is everywhere.
+- Launchplane passes one typed payload to the Odoo settings apply path; legacy
+  `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
+  settings contract.
 - Secret-backed overrides are still not rendered into schedule scripts as
-  plaintext. The payload references the already-present script-runner
-  environment key for each managed secret binding, and the workflow asserts
-  those keys before Odoo starts.
+  plaintext. The payload references the already-present neutral
+  `ODOO_OVERRIDE_SECRET__*` script-runner environment key for each managed
+  secret binding, and the workflow asserts those keys before Odoo starts.
 - This keeps record authority in Launchplane while moving Odoo toward the
-  typed payload contract. The remaining literal `ENV_OVERRIDE_*` bridge is now
-  compatibility-only and can be deleted once the typed consumer is deployed
-  everywhere.
+  typed payload contract. The remaining legacy `ENV_OVERRIDE_*` inputs are now
+  compatibility-only and can be deleted once the DB-backed override records are
+  fully migrated.
 - `odoo-devkit` remains the local runtime/workspace surface. Launchplane driver
   routes should not be inserted into the local PyCharm or local container loop;
   use them only for remote stable lanes and promotion/deploy evidence.

@@ -7,13 +7,8 @@ import click
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 
-ODOO_CONFIG_PARAMETER_ENV_PREFIX = "ENV_OVERRIDE_CONFIG_PARAM__"
 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY = "ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"
-ODOO_ADDON_ENV_PREFIXES = {
-    "authentik": "ENV_OVERRIDE_AUTHENTIK__",
-    "authentik_sso": "ENV_OVERRIDE_AUTHENTIK__",
-    "shopify": "ENV_OVERRIDE_SHOPIFY__",
-}
+ODOO_OVERRIDE_SECRET_ENV_PREFIX = "ODOO_OVERRIDE_SECRET__"
 SHOPIFY_ADDON_NAME = "shopify"
 SHOPIFY_ACTION_SETTING = "action"
 SHOPIFY_ACTION_APPLY = "apply"
@@ -149,7 +144,7 @@ def _resolve_shopify_payload_settings(
             SHOPIFY_PRODUCTION_INDICATORS_SETTING,
         }:
             continue
-        environment_key = addon_setting_env_key(
+        environment_key = addon_setting_secret_env_key(
             addon_name=override.addon, setting_name=override.setting
         )
         payload_settings.append(
@@ -196,7 +191,7 @@ def render_post_deploy_payload(
     }
     config_parameters: list[dict[str, object]] = []
     for override in record.config_parameters:
-        environment_key = config_parameter_env_key(override.key)
+        environment_key = config_parameter_secret_env_key(override.key)
         config_parameters.append(
             {
                 "key": override.key,
@@ -215,7 +210,7 @@ def render_post_deploy_payload(
     for override in record.addon_settings:
         if override.addon == SHOPIFY_ADDON_NAME:
             continue
-        environment_key = addon_setting_env_key(
+        environment_key = addon_setting_secret_env_key(
             addon_name=override.addon, setting_name=override.setting
         )
         addon_settings.append(
@@ -237,24 +232,29 @@ def _encode_post_deploy_payload(payload: dict[str, object]) -> str:
     return base64.b64encode(encoded).decode("ascii")
 
 
-def config_parameter_env_key(config_parameter_key: str) -> str:
+def _secret_env_suffix(raw_value: str) -> str:
+    suffix = raw_value.strip().upper().replace(".", "__").replace("-", "_")
+    if not suffix:
+        raise click.ClickException("Odoo secret override transport requires a non-empty key.")
+    return suffix
+
+
+def config_parameter_secret_env_key(config_parameter_key: str) -> str:
     suffix = config_parameter_key.strip().upper().replace(".", "__")
     if not suffix:
         raise click.ClickException("Odoo config parameter override requires a non-empty key.")
-    return f"{ODOO_CONFIG_PARAMETER_ENV_PREFIX}{suffix}"
+    return f"{ODOO_OVERRIDE_SECRET_ENV_PREFIX}CONFIG_PARAM__{suffix}"
 
 
-def addon_setting_env_key(*, addon_name: str, setting_name: str) -> str:
+def addon_setting_secret_env_key(*, addon_name: str, setting_name: str) -> str:
     normalized_addon = addon_name.strip().lower()
-    prefix = ODOO_ADDON_ENV_PREFIXES.get(normalized_addon)
-    if prefix is None:
-        raise click.ClickException(
-            f"Odoo addon override {normalized_addon!r} does not have a current post-deploy transport mapping."
-        )
-    suffix = setting_name.strip().upper().replace(".", "__").replace("-", "_")
+    if not normalized_addon:
+        raise click.ClickException("Odoo addon setting override requires a non-empty addon.")
+    suffix = _secret_env_suffix(setting_name)
+    addon_suffix = _secret_env_suffix(normalized_addon)
     if not suffix:
         raise click.ClickException("Odoo addon setting override requires a non-empty setting.")
-    return f"{prefix}{suffix}"
+    return f"{ODOO_OVERRIDE_SECRET_ENV_PREFIX}ADDON__{addon_suffix}__{suffix}"
 
 
 def build_post_deploy_environment(

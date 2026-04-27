@@ -133,7 +133,8 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
 
         self.assertIn(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, environment.inline_environment)
         self.assertEqual(
-            environment.required_container_environment_keys, ("ENV_OVERRIDE_SHOPIFY__API_TOKEN",)
+            environment.required_container_environment_keys,
+            ("ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",),
         )
 
     def test_render_post_deploy_payload_injects_shopify_apply_action(self) -> None:
@@ -198,7 +199,7 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
                     "value": {
                         "source": "secret_binding",
                         "secret_binding_id": "secret-binding-shopify-token",
-                        "environment_variable": "ENV_OVERRIDE_SHOPIFY__API_TOKEN",
+                        "environment_variable": "ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",
                     },
                 },
                 {

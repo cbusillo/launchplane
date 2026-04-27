@@ -9,7 +9,13 @@ from typing import Literal
 import click
 from cryptography.fernet import Fernet, InvalidToken
 
-from control_plane.contracts.secret_record import SecretAuditEvent, SecretBinding, SecretRecord, SecretScope, SecretVersion
+from control_plane.contracts.secret_record import (
+    SecretAuditEvent,
+    SecretBinding,
+    SecretRecord,
+    SecretScope,
+    SecretVersion,
+)
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
@@ -21,10 +27,13 @@ RUNTIME_ENVIRONMENT_SECRET_INTEGRATION = "runtime_environment"
 SECRET_STATUS_CONFIGURED = "configured"
 
 SecretWriteAction = Literal["created", "rotated", "unchanged"]
+SecretBindingRelabelAction = Literal["relabelled", "unchanged"]
 
 
 def _secret_slug(value: str) -> str:
-    compact = "".join(character.lower() if character.isalnum() else "-" for character in value.strip())
+    compact = "".join(
+        character.lower() if character.isalnum() else "-" for character in value.strip()
+    )
     normalized = "-".join(part for part in compact.split("-") if part)
     return normalized or "secret"
 
@@ -115,7 +124,9 @@ def _scope_matches_record(
     return record.context == context_name and record.instance == instance_name
 
 
-def _binding_for_secret(record_store: PostgresRecordStore, *, secret_id: str) -> SecretBinding | None:
+def _binding_for_secret(
+    record_store: PostgresRecordStore, *, secret_id: str
+) -> SecretBinding | None:
     for binding in record_store.list_secret_bindings(limit=None):
         if binding.secret_id == secret_id and binding.status == SECRET_STATUS_CONFIGURED:
             return binding
@@ -137,9 +148,13 @@ def resolve_secret_values_for_integration(
             record
             for record in store.list_secret_records(integration=integration)
             if record.status == SECRET_STATUS_CONFIGURED
-            and _scope_matches_record(record, context_name=context_name, instance_name=instance_name)
+            and _scope_matches_record(
+                record, context_name=context_name, instance_name=instance_name
+            )
         ]
-        candidate_records.sort(key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id))
+        candidate_records.sort(
+            key=lambda record: (_scope_rank(record.scope), record.updated_at, record.secret_id)
+        )
         resolved_values: dict[str, str] = {}
         for record in candidate_records:
             binding = _binding_for_secret(store, secret_id=record.secret_id)
@@ -203,7 +218,9 @@ def write_secret_value(
     source_label: str = "manual",
 ) -> dict[str, str]:
     if not plaintext_value.strip():
-        raise click.ClickException("Launchplane managed secrets require a non-empty plaintext value.")
+        raise click.ClickException(
+            "Launchplane managed secrets require a non-empty plaintext value."
+        )
     now = utc_now_timestamp()
     existing_record = record_store.find_secret_record(
         scope=scope,
@@ -212,11 +229,15 @@ def write_secret_value(
         context=context_name,
         instance=instance_name,
     )
-    secret_id = existing_record.secret_id if existing_record is not None else _secret_id(
-        integration=integration,
-        name=name,
-        context=context_name,
-        instance=instance_name,
+    secret_id = (
+        existing_record.secret_id
+        if existing_record is not None
+        else _secret_id(
+            integration=integration,
+            name=name,
+            context=context_name,
+            instance=instance_name,
+        )
     )
     if existing_record is not None:
         current_version = record_store.read_secret_version(existing_record.current_version_id)
@@ -258,7 +279,9 @@ def write_secret_value(
             created_at=created_at,
             updated_at=now,
             updated_by=actor,
-            last_validated_at=existing_record.last_validated_at if existing_record is not None else "",
+            last_validated_at=existing_record.last_validated_at
+            if existing_record is not None
+            else "",
         )
     )
     record_store.write_secret_binding(
@@ -285,6 +308,90 @@ def write_secret_value(
         )
     )
     return {"status": "ok", "secret_id": secret_id, "action": action, "version_id": version_id}
+
+
+def expected_secret_binding_id(*, secret_id: str, binding_key: str) -> str:
+    return _binding_id(secret_id=secret_id, binding_key=binding_key)
+
+
+def relabel_secret_binding(
+    *,
+    record_store: PostgresRecordStore,
+    binding_id: str,
+    binding_key: str,
+    actor: str = "",
+    source_label: str = "manual",
+) -> dict[str, str]:
+    normalized_binding_id = binding_id.strip()
+    normalized_binding_key = binding_key.strip()
+    if not normalized_binding_id or not normalized_binding_key:
+        raise click.ClickException("Secret binding relabel requires binding id and binding key.")
+
+    bindings = record_store.list_secret_bindings(limit=None)
+    existing_binding = next(
+        (binding for binding in bindings if binding.binding_id == normalized_binding_id), None
+    )
+    if existing_binding is None:
+        raise click.ClickException(f"Secret binding {normalized_binding_id!r} was not found.")
+    if existing_binding.status != SECRET_STATUS_CONFIGURED:
+        raise click.ClickException(f"Secret binding {normalized_binding_id!r} is not configured.")
+
+    desired_binding_id = _binding_id(
+        secret_id=existing_binding.secret_id, binding_key=normalized_binding_key
+    )
+    if existing_binding.binding_key == normalized_binding_key:
+        return {
+            "status": "ok",
+            "action": "unchanged",
+            "secret_id": existing_binding.secret_id,
+            "binding_id": existing_binding.binding_id,
+            "binding_key": existing_binding.binding_key,
+        }
+
+    now = utc_now_timestamp()
+    target_binding = next(
+        (binding for binding in bindings if binding.binding_id == desired_binding_id), None
+    )
+    record_store.write_secret_binding(
+        existing_binding.model_copy(update={"status": "disabled", "updated_at": now})
+    )
+    record_store.write_secret_binding(
+        SecretBinding(
+            binding_id=desired_binding_id,
+            secret_id=existing_binding.secret_id,
+            integration=existing_binding.integration,
+            binding_key=normalized_binding_key,
+            context=existing_binding.context,
+            instance=existing_binding.instance,
+            status="configured",
+            created_at=target_binding.created_at if target_binding is not None else now,
+            updated_at=now,
+        )
+    )
+    record_store.write_secret_audit_event(
+        SecretAuditEvent(
+            event_id=_audit_event_id(secret_id=existing_binding.secret_id, event_type="relabelled"),
+            secret_id=existing_binding.secret_id,
+            event_type="relabelled",
+            recorded_at=now,
+            actor=actor,
+            detail=f"Launchplane relabelled managed secret binding from {source_label}.",
+            metadata={
+                "source": source_label,
+                "old_binding_id": existing_binding.binding_id,
+                "old_binding_key": existing_binding.binding_key,
+                "new_binding_id": desired_binding_id,
+                "new_binding_key": normalized_binding_key,
+            },
+        )
+    )
+    return {
+        "status": "ok",
+        "action": "relabelled",
+        "secret_id": existing_binding.secret_id,
+        "binding_id": desired_binding_id,
+        "binding_key": normalized_binding_key,
+    }
 
 
 def build_secret_status(record_store: PostgresRecordStore, *, secret_id: str) -> dict[str, object]:
@@ -345,7 +452,9 @@ def list_secret_statuses(
 ) -> list[dict[str, object]]:
     statuses: list[dict[str, object]] = []
     for record in record_store.list_secret_records(integration=integration or ""):
-        if context_name and not _scope_matches_record(record, context_name=context_name, instance_name=instance_name):
+        if context_name and not _scope_matches_record(
+            record, context_name=context_name, instance_name=instance_name
+        ):
             continue
         if not context_name and instance_name:
             continue

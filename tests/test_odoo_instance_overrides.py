@@ -19,6 +19,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
     OdooOverrideValue,
 )
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -401,8 +402,110 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             )
             store.close()
 
-        self.assertEqual(captured_required_environment_keys, ["ENV_OVERRIDE_SHOPIFY__API_TOKEN"])
+        self.assertEqual(
+            captured_required_environment_keys,
+            ["ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"],
+        )
         self.assertEqual(stored_record.last_apply.status, "pass")
+
+    def test_cli_migrate_secret_transport_relabels_secret_bindings_without_plaintext(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_secret_record(
+                SecretRecord(
+                    secret_id="secret-runtime-shopify-token",
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="shopify-api-token",
+                    context="opw",
+                    instance="prod",
+                    current_version_id="secret-runtime-shopify-token-version-1",
+                    created_at="2026-04-23T12:00:00Z",
+                    updated_at="2026-04-23T12:00:00Z",
+                )
+            )
+            store.write_secret_version(
+                SecretVersion(
+                    version_id="secret-runtime-shopify-token-version-1",
+                    secret_id="secret-runtime-shopify-token",
+                    created_at="2026-04-23T12:00:00Z",
+                    ciphertext="encrypted-value-placeholder",
+                )
+            )
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-runtime-shopify-token-binding-env-override-shopify-api-token",
+                    secret_id="secret-runtime-shopify-token",
+                    integration="runtime_environment",
+                    binding_key="ENV_OVERRIDE_SHOPIFY__API_TOKEN",
+                    context="opw",
+                    instance="prod",
+                    created_at="2026-04-23T12:00:00Z",
+                    updated_at="2026-04-23T12:00:00Z",
+                )
+            )
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="prod",
+                    addon_settings=(
+                        OdooAddonSettingOverride(
+                            addon="shopify",
+                            setting="api_token",
+                            value=OdooOverrideValue(
+                                source="secret_binding",
+                                secret_binding_id="secret-runtime-shopify-token-binding-env-override-shopify-api-token",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-04-23T12:00:00Z",
+                )
+            )
+            store.close()
+
+            runner = CliRunner()
+            result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "migrate-secret-transport",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--apply",
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            migrated_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
+            bindings = store.list_secret_bindings(integration="runtime_environment", limit=None)
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["changed_record_count"], 1)
+        self.assertEqual(
+            migrated_record.addon_settings[0].value.secret_binding_id,
+            "secret-runtime-shopify-token-binding-odoo-override-secret-addon-shopify-api-token",
+        )
+        binding_status_by_key = {binding.binding_key: binding.status for binding in bindings}
+        self.assertEqual(binding_status_by_key["ENV_OVERRIDE_SHOPIFY__API_TOKEN"], "disabled")
+        self.assertEqual(
+            binding_status_by_key["ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN"],
+            "configured",
+        )
+        self.assertNotIn("encrypted-value-placeholder", result.output)
 
 
 if __name__ == "__main__":
