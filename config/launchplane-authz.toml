@@ -117,6 +117,16 @@ actions = ["preview_generation.write"]
 [[github_actions]]
 repository = "cbusillo/odoo-tenant-opw"
 workflow_refs = [
+  "cbusillo/odoo-tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["opw"]
+actions = ["odoo_artifact_publish.write"]
+
+[[github_actions]]
+repository = "cbusillo/odoo-tenant-opw"
+workflow_refs = [
   "cbusillo/odoo-tenant-opw/.github/workflows/odoo-post-deploy.yml@refs/heads/main",
 ]
 event_names = ["workflow_dispatch"]
@@ -143,6 +153,16 @@ event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["opw"]
 actions = ["odoo_prod_rollback.execute"]
+
+[[github_actions]]
+repository = "cbusillo/odoo-tenant-cm"
+workflow_refs = [
+  "cbusillo/odoo-tenant-cm/.github/workflows/odoo-artifact-publish.yml@refs/heads/main",
+]
+event_names = ["workflow_dispatch"]
+products = ["odoo"]
+contexts = ["cm"]
+actions = ["odoo_artifact_publish.write"]
 
 [[github_actions]]
 repository = "cbusillo/odoo-tenant-cm"

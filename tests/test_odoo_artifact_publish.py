@@ -5,8 +5,10 @@ from unittest.mock import Mock, patch
 
 from control_plane.workflows.odoo_artifact_publish import (
     DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY,
+    OdooArtifactPublishEvidenceRequest,
     OdooArtifactPublishRequest,
     execute_odoo_artifact_publish,
+    ingest_odoo_artifact_publish_evidence,
 )
 
 
@@ -109,6 +111,23 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "fail")
         self.assertIn("wrong context", result.error_message)
         record_store.write_artifact_manifest.assert_not_called()
+
+    def test_ingest_publish_evidence_writes_artifact_manifest(self) -> None:
+        record_store = Mock()
+
+        result = ingest_odoo_artifact_publish_evidence(
+            record_store=record_store,
+            request=OdooArtifactPublishEvidenceRequest(
+                context="cm",
+                instance="testing",
+                manifest=_artifact_payload(),
+            ),
+        )
+
+        self.assertEqual(result.status, "pass")
+        self.assertEqual(result.artifact_id, "artifact-cm-005c291b63b6")
+        written_manifest = record_store.write_artifact_manifest.call_args.args[0]
+        self.assertEqual(written_manifest.artifact_id, "artifact-cm-005c291b63b6")
 
 
 if __name__ == "__main__":

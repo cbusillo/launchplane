@@ -45,6 +45,10 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.odoo_artifact_publish import (
+    OdooArtifactPublishEvidenceRequest,
+    ingest_odoo_artifact_publish_evidence,
+)
 from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
@@ -189,6 +193,20 @@ class OdooPostDeployEnvelope(BaseModel):
     def _validate_alignment(self) -> "OdooPostDeployEnvelope":
         if self.product.strip() != "odoo":
             raise ValueError("Odoo post-deploy requires product 'odoo'.")
+        return self
+
+
+class OdooArtifactPublishEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    publish: OdooArtifactPublishEvidenceRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooArtifactPublishEnvelope":
+        if self.product.strip() != "odoo":
+            raise ValueError("Odoo artifact publish requires product 'odoo'.")
         return self
 
 
@@ -589,6 +607,7 @@ def _accepted_payload(
                 "target_id",
                 "target_type",
                 "image_reference",
+                "artifact_id",
                 "transition",
             }
         },
@@ -847,6 +866,7 @@ def create_launchplane_service_app(
         "/v1/evidence/previews/destroyed",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
+        "/v1/drivers/odoo/artifact-publish",
         "/v1/drivers/odoo/post-deploy",
         "/v1/drivers/odoo/prod-backup-gate",
         "/v1/drivers/odoo/prod-promotion",
@@ -1399,6 +1419,51 @@ def create_launchplane_service_app(
                     "transition": (
                         f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
                     )
+                }
+            elif path == "/v1/drivers/odoo/artifact-publish":
+                request = OdooArtifactPublishEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="odoo_artifact_publish.write",
+                    product=request.product,
+                    context=request.publish.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write Odoo artifact publish evidence"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = ingest_odoo_artifact_publish_evidence(
+                    record_store=record_store,
+                    request=request.publish,
+                )
+                result = {
+                    "artifact_id": driver_result.artifact_id,
+                    "publish_status": driver_result.status,
+                    "image_repository": driver_result.image_repository,
+                    "image_digest": driver_result.image_digest,
+                    "source_commit": driver_result.source_commit,
                 }
             elif path == "/v1/drivers/odoo/prod-backup-gate":
                 request = OdooProdBackupGateEnvelope.model_validate(payload)

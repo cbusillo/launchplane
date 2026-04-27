@@ -253,6 +253,7 @@ boundary.
 These use the same authn/authz boundary as evidence ingress:
 
 - `POST /v1/drivers/odoo/post-deploy`
+- `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
@@ -261,6 +262,7 @@ These use the same authn/authz boundary as evidence ingress:
 The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/odoo/post-deploy`
+- `POST /v1/drivers/odoo/artifact-publish`
 - `POST /v1/drivers/odoo/prod-rollback`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/stable-environment`
