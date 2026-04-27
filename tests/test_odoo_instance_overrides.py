@@ -174,7 +174,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
 
     def test_cli_mark_apply_updates_result_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             runner = CliRunner()
             put_result = runner.invoke(
                 main,
@@ -214,7 +216,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             )
 
             store = PostgresRecordStore(database_url=database_url)
-            stored_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
             store.close()
 
         self.assertEqual(put_result.exit_code, 0, msg=put_result.output)
@@ -225,7 +229,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
 
     def test_post_deploy_update_renders_literal_odoo_overrides_and_marks_pass(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             store.write_odoo_instance_override_record(
@@ -235,7 +241,9 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     config_parameters=(
                         OdooConfigParameterOverride(
                             key="web.base.url",
-                            value=OdooOverrideValue(source="literal", value="https://opw-prod.example.com"),
+                            value=OdooOverrideValue(
+                                source="literal", value="https://opw-prod.example.com"
+                            ),
                         ),
                     ),
                     updated_at="2026-04-23T12:00:00Z",
@@ -261,26 +269,39 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             captured_workflow_environment: dict[str, str] = {}
             captured_protected_shopify_store_keys: list[str] = []
 
-            with patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False), patch(
-                "control_plane.dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ), patch(
-                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
-                return_value=source_of_truth,
-            ), patch(
-                "control_plane.dokploy.run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: (
-                    captured_workflow_environment.update(kwargs["workflow_environment_overrides"]),
-                    captured_protected_shopify_store_keys.extend(kwargs["protected_shopify_store_keys"]),
+            with (
+                patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False),
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=source_of_truth,
+                ),
+                patch(
+                    "control_plane.dokploy.run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: (
+                        captured_workflow_environment.update(
+                            kwargs["workflow_environment_overrides"]
+                        ),
+                        captured_protected_shopify_store_keys.extend(
+                            kwargs["protected_shopify_store_keys"]
+                        ),
+                    ),
                 ),
             ):
                 _run_compose_post_deploy_update(env_file=None, request=_ship_request())
 
-            stored_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
             store.close()
 
         payload = json.loads(
-            base64.b64decode(captured_workflow_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]).decode("utf-8")
+            base64.b64decode(
+                captured_workflow_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
         )
         self.assertEqual(
             payload["config_parameters"],
@@ -294,16 +315,20 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(
-            captured_workflow_environment["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
-            "https://opw-prod.example.com",
+        self.assertNotIn(
+            "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL",
+            captured_workflow_environment,
         )
         self.assertEqual(captured_protected_shopify_store_keys, ["yps-your-part-supplier"])
         self.assertEqual(stored_record.last_apply.status, "pass")
 
-    def test_post_deploy_update_requires_container_env_for_secret_backed_odoo_overrides(self) -> None:
+    def test_post_deploy_update_requires_container_env_for_secret_backed_odoo_overrides(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             store = PostgresRecordStore(database_url=database_url)
             store.ensure_schema()
             store.write_odoo_instance_override_record(
@@ -352,21 +377,28 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             )
             captured_required_environment_keys: list[str] = []
 
-            with patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False), patch(
-                "control_plane.dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ), patch(
-                "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
-                return_value=source_of_truth,
-            ), patch(
-                "control_plane.dokploy.run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: captured_required_environment_keys.extend(
-                    kwargs["required_workflow_environment_keys"]
+            with (
+                patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=False),
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.read_control_plane_dokploy_source_of_truth",
+                    return_value=source_of_truth,
+                ),
+                patch(
+                    "control_plane.dokploy.run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: captured_required_environment_keys.extend(
+                        kwargs["required_workflow_environment_keys"]
+                    ),
                 ),
             ):
                 _run_compose_post_deploy_update(env_file=None, request=_ship_request())
 
-            stored_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
             store.close()
 
         self.assertEqual(captured_required_environment_keys, ["ENV_OVERRIDE_SHOPIFY__API_TOKEN"])
