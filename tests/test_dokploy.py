@@ -1498,9 +1498,9 @@ actions = ["launchplane_service_deploy.execute"]
             data_workflow_lock_path="/volumes/data/.data_workflow_in_progress",
             workflow_environment_overrides={
                 ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: "payload-value",
-                "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL": "https://opw-prod.example.com",
+                "EXTRA_WORKFLOW_VALUE": "https://opw-prod.example.com",
             },
-            required_workflow_environment_keys=("ENV_OVERRIDE_SHOPIFY__API_TOKEN",),
+            required_workflow_environment_keys=("ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN",),
             protected_shopify_store_keys=("yps-your-part-supplier",),
         )
 
@@ -1509,11 +1509,12 @@ actions = ["launchplane_service_deploy.execute"]
             script,
         )
         self.assertIn(
-            "workflow_environment+=(-e ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL=https://opw-prod.example.com)",
+            "workflow_environment+=(-e EXTRA_WORKFLOW_VALUE=https://opw-prod.example.com)",
             script,
         )
         self.assertIn(
-            "required_workflow_environment_keys+=(ENV_OVERRIDE_SHOPIFY__API_TOKEN)", script
+            "required_workflow_environment_keys+=(ODOO_OVERRIDE_SECRET__ADDON__SHOPIFY__API_TOKEN)",
+            script,
         )
         self.assertIn("protected_shopify_store_keys+=(yps-your-part-supplier)", script)
         self.assertIn("Missing required Odoo override environment key", script)

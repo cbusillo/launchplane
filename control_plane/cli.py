@@ -8743,6 +8743,136 @@ def _build_odoo_instance_override_record_with_addon_setting(
     )
 
 
+def _migrate_odoo_override_secret_transport_record(
+    *,
+    record_store: PostgresRecordStore,
+    record: OdooInstanceOverrideRecord,
+    apply_changes: bool,
+    source_label: str,
+) -> tuple[OdooInstanceOverrideRecord, list[dict[str, str]]]:
+    binding_by_id = {
+        binding.binding_id: binding for binding in record_store.list_secret_bindings(limit=None)
+    }
+    changes: list[dict[str, str]] = []
+    config_parameters: list[OdooConfigParameterOverride] = []
+    addon_settings: list[OdooAddonSettingOverride] = []
+
+    for override in record.config_parameters:
+        value = override.value
+        if value.source != "secret_binding":
+            config_parameters.append(override)
+            continue
+        desired_binding_key = control_plane_odoo_instance_overrides.config_parameter_secret_env_key(
+            override.key
+        )
+        binding = binding_by_id.get(value.secret_binding_id)
+        if binding is None:
+            raise click.ClickException(
+                f"Odoo override {record.context}/{record.instance} config parameter {override.key!r} "
+                f"references missing secret binding {value.secret_binding_id!r}."
+            )
+        desired_binding_id = control_plane_secrets.expected_secret_binding_id(
+            secret_id=binding.secret_id, binding_key=desired_binding_key
+        )
+        action = "unchanged" if binding.binding_key == desired_binding_key else "pending"
+        if apply_changes:
+            result = control_plane_secrets.relabel_secret_binding(
+                record_store=record_store,
+                binding_id=value.secret_binding_id,
+                binding_key=desired_binding_key,
+                actor=source_label,
+                source_label=source_label,
+            )
+            desired_binding_id = result["binding_id"]
+            action = result["action"]
+        changes.append(
+            {
+                "kind": "config_parameter",
+                "key": override.key,
+                "action": action,
+                "old_binding_id": value.secret_binding_id,
+                "new_binding_id": desired_binding_id,
+                "old_binding_key": binding.binding_key,
+                "new_binding_key": desired_binding_key,
+            }
+        )
+        config_parameters.append(
+            OdooConfigParameterOverride(
+                key=override.key,
+                value=OdooOverrideValue(
+                    source="secret_binding", secret_binding_id=desired_binding_id
+                ),
+            )
+        )
+
+    for override in record.addon_settings:
+        value = override.value
+        if value.source != "secret_binding":
+            addon_settings.append(override)
+            continue
+        desired_binding_key = control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
+            addon_name=override.addon, setting_name=override.setting
+        )
+        binding = binding_by_id.get(value.secret_binding_id)
+        if binding is None:
+            raise click.ClickException(
+                f"Odoo override {record.context}/{record.instance} addon setting "
+                f"{override.addon}.{override.setting} references missing secret binding "
+                f"{value.secret_binding_id!r}."
+            )
+        desired_binding_id = control_plane_secrets.expected_secret_binding_id(
+            secret_id=binding.secret_id, binding_key=desired_binding_key
+        )
+        action = "unchanged" if binding.binding_key == desired_binding_key else "pending"
+        if apply_changes:
+            result = control_plane_secrets.relabel_secret_binding(
+                record_store=record_store,
+                binding_id=value.secret_binding_id,
+                binding_key=desired_binding_key,
+                actor=source_label,
+                source_label=source_label,
+            )
+            desired_binding_id = result["binding_id"]
+            action = result["action"]
+        changes.append(
+            {
+                "kind": "addon_setting",
+                "key": f"{override.addon}.{override.setting}",
+                "action": action,
+                "old_binding_id": value.secret_binding_id,
+                "new_binding_id": desired_binding_id,
+                "old_binding_key": binding.binding_key,
+                "new_binding_key": desired_binding_key,
+            }
+        )
+        addon_settings.append(
+            OdooAddonSettingOverride(
+                addon=override.addon,
+                setting=override.setting,
+                value=OdooOverrideValue(
+                    source="secret_binding", secret_binding_id=desired_binding_id
+                ),
+            )
+        )
+
+    updated_record = record
+    if apply_changes and any(
+        change["old_binding_id"] != change["new_binding_id"] for change in changes
+    ):
+        updated_record = OdooInstanceOverrideRecord(
+            context=record.context,
+            instance=record.instance,
+            apply_on=record.apply_on,
+            config_parameters=tuple(config_parameters),
+            addon_settings=tuple(addon_settings),
+            last_apply=record.last_apply,
+            updated_at=utc_now_timestamp(),
+            source_label=source_label.strip() or "odoo-secret-transport-migration",
+        )
+        record_store.write_odoo_instance_override_record(updated_record)
+    return updated_record, changes
+
+
 def _build_odoo_instance_override_record_with_apply_result(
     *,
     existing_records: tuple[OdooInstanceOverrideRecord, ...],
@@ -11566,6 +11696,84 @@ def odoo_overrides_put_addon_setting(
     click.echo(
         json.dumps(
             {"status": "ok", "record": _summarize_odoo_instance_override_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@odoo_overrides.command("migrate-secret-transport")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo override records.",
+)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--apply", "apply_changes", is_flag=True, help="Persist binding relabels.")
+@click.option(
+    "--source-label",
+    default="odoo-secret-transport-migration",
+    show_default=True,
+)
+def odoo_overrides_migrate_secret_transport(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    apply_changes: bool,
+    source_label: str,
+) -> None:
+    normalized_context = context_name.strip().lower()
+    normalized_instance = instance_name.strip().lower()
+    if normalized_instance and not normalized_context:
+        raise click.ClickException("--instance requires --context.")
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        records = postgres_store.list_odoo_instance_override_records()
+        selected_records = [
+            record
+            for record in records
+            if (not normalized_context or record.context == normalized_context)
+            and (not normalized_instance or record.instance == normalized_instance)
+        ]
+        migrations: list[dict[str, object]] = []
+        changed_records = 0
+        for record in selected_records:
+            updated_record, changes = _migrate_odoo_override_secret_transport_record(
+                record_store=postgres_store,
+                record=record,
+                apply_changes=apply_changes,
+                source_label=source_label,
+            )
+            changed = any(
+                change["old_binding_id"] != change["new_binding_id"] for change in changes
+            )
+            if apply_changes and changed:
+                changed_records += 1
+            migrations.append(
+                {
+                    "context": record.context,
+                    "instance": record.instance,
+                    "changed": changed,
+                    "record_updated_at": updated_record.updated_at,
+                    "secret_overrides": changes,
+                }
+            )
+    finally:
+        postgres_store.close()
+
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "mode": "apply" if apply_changes else "dry-run",
+                "record_count": len(selected_records),
+                "changed_record_count": changed_records,
+                "migrations": migrations,
+            },
             indent=2,
             sort_keys=True,
         )
