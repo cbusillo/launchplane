@@ -1968,6 +1968,65 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_odoo_artifact_publish_inputs_returns_build_scoped_environment(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["odoo_artifact_publish_inputs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.build_odoo_artifact_publish_inputs",
+                return_value={
+                    "context": "opw",
+                    "instance": "testing",
+                    "environment": {"ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19"},
+                },
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/artifact-publish-inputs",
+                    payload={
+                        "product": "odoo",
+                        "inputs": {"context": "opw", "instance": "testing"},
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["records"], {})
+            self.assertEqual(
+                payload["result"]["environment"],
+                {"ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19"},
+            )
+
     def test_odoo_prod_backup_gate_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -122,7 +122,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["opw"]
-actions = ["odoo_artifact_publish.write"]
+actions = ["odoo_artifact_publish.write", "odoo_artifact_publish_inputs.read"]
 
 [[github_actions]]
 repository = "cbusillo/odoo-tenant-opw"
@@ -162,7 +162,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["cm"]
-actions = ["odoo_artifact_publish.write"]
+actions = ["odoo_artifact_publish.write", "odoo_artifact_publish_inputs.read"]
 
 [[github_actions]]
 repository = "cbusillo/odoo-tenant-cm"
