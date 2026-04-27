@@ -7245,6 +7245,8 @@ def _execute_ship(
     runtime_source_evidence: dict[str, str] = {}
     try:
         runtime_source_evidence = _sync_artifact_image_reference_for_target(
+            context_name=resolved_request.context,
+            instance_name=resolved_request.instance,
             artifact_manifest=artifact_manifest,
             resolved_target=resolved_target,
         )
@@ -7720,6 +7722,8 @@ def _sync_live_target_from_tracked_contract(
 
 def _sync_artifact_image_reference_for_target(
     *,
+    context_name: str,
+    instance_name: str,
     artifact_manifest: ArtifactIdentityManifest | None,
     resolved_target: ResolvedTargetEvidence,
 ) -> dict[str, str]:
@@ -7732,15 +7736,30 @@ def _sync_artifact_image_reference_for_target(
         target_id=resolved_target.target_id,
     )
     env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    runtime_environment_values = (
+        control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+    )
+    desired_env_map = dict(env_map)
+    desired_env_map.update(runtime_environment_values)
+
+    desired_image_reference = ""
+    if artifact_manifest is not None:
+        desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
+    if desired_image_reference:
+        desired_env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
+    else:
+        desired_env_map.pop(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, None)
+
     _validate_artifact_target_runtime_contract(
         artifact_manifest=artifact_manifest,
         resolved_target=resolved_target,
         target_payload=target_payload,
-        env_map=env_map,
+        env_map=desired_env_map,
     )
-    desired_image_reference = ""
-    if artifact_manifest is not None:
-        desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
 
     runtime_source_evidence: dict[str, str] = {}
     if desired_image_reference and resolved_target.target_type == "compose":
@@ -7756,24 +7775,57 @@ def _sync_artifact_image_reference_for_target(
             compose_file=compose_file,
         )
 
-    current_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
-    if current_image_reference == desired_image_reference:
-        return runtime_source_evidence
-
-    if desired_image_reference:
-        env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
-    else:
-        env_map.pop(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, None)
-
-    control_plane_dokploy.update_dokploy_target_env(
-        host=host,
-        token=token,
-        target_type=resolved_target.target_type,
-        target_id=resolved_target.target_id,
-        target_payload=target_payload,
-        env_text=control_plane_dokploy.serialize_dokploy_env_text(env_map),
+    runtime_source_evidence.update(
+        _build_runtime_environment_sync_evidence(
+            runtime_environment_values=runtime_environment_values,
+            changed=desired_env_map != env_map,
+        )
     )
+    if desired_env_map != env_map:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            target_payload=target_payload,
+            env_text=control_plane_dokploy.serialize_dokploy_env_text(desired_env_map),
+        )
+        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+        )
+    refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        str(target_payload.get("env") or "")
+    )
+    missing_or_mismatched_keys = sorted(
+        env_key
+        for env_key, env_value in desired_env_map.items()
+        if refreshed_env_map.get(env_key, "") != env_value
+    )
+    if missing_or_mismatched_keys:
+        raise click.ClickException(
+            "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
+            + ", ".join(missing_or_mismatched_keys)
+        )
+    runtime_source_evidence["runtime_env_verified"] = "true"
     return runtime_source_evidence
+
+
+def _build_runtime_environment_sync_evidence(
+    *,
+    runtime_environment_values: dict[str, str],
+    changed: bool,
+) -> dict[str, str]:
+    runtime_environment_keys = sorted(runtime_environment_values)
+    key_digest = hashlib.sha256("\n".join(runtime_environment_keys).encode("utf-8")).hexdigest()
+    return {
+        "runtime_env_source": "launchplane-db",
+        "runtime_env_key_count": str(len(runtime_environment_keys)),
+        "runtime_env_keys_sha256": key_digest,
+        "runtime_env_changed": "true" if changed else "false",
+    }
 
 
 def _write_environment_inventory(

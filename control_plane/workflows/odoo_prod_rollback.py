@@ -11,6 +11,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -330,18 +331,56 @@ def _sync_artifact_image_reference_for_target(
         target_id=target_definition.target_id,
     )
     env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
-    if env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "") == desired_image_reference:
-        return
-    env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
-    control_plane_dokploy.update_dokploy_target_env(
-        host=host,
-        token=token,
-        target_type=target_definition.target_type,
-        target_id=target_definition.target_id,
-        target_payload=target_payload,
-        env_text=control_plane_dokploy.serialize_dokploy_env_text(env_map),
+    runtime_environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root,
+        context_name=target_definition.context,
+        instance_name=target_definition.instance,
     )
+    desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
+    if target_definition.target_type == "compose":
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=desired_image_reference
+        )
+        control_plane_dokploy.sync_dokploy_compose_raw_source(
+            host=host,
+            token=token,
+            compose_id=target_definition.target_id,
+            compose_name=target_definition.target_name,
+            target_payload=target_payload,
+            compose_file=compose_file,
+        )
+
+    desired_env_map = dict(env_map)
+    desired_env_map.update(runtime_environment_values)
+    desired_env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
+    if desired_env_map != env_map:
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_definition.target_type,
+            target_id=target_definition.target_id,
+            target_payload=target_payload,
+            env_text=control_plane_dokploy.serialize_dokploy_env_text(desired_env_map),
+        )
+        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target_definition.target_type,
+            target_id=target_definition.target_id,
+        )
+    refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        str(target_payload.get("env") or "")
+    )
+    missing_or_mismatched_keys = sorted(
+        env_key
+        for env_key, env_value in desired_env_map.items()
+        if refreshed_env_map.get(env_key, "") != env_value
+    )
+    if missing_or_mismatched_keys:
+        raise click.ClickException(
+            "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
+            + ", ".join(missing_or_mismatched_keys)
+        )
 
 
 def _trigger_dokploy_deploy(
