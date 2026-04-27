@@ -91,6 +91,10 @@ Current implementation scope:
 - `POST /v1/drivers/verireel/prod-backup-gate`
 - `POST /v1/drivers/verireel/prod-promotion`
 - `POST /v1/drivers/verireel/prod-rollback`
+- `POST /v1/drivers/odoo/post-deploy`
+- `POST /v1/drivers/odoo/prod-backup-gate`
+- `POST /v1/drivers/odoo/prod-promotion`
+- `POST /v1/drivers/odoo/prod-rollback`
 
 VeriReel prod rollback now has a dedicated Launchplane route, but the
 privileged Proxmox path is still intended to stay behind a narrow delegated
@@ -246,6 +250,15 @@ Current derived-state behavior:
   route. Those routes return durable record identifiers, topology metadata, or
   timing/status for the caller to thread into later verification or promotion
   evidence.
+- Launchplane can also execute the Odoo stable-lane driver path directly:
+  `POST /v1/drivers/odoo/prod-backup-gate` captures DB and filestore backup
+  evidence, `POST /v1/drivers/odoo/prod-promotion` validates the stored
+  artifact, source release tuple, and required backup gate before promoting
+  `testing` to `prod`, and `POST /v1/drivers/odoo/prod-rollback` deploys an
+  explicit previous artifact. These routes resolve target identity, runtime
+  values, override inputs, and managed secrets from DB-backed Launchplane
+  records; tenant workflows should only send thin OIDC-authenticated requests
+  and record returned IDs.
 
 ## Core Rules
 
