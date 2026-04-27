@@ -1,3 +1,4 @@
+import hashlib
 import json
 import shlex
 import time
@@ -49,11 +50,190 @@ POST_DEPLOY_UPDATE_ALLOWED_ENV_KEYS = {
 }
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
+ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 
 
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+
+
+def render_odoo_raw_compose_file(*, image_reference: str) -> str:
+    normalized_image_reference = image_reference.strip()
+    if not normalized_image_reference:
+        raise click.ClickException(
+            "Odoo raw compose rendering requires a non-empty image reference."
+        )
+    # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
+    # renders the image reference directly so Dokploy git checkout state cannot
+    # decide what Odoo artifact is deployed.
+    return f"""x-odoo-base: &odoo-base
+  image: {normalized_image_reference}
+  pull_policy: always
+  restart: unless-stopped
+  env_file:
+    - path: .env
+      required: false
+
+x-odoo-env: &odoo-env
+  ODOO_STACK_NAME: ${{ODOO_STACK_NAME:-}}
+  ODOO_PROJECT_NAME: ${{ODOO_PROJECT_NAME:-}}
+  ODOO_DB_HOST: database
+  ODOO_DB_PORT: "5432"
+  ODOO_DB_NAME: ${{ODOO_DB_NAME:?missing}}
+  ODOO_DB_USER: ${{ODOO_DB_USER:?missing}}
+  ODOO_DB_PASSWORD: ${{ODOO_DB_PASSWORD:?missing}}
+  ODOO_ADMIN_LOGIN: ${{ODOO_ADMIN_LOGIN:-}}
+  ODOO_ADMIN_PASSWORD: ${{ODOO_ADMIN_PASSWORD:-}}
+  ODOO_DB_MAXCONN: ${{ODOO_DB_MAXCONN:-44}}
+  ODOO_MAX_CRON_THREADS: ${{ODOO_MAX_CRON_THREADS:-2}}
+  ODOO_WORKERS: ${{ODOO_WORKERS:-6}}
+  ODOO_LIMIT_TIME_CPU: ${{ODOO_LIMIT_TIME_CPU:-600}}
+  ODOO_LIMIT_TIME_REAL: ${{ODOO_LIMIT_TIME_REAL:-1800}}
+  ODOO_LIMIT_TIME_REAL_CRON: ${{ODOO_LIMIT_TIME_REAL_CRON:-1800}}
+  ODOO_LIMIT_MEMORY_SOFT: ${{ODOO_LIMIT_MEMORY_SOFT:-671088640}}
+  ODOO_LIMIT_MEMORY_HARD: ${{ODOO_LIMIT_MEMORY_HARD:-805306368}}
+  ODOO_DEV_MODE: ${{ODOO_DEV_MODE:-}}
+  ODOO_INSTALL_MODULES: ${{ODOO_INSTALL_MODULES:-}}
+  ODOO_UPDATE_MODULES: ${{ODOO_UPDATE_MODULES:-AUTO}}
+  ODOO_ADDONS_PATH: ${{ODOO_ADDONS_PATH:-/opt/project/addons,/opt/extra_addons,/opt/enterprise,/odoo/addons}}
+  ODOO_DATA_WORKFLOW_LOCK_FILE: ${{ODOO_DATA_WORKFLOW_LOCK_FILE:-/volumes/data/.data_workflow_in_progress}}
+  ODOO_DATA_WORKFLOW_LOCK_TIMEOUT_SECONDS: ${{ODOO_DATA_WORKFLOW_LOCK_TIMEOUT_SECONDS:-7200}}
+  IMAGE_ODOO_ENTERPRISE_LOCATION: /volumes/enterprise_disabled
+  IMAGE_EXTRA_ADDONS_LOCATION: /opt/extra_addons
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 5s
+
+name: ${{ODOO_PROJECT_NAME:-odoo}}
+services:
+  web:
+    <<: *odoo-base
+    command:
+      - /bin/sh
+      - -lc
+      - ${{ODOO_WEB_COMMAND:-/odoo/odoo-bin}}
+    volumes:
+      - odoo_data:/volumes/data
+      - odoo_logs:/volumes/logs
+    environment:
+      <<: *odoo-env
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: >-
+        curl -fsS http://127.0.0.1:${{ODOO_HTTP_PORT:-8069}}/web/health || exit 1
+      retries: 5
+      start_period: 20s
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
+  database:
+    image: postgres:17
+    restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: ${{POSTGRES_ULIMIT_NOFILE_SOFT:-8192}}
+        hard: ${{POSTGRES_ULIMIT_NOFILE_HARD:-8192}}
+    command:
+      - postgres
+      - -c
+      - max_connections=${{POSTGRES_MAX_CONNECTIONS:-100}}
+      - -c
+      - max_files_per_process=${{POSTGRES_MAX_FILES_PER_PROCESS:-4096}}
+      - -c
+      - shared_buffers=${{POSTGRES_SHARED_BUFFERS:-1GB}}
+      - -c
+      - effective_cache_size=${{POSTGRES_EFFECTIVE_CACHE_SIZE:-4GB}}
+      - -c
+      - work_mem=${{POSTGRES_WORK_MEM:-32MB}}
+      - -c
+      - maintenance_work_mem=${{POSTGRES_MAINTENANCE_WORK_MEM:-256MB}}
+      - -c
+      - max_wal_size=${{POSTGRES_MAX_WAL_SIZE:-1GB}}
+      - -c
+      - min_wal_size=${{POSTGRES_MIN_WAL_SIZE:-80MB}}
+      - -c
+      - checkpoint_timeout=${{POSTGRES_CHECKPOINT_TIMEOUT:-5min}}
+      - -c
+      - random_page_cost=${{POSTGRES_RANDOM_PAGE_COST:-4}}
+      - -c
+      - effective_io_concurrency=${{POSTGRES_EFFECTIVE_IO_CONCURRENCY:-1}}
+    volumes:
+      - odoo_db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_DB=postgres
+      - POSTGRES_PASSWORD=${{ODOO_DB_PASSWORD}}
+      - POSTGRES_USER=${{ODOO_DB_USER}}
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: >-
+        pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -h 127.0.0.1 -p 5432
+      retries: 5
+      start_period: 10s
+
+  script-runner:
+    <<: *odoo-base
+    volumes:
+      - odoo_data:/volumes/data
+      - odoo_logs:/volumes/logs
+      - ${{DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}}:/home/ubuntu/.ssh:ro
+      - ${{DATA_WORKFLOW_SSH_DIR:-/home/ubuntu/.ssh}}:/root/.ssh:ro
+    command: tail -f /dev/null
+    working_dir: /opt/project
+    shm_size: "2gb"
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: >-
+        test -x /odoo/odoo-bin && test -f /volumes/scripts/run_odoo_data_workflows.py
+      retries: 3
+      start_period: 10s
+    environment:
+      <<: *odoo-env
+      CHROMIUM_BIN: /usr/bin/chromium
+      CHROMIUM_FLAGS: >-
+        --headless=new --no-sandbox --disable-gpu --disable-dev-shm-usage
+        --disable-software-rasterizer --window-size=1920,1080 --no-first-run
+        --no-default-browser-check
+        --disable-features=TranslateUI,site-per-process,IsolateOrigins,BlockInsecurePrivateNetworkRequests
+
+volumes:
+  odoo_data:
+    name: ${{ODOO_DATA_VOLUME:?missing}}
+  odoo_logs:
+    name: ${{ODOO_LOG_VOLUME:?missing}}
+  odoo_db:
+    name: ${{ODOO_DB_VOLUME:?missing}}
+  testkit_db:
+  testkit_data:
+  testkit_logs:
+
+secrets:
+  github_token:
+    environment: GITHUB_TOKEN
+"""
+
+
+def compose_file_sha256(compose_file: str) -> str:
+    return hashlib.sha256(compose_file.encode("utf-8")).hexdigest()
+
+
+def _compose_file_has_required_service(*, compose_file: str, service_name: str) -> bool:
+    return f"\n  {service_name}:" in f"\n{compose_file}"
+
+
+def validate_odoo_raw_compose_file(*, compose_file: str) -> None:
+    missing_services = [
+        service_name
+        for service_name in ODOO_RAW_COMPOSE_REQUIRED_SERVICES
+        if not _compose_file_has_required_service(
+            compose_file=compose_file, service_name=service_name
+        )
+    ]
+    if missing_services:
+        raise click.ClickException(
+            "Odoo raw compose file is missing required services: " + ", ".join(missing_services)
+        )
 
 
 class DokployTargetDefinition(BaseModel):
@@ -659,6 +839,94 @@ def update_dokploy_target_source(
         method="POST",
         payload=payload,
     )
+
+
+def sync_dokploy_compose_raw_source(
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+    compose_name: str,
+    target_payload: JsonObject,
+    compose_file: str,
+) -> dict[str, str]:
+    normalized_compose_id = compose_id.strip()
+    normalized_compose_name = compose_name.strip() or str(target_payload.get("name") or "").strip()
+    environment_id = str(target_payload.get("environmentId") or "").strip()
+    if not normalized_compose_id:
+        raise click.ClickException("Raw compose source sync requires a non-empty compose id.")
+    if not normalized_compose_name:
+        raise click.ClickException(
+            f"Raw compose source sync for {normalized_compose_id} requires a non-empty compose name."
+        )
+    if not environment_id:
+        raise click.ClickException(
+            f"Raw compose source sync for {normalized_compose_name} is missing environmentId in the live payload."
+        )
+    validate_odoo_raw_compose_file(compose_file=compose_file)
+
+    expected_sha256 = compose_file_sha256(compose_file)
+    existing_source_type = str(target_payload.get("sourceType") or "").strip()
+    existing_compose_file = str(target_payload.get("composeFile") or "")
+    if (
+        existing_source_type == "raw"
+        and compose_file_sha256(existing_compose_file) == expected_sha256
+    ):
+        return _build_raw_compose_evidence(
+            source_type=existing_source_type,
+            compose_file=compose_file,
+            changed=False,
+        )
+
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/compose.update",
+        method="POST",
+        payload={
+            "composeId": normalized_compose_id,
+            "name": normalized_compose_name,
+            "environmentId": environment_id,
+            "sourceType": "raw",
+            "autoDeploy": bool(target_payload.get("autoDeploy")),
+            "composeFile": compose_file,
+        },
+    )
+    refreshed_payload = fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=normalized_compose_id,
+    )
+    refreshed_source_type = str(refreshed_payload.get("sourceType") or "").strip()
+    refreshed_compose_file = str(refreshed_payload.get("composeFile") or "")
+    if refreshed_source_type != "raw":
+        raise click.ClickException(
+            f"Dokploy compose {normalized_compose_name} did not retain sourceType=raw after update. "
+            f"Live sourceType={refreshed_source_type or '<empty>'}."
+        )
+    if compose_file_sha256(refreshed_compose_file) != expected_sha256:
+        raise click.ClickException(
+            f"Dokploy compose {normalized_compose_name} did not retain the Launchplane-rendered raw compose content."
+        )
+    validate_odoo_raw_compose_file(compose_file=refreshed_compose_file)
+    return _build_raw_compose_evidence(
+        source_type=refreshed_source_type,
+        compose_file=refreshed_compose_file,
+        changed=True,
+    )
+
+
+def _build_raw_compose_evidence(
+    *, source_type: str, compose_file: str, changed: bool
+) -> dict[str, str]:
+    return {
+        "source_type": source_type,
+        "compose_sha256": compose_file_sha256(compose_file),
+        "compose_bytes": str(len(compose_file.encode("utf-8"))),
+        "required_services": ",".join(ODOO_RAW_COMPOSE_REQUIRED_SERVICES),
+        "changed": "true" if changed else "false",
+    }
 
 
 def wait_for_target_deployment(

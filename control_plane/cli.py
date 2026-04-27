@@ -7242,8 +7242,9 @@ def _execute_ship(
         record_store.write_deployment_record(final_record)
         raise
 
+    runtime_source_evidence: dict[str, str] = {}
     try:
-        _sync_artifact_image_reference_for_target(
+        runtime_source_evidence = _sync_artifact_image_reference_for_target(
             artifact_manifest=artifact_manifest,
             resolved_target=resolved_target,
         )
@@ -7261,6 +7262,7 @@ def _execute_ship(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            runtime_source=runtime_source_evidence,
         )
         record_store.write_deployment_record(final_record)
         raise
@@ -7280,6 +7282,7 @@ def _execute_ship(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            runtime_source=runtime_source_evidence,
             post_deploy_update=PostDeployUpdateEvidence(
                 attempted=True,
                 status="fail",
@@ -7314,6 +7317,7 @@ def _execute_ship(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            runtime_source=runtime_source_evidence,
             post_deploy_update=post_deploy_update_evidence,
         )
     except (subprocess.CalledProcessError, click.ClickException):
@@ -7325,6 +7329,7 @@ def _execute_ship(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            runtime_source=runtime_source_evidence,
             post_deploy_update=post_deploy_update_evidence,
             destination_health=_skipped_destination_health(resolved_request, detail_status="fail"),
         )
@@ -7717,7 +7722,7 @@ def _sync_artifact_image_reference_for_target(
     *,
     artifact_manifest: ArtifactIdentityManifest | None,
     resolved_target: ResolvedTargetEvidence,
-) -> None:
+) -> dict[str, str]:
     control_plane_root = Path(__file__).resolve().parent.parent
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
@@ -7737,9 +7742,23 @@ def _sync_artifact_image_reference_for_target(
     if artifact_manifest is not None:
         desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
 
+    runtime_source_evidence: dict[str, str] = {}
+    if desired_image_reference and resolved_target.target_type == "compose":
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=desired_image_reference
+        )
+        runtime_source_evidence = control_plane_dokploy.sync_dokploy_compose_raw_source(
+            host=host,
+            token=token,
+            compose_id=resolved_target.target_id,
+            compose_name=resolved_target.target_name,
+            target_payload=target_payload,
+            compose_file=compose_file,
+        )
+
     current_image_reference = env_map.get(ARTIFACT_IMAGE_REFERENCE_ENV_KEY, "")
     if current_image_reference == desired_image_reference:
-        return
+        return runtime_source_evidence
 
     if desired_image_reference:
         env_map[ARTIFACT_IMAGE_REFERENCE_ENV_KEY] = desired_image_reference
@@ -7754,6 +7773,7 @@ def _sync_artifact_image_reference_for_target(
         target_payload=target_payload,
         env_text=control_plane_dokploy.serialize_dokploy_env_text(env_map),
     )
+    return runtime_source_evidence
 
 
 def _write_environment_inventory(

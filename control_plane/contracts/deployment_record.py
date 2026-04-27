@@ -9,9 +9,7 @@ from control_plane.contracts.promotion_record import (
     PostDeployUpdateEvidence,
 )
 
-DelegatedExecutor = Literal[
-    "control-plane.dokploy",
-]
+DelegatedExecutor = Literal["control-plane.dokploy"]
 
 
 class ResolvedTargetEvidence(BaseModel):
@@ -44,6 +42,7 @@ class DeploymentRecord(BaseModel):
     no_cache: bool = False
     delegated_executor: DelegatedExecutor = "control-plane.dokploy"
     resolved_target: ResolvedTargetEvidence | None = None
+    runtime_source: dict[str, str] = Field(default_factory=dict)
     deploy: DeploymentEvidence
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
