@@ -1342,6 +1342,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
                     "name": "cm-testing",
                     "environmentId": "env-123",
                     "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
                     "composeFile": compose_file,
                 },
             ),
@@ -1365,8 +1366,10 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         payload = update_payloads[0]["payload"]
         self.assertIsInstance(payload, dict)
         self.assertEqual(payload["sourceType"], "raw")
+        self.assertEqual(payload["composePath"], "docker-compose.yml")
         self.assertEqual(payload["composeFile"], compose_file)
         self.assertEqual(evidence["source_type"], "raw")
+        self.assertEqual(evidence["compose_path"], "docker-compose.yml")
         self.assertEqual(
             evidence["compose_sha256"], control_plane_dokploy.compose_file_sha256(compose_file)
         )
