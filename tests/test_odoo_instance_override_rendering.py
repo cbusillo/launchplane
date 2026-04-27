@@ -9,7 +9,10 @@ from control_plane.odoo_instance_overrides import (
     build_post_deploy_environment,
     render_post_deploy_payload,
 )
-from control_plane.dokploy import DokployTargetDefinition, protected_shopify_store_keys_for_target_definition
+from control_plane.dokploy import (
+    DokployTargetDefinition,
+    protected_shopify_store_keys_for_target_definition,
+)
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooConfigParameterOverride,
@@ -89,11 +92,12 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
 
         self.assertEqual(decoded_payload, render_post_deploy_payload(record))
         self.assertEqual(
-            environment.inline_environment["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
-            "https://opw-prod.example.com",
+            set(environment.inline_environment), {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}
         )
 
-    def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(self) -> None:
+    def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(
+        self,
+    ) -> None:
         record = OdooInstanceOverrideRecord(
             context="opw",
             instance="prod",
@@ -128,7 +132,9 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         environment = build_post_deploy_environment(record)
 
         self.assertIn(ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY, environment.inline_environment)
-        self.assertEqual(environment.required_container_environment_keys, ("ENV_OVERRIDE_SHOPIFY__API_TOKEN",))
+        self.assertEqual(
+            environment.required_container_environment_keys, ("ENV_OVERRIDE_SHOPIFY__API_TOKEN",)
+        )
 
     def test_render_post_deploy_payload_injects_shopify_apply_action(self) -> None:
         record = OdooInstanceOverrideRecord(
@@ -173,8 +179,6 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         )
 
         payload = render_post_deploy_payload(record)
-        environment = build_post_deploy_environment(record)
-
         self.assertEqual(
             payload["addon_settings"],
             [
@@ -215,7 +219,9 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
             ],
         )
 
-    def test_render_post_deploy_payload_injects_shopify_clear_action_for_incomplete_settings(self) -> None:
+    def test_render_post_deploy_payload_injects_shopify_clear_action_for_incomplete_settings(
+        self,
+    ) -> None:
         record = OdooInstanceOverrideRecord(
             context="opw",
             instance="testing",
@@ -336,7 +342,9 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
             ("yps-your-part-supplier",),
         )
 
-    def test_protected_shopify_store_keys_for_target_definition_skips_unconfigured_targets(self) -> None:
+    def test_protected_shopify_store_keys_for_target_definition_skips_unconfigured_targets(
+        self,
+    ) -> None:
         self.assertEqual(
             protected_shopify_store_keys_for_target_definition(
                 DokployTargetDefinition(

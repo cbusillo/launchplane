@@ -85,10 +85,7 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(len(captured_runs), 1)
             workflow_environment = captured_runs[0]["workflow_environment_overrides"]
             self.assertIn("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", workflow_environment)
-            self.assertEqual(
-                workflow_environment["ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL"],
-                "https://opw-testing.example.com",
-            )
+            self.assertNotIn("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", workflow_environment)
             updated_record = store.read_odoo_instance_override_record(
                 context_name="opw",
                 instance_name="testing",

@@ -71,13 +71,17 @@ def _resolve_shopify_payload_settings(
     record: OdooInstanceOverrideRecord,
     protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> list[dict[str, object]]:
-    shopify_overrides = [override for override in record.addon_settings if override.addon == SHOPIFY_ADDON_NAME]
+    shopify_overrides = [
+        override for override in record.addon_settings if override.addon == SHOPIFY_ADDON_NAME
+    ]
     if not shopify_overrides:
         return []
 
     overrides_by_setting = {override.setting: override for override in shopify_overrides}
     configured_required_settings = [
-        setting_name for setting_name in SHOPIFY_REQUIRED_SETTINGS if setting_name in overrides_by_setting
+        setting_name
+        for setting_name in SHOPIFY_REQUIRED_SETTINGS
+        if setting_name in overrides_by_setting
     ]
     if len(configured_required_settings) != len(SHOPIFY_REQUIRED_SETTINGS):
         return [
@@ -93,7 +97,9 @@ def _resolve_shopify_payload_settings(
         setting_name="shopify.shop_url_key",
     )
     normalized_shop_url_key = shop_url_key.lower()
-    normalized_protected_keys = {raw_key.strip().lower() for raw_key in protected_shopify_store_keys if raw_key.strip()}
+    normalized_protected_keys = {
+        raw_key.strip().lower() for raw_key in protected_shopify_store_keys if raw_key.strip()
+    }
     if normalized_shop_url_key in normalized_protected_keys:
         protected_list = ", ".join(sorted(normalized_protected_keys))
         raise click.ClickException(
@@ -114,7 +120,9 @@ def _resolve_shopify_payload_settings(
             override_value=overrides_by_setting[SHOPIFY_PRODUCTION_INDICATORS_SETTING].value,
             setting_name=f"shopify.{SHOPIFY_PRODUCTION_INDICATORS_SETTING}",
         )
-        cleaned_indicators = [item.strip().lower() for item in raw_indicators.split(",") if item.strip()]
+        cleaned_indicators = [
+            item.strip().lower() for item in raw_indicators.split(",") if item.strip()
+        ]
         production_indicators = cleaned_indicators or list(DEFAULT_SHOPIFY_PRODUCTION_INDICATORS)
 
     matched_indicator = ""
@@ -136,20 +144,29 @@ def _resolve_shopify_payload_settings(
         }
     ]
     for override in shopify_overrides:
-        if override.setting in {SHOPIFY_ALLOW_PRODUCTION_SETTING, SHOPIFY_PRODUCTION_INDICATORS_SETTING}:
+        if override.setting in {
+            SHOPIFY_ALLOW_PRODUCTION_SETTING,
+            SHOPIFY_PRODUCTION_INDICATORS_SETTING,
+        }:
             continue
-        environment_key = addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
+        environment_key = addon_setting_env_key(
+            addon_name=override.addon, setting_name=override.setting
+        )
         payload_settings.append(
             {
                 "addon": override.addon,
                 "setting": override.setting,
-                "value": _payload_override_value(value=override.value, environment_key=environment_key),
+                "value": _payload_override_value(
+                    value=override.value, environment_key=environment_key
+                ),
             }
         )
     return payload_settings
 
 
-def _payload_override_value(*, value: OdooOverrideValue, environment_key: str | None = None) -> dict[str, object]:
+def _payload_override_value(
+    *, value: OdooOverrideValue, environment_key: str | None = None
+) -> dict[str, object]:
     payload: dict[str, object] = {
         "source": value.source,
     }
@@ -158,7 +175,9 @@ def _payload_override_value(*, value: OdooOverrideValue, environment_key: str | 
         return payload
     payload["secret_binding_id"] = value.secret_binding_id
     if not environment_key:
-        raise click.ClickException("Secret-backed Odoo overrides require a runtime environment key.")
+        raise click.ClickException(
+            "Secret-backed Odoo overrides require a runtime environment key."
+        )
     payload["environment_variable"] = environment_key
     return payload
 
@@ -181,7 +200,9 @@ def render_post_deploy_payload(
         config_parameters.append(
             {
                 "key": override.key,
-                "value": _payload_override_value(value=override.value, environment_key=environment_key),
+                "value": _payload_override_value(
+                    value=override.value, environment_key=environment_key
+                ),
             }
         )
     addon_settings: list[dict[str, object]] = []
@@ -194,12 +215,16 @@ def render_post_deploy_payload(
     for override in record.addon_settings:
         if override.addon == SHOPIFY_ADDON_NAME:
             continue
-        environment_key = addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
+        environment_key = addon_setting_env_key(
+            addon_name=override.addon, setting_name=override.setting
+        )
         addon_settings.append(
             {
                 "addon": override.addon,
                 "setting": override.setting,
-                "value": _payload_override_value(value=override.value, environment_key=environment_key),
+                "value": _payload_override_value(
+                    value=override.value, environment_key=environment_key
+                ),
             }
         )
     payload["config_parameters"] = config_parameters
@@ -210,26 +235,6 @@ def render_post_deploy_payload(
 def _encode_post_deploy_payload(payload: dict[str, object]) -> str:
     encoded = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     return base64.b64encode(encoded).decode("ascii")
-
-
-def _render_legacy_literal_environment(record: OdooInstanceOverrideRecord) -> dict[str, str]:
-    legacy_environment: dict[str, str] = {}
-    for override in record.config_parameters:
-        if override.value.source != "literal":
-            continue
-        if override.value.value is None:
-            raise click.ClickException(f"Odoo override {override.key!r} is missing a literal value.")
-        legacy_environment[config_parameter_env_key(override.key)] = str(override.value.value)
-    for override in record.addon_settings:
-        if override.value.source != "literal":
-            continue
-        override_name = f"{override.addon}.{override.setting}"
-        if override.value.value is None:
-            raise click.ClickException(f"Odoo override {override_name!r} is missing a literal value.")
-        legacy_environment[
-            addon_setting_env_key(addon_name=override.addon, setting_name=override.setting)
-        ] = str(override.value.value)
-    return legacy_environment
 
 
 def config_parameter_env_key(config_parameter_key: str) -> str:
@@ -264,7 +269,6 @@ def build_post_deploy_environment(
     inline_environment: dict[str, str] = {
         ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY: _encode_post_deploy_payload(payload),
     }
-    inline_environment.update(_render_legacy_literal_environment(record))
     required_container_environment_keys: list[str] = []
     config_parameter_payloads = payload.get("config_parameters")
     if not isinstance(config_parameter_payloads, list):
