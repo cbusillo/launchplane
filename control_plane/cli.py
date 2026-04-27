@@ -9215,6 +9215,7 @@ def artifacts_ingest(state_dir: Path, database_url: str, input_file: Path) -> No
 @click.option("--devkit-root", type=click.Path(path_type=Path), required=True)
 @click.option("--image-repository", required=True)
 @click.option("--image-tag", required=True)
+@click.option("--platform", multiple=True, help="Target platform passed to odoo-devkit publish.")
 @click.option("--output-file", type=click.Path(path_type=Path), default=None)
 @click.option("--no-cache", is_flag=True, default=False)
 def odoo_artifacts_publish(
@@ -9225,6 +9226,7 @@ def odoo_artifacts_publish(
     devkit_root: Path,
     image_repository: str,
     image_tag: str,
+    platform: tuple[str, ...],
     output_file: Path | None,
     no_cache: bool,
 ) -> None:
@@ -9239,6 +9241,7 @@ def odoo_artifacts_publish(
             devkit_root=devkit_root,
             image_repository=image_repository,
             image_tag=image_tag,
+            platforms=platform,
             output_file=output_file,
             no_cache=no_cache,
         ),
