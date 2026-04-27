@@ -28,6 +28,7 @@ class OdooArtifactPublishRequest(BaseModel):
     devkit_root: Path
     image_repository: str
     image_tag: str
+    platforms: tuple[str, ...] = ()
     output_file: Path | None = None
     no_cache: bool = False
 
@@ -48,6 +49,7 @@ class OdooArtifactPublishRequest(BaseModel):
             raise ValueError("Odoo artifact publish requires image_repository.")
         if not self.image_tag:
             raise ValueError("Odoo artifact publish requires image_tag.")
+        self.platforms = tuple(platform.strip() for platform in self.platforms if platform.strip())
         return self
 
 
@@ -103,6 +105,8 @@ def _publish_command(*, request: OdooArtifactPublishRequest, output_file: Path) 
         "--output-file",
         str(output_file),
     ]
+    for platform in request.platforms:
+        command.extend(["--platform", platform])
     if request.no_cache:
         command.append("--no-cache")
     return command
