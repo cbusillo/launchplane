@@ -49,6 +49,10 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
 )
+from control_plane.workflows.odoo_prod_backup_gate import (
+    OdooProdBackupGateRequest,
+    execute_odoo_prod_backup_gate,
+)
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
@@ -195,6 +199,20 @@ class OdooProdRollbackEnvelope(BaseModel):
     def _validate_alignment(self) -> "OdooProdRollbackEnvelope":
         if self.product.strip() != "odoo":
             raise ValueError("Odoo prod rollback requires product 'odoo'.")
+        return self
+
+
+class OdooProdBackupGateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    backup_gate: OdooProdBackupGateRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdBackupGateEnvelope":
+        if self.product.strip() != "odoo":
+            raise ValueError("Odoo prod backup gate requires product 'odoo'.")
         return self
 
 
@@ -811,6 +829,7 @@ def create_launchplane_service_app(
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/odoo/post-deploy",
+        "/v1/drivers/odoo/prod-backup-gate",
         "/v1/drivers/odoo/prod-rollback",
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-inventory",
@@ -1360,6 +1379,53 @@ def create_launchplane_service_app(
                     "transition": (
                         f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
                     )
+                }
+            elif path == "/v1/drivers/odoo/prod-backup-gate":
+                request = OdooProdBackupGateEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="odoo_prod_backup_gate.execute",
+                    product=request.product,
+                    context=request.backup_gate.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the Odoo prod backup-gate driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_prod_backup_gate(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.backup_gate,
+                )
+                result = {
+                    "backup_record_id": driver_result.backup_record_id,
+                    "backup_status": driver_result.backup_status,
+                    "backup_root": driver_result.backup_root,
+                    "database_dump_path": driver_result.database_dump_path,
+                    "filestore_archive_path": driver_result.filestore_archive_path,
+                    "manifest_path": driver_result.manifest_path,
                 }
             elif path == "/v1/drivers/odoo/prod-rollback":
                 request = OdooProdRollbackEnvelope.model_validate(payload)

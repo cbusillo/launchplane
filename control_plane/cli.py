@@ -101,6 +101,10 @@ from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
     execute_odoo_artifact_publish,
 )
+from control_plane.workflows.odoo_prod_backup_gate import (
+    OdooProdBackupGateRequest,
+    execute_odoo_prod_backup_gate,
+)
 from control_plane.workflows.promote import (
     build_executed_promotion_record,
     build_promotion_record,
@@ -8720,6 +8724,11 @@ def odoo_artifacts() -> None:
     """Odoo artifact publish driver commands."""
 
 
+@main.group("odoo-backup-gates")
+def odoo_backup_gates() -> None:
+    """Odoo backup-gate driver commands."""
+
+
 @main.group()
 def service() -> None:
     """Launchplane service commands."""
@@ -9249,6 +9258,39 @@ def odoo_artifacts_publish(
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
     if result.status != "pass":
         raise click.ClickException(result.error_message or "Odoo artifact publish failed.")
+
+
+@odoo_backup_gates.command("capture")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane backup-gate and Dokploy target records.",
+)
+@click.option("--context", required=True)
+@click.option("--instance", default="prod", show_default=True)
+@click.option("--backup-record-id", required=True)
+@click.option("--timeout", "timeout_seconds", type=int, default=None)
+def odoo_backup_gates_capture(
+    database_url: str,
+    context: str,
+    instance: str,
+    backup_record_id: str,
+    timeout_seconds: int | None,
+) -> None:
+    result = execute_odoo_prod_backup_gate(
+        control_plane_root=_control_plane_root(),
+        record_store=_store(Path("state"), database_url=database_url),
+        request=OdooProdBackupGateRequest(
+            context=context,
+            instance=instance,
+            backup_record_id=backup_record_id,
+            timeout_seconds=timeout_seconds,
+        ),
+    )
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+    if result.backup_status != "pass":
+        raise click.ClickException(result.error_message or "Odoo backup gate failed.")
 
 
 @main.group("release-tuples")

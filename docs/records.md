@@ -98,6 +98,9 @@ state/
 - One file per backup gate run that can authorize a promotion.
 - Record the destination environment, evidence source, pass/fail status, and
   concrete backup evidence such as snapshot or archive identifiers.
+- Odoo prod backup-gate records are created by the Launchplane Odoo driver after
+  a real compose-local DB dump and filestore archive capture. They should not be
+  synthesized with generic operator assertions for release drills.
 - Promotion execution should fail closed unless the referenced backup-gate
   record exists, targets the same destination environment, and has `status`
   `pass`.
