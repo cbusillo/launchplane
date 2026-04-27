@@ -3,7 +3,9 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import click
+from click.testing import CliRunner
 
+from control_plane.cli import main
 from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     ArtifactImageReference,
@@ -321,6 +323,54 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertIn("deploy failed", result.error_message)
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "fail")
+
+    def test_rollback_cli_executes_driver(self) -> None:
+        with (
+            patch(
+                "control_plane.cli.execute_odoo_prod_rollback",
+                return_value=Mock(
+                    rollback_status="pass",
+                    model_dump=Mock(
+                        return_value={
+                            "context": "cm",
+                            "instance": "prod",
+                            "artifact_id": "artifact-cm-previous",
+                            "promotion_record_id": "promotion-cm-prod",
+                            "deployment_record_id": "deployment-cm-prod",
+                            "release_tuple_id": "cm-prod-artifact-cm-previous",
+                            "rollback_status": "pass",
+                            "rollback_health_status": "pass",
+                            "post_deploy_status": "pass",
+                            "error_message": "",
+                        }
+                    ),
+                ),
+            ) as execute_mock,
+            patch("control_plane.cli._store", return_value=Mock()),
+        ):
+            result = CliRunner().invoke(
+                main,
+                [
+                    "odoo-rollbacks",
+                    "execute",
+                    "--database-url",
+                    "postgresql://launchplane.example/db",
+                    "--context",
+                    "cm",
+                    "--artifact-id",
+                    "artifact-cm-previous",
+                    "--reason",
+                    "drill",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertIn("artifact-cm-previous", result.output)
+        execute_mock.assert_called_once()
+        request = execute_mock.call_args.kwargs["request"]
+        self.assertEqual(request.context, "cm")
+        self.assertEqual(request.artifact_id, "artifact-cm-previous")
+        self.assertEqual(request.reason, "drill")
 
 
 if __name__ == "__main__":
