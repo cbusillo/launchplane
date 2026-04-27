@@ -53,6 +53,10 @@ from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
 )
+from control_plane.workflows.odoo_prod_promotion import (
+    OdooProdPromotionRequest,
+    execute_odoo_prod_promotion,
+)
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
@@ -213,6 +217,20 @@ class OdooProdBackupGateEnvelope(BaseModel):
     def _validate_alignment(self) -> "OdooProdBackupGateEnvelope":
         if self.product.strip() != "odoo":
             raise ValueError("Odoo prod backup gate requires product 'odoo'.")
+        return self
+
+
+class OdooProdPromotionEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    promotion: OdooProdPromotionRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooProdPromotionEnvelope":
+        if self.product.strip() != "odoo":
+            raise ValueError("Odoo prod promotion requires product 'odoo'.")
         return self
 
 
@@ -563,6 +581,7 @@ def _accepted_payload(
                 "deployment_record_id",
                 "backup_gate_record_id",
                 "backup_record_id",
+                "release_tuple_id",
                 "inventory_record_id",
                 "preview_id",
                 "generation_id",
@@ -830,6 +849,7 @@ def create_launchplane_service_app(
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/odoo/post-deploy",
         "/v1/drivers/odoo/prod-backup-gate",
+        "/v1/drivers/odoo/prod-promotion",
         "/v1/drivers/odoo/prod-rollback",
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-inventory",
@@ -1426,6 +1446,57 @@ def create_launchplane_service_app(
                     "database_dump_path": driver_result.database_dump_path,
                     "filestore_archive_path": driver_result.filestore_archive_path,
                     "manifest_path": driver_result.manifest_path,
+                }
+            elif path == "/v1/drivers/odoo/prod-promotion":
+                request = OdooProdPromotionEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="odoo_prod_promotion.execute",
+                    product=request.product,
+                    context=request.promotion.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the Odoo prod promotion driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_prod_promotion(
+                    control_plane_root=resolved_root,
+                    state_dir=state_dir,
+                    database_url=database_url,
+                    record_store=record_store,
+                    request=request.promotion,
+                )
+                result = {
+                    "promotion_record_id": driver_result.promotion_record_id,
+                    "deployment_record_id": driver_result.deployment_record_id,
+                    "backup_record_id": driver_result.backup_record_id,
+                    "release_tuple_id": driver_result.release_tuple_id,
+                    "promotion_status": driver_result.promotion_status,
+                    "deployment_status": driver_result.deployment_status,
+                    "post_deploy_status": driver_result.post_deploy_status,
+                    "destination_health_status": driver_result.destination_health_status,
                 }
             elif path == "/v1/drivers/odoo/prod-rollback":
                 request = OdooProdRollbackEnvelope.model_validate(payload)
