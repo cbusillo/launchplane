@@ -867,9 +867,11 @@ def sync_dokploy_compose_raw_source(
 
     expected_sha256 = compose_file_sha256(compose_file)
     existing_source_type = str(target_payload.get("sourceType") or "").strip()
+    existing_compose_path = str(target_payload.get("composePath") or "").strip()
     existing_compose_file = str(target_payload.get("composeFile") or "")
     if (
         existing_source_type == "raw"
+        and existing_compose_path == "docker-compose.yml"
         and compose_file_sha256(existing_compose_file) == expected_sha256
     ):
         return _build_raw_compose_evidence(
@@ -888,6 +890,7 @@ def sync_dokploy_compose_raw_source(
             "name": normalized_compose_name,
             "environmentId": environment_id,
             "sourceType": "raw",
+            "composePath": "docker-compose.yml",
             "autoDeploy": bool(target_payload.get("autoDeploy")),
             "composeFile": compose_file,
         },
@@ -899,11 +902,17 @@ def sync_dokploy_compose_raw_source(
         target_id=normalized_compose_id,
     )
     refreshed_source_type = str(refreshed_payload.get("sourceType") or "").strip()
+    refreshed_compose_path = str(refreshed_payload.get("composePath") or "").strip()
     refreshed_compose_file = str(refreshed_payload.get("composeFile") or "")
     if refreshed_source_type != "raw":
         raise click.ClickException(
             f"Dokploy compose {normalized_compose_name} did not retain sourceType=raw after update. "
             f"Live sourceType={refreshed_source_type or '<empty>'}."
+        )
+    if refreshed_compose_path != "docker-compose.yml":
+        raise click.ClickException(
+            f"Dokploy compose {normalized_compose_name} did not retain composePath=docker-compose.yml after raw update. "
+            f"Live composePath={refreshed_compose_path or '<empty>'}."
         )
     if compose_file_sha256(refreshed_compose_file) != expected_sha256:
         raise click.ClickException(
@@ -924,6 +933,7 @@ def _build_raw_compose_evidence(
         "source_type": source_type,
         "compose_sha256": compose_file_sha256(compose_file),
         "compose_bytes": str(len(compose_file.encode("utf-8"))),
+        "compose_path": "docker-compose.yml",
         "required_services": ",".join(ODOO_RAW_COMPOSE_REQUIRED_SERVICES),
         "changed": "true" if changed else "false",
     }
