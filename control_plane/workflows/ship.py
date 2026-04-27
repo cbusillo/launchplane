@@ -3,7 +3,11 @@ from datetime import UTC, datetime
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import DelegatedExecutor
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, HealthcheckEvidence
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+)
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.ship_request import ShipRequest
 
@@ -26,8 +30,11 @@ def _resolve_destination_health(
     if destination_health.status == "skipped":
         return destination_health
     if not wait:
-        return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
-                                   status="pending")
+        return HealthcheckEvidence(
+            urls=destination_health.urls,
+            timeout_seconds=destination_health.timeout_seconds,
+            status="pending",
+        )
     if deployment_status == "pass":
         return HealthcheckEvidence(
             verified=True,
@@ -35,8 +42,11 @@ def _resolve_destination_health(
             timeout_seconds=destination_health.timeout_seconds,
             status="pass",
         )
-    return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
-                               status="fail")
+    return HealthcheckEvidence(
+        urls=destination_health.urls,
+        timeout_seconds=destination_health.timeout_seconds,
+        status="fail",
+    )
 
 
 def _resolve_post_deploy_update(
@@ -65,7 +75,8 @@ def _resolve_post_deploy_update(
             ),
         )
     return PostDeployUpdateEvidence(
-        detail="Odoo-specific post-deploy update did not run because deploy execution did not complete successfully.")
+        detail="Odoo-specific post-deploy update did not run because deploy execution did not complete successfully."
+    )
 
 
 def build_deployment_record(
@@ -78,6 +89,7 @@ def build_deployment_record(
     finished_at: str,
     resolved_target: ResolvedTargetEvidence | None = None,
     delegated_executor: DelegatedExecutor = "control-plane.dokploy",
+    runtime_source: dict[str, str] | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
 ) -> DeploymentRecord:
@@ -96,6 +108,7 @@ def build_deployment_record(
         no_cache=request.no_cache,
         delegated_executor=delegated_executor,
         resolved_target=resolved_target,
+        runtime_source=runtime_source or {},
         deploy=DeploymentEvidence(
             target_name=request.target_name,
             target_type=request.target_type,
@@ -105,7 +118,8 @@ def build_deployment_record(
             started_at=started_at,
             finished_at=finished_at,
         ),
-        post_deploy_update=post_deploy_update or _resolve_post_deploy_update(
+        post_deploy_update=post_deploy_update
+        or _resolve_post_deploy_update(
             request,
             deployment_status=deployment_status,
         ),

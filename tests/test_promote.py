@@ -306,6 +306,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "control_plane.dokploy.fetch_dokploy_target_payload",
             return_value={"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
         ), patch(
+            "control_plane.dokploy.sync_dokploy_compose_raw_source",
+            return_value={"source_type": "raw", "compose_sha256": "abc123"},
+        ) as raw_compose_sync, patch(
             "control_plane.dokploy.update_dokploy_target_env",
             side_effect=lambda **kwargs: captured_update.update(kwargs),
         ):
@@ -314,6 +317,7 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 resolved_target=resolved_target,
             )
 
+        raw_compose_sync.assert_called_once()
         self.assertEqual(captured_update["target_type"], "compose")
         self.assertEqual(captured_update["target_id"], "compose-123")
         self.assertIn(

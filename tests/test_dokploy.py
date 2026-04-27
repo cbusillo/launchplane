@@ -1313,6 +1313,65 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
         self.assertEqual(rendered, "KEEP=1\nADD=2")
 
+    def test_render_odoo_raw_compose_file_pins_artifact_image_and_services(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+        )
+
+        self.assertIn("image: ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123", compose_file)
+        self.assertIn("\n  web:", compose_file)
+        self.assertIn("\n  database:", compose_file)
+        self.assertIn("\n  script-runner:", compose_file)
+        self.assertIn("name: ${ODOO_PROJECT_NAME:-odoo}", compose_file)
+
+    def test_sync_dokploy_compose_raw_source_updates_and_verifies_hash(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+        )
+        update_payloads: list[dict[str, object]] = []
+
+        def fake_dokploy_request(**kwargs: object) -> dict[str, object]:
+            update_payloads.append(dict(kwargs))
+            return {"status": "ok"}
+
+        with (
+            patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "environmentId": "env-123",
+                    "sourceType": "raw",
+                    "composeFile": compose_file,
+                },
+            ),
+        ):
+            evidence = control_plane_dokploy.sync_dokploy_compose_raw_source(
+                host="https://dokploy.example.com",
+                token="token-123",
+                compose_id="compose-123",
+                compose_name="cm-testing",
+                target_payload={
+                    "name": "cm-testing",
+                    "environmentId": "env-123",
+                    "sourceType": "git",
+                    "composeFile": "",
+                    "autoDeploy": False,
+                },
+                compose_file=compose_file,
+            )
+
+        self.assertEqual(len(update_payloads), 1)
+        payload = update_payloads[0]["payload"]
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["sourceType"], "raw")
+        self.assertEqual(payload["composeFile"], compose_file)
+        self.assertEqual(evidence["source_type"], "raw")
+        self.assertEqual(
+            evidence["compose_sha256"], control_plane_dokploy.compose_file_sha256(compose_file)
+        )
+        self.assertEqual(evidence["changed"], "true")
+
     def test_service_render_authz_policy_uses_tracked_policy_source(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
