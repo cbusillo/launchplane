@@ -43,6 +43,7 @@ from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotio
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 from control_plane.workflows.verireel_environment import VeriReelStableEnvironmentResult
+from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
@@ -1828,6 +1829,138 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "post_deploy": {
                         "context": "opw",
                         "instance": "testing",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_odoo_artifact_publish_driver_writes_manifest_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-opw",
+                            "workflow_refs": [
+                                "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["opw"],
+                            "actions": ["odoo_artifact_publish.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.ingest_odoo_artifact_publish_evidence",
+                return_value=OdooArtifactPublishResult(
+                    status="pass",
+                    context="opw",
+                    instance="testing",
+                    artifact_id="artifact-opw-new",
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-opw",
+                    image_digest="sha256:new",
+                    source_commit="2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/artifact-publish",
+                    payload={
+                        "product": "odoo",
+                        "publish": {
+                            "context": "opw",
+                            "instance": "testing",
+                            "manifest": {
+                                "artifact_id": "artifact-opw-new",
+                                "source_commit": "2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                                "enterprise_base_digest": "sha256:enterprise",
+                                "image": {
+                                    "repository": "ghcr.io/cbusillo/odoo-tenant-opw",
+                                    "digest": "sha256:new",
+                                },
+                            },
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["records"]["artifact_id"], "artifact-opw-new")
+            self.assertEqual(payload["result"]["status"], "pass")
+            execute_mock.assert_called_once()
+
+    def test_odoo_artifact_publish_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-opw",
+                        workflow_ref=(
+                            "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/tenant-opw",
+                                "workflow_refs": [
+                                    "every/tenant-opw/.github/workflows/odoo-artifact-publish.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo"],
+                                "contexts": ["opw"],
+                                "actions": ["odoo_post_deploy.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/artifact-publish",
+                payload={
+                    "product": "odoo",
+                    "publish": {
+                        "context": "opw",
+                        "instance": "testing",
+                        "manifest": {
+                            "artifact_id": "artifact-opw-new",
+                            "source_commit": "2719b363e1a434d890b2d75f0cb4ef629bc3a012",
+                            "enterprise_base_digest": "sha256:enterprise",
+                            "image": {
+                                "repository": "ghcr.io/cbusillo/odoo-tenant-opw",
+                                "digest": "sha256:new",
+                            },
+                        },
                     },
                 },
             )

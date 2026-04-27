@@ -67,6 +67,43 @@ class OdooArtifactPublishResult(BaseModel):
     error_message: str = ""
 
 
+class OdooArtifactPublishEvidenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    instance: str = "testing"
+    manifest: ArtifactIdentityManifest
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooArtifactPublishEvidenceRequest":
+        self.context = self.context.strip().lower()
+        self.instance = self.instance.strip().lower()
+        if self.context not in SUPPORTED_ODOO_CONTEXTS:
+            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
+            raise ValueError(
+                f"Odoo artifact publish supports contexts {supported}; got {self.context!r}."
+            )
+        if self.instance not in {"testing", "prod"}:
+            raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
+        expected_prefix = f"artifact-{self.context}-"
+        if not self.manifest.artifact_id.startswith(expected_prefix):
+            raise ValueError(
+                "Odoo artifact publish evidence has an artifact for the wrong context. "
+                f"Expected prefix {expected_prefix!r}; got {self.manifest.artifact_id!r}."
+            )
+        return self
+
+
+def _validate_manifest_context(*, manifest: ArtifactIdentityManifest, context: str) -> None:
+    expected_prefix = f"artifact-{context}-"
+    if not manifest.artifact_id.startswith(expected_prefix):
+        raise click.ClickException(
+            "Odoo artifact publish produced an artifact for the wrong context. "
+            f"Expected prefix {expected_prefix!r}; got {manifest.artifact_id!r}."
+        )
+
+
 def _runtime_environment_payload(
     *, request: OdooArtifactPublishRequest, control_plane_root: Path
 ) -> str:
@@ -146,13 +183,37 @@ def _read_manifest(
             "Odoo artifact publish produced invalid artifact manifest JSON."
         ) from error
     manifest = ArtifactIdentityManifest.model_validate(payload)
-    expected_prefix = f"artifact-{request.context}-"
-    if not manifest.artifact_id.startswith(expected_prefix):
-        raise click.ClickException(
-            "Odoo artifact publish produced an artifact for the wrong context. "
-            f"Expected prefix {expected_prefix!r}; got {manifest.artifact_id!r}."
-        )
+    _validate_manifest_context(manifest=manifest, context=request.context)
     return manifest
+
+
+def ingest_odoo_artifact_publish_evidence(
+    *,
+    record_store: FilesystemRecordStore,
+    request: OdooArtifactPublishEvidenceRequest,
+) -> OdooArtifactPublishResult:
+    try:
+        record_store.write_artifact_manifest(request.manifest)
+    except click.ClickException as error:
+        return OdooArtifactPublishResult(
+            status="fail",
+            context=request.context,
+            instance=request.instance,
+            artifact_id=request.manifest.artifact_id,
+            image_repository=request.manifest.image.repository,
+            image_digest=request.manifest.image.digest,
+            source_commit=request.manifest.source_commit,
+            error_message=str(error),
+        )
+    return OdooArtifactPublishResult(
+        status="pass",
+        context=request.context,
+        instance=request.instance,
+        artifact_id=request.manifest.artifact_id,
+        image_repository=request.manifest.image.repository,
+        image_digest=request.manifest.image.digest,
+        source_commit=request.manifest.source_commit,
+    )
 
 
 def execute_odoo_artifact_publish(
