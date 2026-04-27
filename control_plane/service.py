@@ -47,6 +47,8 @@ from control_plane.workflows.evidence_ingestion import (
 )
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceRequest,
+    OdooArtifactPublishInputsRequest,
+    build_odoo_artifact_publish_inputs,
     ingest_odoo_artifact_publish_evidence,
 )
 from control_plane.workflows.odoo_post_deploy import (
@@ -207,6 +209,20 @@ class OdooArtifactPublishEnvelope(BaseModel):
     def _validate_alignment(self) -> "OdooArtifactPublishEnvelope":
         if self.product.strip() != "odoo":
             raise ValueError("Odoo artifact publish requires product 'odoo'.")
+        return self
+
+
+class OdooArtifactPublishInputsEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    inputs: OdooArtifactPublishInputsRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooArtifactPublishInputsEnvelope":
+        if self.product.strip() != "odoo":
+            raise ValueError("Odoo artifact publish inputs require product 'odoo'.")
         return self
 
 
@@ -866,6 +882,7 @@ def create_launchplane_service_app(
         "/v1/evidence/previews/destroyed",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
+        "/v1/drivers/odoo/artifact-publish-inputs",
         "/v1/drivers/odoo/artifact-publish",
         "/v1/drivers/odoo/post-deploy",
         "/v1/drivers/odoo/prod-backup-gate",
@@ -1465,6 +1482,45 @@ def create_launchplane_service_app(
                     "image_digest": driver_result.image_digest,
                     "source_commit": driver_result.source_commit,
                 }
+            elif path == "/v1/drivers/odoo/artifact-publish-inputs":
+                request = OdooArtifactPublishInputsEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="odoo_artifact_publish_inputs.read",
+                    product=request.product,
+                    context=request.inputs.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot read Odoo artifact publish inputs"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = build_odoo_artifact_publish_inputs(
+                    control_plane_root=resolved_root,
+                    request=request.inputs,
+                )
+                driver_result = result
             elif path == "/v1/drivers/odoo/prod-backup-gate":
                 request = OdooProdBackupGateEnvelope.model_validate(payload)
                 if not authz_policy.allows(

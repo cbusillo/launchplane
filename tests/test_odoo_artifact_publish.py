@@ -6,7 +6,9 @@ from unittest.mock import Mock, patch
 from control_plane.workflows.odoo_artifact_publish import (
     DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY,
     OdooArtifactPublishEvidenceRequest,
+    OdooArtifactPublishInputsRequest,
     OdooArtifactPublishRequest,
+    build_odoo_artifact_publish_inputs,
     execute_odoo_artifact_publish,
     ingest_odoo_artifact_publish_evidence,
 )
@@ -128,6 +130,30 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         self.assertEqual(result.artifact_id, "artifact-cm-005c291b63b6")
         written_manifest = record_store.write_artifact_manifest.call_args.args[0]
         self.assertEqual(written_manifest.artifact_id, "artifact-cm-005c291b63b6")
+
+    def test_publish_inputs_return_only_build_scoped_environment_keys(self) -> None:
+        with patch(
+            "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
+            return_value={
+                "ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19",
+                "ODOO_BASE_DEVTOOLS_IMAGE": "ghcr.io/cbusillo/devtools:19",
+                "ODOO_DB_PASSWORD": "do-not-return",
+                "GITHUB_TOKEN": "do-not-return",
+            },
+        ):
+            payload = build_odoo_artifact_publish_inputs(
+                control_plane_root=Path("/launchplane"),
+                request=OdooArtifactPublishInputsRequest(context="cm", instance="testing"),
+            )
+
+        self.assertEqual(payload["context"], "cm")
+        self.assertEqual(
+            payload["environment"],
+            {
+                "ODOO_BASE_RUNTIME_IMAGE": "ghcr.io/cbusillo/runtime:19",
+                "ODOO_BASE_DEVTOOLS_IMAGE": "ghcr.io/cbusillo/devtools:19",
+            },
+        )
 
 
 if __name__ == "__main__":

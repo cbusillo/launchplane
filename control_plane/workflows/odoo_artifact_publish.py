@@ -16,6 +16,15 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 
 SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
 DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY = "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"
+PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
+    "ODOO_VERSION",
+    "ODOO_BASE_RUNTIME_IMAGE",
+    "ODOO_BASE_DEVTOOLS_IMAGE",
+    "ODOO_ADDON_REPOSITORIES",
+    "OPENUPGRADE_ADDON_REPOSITORY",
+    "OPENUPGRADELIB_INSTALL_SPEC",
+    "ODOO_PYTHON_SYNC_SKIP_ADDONS",
+)
 
 
 class OdooArtifactPublishRequest(BaseModel):
@@ -95,6 +104,27 @@ class OdooArtifactPublishEvidenceRequest(BaseModel):
         return self
 
 
+class OdooArtifactPublishInputsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    instance: str = "testing"
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooArtifactPublishInputsRequest":
+        self.context = self.context.strip().lower()
+        self.instance = self.instance.strip().lower()
+        if self.context not in SUPPORTED_ODOO_CONTEXTS:
+            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
+            raise ValueError(
+                f"Odoo artifact publish supports contexts {supported}; got {self.context!r}."
+            )
+        if self.instance not in {"testing", "prod"}:
+            raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
+        return self
+
+
 def _validate_manifest_context(*, manifest: ArtifactIdentityManifest, context: str) -> None:
     expected_prefix = f"artifact-{context}-"
     if not manifest.artifact_id.startswith(expected_prefix):
@@ -120,6 +150,28 @@ def _runtime_environment_payload(
         },
         sort_keys=True,
     )
+
+
+def build_odoo_artifact_publish_inputs(
+    *,
+    control_plane_root: Path,
+    request: OdooArtifactPublishInputsRequest,
+) -> dict[str, object]:
+    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root,
+        context_name=request.context,
+        instance_name=request.instance,
+    )
+    publish_environment = {
+        env_key: environment_values[env_key]
+        for env_key in PUBLISH_RUNTIME_ENVIRONMENT_KEYS
+        if environment_values.get(env_key, "").strip()
+    }
+    return {
+        "context": request.context,
+        "instance": request.instance,
+        "environment": publish_environment,
+    }
 
 
 def _publish_command(*, request: OdooArtifactPublishRequest, output_file: Path) -> list[str]:
