@@ -346,6 +346,12 @@ Current derived-state behavior:
   Odoo post-deploy workflow, verifies `/web/health`, writes deployment,
   inventory, release tuple, and rollback evidence, and annotates the current prod
   promotion record.
+- `POST /v1/drivers/odoo/prod-backup-gate` captures the DB and filestore backup
+  evidence required before Odoo prod promotion. It resolves `ODOO_DB_NAME`,
+  `ODOO_FILESTORE_PATH`, and `ODOO_BACKUP_ROOT` from DB-backed runtime
+  environment records, runs a Dokploy schedule against the compose lane, stops
+  the web service while capturing, and writes the backup-gate record only after
+  the capture succeeds.
 - Odoo rollback is image/release-tuple rollback, not VM snapshot rollback. Do not
   invent artifact ids, source commits, backup gates, or env-file overlays to make
   a rollback proceed; write or import the real Launchplane records first.

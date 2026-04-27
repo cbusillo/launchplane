@@ -32,6 +32,9 @@ The first service slice is now implemented locally in this repo:
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
 - product driver routes:
+  - `POST /v1/drivers/odoo/post-deploy`
+  - `POST /v1/drivers/odoo/prod-backup-gate`
+  - `POST /v1/drivers/odoo/prod-rollback`
   - `POST /v1/drivers/verireel/testing-deploy`
   - `POST /v1/drivers/verireel/prod-deploy`
   - `POST /v1/drivers/verireel/prod-promotion`
@@ -43,8 +46,8 @@ That slice now covers the first documented evidence surface end to end plus
 the current VeriReel-specific driver routes. Launchplane can verify GitHub
 OIDC, authorize workflow identity claims, accept
 deployment/promotion/preview lifecycle evidence over HTTP, and execute the
-current VeriReel deploy, promotion, and preview mutations as authenticated
-Launchplane routes.
+current Odoo/VeriReel deploy, backup, promotion, rollback, and preview
+mutations as authenticated Launchplane routes.
 
 ## First Host Assumption
 

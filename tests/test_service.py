@@ -44,6 +44,7 @@ from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackR
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 from control_plane.workflows.verireel_environment import VeriReelStableEnvironmentResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 
 
@@ -1826,6 +1827,130 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "post_deploy": {
                         "context": "opw",
                         "instance": "testing",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_odoo_prod_backup_gate_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_prod_backup_gate.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_prod_backup_gate",
+                return_value=OdooProdBackupGateResult(
+                    context="cm",
+                    instance="prod",
+                    backup_record_id="backup-gate-cm-prod-run-1",
+                    backup_status="pass",
+                    backup_root="/volumes/data/backups/launchplane",
+                    database_dump_path="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/cm.dump",
+                    filestore_archive_path="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/cm-filestore.tar.gz",
+                    manifest_path="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/manifest.json",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-backup-gate",
+                    payload={
+                        "product": "odoo",
+                        "backup_gate": {
+                            "context": "cm",
+                            "instance": "prod",
+                            "backup_record_id": "backup-gate-cm-prod-run-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"backup_record_id": "backup-gate-cm-prod-run-1"},
+            )
+            self.assertEqual(payload["result"]["backup_status"], "pass")
+            self.assertEqual(
+                payload["result"]["database_dump_path"],
+                "/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/cm.dump",
+            )
+            execute_mock.assert_called_once()
+
+    def test_odoo_prod_backup_gate_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "every/tenant-cm",
+                                "workflow_refs": [
+                                    "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo"],
+                                "contexts": ["cm"],
+                                "actions": ["odoo_post_deploy.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/prod-backup-gate",
+                payload={
+                    "product": "odoo",
+                    "backup_gate": {
+                        "context": "cm",
+                        "instance": "prod",
+                        "backup_record_id": "backup-gate-cm-prod-run-1",
                     },
                 },
             )

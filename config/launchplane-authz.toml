@@ -122,7 +122,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["opw"]
-actions = ["odoo_post_deploy.execute", "odoo_prod_rollback.execute"]
+actions = ["odoo_post_deploy.execute", "odoo_prod_backup_gate.execute", "odoo_prod_rollback.execute"]
 
 [[github_actions]]
 repository = "cbusillo/odoo-tenant-cm"
@@ -132,7 +132,7 @@ workflow_refs = [
 event_names = ["workflow_dispatch"]
 products = ["odoo"]
 contexts = ["cm"]
-actions = ["odoo_post_deploy.execute", "odoo_prod_rollback.execute"]
+actions = ["odoo_post_deploy.execute", "odoo_prod_backup_gate.execute", "odoo_prod_rollback.execute"]
 
 [[github_actions]]
 repository = "cbusillo/launchplane"

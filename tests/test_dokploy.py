@@ -1192,6 +1192,65 @@ protected_store_keys = ["yps-your-part-supplier"]
 
         self.assertIn("ODOO_DB_NAME", str(raised_error.exception))
 
+    def test_run_compose_odoo_backup_gate_uses_manual_schedule_with_consistency_script(
+        self,
+    ) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm", instance="prod", target_id="compose-123", target_name="cm-prod"
+        )
+        schedule_payloads: list[dict[str, object]] = []
+        request_paths: list[str] = []
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={"appName": "cm-prod-app", "serverId": "server-123"},
+            ),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                side_effect=lambda **kwargs: (
+                    schedule_payloads.append(kwargs["schedule_payload"])
+                    or {"scheduleId": "schedule-123"}
+                ),
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=lambda **kwargs: (
+                    request_paths.append(str(kwargs["path"])) or {"ok": True}
+                ),
+            ),
+        ):
+            control_plane_dokploy.run_compose_odoo_backup_gate(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                backup_record_id="backup-gate-cm-prod-1",
+                database_name="cm",
+                filestore_path="/volumes/data/filestore",
+                backup_root="/volumes/data/backups/launchplane",
+            )
+
+        self.assertEqual(len(schedule_payloads), 1)
+        self.assertEqual(
+            schedule_payloads[0]["name"],
+            control_plane_dokploy.DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME,
+        )
+        self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo backup gate")
+        script = str(schedule_payloads[0]["script"])
+        self.assertIn("docker stop", script)
+        self.assertIn("pg_dump", script)
+        self.assertIn("tar -C", script)
+        self.assertIn("manifest.json", script)
+        self.assertIn("/api/schedule.runManually", request_paths)
+
     def test_run_compose_post_deploy_update_rejects_unsupported_env_overlay_keys(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             env_file = Path(temporary_directory_name) / "post-deploy.env"

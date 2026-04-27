@@ -26,10 +26,18 @@ DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
 DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
+DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME = "platform-odoo-backup-gate"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
 DOKPLOY_RUNNING_DEPLOYMENT_STATUSES = {"pending", "queued", "running", "in_progress", "starting"}
 DOKPLOY_CANCELLED_DEPLOYMENT_STATUSES = {"cancelled", "canceled"}
-DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES = {"done", "success", "succeeded", "completed", "finished", "healthy"}
+DOKPLOY_SUCCESS_DEPLOYMENT_STATUSES = {
+    "done",
+    "success",
+    "succeeded",
+    "completed",
+    "finished",
+    "healthy",
+}
 POST_DEPLOY_UPDATE_IGNORED_ENV_KEYS = {
     "DOKPLOY_HOST",
     "DOKPLOY_TOKEN",
@@ -40,6 +48,7 @@ POST_DEPLOY_UPDATE_ALLOWED_ENV_KEYS = {
     "ODOO_DATA_WORKFLOW_LOCK_FILE",
 }
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
+DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 
 
 type JsonPrimitive = str | int | float | bool | None
@@ -81,7 +90,9 @@ class DokployTargetDefinition(BaseModel):
         if not self.instance.strip():
             raise ValueError("Dokploy target requires non-empty instance")
         if not self.target_id.strip():
-            raise ValueError(f"Dokploy target {self.context}/{self.instance} requires non-empty target_id")
+            raise ValueError(
+                f"Dokploy target {self.context}/{self.instance} requires non-empty target_id"
+            )
         return self
 
 
@@ -163,13 +174,19 @@ def resolve_ship_health_timeout_seconds(
     return DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
 
 
-def resolve_dokploy_ship_mode(context_name: str, instance_name: str, environment_values: dict[str, str]) -> str:
+def resolve_dokploy_ship_mode(
+    context_name: str, instance_name: str, environment_values: dict[str, str]
+) -> str:
     specific_key = f"DOKPLOY_SHIP_MODE_{context_name}_{instance_name}".upper()
     configured_mode = environment_values.get(specific_key, "").strip().lower()
     if not configured_mode:
-        configured_mode = environment_values.get("DOKPLOY_SHIP_MODE", "auto").strip().lower() or "auto"
+        configured_mode = (
+            environment_values.get("DOKPLOY_SHIP_MODE", "auto").strip().lower() or "auto"
+        )
     if configured_mode not in {"auto", "compose", "application"}:
-        raise click.ClickException(f"Invalid Dokploy ship mode '{configured_mode}'. Expected auto, compose, or application.")
+        raise click.ClickException(
+            f"Invalid Dokploy ship mode '{configured_mode}'. Expected auto, compose, or application."
+        )
     return configured_mode
 
 
@@ -188,12 +205,16 @@ def resolve_healthcheck_base_urls(
     raw_base_urls: list[str] = []
     if target_definition is not None:
         raw_base_urls.extend(domain for domain in target_definition.domains if domain)
-        configured_base_url = target_definition.env.get("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", "").strip()
+        configured_base_url = target_definition.env.get(
+            "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", ""
+        ).strip()
         if configured_base_url:
             raw_base_urls.append(configured_base_url)
 
     if not raw_base_urls:
-        fallback_base_url = environment_values.get("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", "").strip()
+        fallback_base_url = environment_values.get(
+            "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", ""
+        ).strip()
         if fallback_base_url:
             raw_base_urls.append(fallback_base_url)
 
@@ -221,9 +242,13 @@ def resolve_ship_healthcheck_urls(
         return ()
 
     healthcheck_path = normalize_healthcheck_path(
-        target_definition.healthcheck_path if target_definition is not None else DEFAULT_DOKPLOY_HEALTHCHECK_PATH
+        target_definition.healthcheck_path
+        if target_definition is not None
+        else DEFAULT_DOKPLOY_HEALTHCHECK_PATH
     )
-    base_urls = resolve_healthcheck_base_urls(target_definition=target_definition, environment_values=environment_values)
+    base_urls = resolve_healthcheck_base_urls(
+        target_definition=target_definition, environment_values=environment_values
+    )
     return tuple(f"{base_url}{healthcheck_path}" for base_url in base_urls)
 
 
@@ -239,11 +264,11 @@ def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> D
         raise click.ClickException(
             "Missing Launchplane tracked Dokploy target authority. Configure DB-backed tracked target records."
         )
-    source_of_truth = _load_optional_dokploy_source_of_truth_from_database(database_url=database_url)
+    source_of_truth = _load_optional_dokploy_source_of_truth_from_database(
+        database_url=database_url
+    )
     if source_of_truth is None:
-        raise click.ClickException(
-            "Missing DB-backed Launchplane tracked Dokploy target records."
-        )
+        raise click.ClickException("Missing DB-backed Launchplane tracked Dokploy target records.")
     return source_of_truth
 
 
@@ -329,7 +354,8 @@ def build_dokploy_source_of_truth_from_records(
         )
     if remaining_target_id_routes:
         unknown_routes = ", ".join(
-            f"{context_name}/{instance_name}" for context_name, instance_name in sorted(remaining_target_id_routes)
+            f"{context_name}/{instance_name}"
+            for context_name, instance_name in sorted(remaining_target_id_routes)
         )
         raise click.ClickException(
             "DB-backed Dokploy target-id records contain route(s) that are not present in the tracked target records: "
@@ -338,7 +364,9 @@ def build_dokploy_source_of_truth_from_records(
     return DokploySourceOfTruth.model_validate({"schema_version": 1, "targets": targets_payload})
 
 
-def _load_optional_dokploy_source_of_truth_from_database(*, database_url: str) -> DokploySourceOfTruth | None:
+def _load_optional_dokploy_source_of_truth_from_database(
+    *, database_url: str
+) -> DokploySourceOfTruth | None:
     record_store: PostgresRecordStore | None = None
     try:
         record_store = PostgresRecordStore(database_url=database_url)
@@ -363,7 +391,9 @@ def _load_optional_dokploy_source_of_truth_from_database(*, database_url: str) -
 
 
 def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
-    environment_values = read_control_plane_environment_values(control_plane_root=control_plane_root)
+    environment_values = read_control_plane_environment_values(
+        control_plane_root=control_plane_root
+    )
 
     host = environment_values.get("DOKPLOY_HOST", "").strip()
     token = environment_values.get("DOKPLOY_TOKEN", "").strip()
@@ -375,7 +405,9 @@ def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
     return host, token
 
 
-def trigger_deployment(*, host: str, token: str, target_type: str, target_id: str, no_cache: bool) -> None:
+def trigger_deployment(
+    *, host: str, token: str, target_type: str, target_id: str, no_cache: bool
+) -> None:
     if target_type == "compose":
         endpoint_path = "/api/compose.redeploy" if no_cache else "/api/compose.deploy"
         payload: JsonObject = {"composeId": target_id}
@@ -389,7 +421,9 @@ def trigger_deployment(*, host: str, token: str, target_type: str, target_id: st
     dokploy_request(host=host, token=token, path=endpoint_path, method="POST", payload=payload)
 
 
-def latest_deployment_for_target(*, host: str, token: str, target_type: str, target_id: str) -> JsonObject | None:
+def latest_deployment_for_target(
+    *, host: str, token: str, target_type: str, target_id: str
+) -> JsonObject | None:
     if target_type == "compose":
         compose_payload = dokploy_request(
             host=host,
@@ -443,7 +477,9 @@ def fetch_dokploy_target_payload(
 
     payload_as_object = as_json_object(payload)
     if payload_as_object is None:
-        raise click.ClickException(f"Dokploy {target_type}.one returned an invalid response payload.")
+        raise click.ClickException(
+            f"Dokploy {target_type}.one returned an invalid response payload."
+        )
     return payload_as_object
 
 
@@ -543,10 +579,21 @@ def update_dokploy_target_source(
 
     environment_id = str(target_payload.get("environmentId") or "").strip()
     target_name = str(target_payload.get("name") or target_definition.target_name or "").strip()
-    source_type = target_definition.source_type.strip() or str(target_payload.get("sourceType") or "").strip()
-    compose_path = target_definition.compose_path.strip() or str(target_payload.get("composePath") or "").strip()
-    custom_git_url = target_definition.custom_git_url.strip() or str(target_payload.get("customGitUrl") or "").strip()
-    custom_git_branch = target_definition.custom_git_branch.strip() or str(target_payload.get("customGitBranch") or "").strip()
+    source_type = (
+        target_definition.source_type.strip() or str(target_payload.get("sourceType") or "").strip()
+    )
+    compose_path = (
+        target_definition.compose_path.strip()
+        or str(target_payload.get("composePath") or "").strip()
+    )
+    custom_git_url = (
+        target_definition.custom_git_url.strip()
+        or str(target_payload.get("customGitUrl") or "").strip()
+    )
+    custom_git_branch = (
+        target_definition.custom_git_branch.strip()
+        or str(target_payload.get("customGitBranch") or "").strip()
+    )
     custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
     trigger_type = str(target_payload.get("triggerType") or "push").strip() or "push"
     raw_watch_paths = target_payload.get("watchPaths")
@@ -623,7 +670,11 @@ def wait_for_target_deployment(
     before_key: str,
     timeout_seconds: int,
 ) -> str:
-    failure_message_prefix = "Dokploy compose deployment failed" if target_type == "compose" else "Dokploy deployment failed"
+    failure_message_prefix = (
+        "Dokploy compose deployment failed"
+        if target_type == "compose"
+        else "Dokploy deployment failed"
+    )
     return _wait_for_deployment_status(
         fetch_latest_deployment=lambda: latest_deployment_for_target(
             host=host,
@@ -791,7 +842,10 @@ def run_compose_post_deploy_update(
     protected_shopify_store_keys: tuple[str, ...] = (),
 ) -> None:
     compose_id = target_definition.target_id.strip()
-    compose_name = target_definition.target_name.strip() or f"{target_definition.context}-{target_definition.instance}"
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
     if not compose_id:
         raise click.ClickException(
             f"Dokploy compose target {target_definition.context}/{target_definition.instance} requires target_id for post-deploy update."
@@ -807,7 +861,9 @@ def run_compose_post_deploy_update(
         current_env_map=current_env_map,
         env_file=env_file,
     )
-    schedule_timeout_seconds = target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    schedule_timeout_seconds = (
+        target_definition.deploy_timeout_seconds or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
     if desired_env_map != current_env_map:
         update_dokploy_target_env(
             host=host,
@@ -844,16 +900,20 @@ def run_compose_post_deploy_update(
         raise click.ClickException(
             "Compose post-deploy update requires ODOO_DB_NAME in the live target environment or explicit env file."
         )
-    filestore_path = (desired_env_map.get("ODOO_FILESTORE_PATH") or "/volumes/data/filestore").strip() or "/volumes/data/filestore"
+    filestore_path = (
+        desired_env_map.get("ODOO_FILESTORE_PATH") or "/volumes/data/filestore"
+    ).strip() or "/volumes/data/filestore"
     data_workflow_lock_path = (
         desired_env_map.get("ODOO_DATA_WORKFLOW_LOCK_FILE") or DEFAULT_DATA_WORKFLOW_LOCK_PATH
     ).strip() or DEFAULT_DATA_WORKFLOW_LOCK_PATH
-    schedule_type, schedule_lookup_id, compose_app_name, schedule_server_id = _resolve_dokploy_schedule_runtime(
-        host=host,
-        token=token,
-        compose_id=compose_id,
-        compose_name=compose_name,
-        target_payload=target_payload,
+    schedule_type, schedule_lookup_id, compose_app_name, schedule_server_id = (
+        _resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            compose_name=compose_name,
+            target_payload=target_payload,
+        )
     )
     schedule_name = DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME
     schedule_app_name = _build_dokploy_data_workflow_schedule_app_name(
@@ -932,6 +992,112 @@ def run_compose_post_deploy_update(
     )
 
 
+def run_compose_odoo_backup_gate(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    backup_record_id: str,
+    database_name: str,
+    filestore_path: str,
+    backup_root: str,
+    timeout_seconds: int | None = None,
+) -> None:
+    compose_id = target_definition.target_id.strip()
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
+    if not compose_id:
+        raise click.ClickException(
+            f"Dokploy compose target {target_definition.context}/{target_definition.instance} requires target_id for Odoo backup gate."
+        )
+    target_payload = fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=compose_id,
+    )
+    normalized_database_name = database_name.strip()
+    if not normalized_database_name:
+        raise click.ClickException(
+            "Odoo backup gate requires a non-empty database_name resolved from Launchplane runtime records."
+        )
+    normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
+    normalized_backup_root = backup_root.strip() or DEFAULT_ODOO_BACKUP_ROOT
+    schedule_timeout_seconds = (
+        timeout_seconds
+        or target_definition.deploy_timeout_seconds
+        or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    schedule_type, schedule_lookup_id, compose_app_name, schedule_server_id = (
+        _resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            compose_name=compose_name,
+            target_payload=target_payload,
+        )
+    )
+    schedule_app_name = (
+        f"platform-{target_definition.context}-{target_definition.instance}-odoo-backup-gate"
+    )
+    schedule_script = _build_dokploy_odoo_backup_gate_script(
+        compose_app_name=compose_app_name,
+        database_name=normalized_database_name,
+        filestore_path=normalized_filestore_path,
+        backup_root=normalized_backup_root,
+        backup_record_id=backup_record_id,
+    )
+    schedule_payload: JsonObject = {
+        "name": DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME,
+        "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "appName": schedule_app_name,
+        "shellType": "bash",
+        "scheduleType": schedule_type,
+        "command": "control-plane odoo backup gate",
+        "script": schedule_script,
+        "serverId": schedule_server_id,
+        "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    schedule = upsert_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME,
+        app_name=schedule_app_name,
+        schedule_payload=schedule_payload,
+    )
+    schedule_id = schedule_key(schedule)
+    if not schedule_id:
+        raise click.ClickException(
+            f"Dokploy Odoo backup gate schedule for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
+        )
+    latest_schedule_deployment = latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.runManually",
+        method="POST",
+        payload={"scheduleId": schedule_id},
+        timeout_seconds=schedule_timeout_seconds,
+    )
+    wait_for_dokploy_schedule_deployment(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        before_key=deployment_key(latest_schedule_deployment),
+        timeout_seconds=schedule_timeout_seconds,
+    )
+
+
 def deployment_key(deployment: JsonObject | None) -> str:
     if deployment is None:
         return ""
@@ -972,7 +1138,9 @@ def dokploy_request(
             f"Dokploy API {method} {normalized_path} failed ({error.code}): {error_body}"
         ) from error
     except URLError as error:
-        raise click.ClickException(f"Dokploy API {method} {normalized_path} request failed: {error.reason}") from error
+        raise click.ClickException(
+            f"Dokploy API {method} {normalized_path} request failed: {error.reason}"
+        ) from error
 
     if not raw_payload:
         return {}
@@ -1029,7 +1197,15 @@ def _wait_for_deployment_status(
     failure_message_prefix: str,
 ) -> str:
     success_statuses = {"success", "succeeded", "done", "completed", "healthy", "finished"}
-    failure_statuses = {"failed", "error", "canceled", "cancelled", "killed", "unhealthy", "timeout"}
+    failure_statuses = {
+        "failed",
+        "error",
+        "canceled",
+        "cancelled",
+        "killed",
+        "unhealthy",
+        "timeout",
+    }
 
     start_time = time.monotonic()
     while time.monotonic() - start_time <= timeout_seconds:
@@ -1044,7 +1220,9 @@ def _wait_for_deployment_status(
             if latest_status in success_statuses:
                 return f"deployment={latest_key} status={latest_status}"
             if latest_status in failure_statuses:
-                raise click.ClickException(f"{failure_message_prefix}: deployment={latest_key} status={latest_status}")
+                raise click.ClickException(
+                    f"{failure_message_prefix}: deployment={latest_key} status={latest_status}"
+                )
             if not latest_status:
                 return f"deployment={latest_key} status=unknown"
         time.sleep(3)
@@ -1088,7 +1266,9 @@ def _resolve_dokploy_schedule_runtime(
 ) -> tuple[str, str, str, str | None]:
     compose_app_name = str(target_payload.get("appName") or "").strip()
     if not compose_app_name:
-        raise click.ClickException(f"Dokploy compose {compose_name!r} ({compose_id}) has no appName in API response.")
+        raise click.ClickException(
+            f"Dokploy compose {compose_name!r} ({compose_id}) has no appName in API response."
+        )
     compose_server_id = str(target_payload.get("serverId") or "").strip()
     if compose_server_id:
         return "server", compose_server_id, compose_app_name, compose_server_id
@@ -1112,8 +1292,12 @@ def _build_dokploy_data_workflow_script(
     quoted_database_name = shlex.quote(database_name)
     quoted_filestore_path = shlex.quote(normalized_filestore_path)
     quoted_lock_path = shlex.quote(data_workflow_lock_path)
-    workflow_environment_lines = _render_docker_exec_environment_lines(workflow_environment_overrides or {})
-    required_workflow_environment_lines = _render_required_environment_key_lines(required_workflow_environment_keys)
+    workflow_environment_lines = _render_docker_exec_environment_lines(
+        workflow_environment_overrides or {}
+    )
+    required_workflow_environment_lines = _render_required_environment_key_lines(
+        required_workflow_environment_keys
+    )
     protected_shopify_store_key_lines = _render_bash_array_assignment_lines(
         "protected_shopify_store_keys",
         protected_shopify_store_keys,
@@ -1132,7 +1316,7 @@ required_workflow_environment_keys=()
 {required_workflow_environment_lines}
 protected_shopify_store_keys=()
 {protected_shopify_store_key_lines}
-clear_stale_lock={'1' if clear_stale_lock else '0'}
+clear_stale_lock={"1" if clear_stale_lock else "0"}
 data_workflow_lock_path={quoted_lock_path}
 restart_web_on_success=0
 web_was_running=0
@@ -1319,14 +1503,175 @@ trap - EXIT
 """
 
 
+def _build_dokploy_odoo_backup_gate_script(
+    *,
+    compose_app_name: str,
+    database_name: str,
+    filestore_path: str,
+    backup_root: str,
+    backup_record_id: str,
+) -> str:
+    normalized_filestore_path = filestore_path.strip() or "/volumes/data/filestore"
+    normalized_backup_root = backup_root.strip() or DEFAULT_ODOO_BACKUP_ROOT
+    quoted_compose_app_name = shlex.quote(compose_app_name)
+    quoted_database_name = shlex.quote(database_name)
+    quoted_filestore_path = shlex.quote(normalized_filestore_path)
+    quoted_backup_root = shlex.quote(normalized_backup_root)
+    quoted_backup_record_id = shlex.quote(backup_record_id)
+    return f"""#!/usr/bin/env bash
+set -euo pipefail
+
+compose_project={quoted_compose_app_name}
+database_name={quoted_database_name}
+filestore_root={quoted_filestore_path}
+backup_root={quoted_backup_root}
+backup_record_id={quoted_backup_record_id}
+
+resolve_container_id() {{
+    local service_name="$1"
+    local container_id
+    container_id=$(docker ps -aq \
+        --filter "label=com.docker.compose.project=${{compose_project}}" \
+        --filter "label=com.docker.compose.service=${{service_name}}" | head -n 1)
+    if [ -z "${{container_id}}" ]; then
+        echo "Missing container for service '${{service_name}}' in project '${{compose_project}}'." >&2
+        exit 1
+    fi
+    printf '%s' "${{container_id}}"
+}}
+
+ensure_running() {{
+    local container_id="$1"
+    local service_name="$2"
+    local current_status
+    current_status=$(docker inspect -f '{{{{.State.Status}}}}' "${{container_id}}")
+    if [ "${{current_status}}" != "running" ]; then
+        echo "Starting ${{service_name}} container ${{container_id}}"
+        docker start "${{container_id}}" >/dev/null
+    fi
+}}
+
+database_container_id=$(resolve_container_id "database")
+script_runner_container_id=$(resolve_container_id "script-runner")
+web_container_id=$(resolve_container_id "web")
+ensure_running "${{database_container_id}}" "database"
+ensure_running "${{script_runner_container_id}}" "script-runner"
+
+web_was_running=0
+if [ "$(docker inspect -f '{{{{.State.Status}}}}' "${{web_container_id}}")" = "running" ]; then
+    web_was_running=1
+    echo "Stopping web container ${{web_container_id}} for backup consistency"
+    docker stop "${{web_container_id}}" >/dev/null
+fi
+
+restart_web_on_exit() {{
+    if [ "${{web_was_running}}" = "1" ]; then
+        echo "Starting web container ${{web_container_id}}"
+        docker start "${{web_container_id}}" >/dev/null
+    fi
+}}
+trap restart_web_on_exit EXIT
+
+backup_dir="${{backup_root}}/${{database_name}}/${{backup_record_id}}"
+database_dump_path="${{backup_dir}}/${{database_name}}.dump"
+filestore_archive_path="${{backup_dir}}/${{database_name}}-filestore.tar.gz"
+manifest_path="${{backup_dir}}/manifest.json"
+
+echo "Creating Odoo backup gate directory ${{backup_dir}}"
+docker exec -u root \
+    -e BACKUP_DIR="${{backup_dir}}" \
+    "${{script_runner_container_id}}" \
+    /bin/bash -lc 'install -d -m 700 "$BACKUP_DIR"'
+
+echo "Capturing database dump for ${{database_name}}"
+docker exec \
+    -e ODOO_DATABASE_NAME="${{database_name}}" \
+    -e DATABASE_DUMP_PATH="${{database_dump_path}}" \
+    "${{script_runner_container_id}}" \
+    /bin/bash -lc '
+        set -euo pipefail
+        export PGPASSWORD="${{ODOO_DB_PASSWORD:-}}"
+        pg_dump \
+            --host "${{ODOO_DB_HOST:-database}}" \
+            --port "${{ODOO_DB_PORT:-5432}}" \
+            --username "${{ODOO_DB_USER:-odoo}}" \
+            --format custom \
+            --file "$DATABASE_DUMP_PATH" \
+            "$ODOO_DATABASE_NAME"
+        test -s "$DATABASE_DUMP_PATH"
+    '
+
+echo "Capturing filestore archive for ${{database_name}}"
+docker exec \
+    -e ODOO_DATABASE_NAME="${{database_name}}" \
+    -e ODOO_FILESTORE_ROOT="${{filestore_root}}" \
+    -e FILESTORE_ARCHIVE_PATH="${{filestore_archive_path}}" \
+    "${{script_runner_container_id}}" \
+    /bin/bash -lc '
+        set -euo pipefail
+        filestore_database_path="$ODOO_FILESTORE_ROOT"
+        if [ "$(basename "$filestore_database_path")" != "$ODOO_DATABASE_NAME" ]; then
+            filestore_database_path="$filestore_database_path/$ODOO_DATABASE_NAME"
+        fi
+        if [ ! -d "$filestore_database_path" ]; then
+            echo "Missing filestore path: $filestore_database_path" >&2
+            exit 1
+        fi
+        tar -C "$(dirname "$filestore_database_path")" -czf "$FILESTORE_ARCHIVE_PATH" "$(basename "$filestore_database_path")"
+        test -s "$FILESTORE_ARCHIVE_PATH"
+    '
+
+database_dump_size=$(docker exec "${{script_runner_container_id}}" stat -c %s "${{database_dump_path}}")
+filestore_archive_size=$(docker exec "${{script_runner_container_id}}" stat -c %s "${{filestore_archive_path}}")
+
+docker exec \
+    -e MANIFEST_PATH="${{manifest_path}}" \
+    -e BACKUP_RECORD_ID="${{backup_record_id}}" \
+    -e DATABASE_NAME="${{database_name}}" \
+    -e BACKUP_DIR="${{backup_dir}}" \
+    -e DATABASE_DUMP_PATH="${{database_dump_path}}" \
+    -e FILESTORE_ARCHIVE_PATH="${{filestore_archive_path}}" \
+    -e DATABASE_DUMP_SIZE="${{database_dump_size}}" \
+    -e FILESTORE_ARCHIVE_SIZE="${{filestore_archive_size}}" \
+    "${{script_runner_container_id}}" \
+    python3 - <<'PY'
+import json
+import os
+from datetime import datetime, timezone
+
+payload = {{
+    "backup_record_id": os.environ["BACKUP_RECORD_ID"],
+    "database_name": os.environ["DATABASE_NAME"],
+    "backup_dir": os.environ["BACKUP_DIR"],
+    "database_dump_path": os.environ["DATABASE_DUMP_PATH"],
+    "filestore_archive_path": os.environ["FILESTORE_ARCHIVE_PATH"],
+    "database_dump_size": os.environ["DATABASE_DUMP_SIZE"],
+    "filestore_archive_size": os.environ["FILESTORE_ARCHIVE_SIZE"],
+    "captured_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+}}
+with open(os.environ["MANIFEST_PATH"], "w", encoding="utf-8") as handle:
+    json.dump(payload, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+
+echo "Odoo backup gate complete: ${{backup_dir}}"
+restart_web_on_exit
+trap - EXIT
+"""
+
+
 def _render_docker_exec_environment_lines(environment_values: Mapping[str, str]) -> str:
     lines: list[str] = []
     for key_name in sorted(environment_values):
         normalized_key = key_name.strip()
         if not normalized_key:
-            raise click.ClickException("Post-deploy workflow environment override keys must be non-empty.")
+            raise click.ClickException(
+                "Post-deploy workflow environment override keys must be non-empty."
+            )
         if not normalized_key.replace("_", "A").isalnum() or normalized_key[0].isdigit():
-            raise click.ClickException(f"Invalid post-deploy workflow environment override key: {normalized_key!r}.")
+            raise click.ClickException(
+                f"Invalid post-deploy workflow environment override key: {normalized_key!r}."
+            )
         value = str(environment_values[key_name])
         lines.append(f"workflow_environment+=(-e {shlex.quote(f'{normalized_key}={value}')})")
     return "\n".join(lines)
@@ -1337,9 +1682,13 @@ def _render_required_environment_key_lines(environment_keys: tuple[str, ...]) ->
     for key_name in sorted(set(environment_keys)):
         normalized_key = key_name.strip()
         if not normalized_key:
-            raise click.ClickException("Required post-deploy workflow environment keys must be non-empty.")
+            raise click.ClickException(
+                "Required post-deploy workflow environment keys must be non-empty."
+            )
         if not normalized_key.replace("_", "A").isalnum() or normalized_key[0].isdigit():
-            raise click.ClickException(f"Invalid required post-deploy workflow environment key: {normalized_key!r}.")
+            raise click.ClickException(
+                f"Invalid required post-deploy workflow environment key: {normalized_key!r}."
+            )
         lines.append(f"required_workflow_environment_keys+=({shlex.quote(normalized_key)})")
     return "\n".join(lines)
 
@@ -1383,7 +1732,9 @@ def _should_clear_stale_data_workflow_lock(schedule: JsonObject | None) -> bool:
     return False
 
 
-def _apply_post_deploy_env_file_overrides(*, current_env_map: dict[str, str], env_file: Path | None) -> dict[str, str]:
+def _apply_post_deploy_env_file_overrides(
+    *, current_env_map: dict[str, str], env_file: Path | None
+) -> dict[str, str]:
     if env_file is None:
         return dict(current_env_map)
     desired_env_map = dict(current_env_map)
@@ -1426,7 +1777,9 @@ def _normalize_dokploy_source_payload(raw_value: object) -> object:
 
     normalized_payload = dict(raw_value)
     allowed_top_level_keys = {"defaults", "profiles", "projects", "schema_version", "targets"}
-    unknown_keys = sorted(key_name for key_name in normalized_payload if key_name not in allowed_top_level_keys)
+    unknown_keys = sorted(
+        key_name for key_name in normalized_payload if key_name not in allowed_top_level_keys
+    )
     if unknown_keys:
         unknown_key_list = ", ".join(unknown_keys)
         raise ValueError(f"Unknown top-level dokploy keys: {unknown_key_list}")
@@ -1541,9 +1894,13 @@ def _resolve_dokploy_project_reference(
     elif isinstance(raw_project_value, Mapping):
         project_name = str(raw_project_value.get("project_name") or "").strip()
     else:
-        raise ValueError(f"Dokploy project alias '{project_alias}' in {label} must be a string or table")
+        raise ValueError(
+            f"Dokploy project alias '{project_alias}' in {label} must be a string or table"
+        )
     if not project_name:
-        raise ValueError(f"Dokploy project alias '{project_alias}' in {label} is missing project_name")
+        raise ValueError(
+            f"Dokploy project alias '{project_alias}' in {label} is missing project_name"
+        )
 
     resolved_payload["project_name"] = project_name
     return resolved_payload
@@ -1559,7 +1916,9 @@ def _expect_mapping(raw_value: object, *, label: str) -> dict[str, object]:
     return dict(raw_value)
 
 
-def _merge_dokploy_settings(base: Mapping[str, object], overlay: Mapping[str, object]) -> dict[str, object]:
+def _merge_dokploy_settings(
+    base: Mapping[str, object], overlay: Mapping[str, object]
+) -> dict[str, object]:
     merged_settings = dict(base)
     for key_name, key_value in overlay.items():
         base_env = merged_settings.get("env")
