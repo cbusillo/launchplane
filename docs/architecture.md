@@ -228,10 +228,23 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   tests, and emergency diagnostics only.
 - New cross-product integrations should target the Launchplane service boundary
   and GitHub OIDC, not repo-local CLI mutation.
-- Launchplane does not yet have a formal schema migration system.
-- Until that migration story exists, schema changes for DB-backed Launchplane state
-  should remain additive and backward-compatible so deploy rollback can safely
-  return to the previous Launchplane image.
+- Use SQLAlchemy ORM models plus Alembic migrations for shared-service schema
+  changes. Compatibility `ensure_schema()` paths are for local, test, and
+  bootstrap tolerance, not the production migration strategy.
+- Keep schema changes backward-compatible enough that deploy rollback can safely
+  return to the previous Launchplane image when possible.
+
+## Driver Migration Status
+
+The first Odoo and VeriReel driver migration is complete enough that the old
+driver-migration working plan has been retired. Product repos now keep source,
+build, verification, and thin OIDC request wrappers, while Launchplane owns the
+durable service routes, DB-backed records, managed-secret/runtime authority,
+driver execution, and operator read models for the current Odoo and VeriReel
+deployment, promotion, rollback, backup, and preview paths.
+
+Future driver work should be incremental capability expansion behind the same
+service/read-model contract, not a second migration track.
 
 See [compatibility-retirement.md](compatibility-retirement.md) for the checkpoint
 rules that decide whether a local CLI/file-backed compatibility path can remain.
