@@ -26,7 +26,7 @@ jobs:
         run: uv python install 3.13
 
       - name: Run Ruff
-        run: uv run ruff check .
+        run: uv run --extra dev ruff check .
 
       - name: Audit Python dependencies
         run: uv run --with pip-audit pip-audit
@@ -47,7 +47,7 @@ jobs:
         run: uv python install 3.13
 
       - name: Run Ruff
-        run: uv run ruff check .
+        run: uv run --extra dev ruff check .
 
       - name: Audit Python dependencies
         run: uv run --with pip-audit pip-audit
