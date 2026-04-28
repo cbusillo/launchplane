@@ -3,7 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.cli import main
 from control_plane.contracts.artifact_identity import (
@@ -41,9 +44,17 @@ from control_plane.contracts.secret_record import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _alembic_config(database_url: str) -> AlembicConfig:
+    config = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    return config
 
 
 def _deployment_record(*, record_id: str, started_at: str, finished_at: str) -> DeploymentRecord:
@@ -305,6 +316,36 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_alembic_baseline_creates_schema_used_by_record_store(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            alembic_command.upgrade(_alembic_config(database_url), "head")
+
+            store = PostgresRecordStore(database_url=database_url)
+            manifest = _artifact_manifest()
+            store.write_artifact_manifest(manifest)
+            loaded = store.read_artifact_manifest(manifest.artifact_id)
+            store.close()
+
+        self.assertEqual(loaded.artifact_id, manifest.artifact_id)
+        self.assertEqual(loaded.image.digest, "sha256:image123")
+
+    def test_alembic_baseline_downgrades_to_empty_schema(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = _sqlite_database_url(database_path)
+            config = _alembic_config(database_url)
+
+            alembic_command.upgrade(config, "head")
+            alembic_command.downgrade(config, "base")
+
+            store = PostgresRecordStore(database_url=database_url)
+            with self.assertRaises(SQLAlchemyError):
+                store.list_artifact_manifests()
+            store.close()
+
     def test_artifact_manifests_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -516,6 +557,60 @@ class PostgresRecordStoreTests(unittest.TestCase):
             ],
         )
 
+    def test_preview_summaries_include_latest_generation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+
+            preview = _preview_record(
+                preview_id="preview-verireel-testing-verireel-pr-123",
+                updated_at="2026-04-20T10:05:00Z",
+                pr_number=123,
+            )
+            store.write_preview_record(preview)
+            store.write_preview_generation_record(
+                _preview_generation_record(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    preview_id=preview.preview_id,
+                )
+            )
+            store.write_preview_generation_record(
+                _preview_generation_record(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0002",
+                    preview_id=preview.preview_id,
+                ).model_copy(
+                    update={
+                        "sequence": 2,
+                        "requested_at": "2026-04-20T10:06:00Z",
+                        "ready_at": "2026-04-20T10:08:00Z",
+                        "finished_at": "2026-04-20T10:08:00Z",
+                        "artifact_id": "artifact-verireel-pr-123-bbbbbbbb",
+                    }
+                )
+            )
+
+            summary = store.read_preview_summary(preview_id=preview.preview_id)
+            listed_summaries = store.list_preview_summaries(
+                context_name="verireel-testing",
+                anchor_repo="verireel",
+                generation_limit=1,
+            )
+            store.close()
+
+        self.assertEqual(summary.preview.preview_id, preview.preview_id)
+        self.assertEqual(
+            summary.latest_generation.generation_id,
+            "preview-verireel-testing-verireel-pr-123-generation-0002",
+        )
+        self.assertEqual(len(summary.recent_generations), 2)
+        self.assertEqual(len(listed_summaries), 1)
+        self.assertEqual(len(listed_summaries[0].recent_generations), 1)
+        self.assertEqual(listed_summaries[0].latest_generation.sequence, 2)
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -570,6 +665,87 @@ class PostgresRecordStoreTests(unittest.TestCase):
             [(record.scope, record.context, record.instance) for record in listed_records],
             [("global", "", ""), ("instance", "opw", "local")],
         )
+
+    def test_read_lane_summary_uses_repository_queries_for_gui_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_environment_inventory(_inventory_record())
+            store.write_deployment_record(
+                _deployment_record(
+                    record_id="deployment-20260420T153000Z-opw-testing",
+                    started_at="2026-04-20T15:30:00Z",
+                    finished_at="2026-04-20T15:32:00Z",
+                )
+            )
+            store.write_release_tuple_record(_release_tuple_record())
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(context="opw", instance="testing")
+            )
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="opw", instance="testing")
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(
+                    scope="global",
+                    env={"ODOO_MASTER_PASSWORD": "shared-master"},
+                )
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(
+                    scope="context",
+                    context="opw",
+                    env={"ODOO_DB_USER": "opw"},
+                )
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(
+                    scope="instance",
+                    context="opw",
+                    instance="testing",
+                    env={"ODOO_DB_NAME": "opw-testing"},
+                )
+            )
+            store.write_odoo_instance_override_record(
+                _odoo_instance_override_record(context="opw", instance="testing")
+            )
+            store.write_secret_binding(
+                _secret_binding(
+                    binding_id="binding-dokploy-token",
+                    secret_id="secret-dokploy-token",
+                    updated_at="2026-04-20T18:07:00Z",
+                )
+            )
+
+            summary = store.read_lane_summary(context_name="opw", instance_name="testing")
+            store.close()
+
+        self.assertEqual(summary.context, "opw")
+        self.assertEqual(summary.instance, "testing")
+        self.assertEqual(
+            summary.inventory.artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4"
+        )
+        self.assertEqual(summary.release_tuple.channel, "testing")
+        self.assertEqual(
+            summary.latest_deployment.record_id, "deployment-20260420T153000Z-opw-testing"
+        )
+        self.assertIsNone(summary.latest_promotion)
+        self.assertIsNone(summary.latest_backup_gate)
+        self.assertEqual(summary.dokploy_target_id.target_id, "compose-123")
+        self.assertEqual(summary.dokploy_target.target_name, "opw-testing")
+        self.assertEqual(
+            [
+                (record.scope, record.context, record.instance)
+                for record in summary.runtime_environment_records
+            ],
+            [("global", "", ""), ("context", "opw", ""), ("instance", "opw", "testing")],
+        )
+        self.assertEqual(summary.odoo_instance_override.config_parameters[0].key, "web.base.url")
+        self.assertEqual(summary.secret_bindings[0].binding_key, "DOKPLOY_TOKEN")
 
     def test_write_read_and_list_odoo_instance_override_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
