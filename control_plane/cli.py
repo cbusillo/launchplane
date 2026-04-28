@@ -6120,8 +6120,7 @@ def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
     if not request.destination_health.urls:
         raise click.ClickException(
             "Healthcheck verification requested but no target domain/URL was resolved. "
-            "Define domains or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL in the tracked Dokploy target record "
-            "or disable with --no-verify-health."
+            "Define domains in the tracked Dokploy target record or disable with --no-verify-health."
         )
     if request.destination_health.timeout_seconds is None:
         raise click.ClickException("Healthcheck verification requested without timeout_seconds.")
@@ -6808,8 +6807,7 @@ def _resolve_native_ship_request(
     if should_verify_health and not destination_healthcheck_urls:
         raise click.ClickException(
             "Healthcheck verification requested but no target domain/URL was resolved. "
-            "Define domains or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL in the tracked Dokploy target record "
-            "or disable with --no-verify-health."
+            "Define domains in the tracked Dokploy target record or disable with --no-verify-health."
         )
 
     configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
@@ -6953,8 +6951,7 @@ def _resolve_native_promotion_request(
     if should_verify_destination_health and not destination_healthcheck_urls:
         raise click.ClickException(
             "Healthcheck verification requested but no target domain/URL was resolved. "
-            "Define domains in the DB-backed target record or ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL "
-            "in runtime-environment records, or disable with --no-verify-health."
+            "Define domains in the DB-backed target record or disable with --no-verify-health."
         )
     configured_ship_mode = control_plane_dokploy.resolve_dokploy_ship_mode(
         context_name,

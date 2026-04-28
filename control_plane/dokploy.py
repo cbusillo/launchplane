@@ -385,18 +385,6 @@ def resolve_healthcheck_base_urls(
     raw_base_urls: list[str] = []
     if target_definition is not None:
         raw_base_urls.extend(domain for domain in target_definition.domains if domain)
-        configured_base_url = target_definition.env.get(
-            "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", ""
-        ).strip()
-        if configured_base_url:
-            raw_base_urls.append(configured_base_url)
-
-    if not raw_base_urls:
-        fallback_base_url = environment_values.get(
-            "ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", ""
-        ).strip()
-        if fallback_base_url:
-            raw_base_urls.append(fallback_base_url)
 
     normalized_base_urls: list[str] = []
     for raw_base_url in raw_base_urls:
