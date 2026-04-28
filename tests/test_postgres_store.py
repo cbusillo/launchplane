@@ -557,6 +557,60 @@ class PostgresRecordStoreTests(unittest.TestCase):
             ],
         )
 
+    def test_preview_summaries_include_latest_generation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+
+            preview = _preview_record(
+                preview_id="preview-verireel-testing-verireel-pr-123",
+                updated_at="2026-04-20T10:05:00Z",
+                pr_number=123,
+            )
+            store.write_preview_record(preview)
+            store.write_preview_generation_record(
+                _preview_generation_record(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    preview_id=preview.preview_id,
+                )
+            )
+            store.write_preview_generation_record(
+                _preview_generation_record(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0002",
+                    preview_id=preview.preview_id,
+                ).model_copy(
+                    update={
+                        "sequence": 2,
+                        "requested_at": "2026-04-20T10:06:00Z",
+                        "ready_at": "2026-04-20T10:08:00Z",
+                        "finished_at": "2026-04-20T10:08:00Z",
+                        "artifact_id": "artifact-verireel-pr-123-bbbbbbbb",
+                    }
+                )
+            )
+
+            summary = store.read_preview_summary(preview_id=preview.preview_id)
+            listed_summaries = store.list_preview_summaries(
+                context_name="verireel-testing",
+                anchor_repo="verireel",
+                generation_limit=1,
+            )
+            store.close()
+
+        self.assertEqual(summary.preview.preview_id, preview.preview_id)
+        self.assertEqual(
+            summary.latest_generation.generation_id,
+            "preview-verireel-testing-verireel-pr-123-generation-0002",
+        )
+        self.assertEqual(len(summary.recent_generations), 2)
+        self.assertEqual(len(listed_summaries), 1)
+        self.assertEqual(len(listed_summaries[0].recent_generations), 1)
+        self.assertEqual(listed_summaries[0].latest_generation.sequence, 2)
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(

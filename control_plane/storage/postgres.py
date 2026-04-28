@@ -20,6 +20,7 @@ from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -760,6 +761,46 @@ class PostgresRecordStore:
                 LaunchplanePreviewGenerationRow.generation_id.desc(),
             ),
             limit=limit,
+        )
+
+    def read_preview_summary(
+        self,
+        *,
+        preview_id: str,
+        generation_limit: int | None = 10,
+    ) -> LaunchplanePreviewSummary:
+        preview = self.read_preview_record(preview_id)
+        recent_generations = self.list_preview_generation_records(
+            preview_id=preview_id,
+            limit=generation_limit,
+        )
+        return LaunchplanePreviewSummary(
+            preview=preview,
+            latest_generation=next(iter(recent_generations), None),
+            recent_generations=recent_generations,
+        )
+
+    def list_preview_summaries(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        preview_limit: int | None = None,
+        generation_limit: int | None = 1,
+    ) -> tuple[LaunchplanePreviewSummary, ...]:
+        previews = self.list_preview_records(
+            context_name=context_name,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+            limit=preview_limit,
+        )
+        return tuple(
+            self.read_preview_summary(
+                preview_id=preview.preview_id,
+                generation_limit=generation_limit,
+            )
+            for preview in previews
         )
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> None:
