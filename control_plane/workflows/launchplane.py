@@ -1263,12 +1263,10 @@ def resolve_launchplane_preview_base_url(*, control_plane_root: Path, context_na
         context_name=context_name,
     )
     preview_base_url = ""
-    preview_base_url_env_key = LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS[0]
     for environment_key in LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS:
         configured_value = context_values.get(environment_key, "").strip()
         if configured_value:
             preview_base_url = configured_value
-            preview_base_url_env_key = environment_key
             break
     if not preview_base_url:
         raise click.ClickException(

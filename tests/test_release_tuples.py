@@ -77,13 +77,9 @@ class ReleaseTupleTests(unittest.TestCase):
         )
 
     def test_load_release_tuple_catalog_requires_database_url(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            control_plane_root = Path(temporary_directory_name)
-
-            with patch.dict(os.environ, {}, clear=True):
-                with self.assertRaisesRegex(Exception, "LAUNCHPLANE_DATABASE_URL"):
-                    control_plane_release_tuples.load_release_tuple_catalog(
-                    )
+        with patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(Exception, "LAUNCHPLANE_DATABASE_URL"):
+                control_plane_release_tuples.load_release_tuple_catalog()
 
     def test_load_release_tuple_catalog_requires_stored_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
