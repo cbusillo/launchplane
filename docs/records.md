@@ -45,6 +45,81 @@ authorize, constrain, display regularly, or act on should be promoted into ORM
 columns/tables and migrated explicitly while keeping the payload copy as
 historical evidence.
 
+## ORM Query Boundary
+
+Launchplane's Postgres storage layer should expose GUI and driver reads through
+typed repository methods, not through service/UI code that reaches into JSONB
+payloads. The first GUI-facing repository projections are:
+
+- `LaunchplaneLaneSummary`: lane inventory, release tuple, latest deployment,
+  latest promotion, latest backup gate, target metadata, runtime environment
+  records, Odoo override metadata, and secret binding status.
+- `LaunchplanePreviewSummary`: preview identity plus recent/latest generation
+  state.
+
+These summaries are read models, not new durable record families. They compose
+existing ORM rows and contract payloads behind the storage boundary so the next
+driver descriptor and GUI slices can consume a stable API shape.
+
+## Field Promotion Audit
+
+The current ORM tables already model the first layer of queryable operational
+state. Use this audit when deciding whether a new GUI or driver field belongs in
+an ORM column/table or remains only in the evidence payload.
+
+- Artifact manifest: modeled fields are `artifact_id`, `source_commit`,
+  `image_repository`, and `image_digest`. Source input details, addon selectors,
+  and provider/build evidence stay payload-only until they become normal query
+  or action fields.
+- Backup gate: modeled fields are `record_id`, `context`, `instance`,
+  `created_at`, and `status`. Concrete backup paths and provider-specific backup
+  evidence stay payload-only.
+- Deployment: modeled fields are `record_id`, `context`, `instance`,
+  `artifact_id`, `source_git_ref`, and deploy timestamps. Resolved provider
+  evidence, health detail, and post-deploy product facts stay payload-only.
+- Promotion: modeled fields are `record_id`, `context`, `from_instance`,
+  `to_instance`, `artifact_id`, and deploy timestamps. Rollback annotations,
+  backup evidence detail, and provider health envelopes stay payload-only.
+- Inventory: modeled fields are `context`, `instance`, `artifact_id`,
+  `source_git_ref`, `updated_at`, and linked deployment/promotion ids. Full
+  deploy evidence and product-specific live facts stay payload-only.
+- Preview: modeled fields are `preview_id`, `context`, `anchor_repo`,
+  `anchor_pr_number`, `state`, and `updated_at`. Canonical URLs, lifecycle
+  notes, and provider route evidence stay payload-only.
+- Preview generation: modeled fields are `generation_id`, `preview_id`,
+  `sequence`, `state`, `requested_at`, `finished_at`, and `artifact_id`. Source
+  map, PR summaries, deploy/verify evidence, and failure details stay
+  payload-only.
+- Release tuple: modeled fields are `context`, `channel`, `tuple_id`,
+  `artifact_id`, `minted_at`, and `provenance`. Repo SHA maps and source
+  provenance details stay payload-only.
+- Dokploy target id: modeled fields are `context`, `instance`, `target_id`, and
+  `updated_at`. Provider lookup/import evidence stays payload-only.
+- Dokploy target: modeled fields are `context`, `instance`, and `updated_at`.
+  Provider-specific names, domains, policies, schedule, and app details stay
+  payload-only until a provider-neutral target model needs them.
+- Runtime environment: modeled fields are `scope`, `context`, `instance`, and
+  `updated_at`. Individual key/value settings stay payload-only until GUI
+  filtering or editing requires a setting table.
+- Odoo instance override: modeled fields are `context`, `instance`, and
+  `updated_at`. Typed Odoo override payloads stay payload-only until
+  cross-driver settings need generic structure.
+- Secret: modeled fields are `secret_id`, `scope`, `integration`, `name`,
+  `context`, `instance`, `status`, `current_version_id`, and `updated_at`.
+  Descriptions, validation detail, and encrypted version payloads stay
+  payload-only.
+- Secret binding: modeled fields are `binding_id`, `secret_id`, `integration`,
+  `binding_key`, `context`, `instance`, `status`, and `updated_at`. Binding
+  implementation details beyond status and lookup stay payload-only.
+- Secret audit event: modeled fields are `event_id`, `secret_id`, `event_type`,
+  and `recorded_at`. Actor, detail, and metadata stay payload-only until audit
+  filtering needs more columns.
+
+Promote a payload field into ORM structure when Launchplane needs to filter,
+order, join, authorize, constrain, display it regularly, or drive an action from
+it. Keep unstable provider envelopes, replay/debug context, and raw evidence in
+JSONB until they graduate into normal product behavior.
+
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
 be Launchplane's authenticated service ingress plus the durable record semantics
