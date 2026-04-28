@@ -8,6 +8,9 @@ Launchplane UI work must read as a tenant environment control plane, not a
 generic dashboard and not a preview-only queue. The first screen should make the
 operator's current product, lane state, and next safe action obvious.
 
+Use this document as the Launchplane UI quality gate. UI slices that pass tests
+but fail this rubric are not complete.
+
 ## Product Objects
 
 Every UI slice declares one primary object before implementation:
@@ -34,6 +37,22 @@ as evidence around it.
   weight comparable to preview creation or teardown.
 - Secret safety: show binding status, validation, rotation, and audit metadata;
   do not normalize plaintext reveal in the default UI.
+- Driver-shaped: render from Launchplane driver descriptors and read models
+  where possible, so Odoo, VeriReel, and future products share the same shell
+  instead of drifting into separate hard-coded pages.
+
+## Slice Brief
+
+Before implementation, each meaningful UI slice should declare:
+
+- primary object: tenant, environment lane, preview, promotion, policy, or
+  secret/integration status
+- first-screen hierarchy: what must be visible without hunting
+- primary action and safety level
+- explicit anti-goals, such as avoiding fleet-first framing, preview-only
+  framing, generic card grids, plaintext secret reveal, or provider-native
+  vocabulary as the main UI model
+- required evidence states: pass, fail, pending, unknown, blocked, and missing
 
 ## Anti-Slop Gate
 
@@ -54,8 +73,14 @@ Before committing a meaningful UI slice, check it against this rubric:
 ## Review Workflow
 
 - Use browser screenshots for every substantial UI change.
+- Regenerate and reopen the page before judging screenshots; stale screenshots
+  are not acceptance evidence.
 - Critique the visible result, not only the HTML or tests.
-- Keep implementation deterministic and repo-local; use model critique as review
-  input, not as a replacement for the rubric.
+- Keep implementation deterministic and repo-local. Model critique can help with
+  art direction or screenshot review, but the rubric and browser evidence decide
+  acceptance.
 - If UI needs new evidence, add minimal typed read-model fields instead of
   inferring production truth from logs or free-form text.
+- Browser-review desktop and narrow/mobile widths for every committed UI slice.
+- Update the active Launchplane plan when a UI issue is really a product-framing
+  or read-model contract gap instead of a local visual patch.

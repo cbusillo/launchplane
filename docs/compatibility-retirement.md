@@ -47,6 +47,9 @@ Keep a compatibility surface only when it is one of these:
 - `control_plane` remains the Python package name for now. Do not add public
   `odoo-control-plane` names, env vars, or docs; prefer Launchplane wording for
   product/operator surfaces.
+- The first driver-migration working plan is retired. New driver work should be
+  tracked as capability expansion in the active Launchplane GUI/driver plan or
+  in focused PRs/issues, not by reopening the old migration checklist.
 
 ## Review Cadence
 
