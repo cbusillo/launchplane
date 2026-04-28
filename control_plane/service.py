@@ -29,6 +29,11 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewMutationRequest,
 )
 from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.drivers.registry import (
+    build_driver_context_view,
+    list_driver_descriptors,
+    read_driver_descriptor,
+)
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence,
@@ -525,6 +530,19 @@ def _not_found_response(
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
+    if len(segments) == 2 and segments == ["v1", "drivers"]:
+        return "driver.read", {}
+    if len(segments) == 3 and segments[:2] == ["v1", "drivers"]:
+        return "driver.read", {"driver_id": segments[2]}
+    if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "driver-view":
+        return "driver.read", {"context": segments[2]}
+    if (
+        len(segments) == 6
+        and segments[:2] == ["v1", "contexts"]
+        and segments[3] == "instances"
+        and segments[5] == "driver-view"
+    ):
+        return "driver.read", {"context": segments[2], "instance": segments[4]}
     if len(segments) == 3 and segments[:2] == ["v1", "deployments"]:
         return "deployment.read", {"record_id": segments[2]}
     if len(segments) == 3 and segments[:2] == ["v1", "promotions"]:
@@ -969,6 +987,64 @@ def create_launchplane_service_app(
             if method == "GET":
                 assert read_route is not None
                 action, params = read_route
+                if action == "driver.read":
+                    context_name = params.get("context", _LAUNCHPLANE_SERVICE_CONTEXT)
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=context_name,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read driver metadata for the requested context.",
+                                },
+                            },
+                        )
+                    if "context" in params:
+                        view = build_driver_context_view(
+                            record_store=record_store,
+                            context_name=context_name,
+                            instance_name=params.get("instance", ""),
+                        )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "view": view.model_dump(mode="json"),
+                            },
+                        )
+                    if "driver_id" in params:
+                        descriptor = read_driver_descriptor(params["driver_id"])
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "driver": descriptor.model_dump(mode="json"),
+                            },
+                        )
+                    descriptors = list_driver_descriptors()
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "drivers": [
+                                descriptor.model_dump(mode="json") for descriptor in descriptors
+                            ],
+                        },
+                    )
                 if action == "deployment.read":
                     deployment = record_store.read_deployment_record(params["record_id"])
                     if not authz_policy.allows(
