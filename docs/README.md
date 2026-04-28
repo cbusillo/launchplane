@@ -1,5 +1,5 @@
 ---
-title: Control Plane Docs
+title: Launchplane Docs
 ---
 
 Use these docs as the source of truth for `launchplane`.
@@ -9,6 +9,10 @@ Use these docs as the source of truth for `launchplane`.
   and the fallback-removal target.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
   OIDC trust, and first API contracts.
+- [compatibility-retirement.md](compatibility-retirement.md) — checkpoints for
+  deleting or demoting local CLI/file-backed compatibility surfaces.
+- [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
+  review rubric.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [verireel-prod-rollback-runtime.md](verireel-prod-rollback-runtime.md) —
   proposed runtime contract for moving VeriReel prod rollback behind
@@ -16,7 +20,7 @@ Use these docs as the source of truth for `launchplane`.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria
   before making Launchplane public.
-- [secrets.md](secrets.md) — control-plane secret ownership and local contract.
+- [secrets.md](secrets.md) — Launchplane secret ownership and local contract.
 - [style/python.md](style/python.md) — Python conventions.
 - [style/testing.md](style/testing.md) — testing conventions.
 - [policies/coding-standards.md](policies/coding-standards.md) — naming and

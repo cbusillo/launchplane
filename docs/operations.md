@@ -305,6 +305,9 @@ Current derived-state behavior:
 - Until Launchplane has a formal schema migration system, DB-backed schema changes
   must stay additive and backward-compatible so image rollback remains a valid
   recovery path.
+- Local CLI/file-backed compatibility paths must pass the review checkpoints in
+  [compatibility-retirement.md](compatibility-retirement.md). Product workflows
+  should use service routes once matching OIDC-authenticated routes exist.
 
 ## Dokploy Contracts
 

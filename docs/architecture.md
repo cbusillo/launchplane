@@ -8,42 +8,45 @@ title: Architecture
 - Make artifact identity and promotion records first-class control-plane data.
 - Own promotion, deploy, and preview orchestration behind explicit contracts.
 
-This repo is the current Odoo implementation of the Launchplane operator surface.
-The contracts documented here now need to serve two jobs at once: describe the
-implemented Odoo control-plane behavior that exists today, and describe the
-target Launchplane boundary that future cross-product work should aim at. Launchplane is
-still implemented inside `launchplane` today, but the target shape is a
-long-running Launchplane service rather than a permanently repo-local CLI.
+This repo is the Launchplane implementation and operator surface. Odoo was the
+first product proving ground, and VeriReel is now the second product proof, but
+the durable boundary is Launchplane: a long-running service with DB-backed
+records, GitHub OIDC ingress, product drivers, provider calls, and operator read
+models.
 
 ## Repo Boundary
 
 `launchplane` owns:
 
+- service API and GitHub OIDC authn/authz
 - artifact manifests
-- release tuple catalogs
+- release tuple records
 - backup-gate records
 - promotion records
 - deployment records
 - environment inventory
-- promotion execution
-- deploy orchestration
-- backup and restore control-plane workflows
-- control-plane-owned operator secrets for deploy/runtime orchestration
+- promotion and deploy execution
+- backup, restore, and rollback workflows
+- Launchplane-managed secrets for deploy/runtime orchestration
 - Launchplane preview and generation records
+- product drivers for Odoo and VeriReel
+- provider integrations for Dokploy, GHCR, GitHub, health, and backups
 
-Code and local-DX repos own:
+Product, tenant, and local-DX repos own:
 
-- addon code
+- product and addon source code
+- product tests and build definitions
 - local developer workflows
-- Odoo-specific validation
-- explicit artifact and operator handoff surfaces only
+- explicit artifact/source inputs
+- thin OIDC-authenticated Launchplane request wrappers
+- product verification that must run next to source or browser context
 
 GitHub owns the engineering workflow around this system: issues, branches,
 pull requests, labels, checks, PR comments, releases, and CI execution.
 
-This repository is not the generic Launchplane product boundary today. It is the
-Odoo-specific control plane that currently contains Launchplane preview and
-promotion behavior.
+This repository is the product boundary today. Keep reusable nouns in
+Launchplane core, product-specific runtime behavior in Launchplane drivers, and
+repo-specific variation in thin request/config surfaces.
 
 ## Target Launchplane Shape
 
@@ -72,12 +75,11 @@ promotion behavior.
 ## Launchplane Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
-- Launchplane currently lives inside `launchplane`; there is no separate
-  extracted Launchplane repo or package contract yet.
-- The CLI and file-backed state directory remain the current implementation
-  surface, but they should be treated as temporary local scaffolding around the
-  target Launchplane service boundary rather than as the final cross-product ingress
-  contract.
+- Launchplane runs as the shared service behind
+  `launchplane.shinycomputers.com` with Postgres-backed operational truth.
+- The CLI and file-backed state directory are local-development, test, and
+  emergency operator scaffolding around the service boundary. They are not the
+  production integration contract for product workflows.
 - PR previews are Launchplane-managed preview identities backed by separate preview
   generations and ephemeral preview runtime state, not extra long-lived Dokploy
   lanes.
@@ -85,7 +87,20 @@ promotion behavior.
   rather than acting as a registry for every preview or ad hoc environment.
 - Durable control-plane records use generic deployment nouns when the concept
   is reusable across products, but Odoo-specific runtime behavior remains
-  explicit in the Odoo workflow code and deploy evidence.
+  explicit in the Odoo driver code and deploy evidence.
+
+## Vocabulary
+
+- `Launchplane core`: service API, authn/authz, durable records, audit,
+  idempotency, inventory, read models, and shared orchestration contracts.
+- `product driver`: Launchplane-owned executable product behavior, such as Odoo
+  post-deploy/update, Odoo backup/promotion/rollback, VeriReel deploy,
+  maintenance, promotion, rollback, and preview lifecycle operations.
+- `provider`: an external execution or data system such as Dokploy, GitHub,
+  GHCR, Proxmox, public health endpoints, or backup storage.
+- `repo extension`: the minimal source-adjacent wrapper, manifest, or workflow
+  input that lets a product repo ask Launchplane to act without owning durable
+  runtime truth.
 
 ## Launchplane Core And Drivers
 
@@ -175,8 +190,8 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
   promotion evidence when Launchplane has both a promotion record and explicit
   linked deployment record, which keeps second-product onboarding evidence-
   first instead of forcing Launchplane to own runtime execution on day one.
-- Launchplane preview records now support the same posture for preview runtime: the
-  live preview route can be supplied as explicit evidence, and preview plus
+- Launchplane preview records now support the same posture for preview runtime:
+  the live preview route can be supplied as explicit evidence, and preview plus
   generation state can be refreshed from external workflow results without
   requiring Launchplane to provision the preview itself first.
 - Launchplane now has the matching cleanup-evidence path too, so an external product
@@ -207,16 +222,16 @@ The first concrete HTTP/OIDC/API shape for that boundary is defined in
 
 ## Implementation Posture
 
-- Persist records to a local state directory today.
-- Keep storage pluggable, but start with file-backed JSON while Launchplane still
-  lives inside this repo.
-- Treat the current CLI and local JSON layout as implementation scaffolding,
-  not as the final communication contract for external products.
-- New cross-product integrations should target the future Launchplane service
-  boundary in design, even if a temporary local adapter is still required
-  during migration.
-- Launchplane now also has Postgres-backed shared-service storage and managed
-  secrets, but it does not yet have a formal schema migration system.
+- Use Postgres-backed storage and managed secrets for shared-service production
+  truth.
+- Keep file-backed JSON and local CLI writers for local development, focused
+  tests, and emergency diagnostics only.
+- New cross-product integrations should target the Launchplane service boundary
+  and GitHub OIDC, not repo-local CLI mutation.
+- Launchplane does not yet have a formal schema migration system.
 - Until that migration story exists, schema changes for DB-backed Launchplane state
   should remain additive and backward-compatible so deploy rollback can safely
   return to the previous Launchplane image.
+
+See [compatibility-retirement.md](compatibility-retirement.md) for the checkpoint
+rules that decide whether a local CLI/file-backed compatibility path can remain.

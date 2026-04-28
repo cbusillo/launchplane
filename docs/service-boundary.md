@@ -21,7 +21,8 @@ on.
 
 ## Current Implementation Status
 
-The first service slice is now implemented locally in this repo:
+The service boundary is implemented and deployed for the current Odoo and
+VeriReel product paths:
 
 - CLI: `uv run launchplane service serve`
 - health route: `GET /v1/health`
@@ -32,23 +33,27 @@ The first service slice is now implemented locally in this repo:
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
 - product driver routes:
+  - `POST /v1/drivers/odoo/artifact-publish-inputs`
+  - `POST /v1/drivers/odoo/artifact-publish`
   - `POST /v1/drivers/odoo/post-deploy`
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
   - `POST /v1/drivers/odoo/prod-rollback`
   - `POST /v1/drivers/verireel/testing-deploy`
+  - `POST /v1/drivers/verireel/stable-environment`
+  - `POST /v1/drivers/verireel/app-maintenance`
   - `POST /v1/drivers/verireel/prod-deploy`
+  - `POST /v1/drivers/verireel/prod-backup-gate`
   - `POST /v1/drivers/verireel/prod-promotion`
   - `POST /v1/drivers/verireel/prod-rollback`
   - `POST /v1/drivers/verireel/preview-refresh`
+  - `POST /v1/drivers/verireel/preview-inventory`
   - `POST /v1/drivers/verireel/preview-destroy`
 
-That slice now covers the first documented evidence surface end to end plus
-the current VeriReel-specific driver routes. Launchplane can verify GitHub
-OIDC, authorize workflow identity claims, accept
-deployment/promotion/preview lifecycle evidence over HTTP, and execute the
-current Odoo/VeriReel deploy, backup, promotion, rollback, and preview
-mutations as authenticated Launchplane routes.
+Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
+deployment/promotion/preview lifecycle evidence over HTTP, and executes the
+current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
+and preview mutations as authenticated Launchplane routes.
 
 ## First Host Assumption
 
@@ -262,7 +267,10 @@ These use the same authn/authz boundary as evidence ingress:
 The first explicit driver routes now in service are:
 
 - `POST /v1/drivers/odoo/post-deploy`
+- `POST /v1/drivers/odoo/artifact-publish-inputs`
 - `POST /v1/drivers/odoo/artifact-publish`
+- `POST /v1/drivers/odoo/prod-backup-gate`
+- `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/stable-environment`
@@ -342,6 +350,7 @@ For VeriReel, `destroy_reason` should stay stable per destroy lane so idempotent
 retries do not collide. The regular cleanup workflow uses
 `external_preview_cleanup_completed`; the janitor backstop uses
 `external_preview_janitor_cleanup_completed`.
+
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
