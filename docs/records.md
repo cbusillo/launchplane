@@ -5,19 +5,50 @@ title: Records
 ## Storage Policy
 
 - Persist local-dev records as JSON files in a local state directory.
-- Use Postgres-backed Launchplane core-record tables for shared-service ingress when
-  Launchplane is running with `LAUNCHPLANE_DATABASE_URL` or `launchplane service serve
-  --database-url ...`.
+- Use Postgres-backed Launchplane core-record tables for shared-service ingress
+  when Launchplane is running with `LAUNCHPLANE_DATABASE_URL` or
+  `launchplane service serve --database-url ...`.
 - Use Postgres-backed Launchplane secret tables for managed secret records when
   Launchplane is running with `LAUNCHPLANE_DATABASE_URL` and
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+- Manage shared-service Postgres schema changes with Alembic migrations. The
+  current baseline revision captures the SQLAlchemy ORM schema that earlier
+  deployments created through `create_all`; future GUI/write-flow schema changes
+  need explicit migrations instead of relying on implicit table creation.
 - Keep git history separate from operational history.
 - Favor append-style writes for promotion records.
 
-This file layout describes today's local Launchplane implementation, not the final
-cross-product communication boundary. The stable long-term contract should be
-Launchplane's authenticated service ingress plus the durable record semantics those
-API payloads map onto.
+## Schema Migrations
+
+Launchplane uses SQLAlchemy ORM models as the persistence boundary and Alembic as
+the versioned migration mechanism for shared-service Postgres databases. Runtime
+code can still call `ensure_schema()` for compatibility and ephemeral test/local
+databases, but new production schema changes should land as Alembic revisions.
+
+For a fresh database, apply the current schema with:
+
+```bash
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic upgrade head
+```
+
+For an existing Launchplane database that already has the tables created by the
+pre-migration `create_all` path, adopt the baseline by stamping the database at
+the current revision after confirming the live table shape matches the ORM:
+
+```bash
+LAUNCHPLANE_DATABASE_URL=postgresql+psycopg://... uv run alembic stamp head
+```
+
+JSONB `payload` columns remain durable evidence envelopes and original typed
+payload snapshots. Fields that the GUI or drivers need to filter, order, join,
+authorize, constrain, display regularly, or act on should be promoted into ORM
+columns/tables and migrated explicitly while keeping the payload copy as
+historical evidence.
+
+This file layout describes today's local Launchplane implementation, not the
+final cross-product communication boundary. The stable long-term contract should
+be Launchplane's authenticated service ingress plus the durable record semantics
+those API payloads map onto.
 
 These records are the durable Odoo-first Launchplane truth for this repo today.
 Stable lane records (`testing`, `prod`) and preview records are separate on
@@ -29,9 +60,9 @@ deployment, promotion, inventory, and preview evidence ingestion before this
 control plane takes over product-specific runtime actions.
 
 Under the target Launchplane shape, product workflows and drivers should speak in
-typed evidence payloads. Launchplane may still store those facts in file-backed JSON
-for local development, but the shared-service path should write the same record
-nouns into Postgres-backed tables without inventing a second record model.
+typed evidence payloads. Launchplane may still store those facts in file-backed
+JSON for local development, but the shared-service path should write the same
+record nouns into Postgres-backed tables without inventing a second record model.
 
 ## Layout
 
@@ -157,10 +188,10 @@ state/
   deployment record ids that established the promoted state.
 - Externally produced promotion evidence can mint the same destination tuple
   through `release-tuples write-from-promotion` when the stored promotion
-  record carries explicit `deployment_record_id` linkage and Launchplane already has
-  the current source tuple for the promoted-from lane.
-- Launchplane previews are not long-lived release-tuple channels; they derive their
-  baseline from stored tuple evidence plus preview generation records.
+  record carries explicit `deployment_record_id` linkage and Launchplane already
+  has the current source tuple for the promoted-from lane.
+- Launchplane previews are not long-lived release-tuple channels; they derive
+  their baseline from stored tuple evidence plus preview generation records.
 - Local-dev tuple records live under `state/`; shared-service runtime baseline
   authority comes from the same release-tuple record shape in Postgres-backed
   storage. Neither path rewrites any tracked TOML catalog implicitly.
@@ -257,16 +288,16 @@ state/
 - Higher-level transition commands such as generation request/ready/failed
   reuse the same stored generation records while updating preview linkage
   semantics through the Launchplane transition helpers.
-- `launchplane-previews write-from-generation` is the first explicit evidence-ingest
-  surface for that path: it accepts typed preview plus generation evidence,
-  writes the generation record, and refreshes the preview linkage according to
-  the ingested generation state.
-- Together with `launchplane-previews write-destroyed`, Launchplane can now ingest the
-  full external preview lifecycle: create or refresh route evidence, persist
-  generation outcome, and record confirmed cleanup.
+- `launchplane-previews write-from-generation` is the first explicit
+  evidence-ingest surface for that path: it accepts typed preview plus
+  generation evidence, writes the generation record, and refreshes the preview
+  linkage according to the ingested generation state.
+- Together with `launchplane-previews write-destroyed`, Launchplane can now
+  ingest the full external preview lifecycle: create or refresh route evidence,
+  persist generation outcome, and record confirmed cleanup.
 - Those CLI surfaces should be treated as temporary adapters for the target
-  Launchplane API payloads, not as the final integration boundary external products
-  are expected to couple to forever.
+  Launchplane API payloads, not as the final integration boundary external
+  products are expected to couple to forever.
 
 ## Launchplane Preview Enablement Record
 

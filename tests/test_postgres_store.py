@@ -3,7 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
 
+from alembic import command as alembic_command
+from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
+from sqlalchemy.exc import SQLAlchemyError
 
 from control_plane.cli import main
 from control_plane.contracts.artifact_identity import (
@@ -41,9 +44,17 @@ from control_plane.contracts.secret_record import (
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _alembic_config(database_url: str) -> AlembicConfig:
+    config = AlembicConfig(str(REPO_ROOT / "alembic.ini"))
+    config.set_main_option("sqlalchemy.url", database_url)
+    return config
 
 
 def _deployment_record(*, record_id: str, started_at: str, finished_at: str) -> DeploymentRecord:
@@ -305,6 +316,36 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_alembic_baseline_creates_schema_used_by_record_store(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            alembic_command.upgrade(_alembic_config(database_url), "head")
+
+            store = PostgresRecordStore(database_url=database_url)
+            manifest = _artifact_manifest()
+            store.write_artifact_manifest(manifest)
+            loaded = store.read_artifact_manifest(manifest.artifact_id)
+            store.close()
+
+        self.assertEqual(loaded.artifact_id, manifest.artifact_id)
+        self.assertEqual(loaded.image.digest, "sha256:image123")
+
+    def test_alembic_baseline_downgrades_to_empty_schema(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = _sqlite_database_url(database_path)
+            config = _alembic_config(database_url)
+
+            alembic_command.upgrade(config, "head")
+            alembic_command.downgrade(config, "base")
+
+            store = PostgresRecordStore(database_url=database_url)
+            with self.assertRaises(SQLAlchemyError):
+                store.list_artifact_manifests()
+            store.close()
+
     def test_artifact_manifests_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
