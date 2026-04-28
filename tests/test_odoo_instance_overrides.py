@@ -420,11 +420,10 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             store.write_secret_record(
                 SecretRecord(
                     secret_id="secret-runtime-shopify-token",
-                    scope="context_instance",
+                    scope="context",
                     integration="runtime_environment",
                     name="shopify-api-token",
                     context="opw",
-                    instance="prod",
                     current_version_id="secret-runtime-shopify-token-version-1",
                     created_at="2026-04-23T12:00:00Z",
                     updated_at="2026-04-23T12:00:00Z",
@@ -445,7 +444,6 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     integration="runtime_environment",
                     binding_key="ENV_OVERRIDE_SHOPIFY__API_TOKEN",
                     context="opw",
-                    instance="prod",
                     created_at="2026-04-23T12:00:00Z",
                     updated_at="2026-04-23T12:00:00Z",
                 )
@@ -454,6 +452,23 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 OdooInstanceOverrideRecord(
                     context="opw",
                     instance="prod",
+                    addon_settings=(
+                        OdooAddonSettingOverride(
+                            addon="shopify",
+                            setting="api_token",
+                            value=OdooOverrideValue(
+                                source="secret_binding",
+                                secret_binding_id="secret-runtime-shopify-token-binding-env-override-shopify-api-token",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-04-23T12:00:00Z",
+                )
+            )
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="testing",
                     addon_settings=(
                         OdooAddonSettingOverride(
                             addon="shopify",
@@ -479,24 +494,29 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                     database_url,
                     "--context",
                     "opw",
-                    "--instance",
-                    "prod",
                     "--apply",
                 ],
             )
 
             store = PostgresRecordStore(database_url=database_url)
-            migrated_record = store.read_odoo_instance_override_record(
+            migrated_prod_record = store.read_odoo_instance_override_record(
                 context_name="opw", instance_name="prod"
+            )
+            migrated_testing_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="testing"
             )
             bindings = store.list_secret_bindings(integration="runtime_environment", limit=None)
             store.close()
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["changed_record_count"], 1)
+        self.assertEqual(payload["changed_record_count"], 2)
         self.assertEqual(
-            migrated_record.addon_settings[0].value.secret_binding_id,
+            migrated_prod_record.addon_settings[0].value.secret_binding_id,
+            "secret-runtime-shopify-token-binding-odoo-override-secret-addon-shopify-api-token",
+        )
+        self.assertEqual(
+            migrated_testing_record.addon_settings[0].value.secret_binding_id,
             "secret-runtime-shopify-token-binding-odoo-override-secret-addon-shopify-api-token",
         )
         binding_status_by_key = {binding.binding_key: binding.status for binding in bindings}
