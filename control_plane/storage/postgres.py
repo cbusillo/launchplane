@@ -16,6 +16,7 @@ from control_plane.contracts.dokploy_target_id_record import DokployTargetIdReco
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
@@ -400,6 +401,22 @@ class PostgresRecordStore:
                     f"No Launchplane record found in {orm_model.__tablename__} for {tuple(filters)!r}"
                 )
             return self._read_payload(model_type=model_type, payload=getattr(row, "payload"))
+
+    def _read_optional_model(
+        self,
+        *,
+        model_type: type[RecordModel],
+        orm_model: type[Base],
+        filters: Sequence[object],
+    ) -> RecordModel | None:
+        try:
+            return self._read_model(
+                model_type=model_type,
+                orm_model=orm_model,
+                filters=filters,
+            )
+        except FileNotFoundError:
+            return None
 
     def _list_models(
         self,
@@ -856,14 +873,118 @@ class PostgresRecordStore:
             )
         )
 
-    def list_runtime_environment_records(self) -> tuple[RuntimeEnvironmentRecord, ...]:
+    def list_runtime_environment_records(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        filters: list[object] = []
+        if scope:
+            filters.append(LaunchplaneRuntimeEnvironmentRow.scope == scope)
+        if context_name:
+            filters.append(LaunchplaneRuntimeEnvironmentRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneRuntimeEnvironmentRow.instance == instance_name)
         return self._list_models(
             model_type=RuntimeEnvironmentRecord,
             orm_model=LaunchplaneRuntimeEnvironmentRow,
+            filters=filters,
             order_by=(
                 LaunchplaneRuntimeEnvironmentRow.scope.asc(),
                 LaunchplaneRuntimeEnvironmentRow.context.asc(),
                 LaunchplaneRuntimeEnvironmentRow.instance.asc(),
+            ),
+        )
+
+    def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
+        runtime_environment_records = (
+            *self.list_runtime_environment_records(scope="global"),
+            *self.list_runtime_environment_records(scope="context", context_name=context_name),
+            *self.list_runtime_environment_records(
+                scope="instance",
+                context_name=context_name,
+                instance_name=instance_name,
+            ),
+        )
+        return LaunchplaneLaneSummary(
+            context=context_name,
+            instance=instance_name,
+            inventory=self._read_optional_model(
+                model_type=EnvironmentInventory,
+                orm_model=LaunchplaneInventoryRow,
+                filters=(
+                    LaunchplaneInventoryRow.context == context_name,
+                    LaunchplaneInventoryRow.instance == instance_name,
+                ),
+            ),
+            release_tuple=self._read_optional_model(
+                model_type=ReleaseTupleRecord,
+                orm_model=LaunchplaneReleaseTupleRow,
+                filters=(
+                    LaunchplaneReleaseTupleRow.context == context_name,
+                    LaunchplaneReleaseTupleRow.channel == instance_name,
+                ),
+            ),
+            latest_deployment=next(
+                iter(
+                    self.list_deployment_records(
+                        context_name=context_name,
+                        instance_name=instance_name,
+                        limit=1,
+                    )
+                ),
+                None,
+            ),
+            latest_promotion=next(
+                iter(
+                    self.list_promotion_records(
+                        context_name=context_name,
+                        to_instance_name=instance_name,
+                        limit=1,
+                    )
+                ),
+                None,
+            ),
+            latest_backup_gate=next(
+                iter(
+                    self.list_backup_gate_records(
+                        context_name=context_name,
+                        instance_name=instance_name,
+                        limit=1,
+                    )
+                ),
+                None,
+            ),
+            dokploy_target_id=self._read_optional_model(
+                model_type=DokployTargetIdRecord,
+                orm_model=LaunchplaneDokployTargetIdRow,
+                filters=(
+                    LaunchplaneDokployTargetIdRow.context == context_name,
+                    LaunchplaneDokployTargetIdRow.instance == instance_name,
+                ),
+            ),
+            dokploy_target=self._read_optional_model(
+                model_type=DokployTargetRecord,
+                orm_model=LaunchplaneDokployTargetRow,
+                filters=(
+                    LaunchplaneDokployTargetRow.context == context_name,
+                    LaunchplaneDokployTargetRow.instance == instance_name,
+                ),
+            ),
+            runtime_environment_records=runtime_environment_records,
+            odoo_instance_override=self._read_optional_model(
+                model_type=OdooInstanceOverrideRecord,
+                orm_model=LaunchplaneOdooInstanceOverrideRow,
+                filters=(
+                    LaunchplaneOdooInstanceOverrideRow.context == context_name,
+                    LaunchplaneOdooInstanceOverrideRow.instance == instance_name,
+                ),
+            ),
+            secret_bindings=self.list_secret_bindings(
+                context_name=context_name,
+                instance_name=instance_name,
             ),
         )
 

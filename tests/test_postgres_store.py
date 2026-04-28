@@ -612,6 +612,87 @@ class PostgresRecordStoreTests(unittest.TestCase):
             [("global", "", ""), ("instance", "opw", "local")],
         )
 
+    def test_read_lane_summary_uses_repository_queries_for_gui_state(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_environment_inventory(_inventory_record())
+            store.write_deployment_record(
+                _deployment_record(
+                    record_id="deployment-20260420T153000Z-opw-testing",
+                    started_at="2026-04-20T15:30:00Z",
+                    finished_at="2026-04-20T15:32:00Z",
+                )
+            )
+            store.write_release_tuple_record(_release_tuple_record())
+            store.write_dokploy_target_id_record(
+                _dokploy_target_id_record(context="opw", instance="testing")
+            )
+            store.write_dokploy_target_record(
+                _dokploy_target_record(context="opw", instance="testing")
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(
+                    scope="global",
+                    env={"ODOO_MASTER_PASSWORD": "shared-master"},
+                )
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(
+                    scope="context",
+                    context="opw",
+                    env={"ODOO_DB_USER": "opw"},
+                )
+            )
+            store.write_runtime_environment_record(
+                _runtime_environment_record(
+                    scope="instance",
+                    context="opw",
+                    instance="testing",
+                    env={"ODOO_DB_NAME": "opw-testing"},
+                )
+            )
+            store.write_odoo_instance_override_record(
+                _odoo_instance_override_record(context="opw", instance="testing")
+            )
+            store.write_secret_binding(
+                _secret_binding(
+                    binding_id="binding-dokploy-token",
+                    secret_id="secret-dokploy-token",
+                    updated_at="2026-04-20T18:07:00Z",
+                )
+            )
+
+            summary = store.read_lane_summary(context_name="opw", instance_name="testing")
+            store.close()
+
+        self.assertEqual(summary.context, "opw")
+        self.assertEqual(summary.instance, "testing")
+        self.assertEqual(
+            summary.inventory.artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4"
+        )
+        self.assertEqual(summary.release_tuple.channel, "testing")
+        self.assertEqual(
+            summary.latest_deployment.record_id, "deployment-20260420T153000Z-opw-testing"
+        )
+        self.assertIsNone(summary.latest_promotion)
+        self.assertIsNone(summary.latest_backup_gate)
+        self.assertEqual(summary.dokploy_target_id.target_id, "compose-123")
+        self.assertEqual(summary.dokploy_target.target_name, "opw-testing")
+        self.assertEqual(
+            [
+                (record.scope, record.context, record.instance)
+                for record in summary.runtime_environment_records
+            ],
+            [("global", "", ""), ("context", "opw", ""), ("instance", "opw", "testing")],
+        )
+        self.assertEqual(summary.odoo_instance_override.config_parameters[0].key, "web.base.url")
+        self.assertEqual(summary.secret_bindings[0].binding_key, "DOKPLOY_TOKEN")
+
     def test_write_read_and_list_odoo_instance_override_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
