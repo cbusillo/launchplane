@@ -3039,7 +3039,7 @@ target_id = "compose-123"
         self.assertEqual(resolved_target.target_name, "opw-prod")
         self.assertEqual(deploy_timeout_seconds, 7200)
 
-    def test_resolve_native_ship_request_reads_source_of_truth_and_env_healthcheck(self) -> None:
+    def test_resolve_native_ship_request_reads_source_of_truth_and_target_domain_healthcheck(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             _write_control_plane_dokploy_source_of_truth(
@@ -3054,6 +3054,7 @@ target_id = "compose-123"
 target_type = "compose"
 deploy_timeout_seconds = 7200
 healthcheck_timeout_seconds = 55
+domains = ["prod.example.com"]
 """,
             )
             _write_runtime_environments_file(
@@ -3062,7 +3063,6 @@ healthcheck_timeout_seconds = 55
 schema_version = 1
 
 [contexts.opw.instances.prod.env]
-ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "prod.example.com"
 DOKPLOY_SHIP_MODE = "auto"
 """.strip()
             )
