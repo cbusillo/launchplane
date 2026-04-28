@@ -333,11 +333,12 @@ def relabel_secret_binding(
     )
     if existing_binding is None:
         raise click.ClickException(f"Secret binding {normalized_binding_id!r} was not found.")
-    if existing_binding.status != SECRET_STATUS_CONFIGURED:
-        raise click.ClickException(f"Secret binding {normalized_binding_id!r} is not configured.")
 
     desired_binding_id = _binding_id(
         secret_id=existing_binding.secret_id, binding_key=normalized_binding_key
+    )
+    target_binding = next(
+        (binding for binding in bindings if binding.binding_id == desired_binding_id), None
     )
     if existing_binding.binding_key == normalized_binding_key:
         return {
@@ -347,11 +348,23 @@ def relabel_secret_binding(
             "binding_id": existing_binding.binding_id,
             "binding_key": existing_binding.binding_key,
         }
+    if existing_binding.status != SECRET_STATUS_CONFIGURED:
+        if (
+            target_binding is not None
+            and target_binding.status == SECRET_STATUS_CONFIGURED
+            and target_binding.secret_id == existing_binding.secret_id
+            and target_binding.binding_key == normalized_binding_key
+        ):
+            return {
+                "status": "ok",
+                "action": "unchanged",
+                "secret_id": existing_binding.secret_id,
+                "binding_id": target_binding.binding_id,
+                "binding_key": target_binding.binding_key,
+            }
+        raise click.ClickException(f"Secret binding {normalized_binding_id!r} is not configured.")
 
     now = utc_now_timestamp()
-    target_binding = next(
-        (binding for binding in bindings if binding.binding_id == desired_binding_id), None
-    )
     record_store.write_secret_binding(
         existing_binding.model_copy(update={"status": "disabled", "updated_at": now})
     )
