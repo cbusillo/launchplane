@@ -1,12 +1,83 @@
+---
 name: CI
 
-on:
+"on":
   push:
     branches:
       - main
   pull_request:
 
 jobs:
+  static_checks:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      - self-hosted
+      - chris-testing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+      - name: Audit Python dependencies
+        run: uv run --with pip-audit pip-audit
+
+  static_checks_fork:
+    if: >-
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Run Ruff
+        run: uv run ruff check .
+
+      - name: Audit Python dependencies
+        run: uv run --with pip-audit pip-audit
+
+  container_scan:
+    if: >-
+      github.event_name != 'pull_request' ||
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      - self-hosted
+      - chris-testing
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build runtime image
+        run: docker build -t launchplane-ci:test .
+
+      - name: Scan runtime image
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "${RUNNER_TEMP}/trivy-cache:/root/.cache" \
+            aquasec/trivy:0.70.0 image \
+            --scanners vulnerability \
+            --ignore-unfixed \
+            --severity HIGH,CRITICAL \
+            --exit-code 1 \
+            launchplane-ci:test
+
   test:
     if: >-
       github.event_name != 'pull_request' ||
