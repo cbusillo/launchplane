@@ -258,6 +258,295 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
 
+    def test_driver_descriptor_endpoints_return_provider_neutral_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            list_status_code, list_payload = _invoke_app(app, method="GET", path="/v1/drivers")
+            show_status_code, show_payload = _invoke_app(app, method="GET", path="/v1/drivers/odoo")
+
+        self.assertEqual(list_status_code, 200)
+        self.assertEqual(
+            [driver["driver_id"] for driver in list_payload["drivers"]], ["odoo", "verireel"]
+        )
+        self.assertNotIn("Dokploy", json.dumps(list_payload["drivers"]))
+        self.assertEqual(show_status_code, 200)
+        self.assertEqual(show_payload["driver"]["driver_id"], "odoo")
+        rollback_actions = [
+            action
+            for action in show_payload["driver"]["actions"]
+            if action["action_id"] == "prod_rollback"
+        ]
+        self.assertEqual(rollback_actions[0]["safety"], "destructive")
+
+    def test_driver_descriptor_endpoint_returns_not_found_for_unknown_driver(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/drivers/missing",
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_driver_context_view_endpoint_returns_lane_summary(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-20260420T153000Z-opw-testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    context="opw",
+                    instance="testing",
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="compose",
+                        target_id="target-123",
+                        target_name="opw-testing",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="opw-testing",
+                        target_type="compose",
+                        deploy_mode="runtime-provider-api",
+                        deployment_id="deployment-provider-1",
+                        status="pass",
+                        started_at="2026-04-20T15:30:00Z",
+                        finished_at="2026-04-20T15:32:00Z",
+                    ),
+                )
+            )
+            store.write_environment_inventory(
+                EnvironmentInventory(
+                    context="opw",
+                    instance="testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
+                    source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                    deploy=DeploymentEvidence(
+                        target_name="opw-testing",
+                        target_type="compose",
+                        deploy_mode="runtime-provider-api",
+                        deployment_id="deployment-provider-1",
+                        status="pass",
+                        started_at="2026-04-20T15:30:00Z",
+                        finished_at="2026-04-20T15:32:00Z",
+                    ),
+                    updated_at="2026-04-20T15:33:00Z",
+                    deployment_record_id="deployment-20260420T153000Z-opw-testing",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["opw"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/opw/instances/testing/driver-view",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["view"]["context"], "opw")
+        self.assertEqual(payload["view"]["instance"], "testing")
+        self.assertEqual(len(payload["view"]["drivers"]), 1)
+        driver = payload["view"]["drivers"][0]
+        self.assertEqual(driver["driver_id"], "odoo")
+        self.assertEqual(
+            driver["lane_summary"]["latest_deployment"]["record_id"],
+            "deployment-20260420T153000Z-opw-testing",
+        )
+        self.assertEqual(
+            driver["lane_summary"]["inventory"]["artifact_identity"]["artifact_id"],
+            "artifact-20260420-a1b2c3d4",
+        )
+
+    def test_driver_context_view_endpoint_returns_preview_summaries(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    preview_label="verireel/pr-123",
+                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:05:00Z",
+                    eligible_at="2026-04-20T10:05:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                PreviewGenerationRecord(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    sequence=1,
+                    state="ready",
+                    requested_reason="external_preview_refresh",
+                    requested_at="2026-04-20T10:01:00Z",
+                    ready_at="2026-04-20T10:05:00Z",
+                    finished_at="2026-04-20T10:05:00Z",
+                    resolved_manifest_fingerprint="preview-manifest-123",
+                    artifact_id="ghcr.io/every/verireel-app:pr-123",
+                    anchor_summary=PreviewPullRequestSummary(
+                        repo="verireel",
+                        pr_number=123,
+                        head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        pr_url="https://github.com/every/verireel/pull/123",
+                    ),
+                    deploy_status="pass",
+                    verify_status="pass",
+                    overall_health_status="pass",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/verireel-testing/driver-view",
+            )
+
+        self.assertEqual(status_code, 200)
+        driver = payload["view"]["drivers"][0]
+        self.assertEqual(driver["driver_id"], "verireel")
+        self.assertEqual(driver["preview_summaries"][0]["latest_generation"]["state"], "ready")
+        destructive_actions = [
+            action for action in driver["available_actions"] if action["safety"] == "destructive"
+        ]
+        self.assertEqual(
+            {action["action_id"] for action in destructive_actions},
+            {"prod_rollback", "preview_destroy"},
+        )
+
+    def test_driver_context_view_endpoint_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["opw"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/cm/instances/prod/driver-view",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_self_deploy_endpoint_updates_target_env_and_triggers_dokploy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             policy_text = "schema_version = 1\n"

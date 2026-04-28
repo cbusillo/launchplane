@@ -283,6 +283,21 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/verireel/preview-inventory`
 - `POST /v1/drivers/verireel/preview-destroy`
 
+### Driver discovery endpoints
+
+These are read-only endpoints for the provider-neutral driver descriptor and
+read-model contract documented in [driver-descriptors.md](driver-descriptors.md):
+
+- `GET /v1/drivers`
+- `GET /v1/drivers/{driver_id}`
+- `GET /v1/contexts/{context}/driver-view`
+- `GET /v1/contexts/{context}/instances/{instance}/driver-view`
+
+They use action `driver.read`. Discovery authorizes against context
+`launchplane`; context and instance views authorize against the requested
+context. These routes expose Launchplane capabilities and repository-backed read
+state, not runtime-provider primitives.
+
 The preview driver cut stays intentionally narrow but keeps topology in
 Launchplane: Launchplane owns preview URL derivation from the
 `LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment value, preview app naming,
