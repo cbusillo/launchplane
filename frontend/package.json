@@ -8,7 +8,7 @@
     "node": ">=22 <23"
   },
   "scripts": {
-    "build": "pnpm typecheck && vite build",
+    "build": "pnpm typecheck && vite build && node scripts/assert-production-fixtures.mjs",
     "dev": "vite --host 127.0.0.1",
     "preview": "vite preview --host 127.0.0.1",
     "typecheck": "tsc --noEmit",

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
 from typing import Any, Literal
 
+from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
     DriverActionSafety,
@@ -21,6 +23,8 @@ PROVIDER_BOUNDARY_NOTE = (
     "Launchplane exposes product capabilities and evidence; runtime-provider details stay behind "
     "backend adapters and evidence records."
 )
+LANE_STALE_AFTER = timedelta(minutes=30)
+PREVIEW_STALE_AFTER = timedelta(minutes=30)
 
 
 def _action(
@@ -315,16 +319,124 @@ def _optional_call(method: Any, **kwargs: object) -> object | None:
         return None
 
 
+def _parse_timestamp(value: str) -> datetime | None:
+    normalized_value = value.strip()
+    if not normalized_value:
+        return None
+    try:
+        if normalized_value.endswith("Z"):
+            normalized_value = f"{normalized_value[:-1]}+00:00"
+        parsed = datetime.fromisoformat(normalized_value)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def _format_timestamp(value: datetime) -> str:
+    return value.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _freshness_status(
+    *, recorded_at: str, stale_after: timedelta, verified: bool
+) -> tuple[FreshnessStatus, str]:
+    recorded_timestamp = _parse_timestamp(recorded_at)
+    if recorded_timestamp is None:
+        return "recorded", ""
+    stale_at = recorded_timestamp + stale_after
+    if datetime.now(timezone.utc) > stale_at:
+        return "stale", _format_timestamp(stale_at)
+    return ("verified" if verified else "recorded"), _format_timestamp(stale_at)
+
+
+def _lane_provenance(summary: LaunchplaneLaneSummary) -> DataProvenance:
+    if summary.inventory is not None:
+        status, stale_after = _freshness_status(
+            recorded_at=summary.inventory.updated_at,
+            stale_after=LANE_STALE_AFTER,
+            verified=summary.inventory.destination_health.verified,
+        )
+        return DataProvenance(
+            source_kind="record",
+            source_record_id=summary.inventory.deployment_record_id,
+            recorded_at=summary.inventory.updated_at,
+            refreshed_at=summary.inventory.updated_at,
+            freshness_status=status,
+            stale_after=stale_after,
+            detail="Launchplane environment inventory record.",
+        )
+    if summary.latest_deployment is not None:
+        recorded_at = (
+            summary.latest_deployment.deploy.finished_at
+            or summary.latest_deployment.deploy.started_at
+        )
+        status, stale_after = _freshness_status(
+            recorded_at=recorded_at,
+            stale_after=LANE_STALE_AFTER,
+            verified=summary.latest_deployment.destination_health.verified,
+        )
+        return DataProvenance(
+            source_kind="record",
+            source_record_id=summary.latest_deployment.record_id,
+            recorded_at=recorded_at,
+            refreshed_at=recorded_at,
+            freshness_status=status,
+            stale_after=stale_after,
+            detail="Latest Launchplane deployment record; environment inventory is missing.",
+        )
+    return DataProvenance(
+        source_kind="record",
+        freshness_status="missing",
+        detail="Launchplane has not recorded lane evidence for this context and instance.",
+    )
+
+
+def _preview_provenance(summary: LaunchplanePreviewSummary) -> DataProvenance:
+    if summary.latest_generation is not None:
+        generation = summary.latest_generation
+        recorded_at = generation.finished_at or generation.ready_at or generation.requested_at
+        status, stale_after = _freshness_status(
+            recorded_at=recorded_at,
+            stale_after=PREVIEW_STALE_AFTER,
+            verified=generation.overall_health_status == "pass",
+        )
+        return DataProvenance(
+            source_kind="record",
+            source_record_id=generation.generation_id,
+            recorded_at=recorded_at,
+            refreshed_at=recorded_at,
+            freshness_status=status,
+            stale_after=stale_after,
+            detail="Latest Launchplane preview generation record.",
+        )
+    status, stale_after = _freshness_status(
+        recorded_at=summary.preview.updated_at,
+        stale_after=PREVIEW_STALE_AFTER,
+        verified=False,
+    )
+    return DataProvenance(
+        source_kind="record",
+        source_record_id=summary.preview.preview_id,
+        recorded_at=summary.preview.updated_at,
+        refreshed_at=summary.preview.updated_at,
+        freshness_status=status,
+        stale_after=stale_after,
+        detail="Preview identity record exists, but no generation evidence is recorded.",
+    )
+
+
 def _read_lane_summary(
     *, record_store: object, context_name: str, instance_name: str
 ) -> LaunchplaneLaneSummary | None:
     if not instance_name:
         return None
     if hasattr(record_store, "read_lane_summary"):
-        return getattr(record_store, "read_lane_summary")(
+        summary = getattr(record_store, "read_lane_summary")(
             context_name=context_name,
             instance_name=instance_name,
         )
+        return summary.model_copy(update={"provenance": _lane_provenance(summary)})
 
     inventory = None
     if hasattr(record_store, "read_environment_inventory"):
@@ -384,7 +496,7 @@ def _read_lane_summary(
             instance_name=instance_name,
         )
 
-    return LaunchplaneLaneSummary(
+    summary = LaunchplaneLaneSummary(
         context=context_name,
         instance=instance_name,
         inventory=inventory,
@@ -394,15 +506,20 @@ def _read_lane_summary(
         latest_backup_gate=latest_backup_gate,
         odoo_instance_override=odoo_instance_override,
     )
+    return summary.model_copy(update={"provenance": _lane_provenance(summary)})
 
 
 def _list_preview_summaries(
     *, record_store: object, context_name: str
 ) -> tuple[LaunchplanePreviewSummary, ...]:
     if hasattr(record_store, "list_preview_summaries"):
-        return getattr(record_store, "list_preview_summaries")(
+        summaries = getattr(record_store, "list_preview_summaries")(
             context_name=context_name,
             generation_limit=1,
+        )
+        return tuple(
+            summary.model_copy(update={"provenance": _preview_provenance(summary)})
+            for summary in summaries
         )
     if not hasattr(record_store, "list_preview_records"):
         return ()
@@ -415,13 +532,12 @@ def _list_preview_summaries(
                 preview_id=preview.preview_id,
                 limit=1,
             )
-        summaries.append(
-            LaunchplanePreviewSummary(
-                preview=preview,
-                latest_generation=next(iter(generations), None),
-                recent_generations=generations,
-            )
+        summary = LaunchplanePreviewSummary(
+            preview=preview,
+            latest_generation=next(iter(generations), None),
+            recent_generations=generations,
         )
+        summaries.append(summary.model_copy(update={"provenance": _preview_provenance(summary)}))
     return tuple(summaries)
 
 

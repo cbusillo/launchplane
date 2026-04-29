@@ -11,6 +11,9 @@ from typing import Literal
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, patch
 
+from click.testing import CliRunner
+
+from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -924,6 +927,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
             driver["lane_summary"]["inventory"]["artifact_identity"]["artifact_id"],
             "artifact-20260420-a1b2c3d4",
         )
+        self.assertEqual(driver["lane_summary"]["provenance"]["source_kind"], "record")
+        self.assertEqual(
+            driver["lane_summary"]["provenance"]["source_record_id"],
+            "deployment-20260420T153000Z-opw-testing",
+        )
+        self.assertIn(
+            driver["lane_summary"]["provenance"]["freshness_status"],
+            {"verified", "recorded", "stale"},
+        )
 
     def test_driver_context_view_endpoint_returns_preview_summaries(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1001,12 +1013,111 @@ class LaunchplaneServiceTests(unittest.TestCase):
         driver = payload["view"]["drivers"][0]
         self.assertEqual(driver["driver_id"], "verireel")
         self.assertEqual(driver["preview_summaries"][0]["latest_generation"]["state"], "ready")
+        self.assertEqual(
+            driver["preview_summaries"][0]["provenance"]["source_record_id"],
+            "preview-verireel-testing-verireel-pr-123-generation-0001",
+        )
+        self.assertIn(
+            driver["preview_summaries"][0]["provenance"]["freshness_status"],
+            {"verified", "recorded", "stale"},
+        )
         destructive_actions = [
             action for action in driver["available_actions"] if action["safety"] == "destructive"
         ]
         self.assertEqual(
             {action["action_id"] for action in destructive_actions},
             {"prod_rollback", "preview_destroy"},
+        )
+
+    def test_data_freshness_report_covers_visible_surfaces(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            for instance_name in ("prod", "testing"):
+                store.write_environment_inventory(
+                    EnvironmentInventory(
+                        context="verireel",
+                        instance=instance_name,
+                        artifact_identity=ArtifactIdentityReference(
+                            artifact_id=f"artifact-verireel-{instance_name}"
+                        ),
+                        source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        deploy=DeploymentEvidence(
+                            target_name=f"verireel-{instance_name}",
+                            target_type="application",
+                            deploy_mode="runtime-provider-api",
+                            deployment_id=f"provider-{instance_name}",
+                            status="pass",
+                            started_at="2026-04-20T15:30:00Z",
+                            finished_at="2026-04-20T15:32:00Z",
+                        ),
+                        updated_at="2026-04-20T15:33:00Z",
+                        deployment_record_id=f"deployment-verireel-{instance_name}",
+                    )
+                )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    preview_label="verireel/pr-123",
+                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:05:00Z",
+                    eligible_at="2026-04-20T10:05:00Z",
+                )
+            )
+            store.write_preview_generation_record(
+                PreviewGenerationRecord(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    sequence=1,
+                    state="ready",
+                    requested_reason="external_preview_refresh",
+                    requested_at="2026-04-20T10:01:00Z",
+                    ready_at="2026-04-20T10:05:00Z",
+                    finished_at="2026-04-20T10:05:00Z",
+                    resolved_manifest_fingerprint="preview-manifest-123",
+                    artifact_id="ghcr.io/every/verireel-app:pr-123",
+                    anchor_summary=PreviewPullRequestSummary(
+                        repo="verireel",
+                        pr_number=123,
+                        head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        pr_url="https://github.com/every/verireel/pull/123",
+                    ),
+                    deploy_status="pass",
+                    verify_status="pass",
+                    overall_health_status="pass",
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "inspect-data-freshness",
+                    "--state-dir",
+                    str(state_dir),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["surface_count"], 3)
+        self.assertEqual(payload["missing_provenance_count"], 0)
+        self.assertEqual(
+            {surface["name"] for surface in payload["surfaces"]},
+            {
+                "verireel/prod/lane",
+                "verireel/testing/lane",
+                "verireel-testing/preview-verireel-testing-verireel-pr-123",
+            },
         )
 
     def test_driver_context_view_endpoint_rejects_unauthorized_context(self) -> None:

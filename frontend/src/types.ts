@@ -1,5 +1,16 @@
 export type Safety = "read" | "safe_write" | "mutation" | "destructive";
 export type Status = "pass" | "fail" | "pending" | "skipped" | "unknown" | "blocked";
+export type FreshnessStatus = "verified" | "recorded" | "stale" | "missing" | "unsupported";
+
+export interface DataProvenance {
+  source_kind: "record" | "provider" | "descriptor" | "unsupported";
+  source_record_id: string;
+  recorded_at: string;
+  refreshed_at: string;
+  freshness_status: FreshnessStatus;
+  stale_after: string;
+  detail: string;
+}
 
 export interface DriverActionDescriptor {
   action_id: string;
@@ -153,6 +164,7 @@ export interface LaneSummary {
   latest_backup_gate?: BackupGateRecord | null;
   odoo_instance_override?: unknown | null;
   secret_bindings: SecretBinding[];
+  provenance: DataProvenance;
 }
 
 export interface PreviewRecord {
@@ -188,6 +200,7 @@ export interface PreviewSummary {
   preview: PreviewRecord;
   latest_generation?: PreviewGenerationRecord | null;
   recent_generations: PreviewGenerationRecord[];
+  provenance: DataProvenance;
 }
 
 export interface DriverView {

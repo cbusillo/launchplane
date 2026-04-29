@@ -62,6 +62,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.drivers.registry import build_driver_context_view
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence as shared_apply_launchplane_generation_evidence,
@@ -9382,6 +9383,156 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     launchplane_root = control_plane_root or _control_plane_root()
     payload = _inspect_local_launchplane_config_boundary(control_plane_root=launchplane_root)
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _first_driver_payload(view_payload: object, *, driver_id: str) -> dict[str, object] | None:
+    if not hasattr(view_payload, "drivers"):
+        return None
+    for driver_view in view_payload.drivers:
+        if getattr(driver_view, "driver_id", "") == driver_id:
+            return driver_view.model_dump(mode="json")
+    return None
+
+
+def _provenance_payload(raw_value: object) -> dict[str, object] | None:
+    if not isinstance(raw_value, dict):
+        return None
+    provenance = raw_value.get("provenance")
+    return provenance if isinstance(provenance, dict) else None
+
+
+def _freshness_surface(
+    *, name: str, driver_id: str, raw_value: object, unsupported: bool = False
+) -> dict[str, object]:
+    if unsupported:
+        return {
+            "name": name,
+            "driver_id": driver_id,
+            "freshness_status": "unsupported",
+            "source_kind": "unsupported",
+            "source_record_id": "",
+            "recorded_at": "",
+            "stale_after": "",
+            "has_provenance": True,
+        }
+    provenance = _provenance_payload(raw_value)
+    if provenance is None:
+        return {
+            "name": name,
+            "driver_id": driver_id,
+            "freshness_status": "missing",
+            "source_kind": "record",
+            "source_record_id": "",
+            "recorded_at": "",
+            "stale_after": "",
+            "has_provenance": False,
+        }
+    return {
+        "name": name,
+        "driver_id": driver_id,
+        "freshness_status": str(provenance.get("freshness_status") or "missing"),
+        "source_kind": str(provenance.get("source_kind") or "record"),
+        "source_record_id": str(provenance.get("source_record_id") or ""),
+        "recorded_at": str(provenance.get("recorded_at") or ""),
+        "stale_after": str(provenance.get("stale_after") or ""),
+        "has_provenance": True,
+    }
+
+
+def _build_data_freshness_report(
+    *, record_store: object, context_name: str, preview_context_name: str
+) -> dict[str, object]:
+    surfaces: list[dict[str, object]] = []
+    for instance_name in ("prod", "testing"):
+        view = build_driver_context_view(
+            record_store=record_store,
+            context_name=context_name,
+            instance_name=instance_name,
+        )
+        driver = _first_driver_payload(view, driver_id="verireel")
+        lane_summary = driver.get("lane_summary") if isinstance(driver, dict) else None
+        surfaces.append(
+            _freshness_surface(
+                name=f"{context_name}/{instance_name}/lane",
+                driver_id="verireel",
+                raw_value=lane_summary,
+            )
+        )
+
+    preview_view = build_driver_context_view(
+        record_store=record_store,
+        context_name=preview_context_name,
+    )
+    preview_driver = _first_driver_payload(preview_view, driver_id="verireel")
+    preview_summaries = (
+        preview_driver.get("preview_summaries") if isinstance(preview_driver, dict) else None
+    )
+    if isinstance(preview_summaries, list) and preview_summaries:
+        for summary in preview_summaries:
+            preview = summary.get("preview") if isinstance(summary, dict) else None
+            preview_id = "unknown-preview"
+            if isinstance(preview, dict):
+                preview_id = str(preview.get("preview_id") or preview_id)
+            surfaces.append(
+                _freshness_surface(
+                    name=f"{preview_context_name}/{preview_id}",
+                    driver_id="verireel",
+                    raw_value=summary,
+                )
+            )
+    else:
+        surfaces.append(
+            _freshness_surface(
+                name=f"{preview_context_name}/preview-inventory",
+                driver_id="verireel",
+                raw_value={
+                    "provenance": {
+                        "source_kind": "record",
+                        "freshness_status": "missing",
+                        "source_record_id": "",
+                        "recorded_at": "",
+                        "stale_after": "",
+                    }
+                },
+            )
+        )
+
+    missing_provenance = [surface for surface in surfaces if not surface["has_provenance"]]
+    return {
+        "status": "ok" if not missing_provenance else "rejected",
+        "context": context_name,
+        "preview_context": preview_context_name,
+        "surface_count": len(surfaces),
+        "missing_provenance_count": len(missing_provenance),
+        "surfaces": surfaces,
+    }
+
+
+@service.command("inspect-data-freshness")
+@click.option(
+    "--state-dir", type=click.Path(path_type=Path), default=Path("state"), show_default=True
+)
+@click.option("--database-url", envvar=_DATABASE_URL_ENV_KEYS, default="", show_default=False)
+@click.option("--context", "context_name", default="verireel", show_default=True)
+@click.option(
+    "--preview-context", "preview_context_name", default="verireel-testing", show_default=True
+)
+def service_inspect_data_freshness(
+    state_dir: Path, database_url: str, context_name: str, preview_context_name: str
+) -> None:
+    record_store = _store(state_dir, database_url=database_url)
+    try:
+        payload = _build_data_freshness_report(
+            record_store=record_store,
+            context_name=context_name,
+            preview_context_name=preview_context_name,
+        )
+    finally:
+        if hasattr(record_store, "close"):
+            record_store.close()
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+    if payload["status"] != "ok":
+        raise click.ClickException("Launchplane data freshness report is missing provenance.")
 
 
 @artifacts.command("write")
