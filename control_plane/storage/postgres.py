@@ -23,6 +23,7 @@ from control_plane.contracts.preview_generation_record import PreviewGenerationR
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -239,6 +240,33 @@ class LaunchplanePreviewLifecycleCleanupRow(Base):
     plan_id: Mapped[str] = mapped_column(String, nullable=False)
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewPrFeedbackRow(Base):
+    __tablename__ = "launchplane_preview_pr_feedback"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_pr_feedback_context_idx",
+            "context",
+            desc("requested_at"),
+        ),
+        Index(
+            "launchplane_preview_pr_feedback_anchor_idx",
+            "anchor_repo",
+            "anchor_pr_number",
+            desc("requested_at"),
+        ),
+    )
+
+    feedback_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    anchor_repo: Mapped[str] = mapped_column(String, nullable=False)
+    anchor_pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    requested_at: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    delivery_status: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1026,6 +1054,41 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> None:
+        self._write_row(
+            LaunchplanePreviewPrFeedbackRow(
+                feedback_id=record.feedback_id,
+                product=record.product,
+                context=record.context,
+                anchor_repo=record.anchor_repo,
+                anchor_pr_number=record.anchor_pr_number,
+                requested_at=record.requested_at,
+                status=record.status,
+                delivery_status=record.delivery_status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_pr_feedback_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplanePreviewPrFeedbackRow.context == context_name)
+        return self._list_models(
+            model_type=PreviewPrFeedbackRecord,
+            orm_model=LaunchplanePreviewPrFeedbackRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewPrFeedbackRow.requested_at.desc(),
+                LaunchplanePreviewPrFeedbackRow.feedback_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def read_preview_summary(
         self,
         *,
@@ -1506,6 +1569,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_inventory_scans": 0,
             "preview_lifecycle_cleanups": 0,
             "preview_lifecycle_plans": 0,
+            "preview_pr_feedback": 0,
             "release_tuples": 0,
         }
         for record in filesystem_store.list_artifact_manifests():
@@ -1544,6 +1608,10 @@ class PostgresRecordStore(HumanSessionStore):
             for record in filesystem_store.list_preview_lifecycle_cleanup_records():
                 self.write_preview_lifecycle_cleanup_record(record)
                 counts["preview_lifecycle_cleanups"] += 1
+        if hasattr(filesystem_store, "list_preview_pr_feedback_records"):
+            for record in filesystem_store.list_preview_pr_feedback_records():
+                self.write_preview_pr_feedback_record(record)
+                counts["preview_pr_feedback"] += 1
         for record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(record)
             counts["release_tuples"] += 1

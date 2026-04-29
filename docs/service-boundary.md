@@ -264,6 +264,7 @@ writes, not on every possible operator action.
 
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/previews/lifecycle-cleanup`
+- `POST /v1/previews/pr-feedback`
 
 The first preview lifecycle endpoint remains the source of the durable decision:
 product repos send desired preview anchors, Launchplane compares those desired
@@ -273,6 +274,12 @@ second endpoint that requires an existing lifecycle `plan_id`; it defaults to
 `apply=false` report-only behavior and records the cleanup request/result next to
 the plan. Destructive provider cleanup is only attempted when `apply=true` is
 explicitly supplied by an authorized GitHub Actions workflow.
+
+PR feedback delivery is part of the same preview lifecycle boundary. Product
+repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
+Launchplane renders the review comment, upserts the anchored GitHub PR comment
+when its runtime token is available, and stores an append-only feedback record
+with the comment body, delivery action, comment URL, and any skip/failure reason.
 
 ### Operator read endpoints
 

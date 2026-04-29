@@ -2701,6 +2701,123 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["orphaned_slugs"], [])
         self.assertIn("has not recorded", payload["result"]["error_message"])
 
+    def test_preview_pr_feedback_endpoint_records_skipped_delivery_without_token(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "source": "preview-control-plane",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                    "anchor_pr_number": 42,
+                    "anchor_pr_url": "https://github.com/every/verireel/pull/42",
+                    "status": "ready",
+                    "preview_url": "https://pr-42.preview.example",
+                    "immutable_image_reference": "ghcr.io/every/verireel:pr-42-a1b2c3d4",
+                    "refresh_image_reference": "ghcr.io/every/verireel:preview-pr-42",
+                    "revision": "a1b2c3d4",
+                    "run_url": "https://github.com/every/verireel/actions/runs/123",
+                },
+            )
+
+            feedback_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_pr_feedback_records(context_name="verireel-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["preview_pr_feedback_id"], feedback_records[0].feedback_id)
+        self.assertEqual(payload["result"]["delivery_status"], "skipped")
+        self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
+        self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
+        self.assertEqual(feedback_records[0].anchor_pr_number, 42)
+
+    def test_preview_pr_feedback_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                    "anchor_pr_number": 42,
+                    "anchor_pr_url": "https://github.com/every/verireel/pull/42",
+                    "status": "ready",
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_preview_lifecycle_cleanup_endpoint_records_report_only_cleanup(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

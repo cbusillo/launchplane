@@ -40,6 +40,10 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecyclePlanRecord,
 )
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
+from control_plane.contracts.preview_pr_feedback_record import (
+    PreviewPrFeedbackRecord,
+    PreviewPrFeedbackStatus,
+)
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.drivers.registry import (
     build_driver_context_view,
@@ -78,6 +82,10 @@ from control_plane.workflows.evidence_ingestion import (
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
     build_preview_lifecycle_cleanup_record,
+)
+from control_plane.workflows.preview_pr_feedback import (
+    DEFAULT_PREVIEW_FEEDBACK_MARKER,
+    build_preview_pr_feedback_record,
 )
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceRequest,
@@ -259,6 +267,45 @@ class PreviewLifecycleCleanupEnvelope(BaseModel):
             raise ValueError("preview lifecycle cleanup requires source")
         if not self.destroy_reason.strip():
             raise ValueError("preview lifecycle cleanup requires destroy_reason")
+        return self
+
+
+class PreviewPrFeedbackEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    source: str = "workflow"
+    repository: str
+    anchor_repo: str
+    anchor_pr_number: int = Field(ge=1)
+    anchor_pr_url: str
+    status: PreviewPrFeedbackStatus
+    marker: str = DEFAULT_PREVIEW_FEEDBACK_MARKER
+    preview_url: str = ""
+    immutable_image_reference: str = ""
+    refresh_image_reference: str = ""
+    revision: str = ""
+    run_url: str = ""
+    failure_summary: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewPrFeedbackEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview PR feedback requires product")
+        if not self.context.strip():
+            raise ValueError("preview PR feedback requires context")
+        if not self.source.strip():
+            raise ValueError("preview PR feedback requires source")
+        if not self.repository.strip():
+            raise ValueError("preview PR feedback requires repository")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview PR feedback requires anchor_repo")
+        if not self.anchor_pr_url.strip():
+            raise ValueError("preview PR feedback requires anchor_pr_url")
+        if not self.marker.strip():
+            raise ValueError("preview PR feedback requires marker")
         return self
 
 
@@ -843,6 +890,7 @@ def _accepted_payload(
                 "inventory_record_id",
                 "preview_id",
                 "preview_inventory_scan_id",
+                "preview_pr_feedback_id",
                 "preview_lifecycle_cleanup_id",
                 "preview_lifecycle_plan_id",
                 "generation_id",
@@ -1208,6 +1256,15 @@ def _write_preview_lifecycle_cleanup_if_supported(
     return record.cleanup_id
 
 
+def _write_preview_pr_feedback_if_supported(
+    *, record_store: object, record: PreviewPrFeedbackRecord
+) -> str:
+    if not hasattr(record_store, "write_preview_pr_feedback_record"):
+        return ""
+    getattr(record_store, "write_preview_pr_feedback_record")(record)
+    return record.feedback_id
+
+
 def create_launchplane_service_app(
     *,
     state_dir: Path,
@@ -1251,6 +1308,7 @@ def create_launchplane_service_app(
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
+        "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-plan",
         "/v1/evidence/promotions",
@@ -2755,6 +2813,64 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_lifecycle_plan_id": preview_lifecycle_plan_id}
+            elif path == "/v1/previews/pr-feedback":
+                request = PreviewPrFeedbackEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_pr_feedback.write",
+                    product=request.product,
+                    context=request.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write preview PR feedback for the requested"
+                                    " product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = build_preview_pr_feedback_record(
+                    control_plane_root=resolved_root,
+                    product=request.product,
+                    context=request.context,
+                    source=request.source,
+                    requested_at=_utc_now_timestamp(),
+                    repository=request.repository,
+                    anchor_repo=request.anchor_repo,
+                    anchor_pr_number=request.anchor_pr_number,
+                    anchor_pr_url=request.anchor_pr_url,
+                    status=request.status,
+                    marker=request.marker,
+                    preview_url=request.preview_url,
+                    immutable_image_reference=request.immutable_image_reference,
+                    refresh_image_reference=request.refresh_image_reference,
+                    revision=request.revision,
+                    run_url=request.run_url,
+                    failure_summary=request.failure_summary,
+                )
+                preview_pr_feedback_id = _write_preview_pr_feedback_if_supported(
+                    record_store=record_store,
+                    record=driver_result,
+                )
+                result = {"preview_pr_feedback_id": preview_pr_feedback_id}
             elif path == "/v1/previews/lifecycle-cleanup":
                 request = PreviewLifecycleCleanupEnvelope.model_validate(payload)
                 if not authz_policy.allows(

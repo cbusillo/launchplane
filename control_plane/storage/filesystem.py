@@ -16,6 +16,7 @@ from control_plane.contracts.preview_generation_record import PreviewGenerationR
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -371,6 +372,27 @@ class FilesystemRecordStore:
             if not context_name or record.context == context_name
         ]
         records.sort(key=lambda record: (record.requested_at, record.cleanup_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_pr_feedback_record(self, record: PreviewPrFeedbackRecord) -> Path:
+        return self._write_model("launchplane_preview_pr_feedback", record.feedback_id, record)
+
+    def list_preview_pr_feedback_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewPrFeedbackRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewPrFeedbackRecord, "launchplane_preview_pr_feedback"
+            )
+            if not context_name or record.context == context_name
+        ]
+        records.sort(key=lambda record: (record.requested_at, record.feedback_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
