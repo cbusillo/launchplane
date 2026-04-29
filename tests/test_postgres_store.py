@@ -458,9 +458,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
             record = LaunchplaneIdempotencyRecord(
                 record_id=build_launchplane_idempotency_record_id(
-                    scope="every/verireel|workflow|repo:every/verireel:pull_request",
-                    route_path="/v1/evidence/previews/generations",
-                    request_token="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
+                    response_trace_id="launchplane_req_123",
                 ),
                 scope="every/verireel|workflow|repo:every/verireel:pull_request",
                 route_path="/v1/evidence/previews/generations",

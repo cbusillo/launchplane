@@ -1008,9 +1008,7 @@ def _write_idempotency_record(
     idempotency_store.write_idempotency_record(
         LaunchplaneIdempotencyRecord(
             record_id=build_launchplane_idempotency_record_id(
-                scope=scope,
-                route_path=route_path,
-                request_token=idempotency_key,
+                response_trace_id=response_trace_id,
             ),
             scope=scope,
             route_path=route_path,
