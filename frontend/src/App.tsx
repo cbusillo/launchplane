@@ -60,6 +60,13 @@ type EvidenceRow = {
   time: string;
   lane: string;
   kind: string;
+  facts: EvidenceFact[];
+};
+type EvidenceFact = {
+  label: string;
+  value: string;
+  mono?: boolean;
+  status?: Status | string;
 };
 
 const TOKEN_STORAGE_KEY = "launchplane.operatorToken";
@@ -135,6 +142,7 @@ export function App() {
   const [error, setError] = useState<string>("");
   const [traceId, setTraceId] = useState<string>("");
   const [reviewAction, setReviewAction] = useState<DriverActionDescriptor | null>(null);
+  const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(null);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -294,12 +302,14 @@ export function App() {
                 prod={prodDriverView?.lane_summary ?? null}
                 testing={testingDriverView?.lane_summary ?? null}
                 previews={previewDriverView?.preview_summaries ?? []}
+                onSelect={setSelectedEvidence}
               />
             </section>
           </>
         )}
       </main>
       <ActionReviewDialog action={reviewAction} onClose={() => setReviewAction(null)} />
+      <EvidenceDetailDrawer evidence={selectedEvidence} onClose={() => setSelectedEvidence(null)} />
     </div>
   );
 }
@@ -756,11 +766,13 @@ function SecretBindingList({ driver, lane }: { driver: DriverDescriptor | null; 
 function EvidenceTimeline({
   prod,
   testing,
-  previews
+  previews,
+  onSelect
 }: {
   prod: LaneSummary | null;
   testing: LaneSummary | null;
   previews: PreviewSummary[];
+  onSelect: (row: EvidenceRow) => void;
 }) {
   const rows = buildEvidenceRows(prod, testing, previews);
   return (
@@ -769,7 +781,13 @@ function EvidenceTimeline({
       <div className="evidence-list">
         {rows.length ? (
           rows.map((row) => (
-            <div className="evidence-row" key={row.id}>
+            <button
+              className="evidence-row"
+              key={row.id}
+              type="button"
+              aria-label={`Inspect ${row.title} evidence`}
+              onClick={() => onSelect(row)}
+            >
               <StatusIcon status={row.status} />
               <div>
                 <strong>
@@ -783,13 +801,72 @@ function EvidenceTimeline({
                 <br />
                 {formatTime(row.time)}
               </code>
-            </div>
+            </button>
           ))
         ) : (
           <StateBlock icon={<Clock3 size={18} />} title="No evidence records" />
         )}
       </div>
     </section>
+  );
+}
+
+function EvidenceDetailDrawer({ evidence, onClose }: { evidence: EvidenceRow | null; onClose: () => void }) {
+  useEffect(() => {
+    if (!evidence) {
+      return undefined;
+    }
+    function onKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") {
+        onClose();
+      }
+    }
+    document.addEventListener("keydown", onKeyDown);
+    return () => document.removeEventListener("keydown", onKeyDown);
+  }, [evidence, onClose]);
+
+  if (!evidence) {
+    return null;
+  }
+
+  return (
+    <div className="drawer-backdrop" role="presentation" onMouseDown={onClose}>
+      <aside
+        className="evidence-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="evidence-drawer-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <div className="drawer-header">
+          <div>
+            <p className="eyebrow">evidence detail</p>
+            <h2 id="evidence-drawer-title">{evidence.title}</h2>
+          </div>
+          <button className="icon-button" type="button" aria-label="Close evidence detail" onClick={onClose}>
+            <XCircle size={15} aria-hidden="true" />
+          </button>
+        </div>
+        <div className="drawer-meta">
+          <span className={`lane-chip lane-chip-${evidence.lane}`}>{evidence.lane}</span>
+          <StatusPill status={evidence.status} />
+          <code>{evidence.kind}</code>
+          <code>{formatTime(evidence.time)}</code>
+        </div>
+        <p className="drawer-summary">{evidence.detail || "No detail recorded for this evidence row."}</p>
+        <div className="drawer-facts">
+          {evidence.facts.map((fact) => (
+            <KeyValue
+              key={`${fact.label}:${fact.value}`}
+              label={fact.label}
+              value={fact.value}
+              mono={fact.mono}
+              status={fact.status}
+            />
+          ))}
+        </div>
+      </aside>
+    </div>
   );
 }
 
@@ -1092,36 +1169,78 @@ function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null
     { lane: testing, laneName: "testing" }
   ].forEach(({ lane, laneName }) => {
     if (lane?.latest_deployment) {
+      const deployment = lane.latest_deployment;
       rows.push({
-        id: lane.latest_deployment.record_id,
+        id: deployment.record_id,
         title: `${lane.instance} deployment`,
-        detail: artifactFromLane(lane) || lane.latest_deployment.record_id,
-        status: lane.latest_deployment.deploy.status,
-        time: lane.latest_deployment.deploy.finished_at ?? lane.inventory?.updated_at ?? "",
+        detail: artifactFromLane(lane) || deployment.record_id,
+        status: deployment.deploy.status,
+        time: deployment.deploy.finished_at ?? lane.inventory?.updated_at ?? "",
         lane: laneName,
-        kind: "deploy"
+        kind: "deploy",
+        facts: [
+          { label: "Record", value: deployment.record_id, mono: true },
+          { label: "Artifact", value: artifactFromLane(lane) || "unknown", mono: true },
+          { label: "Source ref", value: deployment.source_git_ref || "unknown", mono: true },
+          { label: "Target", value: deployment.deploy.target_name || "unknown" },
+          { label: "Target type", value: deployment.deploy.target_type },
+          { label: "Deploy mode", value: deployment.deploy.deploy_mode },
+          { label: "Deployment id", value: deployment.deploy.deployment_id ?? "unknown", mono: true },
+          { label: "Deploy status", value: labelForStatus(deployment.deploy.status), status: deployment.deploy.status },
+          { label: "Health status", value: labelForStatus(deployment.destination_health.status), status: deployment.destination_health.status },
+          { label: "Health URLs", value: deployment.destination_health.urls.join(", ") || "none", mono: true },
+          { label: "Started", value: formatTime(deployment.deploy.started_at ?? "") },
+          { label: "Finished", value: formatTime(deployment.deploy.finished_at ?? "") }
+        ]
       });
     }
     if (lane?.latest_backup_gate) {
+      const backup = lane.latest_backup_gate;
       rows.push({
-        id: lane.latest_backup_gate.record_id,
+        id: backup.record_id,
         title: `${lane.instance} backup gate`,
-        detail: lane.latest_backup_gate.source,
-        status: lane.latest_backup_gate.status,
-        time: lane.latest_backup_gate.created_at,
+        detail: backup.source,
+        status: backup.status,
+        time: backup.created_at,
         lane: laneName,
-        kind: "backup"
+        kind: "backup",
+        facts: [
+          { label: "Record", value: backup.record_id, mono: true },
+          { label: "Source", value: backup.source || "unknown" },
+          { label: "Required", value: backup.required ? "yes" : "no" },
+          { label: "Status", value: labelForStatus(backup.status), status: backup.status },
+          { label: "Created", value: formatTime(backup.created_at) },
+          ...Object.entries(backup.evidence).map(([label, value]) => ({
+            label,
+            value,
+            mono: true
+          }))
+        ]
       });
     }
     if (lane?.latest_promotion) {
+      const promotion = lane.latest_promotion;
       rows.push({
-        id: lane.latest_promotion.record_id,
-        title: `${lane.latest_promotion.from_instance} to ${lane.latest_promotion.to_instance}`,
-        detail: lane.latest_promotion.artifact_identity.artifact_id,
-        status: lane.latest_promotion.deploy.status,
-        time: lane.latest_promotion.deploy.finished_at ?? "",
+        id: promotion.record_id,
+        title: `${promotion.from_instance} to ${promotion.to_instance}`,
+        detail: promotion.artifact_identity.artifact_id,
+        status: promotion.deploy.status,
+        time: promotion.deploy.finished_at ?? "",
         lane: "prod",
-        kind: "promote"
+        kind: "promote",
+        facts: [
+          { label: "Record", value: promotion.record_id, mono: true },
+          { label: "Artifact", value: promotion.artifact_identity.artifact_id, mono: true },
+          { label: "From", value: promotion.from_instance },
+          { label: "To", value: promotion.to_instance },
+          { label: "Deployment record", value: promotion.deployment_record_id ?? "unknown", mono: true },
+          { label: "Backup record", value: promotion.backup_record_id ?? "unknown", mono: true },
+          { label: "Backup gate", value: labelForStatus(promotion.backup_gate.status), status: promotion.backup_gate.status },
+          { label: "Deploy target", value: promotion.deploy.target_name || "unknown" },
+          { label: "Deploy status", value: labelForStatus(promotion.deploy.status), status: promotion.deploy.status },
+          { label: "Health status", value: labelForStatus(promotion.destination_health.status), status: promotion.destination_health.status },
+          { label: "Finished", value: formatTime(promotion.deploy.finished_at ?? "") }
+        ]
       });
     }
   });
@@ -1134,7 +1253,22 @@ function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null
       status: generation?.overall_health_status ?? summary.preview.state,
       time: generation?.finished_at ?? summary.preview.updated_at,
       lane: "preview",
-      kind: "preview"
+      kind: "preview",
+      facts: [
+        { label: "Preview", value: summary.preview.preview_id, mono: true },
+        { label: "Label", value: summary.preview.preview_label },
+        { label: "Pull request", value: `${summary.preview.anchor_repo}#${summary.preview.anchor_pr_number}` },
+        { label: "URL", value: summary.preview.canonical_url, mono: true },
+        { label: "State", value: summary.preview.state },
+        { label: "Generation", value: generation?.generation_id ?? "none", mono: true },
+        { label: "Sequence", value: generation ? String(generation.sequence) : "none" },
+        { label: "Artifact", value: generation?.artifact_id ?? "unknown", mono: true },
+        { label: "Deploy", value: labelForStatus(generation?.deploy_status ?? "unknown"), status: generation?.deploy_status ?? "unknown" },
+        { label: "Verify", value: labelForStatus(generation?.verify_status ?? "unknown"), status: generation?.verify_status ?? "unknown" },
+        { label: "Health", value: labelForStatus(generation?.overall_health_status ?? "unknown"), status: generation?.overall_health_status ?? "unknown" },
+        { label: "Updated", value: formatTime(summary.preview.updated_at) },
+        { label: "Finished", value: formatTime(generation?.finished_at ?? "") }
+      ]
     });
   });
   return rows.sort((left, right) => right.time.localeCompare(left.time)).slice(0, 8);
