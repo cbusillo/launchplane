@@ -426,6 +426,46 @@ def _preview_provenance(summary: LaunchplanePreviewSummary) -> DataProvenance:
     )
 
 
+def _preview_inventory_provenance(
+    *,
+    record_store: object,
+    context_name: str,
+    preview_summaries: tuple[LaunchplanePreviewSummary, ...],
+) -> DataProvenance:
+    if hasattr(record_store, "list_preview_inventory_scan_records"):
+        scans = getattr(record_store, "list_preview_inventory_scan_records")(
+            context_name=context_name,
+            limit=1,
+        )
+        latest_scan = next(iter(scans), None)
+        if latest_scan is not None:
+            status, stale_after = _freshness_status(
+                recorded_at=latest_scan.scanned_at,
+                stale_after=PREVIEW_STALE_AFTER,
+                verified=latest_scan.status == "pass",
+            )
+            return DataProvenance(
+                source_kind="record",
+                source_record_id=latest_scan.scan_id,
+                recorded_at=latest_scan.scanned_at,
+                refreshed_at=latest_scan.scanned_at,
+                freshness_status=status,
+                stale_after=stale_after,
+                detail=(
+                    "Latest Launchplane preview inventory scan; "
+                    f"{latest_scan.preview_count} preview(s) observed."
+                ),
+            )
+    latest_preview = next(iter(preview_summaries), None)
+    if latest_preview is not None:
+        return latest_preview.provenance
+    return DataProvenance(
+        source_kind="record",
+        freshness_status="missing",
+        detail="Launchplane has not recorded a preview inventory scan for this context.",
+    )
+
+
 def _read_lane_summary(
     *, record_store: object, context_name: str, instance_name: str
 ) -> LaunchplaneLaneSummary | None:
@@ -562,6 +602,13 @@ def build_driver_context_view(
                 record_store=record_store,
                 context_name=context_name,
             )
+        preview_inventory_provenance = None
+        if descriptor.driver_id == "verireel":
+            preview_inventory_provenance = _preview_inventory_provenance(
+                record_store=record_store,
+                context_name=context_name,
+                preview_summaries=preview_summaries,
+            )
         drivers.append(
             DriverView(
                 driver_id=descriptor.driver_id,
@@ -569,6 +616,7 @@ def build_driver_context_view(
                 available_actions=descriptor.actions,
                 lane_summary=lane_summary,
                 preview_summaries=preview_summaries,
+                preview_inventory_provenance=preview_inventory_provenance,
             )
         )
     return DriverContextView(context=context_name, instance=instance_name, drivers=tuple(drivers))

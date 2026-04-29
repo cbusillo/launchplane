@@ -13,6 +13,7 @@ from control_plane.contracts.idempotency_record import build_launchplane_idempot
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -303,6 +304,27 @@ class FilesystemRecordStore:
             if not preview_id or record.preview_id == preview_id
         ]
         records.sort(key=lambda record: (record.sequence, record.generation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_inventory_scan_record(self, record: PreviewInventoryScanRecord) -> Path:
+        return self._write_model("launchplane_preview_inventory_scans", record.scan_id, record)
+
+    def list_preview_inventory_scan_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewInventoryScanRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewInventoryScanRecord, "launchplane_preview_inventory_scans"
+            )
+            if not context_name or record.context == context_name
+        ]
+        records.sort(key=lambda record: (record.scanned_at, record.scan_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)

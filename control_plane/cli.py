@@ -9427,15 +9427,21 @@ def _freshness_surface(
             "stale_after": "",
             "has_provenance": False,
         }
+    freshness_status = str(provenance.get("freshness_status") or "missing")
+    source_kind = str(provenance.get("source_kind") or "record")
+    source_record_id = str(provenance.get("source_record_id") or "")
+    has_provenance = freshness_status != "missing" and (
+        source_kind != "record" or bool(source_record_id)
+    )
     return {
         "name": name,
         "driver_id": driver_id,
-        "freshness_status": str(provenance.get("freshness_status") or "missing"),
-        "source_kind": str(provenance.get("source_kind") or "record"),
-        "source_record_id": str(provenance.get("source_record_id") or ""),
+        "freshness_status": freshness_status,
+        "source_kind": source_kind,
+        "source_record_id": source_record_id,
         "recorded_at": str(provenance.get("recorded_at") or ""),
         "stale_after": str(provenance.get("stale_after") or ""),
-        "has_provenance": True,
+        "has_provenance": has_provenance,
     }
 
 
@@ -9464,6 +9470,11 @@ def _build_data_freshness_report(
         context_name=preview_context_name,
     )
     preview_driver = _first_driver_payload(preview_view, driver_id="verireel")
+    inventory_provenance = (
+        preview_driver.get("preview_inventory_provenance")
+        if isinstance(preview_driver, dict)
+        else None
+    )
     preview_summaries = (
         preview_driver.get("preview_summaries") if isinstance(preview_driver, dict) else None
     )
@@ -9485,15 +9496,9 @@ def _build_data_freshness_report(
             _freshness_surface(
                 name=f"{preview_context_name}/preview-inventory",
                 driver_id="verireel",
-                raw_value={
-                    "provenance": {
-                        "source_kind": "record",
-                        "freshness_status": "missing",
-                        "source_record_id": "",
-                        "recorded_at": "",
-                        "stale_after": "",
-                    }
-                },
+                raw_value={"provenance": inventory_provenance}
+                if isinstance(inventory_provenance, dict)
+                else None,
             )
         )
 

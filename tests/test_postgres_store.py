@@ -28,6 +28,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
 )
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -669,6 +670,49 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(len(listed_summaries[0].recent_generations), 1)
         self.assertEqual(listed_summaries[0].latest_generation.sequence, 2)
 
+    def test_preview_inventory_scan_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_preview_inventory_scan_record(
+                PreviewInventoryScanRecord(
+                    scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
+                    context="verireel-testing",
+                    scanned_at="2026-04-20T10:05:00Z",
+                    source="verireel-preview-inventory",
+                    status="pass",
+                    preview_count=2,
+                    preview_slugs=("pr-123", "pr-124"),
+                )
+            )
+            store.write_preview_inventory_scan_record(
+                PreviewInventoryScanRecord(
+                    scan_id="preview-inventory-scan-verireel-testing-20260420T100600Z",
+                    context="verireel-testing",
+                    scanned_at="2026-04-20T10:06:00Z",
+                    source="verireel-preview-inventory",
+                    status="pass",
+                    preview_count=0,
+                    preview_slugs=(),
+                )
+            )
+            listed_records = store.list_preview_inventory_scan_records(
+                context_name="verireel-testing",
+                limit=1,
+            )
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(
+            listed_records[0].scan_id,
+            "preview-inventory-scan-verireel-testing-20260420T100600Z",
+        )
+        self.assertEqual(listed_records[0].preview_count, 0)
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -958,6 +1002,17 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     preview_id="preview-verireel-testing-verireel-pr-123",
                 )
             )
+            filesystem_store.write_preview_inventory_scan_record(
+                PreviewInventoryScanRecord(
+                    scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
+                    context="verireel-testing",
+                    scanned_at="2026-04-20T10:05:00Z",
+                    source="verireel-preview-inventory",
+                    status="pass",
+                    preview_count=1,
+                    preview_slugs=("pr-123",),
+                )
+            )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
@@ -972,6 +1027,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "odoo_instance_overrides": 1,
                     "preview_records": 1,
                     "preview_generations": 1,
+                    "preview_inventory_scans": 1,
                     "release_tuples": 1,
                 },
             )
@@ -986,5 +1042,12 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview-verireel-testing-verireel-pr-123-generation-0001"
                 ).state,
                 "ready",
+            )
+            self.assertEqual(
+                store.list_preview_inventory_scan_records(
+                    context_name="verireel-testing",
+                    limit=1,
+                )[0].scan_id,
+                "preview-inventory-scan-verireel-testing-20260420T100500Z",
             )
             store.close()

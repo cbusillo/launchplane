@@ -20,6 +20,7 @@ from control_plane.contracts.idempotency_record import build_launchplane_idempot
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -174,6 +175,25 @@ class LaunchplanePreviewGenerationRow(Base):
     requested_at: Mapped[str] = mapped_column(String, nullable=False)
     finished_at: Mapped[str] = mapped_column(String, nullable=False)
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewInventoryScanRow(Base):
+    __tablename__ = "launchplane_preview_inventory_scans"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_inventory_scans_context_idx",
+            "context",
+            desc("scanned_at"),
+        ),
+    )
+
+    scan_id: Mapped[str] = mapped_column(String, primary_key=True)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    scanned_at: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    preview_count: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -860,6 +880,39 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_preview_inventory_scan_record(self, record: PreviewInventoryScanRecord) -> None:
+        self._write_row(
+            LaunchplanePreviewInventoryScanRow(
+                scan_id=record.scan_id,
+                context=record.context,
+                scanned_at=record.scanned_at,
+                source=record.source,
+                status=record.status,
+                preview_count=record.preview_count,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_inventory_scan_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewInventoryScanRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplanePreviewInventoryScanRow.context == context_name)
+        return self._list_models(
+            model_type=PreviewInventoryScanRecord,
+            orm_model=LaunchplanePreviewInventoryScanRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewInventoryScanRow.scanned_at.desc(),
+                LaunchplanePreviewInventoryScanRow.scan_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def read_preview_summary(
         self,
         *,
@@ -1337,6 +1390,7 @@ class PostgresRecordStore(HumanSessionStore):
             "odoo_instance_overrides": 0,
             "preview_records": 0,
             "preview_generations": 0,
+            "preview_inventory_scans": 0,
             "release_tuples": 0,
         }
         for record in filesystem_store.list_artifact_manifests():
@@ -1363,6 +1417,10 @@ class PostgresRecordStore(HumanSessionStore):
         for record in filesystem_store.list_preview_generation_records():
             self.write_preview_generation_record(record)
             counts["preview_generations"] += 1
+        if hasattr(filesystem_store, "list_preview_inventory_scan_records"):
+            for record in filesystem_store.list_preview_inventory_scan_records():
+                self.write_preview_inventory_scan_record(record)
+                counts["preview_inventory_scans"] += 1
         for record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(record)
             counts["release_tuples"] += 1
