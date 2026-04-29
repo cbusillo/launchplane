@@ -55,6 +55,10 @@ deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
 and preview mutations as authenticated Launchplane routes.
 
+The service also serves the built operator UI shell under `/ui`. Built assets
+live under `/ui/assets/...`, while `/ui/*` falls back to the app shell so the
+frontend can own client-side routes.
+
 ## First Host Assumption
 
 - Launchplane runs behind `https://launchplane.shinycomputers.com`.

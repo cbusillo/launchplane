@@ -60,9 +60,13 @@ process env for the first bring-up.
 ```bash
 uv run launchplane --help
 uv run launchplane service serve --help
+cd frontend && npx pnpm@10.10.0 validate
 uv run launchplane storage import-core-records --help
 uv run python -m unittest
 ```
+
+Frontend validation currently covers TypeScript and the production Vite build.
+Lint, formatting, and component tests are not introduced yet.
 
 Runtime authority should come from Launchplane DB records in steady state.
 Launchplane-managed secrets, runtime-environment records, tracked Dokploy
@@ -105,7 +109,10 @@ similar long-running hosts:
 - `Dockerfile`
 - `docker-compose.yml`
 - `scripts/start-launchplane-service.sh`
+- `frontend/`
 
+The service image builds the Vite/React operator UI in a Node 22 stage, copies
+only the static bundle into the Python runtime image, and serves it at `/ui`.
 The compose service now expects the Launchplane container image through
 `DOCKER_IMAGE_REFERENCE`. Dokploy should set that to an immutable GHCR digest
 for real Launchplane deploys. For purely local compose usage, build a local image

@@ -112,6 +112,34 @@ def _invoke_app(
     return int(str(captured["status"]).split(" ", 1)[0]), json.loads(response_body.decode("utf-8"))
 
 
+def _invoke_raw_app(
+    app,
+    *,
+    method: str,
+    path: str,
+    authorization: str = "",
+):
+    environ = {
+        "REQUEST_METHOD": method,
+        "PATH_INFO": path,
+        "CONTENT_LENGTH": "0",
+        "wsgi.input": io.BytesIO(b""),
+        "HTTP_AUTHORIZATION": authorization,
+    }
+    captured: dict[str, object] = {}
+
+    def start_response(status: str, headers: list[tuple[str, str]]) -> None:
+        captured["status"] = status
+        captured["headers"] = headers
+
+    response_body = b"".join(app(environ, start_response))
+    return (
+        int(str(captured["status"]).split(" ", 1)[0]),
+        dict(captured["headers"]),
+        response_body,
+    )
+
+
 class GitHubOidcVerifierTests(unittest.TestCase):
     def test_verify_decodes_expected_github_claims(self) -> None:
         mock_jwk_client = Mock()
@@ -257,6 +285,82 @@ class LaunchplaneServiceTests(unittest.TestCase):
             hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
         )
         self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
+
+    def test_ui_route_serves_static_shell_without_authentication(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            asset_root = ui_root / "assets"
+            asset_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text(
+                '<html><head><script type="module" src="/ui/assets/app.js"></script></head></html>',
+                encoding="utf-8",
+            )
+            (asset_root / "app.js").write_text("console.log('launchplane ui');\n", encoding="utf-8")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            shell_status, shell_headers, shell_body = _invoke_raw_app(
+                app, method="GET", path="/ui"
+            )
+            asset_status, asset_headers, asset_body = _invoke_raw_app(
+                app, method="GET", path="/ui/assets/app.js"
+            )
+
+        self.assertEqual(shell_status, 200)
+        self.assertEqual(shell_headers["Content-Type"], "text/html")
+        self.assertIn(b"/ui/assets/app.js", shell_body)
+        self.assertEqual(shell_headers["Cache-Control"], "no-store")
+        self.assertEqual(asset_status, 200)
+        self.assertIn(asset_headers["Content-Type"], {"text/javascript", "application/javascript"})
+        self.assertIn(b"launchplane ui", asset_body)
+        self.assertEqual(asset_headers["Cache-Control"], "public, max-age=31536000, immutable")
+
+    def test_ui_route_falls_back_to_shell_for_nested_paths(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            ui_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text("<html>Launchplane UI</html>", encoding="utf-8")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, headers, body = _invoke_raw_app(
+                app, method="GET", path="/ui/contexts/verireel"
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(headers["Content-Type"], "text/html")
+        self.assertIn(b"Launchplane UI", body)
+
+    def test_ui_asset_route_rejects_parent_directory_segments(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            ui_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text("<html>Launchplane UI</html>", encoding="utf-8")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, headers, body = _invoke_raw_app(
+                app, method="GET", path="/ui/assets/%2e%2e/index.html"
+            )
+
+        self.assertEqual(status_code, 404)
+        self.assertEqual(headers["Content-Type"], "application/json")
+        self.assertNotIn(b"Launchplane UI", body)
 
     def test_driver_descriptor_endpoints_return_provider_neutral_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
