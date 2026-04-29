@@ -112,7 +112,9 @@ similar long-running hosts:
 - `frontend/`
 
 The service image builds the Vite/React operator UI in a Node 22 stage, copies
-only the static bundle into the Python runtime image, and serves it at `/ui`.
+only the static bundle into the Python runtime image, and serves it at `/` and
+`/ui`. Built assets stay under `/ui/assets/...`; versioned API ingress remains
+under `/v1`.
 The compose service now expects the Launchplane container image through
 `DOCKER_IMAGE_REFERENCE`. Dokploy should set that to an immutable GHCR digest
 for real Launchplane deploys. For purely local compose usage, build a local image

@@ -320,6 +320,29 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn(b"launchplane ui", asset_body)
         self.assertEqual(asset_headers["Cache-Control"], "public, max-age=31536000, immutable")
 
+    def test_root_route_serves_ui_shell_without_authentication(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            ui_root = root / "control_plane" / "ui_static"
+            ui_root.mkdir(parents=True)
+            (ui_root / "index.html").write_text(
+                '<html><head><script type="module" src="/ui/assets/app.js"></script></head></html>',
+                encoding="utf-8",
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=root,
+            )
+
+            status_code, headers, body = _invoke_raw_app(app, method="GET", path="/")
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(headers["Content-Type"], "text/html")
+        self.assertEqual(headers["Cache-Control"], "no-store")
+        self.assertIn(b"/ui/assets/app.js", body)
+
     def test_ui_route_falls_back_to_shell_for_nested_paths(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
