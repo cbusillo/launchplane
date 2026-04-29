@@ -21,6 +21,7 @@ from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -194,6 +195,25 @@ class LaunchplanePreviewInventoryScanRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     preview_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewLifecyclePlanRow(Base):
+    __tablename__ = "launchplane_preview_lifecycle_plans"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_lifecycle_plans_context_idx",
+            "context",
+            desc("planned_at"),
+        ),
+    )
+
+    plan_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    planned_at: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    inventory_scan_id: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -913,6 +933,39 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_preview_lifecycle_plan_record(self, record: PreviewLifecyclePlanRecord) -> None:
+        self._write_row(
+            LaunchplanePreviewLifecyclePlanRow(
+                plan_id=record.plan_id,
+                product=record.product,
+                context=record.context,
+                planned_at=record.planned_at,
+                status=record.status,
+                inventory_scan_id=record.inventory_scan_id,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_lifecycle_plan_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewLifecyclePlanRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplanePreviewLifecyclePlanRow.context == context_name)
+        return self._list_models(
+            model_type=PreviewLifecyclePlanRecord,
+            orm_model=LaunchplanePreviewLifecyclePlanRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewLifecyclePlanRow.planned_at.desc(),
+                LaunchplanePreviewLifecyclePlanRow.plan_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def read_preview_summary(
         self,
         *,
@@ -1391,6 +1444,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_records": 0,
             "preview_generations": 0,
             "preview_inventory_scans": 0,
+            "preview_lifecycle_plans": 0,
             "release_tuples": 0,
         }
         for record in filesystem_store.list_artifact_manifests():
@@ -1421,6 +1475,10 @@ class PostgresRecordStore(HumanSessionStore):
             for record in filesystem_store.list_preview_inventory_scan_records():
                 self.write_preview_inventory_scan_record(record)
                 counts["preview_inventory_scans"] += 1
+        if hasattr(filesystem_store, "list_preview_lifecycle_plan_records"):
+            for record in filesystem_store.list_preview_lifecycle_plan_records():
+                self.write_preview_lifecycle_plan_record(record)
+                counts["preview_lifecycle_plans"] += 1
         for record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(record)
             counts["release_tuples"] += 1

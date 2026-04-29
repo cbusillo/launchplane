@@ -169,6 +169,7 @@ event_name: pull_request
 allowed product: verireel
 allowed contexts: verireel-testing
 allowed actions:
+  - preview_lifecycle.plan
   - verireel_preview_destroy.execute
   - preview_destroyed.write
 ```
@@ -256,6 +257,17 @@ writes, not on every possible operator action.
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 
+### Preview lifecycle endpoints
+
+- `POST /v1/previews/lifecycle-plan`
+
+The first preview lifecycle endpoint is intentionally report-only. Product repos
+send desired preview anchors, Launchplane compares those desired previews with
+the latest recorded provider inventory scan, writes a durable lifecycle plan,
+and returns keep/orphaned/missing sets. It does not destroy previews. Cleanup
+execution and PR feedback ownership should move into Launchplane only after this
+durable decision record is proven by the VeriReel adapter.
+
 ### Operator read endpoints
 
 - `GET /v1/previews/{preview_id}`
@@ -304,6 +316,11 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-inventory`
 - `POST /v1/drivers/verireel/preview-destroy`
+
+The product-neutral preview lifecycle route should become the common boundary
+for preview desired/current-state comparison. Product-specific driver routes can
+continue to perform provider runtime work, but repos should not each reimplement
+orphan detection once they can submit desired preview anchors to Launchplane.
 
 ### Driver discovery endpoints
 

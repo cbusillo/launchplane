@@ -382,6 +382,27 @@ state/
 - PR ingest and `launchplane-previews write-enablement` write the same typed record
   shape so webhook and non-webhook flows preserve comparable evidence.
 
+## Launchplane Preview Inventory Scan Record
+
+- One append-only record per provider inventory scan for a preview context.
+- Record the scan id, context, scanned timestamp, source, pass/fail status,
+  observed preview slugs, and failure message when the scan could not complete.
+- A zero-preview scan is valid evidence and should be distinguished from missing
+  inventory. Read models and readiness checks should use the latest scan to
+  decide whether an empty preview inventory is verified or unknown.
+
+## Launchplane Preview Lifecycle Plan Record
+
+- One append-only report-only decision record per preview lifecycle planning run.
+- Record the desired preview anchors submitted by a product repo, the latest
+  inventory scan used as current provider state, and the derived keep/orphaned/
+  missing slug sets.
+- The first implementation must not execute cleanup. It exists to move reusable
+  desired-vs-actual preview decisions into Launchplane before cleanup execution,
+  PR feedback, or scheduling are centralized.
+- Product repos should eventually submit thin desired-state adapters to this
+  boundary instead of each owning a separate preview janitor implementation.
+
 ## Inventory
 
 - Inventory records are keyed by environment.

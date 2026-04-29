@@ -29,6 +29,10 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
 )
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_lifecycle_plan_record import (
+    PreviewLifecycleDesiredPreview,
+    PreviewLifecyclePlanRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -713,6 +717,43 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
         self.assertEqual(listed_records[0].preview_count, 0)
 
+    def test_preview_lifecycle_plan_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-verireel-testing-20260420T100500Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    planned_at="2026-04-20T10:05:00Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
+                    desired_previews=(PreviewLifecycleDesiredPreview(preview_slug="pr-123"),),
+                    desired_slugs=("pr-123",),
+                    actual_slugs=("pr-122", "pr-123"),
+                    keep_slugs=("pr-123",),
+                    orphaned_slugs=("pr-122",),
+                )
+            )
+            listed_records = store.list_preview_lifecycle_plan_records(
+                context_name="verireel-testing",
+                limit=1,
+            )
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(
+            listed_records[0].plan_id,
+            "preview-lifecycle-plan-verireel-testing-20260420T100500Z",
+        )
+        self.assertEqual(listed_records[0].orphaned_slugs, ("pr-122",))
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1013,6 +1054,21 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     preview_slugs=("pr-123",),
                 )
             )
+            filesystem_store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-verireel-testing-20260420T100600Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    planned_at="2026-04-20T10:06:00Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
+                    desired_previews=(PreviewLifecycleDesiredPreview(preview_slug="pr-123"),),
+                    desired_slugs=("pr-123",),
+                    actual_slugs=("pr-123",),
+                    keep_slugs=("pr-123",),
+                )
+            )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
@@ -1028,6 +1084,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_records": 1,
                     "preview_generations": 1,
                     "preview_inventory_scans": 1,
+                    "preview_lifecycle_plans": 1,
                     "release_tuples": 1,
                 },
             )
@@ -1049,5 +1106,12 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     limit=1,
                 )[0].scan_id,
                 "preview-inventory-scan-verireel-testing-20260420T100500Z",
+            )
+            self.assertEqual(
+                store.list_preview_lifecycle_plan_records(
+                    context_name="verireel-testing",
+                    limit=1,
+                )[0].plan_id,
+                "preview-lifecycle-plan-verireel-testing-20260420T100600Z",
             )
             store.close()
