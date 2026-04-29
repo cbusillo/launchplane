@@ -411,6 +411,17 @@ state/
   only allowed through an authorized workflow request with `apply=true` and an
   existing passing lifecycle plan.
 
+## Launchplane Preview PR Feedback Record
+
+- One append-only record per attempt to publish preview status back to an anchor
+  pull request.
+- Record the product/context/source, anchor repository and PR, preview status,
+  rendered comment markdown, delivery status, delivery action, GitHub comment id
+  and URL, and any skip/failure reason.
+- Product repos should send outcome facts rather than hand-rendering or upserting
+  GitHub comments themselves. This keeps PR feedback aligned with Launchplane's
+  durable preview lifecycle records.
+
 ## Inventory
 
 - Inventory records are keyed by environment.

@@ -482,9 +482,12 @@ inventory scan, writes a durable lifecycle plan, and returns keep/orphaned/missi
 sets. Cleanup requests go through `POST /v1/previews/lifecycle-cleanup`, which
 requires an existing plan id, defaults to report-only, and records cleanup
 results. Destructive provider cleanup still requires explicit `apply=true` from
-an authorized GitHub Actions workflow. This is the next extraction step toward a
-cross-repo preview system; product repos remain thin adapters for labels,
-artifact build facts, and product-specific health/config hints.
+an authorized GitHub Actions workflow. PR feedback goes through
+`POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
+comment when runtime GitHub credentials are available, then records delivery
+status. This is the next extraction step toward a cross-repo preview system;
+product repos remain thin adapters for labels, artifact build facts, and
+product-specific health/config hints.
 
 ### VeriReel Preview Evidence Handoff
 

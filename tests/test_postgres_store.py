@@ -37,6 +37,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
 )
+from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -810,6 +811,53 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(listed_records[0].destroyed_slugs, ("pr-122",))
         self.assertEqual(listed_records[0].results[0].application_id, "app-122")
 
+    def test_preview_pr_feedback_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_preview_pr_feedback_record(
+                PreviewPrFeedbackRecord(
+                    feedback_id="preview-pr-feedback-verireel-testing-pr-123-20260420T100800Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    source="preview-control-plane",
+                    requested_at="2026-04-20T10:08:00Z",
+                    repository="every/verireel",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    status="ready",
+                    marker="<!-- verireel-preview-control -->",
+                    comment_markdown="<!-- verireel-preview-control -->\nPreview ready.",
+                    preview_url="https://pr-123.preview.example",
+                    immutable_image_reference="ghcr.io/every/verireel:pr-123-a1b2c3d4",
+                    refresh_image_reference="ghcr.io/every/verireel:preview-pr-123",
+                    revision="a1b2c3d4",
+                    run_url="https://github.com/every/verireel/actions/runs/123",
+                    delivery_status="delivered",
+                    delivery_action="updated_comment",
+                    comment_id=456,
+                    comment_url="https://github.com/every/verireel/pull/123#issuecomment-456",
+                )
+            )
+            listed_records = store.list_preview_pr_feedback_records(
+                context_name="verireel-testing",
+                limit=1,
+            )
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(
+            listed_records[0].feedback_id,
+            "preview-pr-feedback-verireel-testing-pr-123-20260420T100800Z",
+        )
+        self.assertEqual(listed_records[0].delivery_status, "delivered")
+        self.assertEqual(listed_records[0].comment_id, 456)
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1138,6 +1186,24 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     status="report_only",
                 )
             )
+            filesystem_store.write_preview_pr_feedback_record(
+                PreviewPrFeedbackRecord(
+                    feedback_id="preview-pr-feedback-verireel-testing-pr-123-20260420T100800Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    source="preview-control-plane",
+                    requested_at="2026-04-20T10:08:00Z",
+                    repository="every/verireel",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    status="ready",
+                    marker="<!-- verireel-preview-control -->",
+                    comment_markdown="<!-- verireel-preview-control -->\nPreview ready.",
+                    delivery_status="skipped",
+                    error_message="Launchplane runtime records do not expose GITHUB_TOKEN for this context",
+                )
+            )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
@@ -1155,6 +1221,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_inventory_scans": 1,
                     "preview_lifecycle_cleanups": 1,
                     "preview_lifecycle_plans": 1,
+                    "preview_pr_feedback": 1,
                     "release_tuples": 1,
                 },
             )
@@ -1190,5 +1257,12 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     limit=1,
                 )[0].cleanup_id,
                 "preview-lifecycle-cleanup-verireel-testing-20260420T100700Z",
+            )
+            self.assertEqual(
+                store.list_preview_pr_feedback_records(
+                    context_name="verireel-testing",
+                    limit=1,
+                )[0].feedback_id,
+                "preview-pr-feedback-verireel-testing-pr-123-20260420T100800Z",
             )
             store.close()
