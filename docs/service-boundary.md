@@ -170,6 +170,7 @@ allowed product: verireel
 allowed contexts: verireel-testing
 allowed actions:
   - preview_lifecycle.plan
+  - preview_lifecycle.cleanup
   - verireel_preview_destroy.execute
   - preview_destroyed.write
 ```
@@ -183,6 +184,8 @@ event_name: schedule or workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel-testing
 allowed actions:
+  - preview_lifecycle.plan
+  - preview_lifecycle.cleanup
   - verireel_preview_destroy.execute
   - preview_destroyed.write
 ```
@@ -260,13 +263,16 @@ writes, not on every possible operator action.
 ### Preview lifecycle endpoints
 
 - `POST /v1/previews/lifecycle-plan`
+- `POST /v1/previews/lifecycle-cleanup`
 
-The first preview lifecycle endpoint is intentionally report-only. Product repos
-send desired preview anchors, Launchplane compares those desired previews with
-the latest recorded provider inventory scan, writes a durable lifecycle plan,
-and returns keep/orphaned/missing sets. It does not destroy previews. Cleanup
-execution and PR feedback ownership should move into Launchplane only after this
-durable decision record is proven by the VeriReel adapter.
+The first preview lifecycle endpoint remains the source of the durable decision:
+product repos send desired preview anchors, Launchplane compares those desired
+previews with the latest recorded provider inventory scan, writes a durable
+lifecycle plan, and returns keep/orphaned/missing sets. Cleanup execution uses a
+second endpoint that requires an existing lifecycle `plan_id`; it defaults to
+`apply=false` report-only behavior and records the cleanup request/result next to
+the plan. Destructive provider cleanup is only attempted when `apply=true` is
+explicitly supplied by an authorized GitHub Actions workflow.
 
 ### Operator read endpoints
 

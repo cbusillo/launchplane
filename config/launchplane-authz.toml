@@ -22,7 +22,7 @@ workflow_refs = [
 event_names = ["pull_request"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write", "preview_lifecycle.plan"]
+actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write", "preview_lifecycle.plan", "preview_lifecycle.cleanup"]
 
 [[github_actions]]
 repository = "cbusillo/verireel"
@@ -32,7 +32,7 @@ workflow_refs = [
 event_names = ["schedule", "workflow_dispatch"]
 products = ["verireel"]
 contexts = ["verireel-testing"]
-actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write", "preview_lifecycle.plan"]
+actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write", "preview_lifecycle.plan", "preview_lifecycle.cleanup"]
 
 [[github_actions]]
 repository = "cbusillo/verireel"

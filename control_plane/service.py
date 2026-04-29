@@ -39,6 +39,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
     PreviewLifecycleDesiredPreview,
     PreviewLifecyclePlanRecord,
 )
+from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.drivers.registry import (
     build_driver_context_view,
@@ -75,6 +76,9 @@ from control_plane.workflows.evidence_ingestion import (
     apply_promotion_evidence,
 )
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
+from control_plane.workflows.preview_lifecycle_cleanup import (
+    build_preview_lifecycle_cleanup_record,
+)
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceRequest,
     OdooArtifactPublishInputsRequest,
@@ -228,6 +232,33 @@ class PreviewLifecyclePlanEnvelope(BaseModel):
             raise ValueError("preview lifecycle plan requires context")
         if not self.source.strip():
             raise ValueError("preview lifecycle plan requires source")
+        return self
+
+
+class PreviewLifecycleCleanupEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    plan_id: str
+    source: str = "workflow"
+    apply: bool = False
+    destroy_reason: str = "preview_lifecycle_cleanup"
+    timeout_seconds: int = Field(default=300, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewLifecycleCleanupEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview lifecycle cleanup requires product")
+        if not self.context.strip():
+            raise ValueError("preview lifecycle cleanup requires context")
+        if not self.plan_id.strip():
+            raise ValueError("preview lifecycle cleanup requires plan_id")
+        if not self.source.strip():
+            raise ValueError("preview lifecycle cleanup requires source")
+        if not self.destroy_reason.strip():
+            raise ValueError("preview lifecycle cleanup requires destroy_reason")
         return self
 
 
@@ -812,6 +843,7 @@ def _accepted_payload(
                 "inventory_record_id",
                 "preview_id",
                 "preview_inventory_scan_id",
+                "preview_lifecycle_cleanup_id",
                 "preview_lifecycle_plan_id",
                 "generation_id",
                 "promotion_record_id",
@@ -1155,6 +1187,27 @@ def _write_preview_lifecycle_plan_if_supported(
     return record.plan_id
 
 
+def _latest_preview_lifecycle_plan(
+    *, record_store: object, context_name: str, plan_id: str
+) -> PreviewLifecyclePlanRecord | None:
+    if not hasattr(record_store, "list_preview_lifecycle_plan_records"):
+        return None
+    records = getattr(record_store, "list_preview_lifecycle_plan_records")(
+        context_name=context_name,
+        limit=None,
+    )
+    return next((record for record in records if record.plan_id == plan_id), None)
+
+
+def _write_preview_lifecycle_cleanup_if_supported(
+    *, record_store: object, record: PreviewLifecycleCleanupRecord
+) -> str:
+    if not hasattr(record_store, "write_preview_lifecycle_cleanup_record"):
+        return ""
+    getattr(record_store, "write_preview_lifecycle_cleanup_record")(record)
+    return record.cleanup_id
+
+
 def create_launchplane_service_app(
     *,
     state_dir: Path,
@@ -1198,6 +1251,7 @@ def create_launchplane_service_app(
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
+        "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-plan",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
@@ -2701,6 +2755,73 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_lifecycle_plan_id": preview_lifecycle_plan_id}
+            elif path == "/v1/previews/lifecycle-cleanup":
+                request = PreviewLifecycleCleanupEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_lifecycle.cleanup",
+                    product=request.product,
+                    context=request.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot clean preview lifecycle for the requested"
+                                    " product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                plan = _latest_preview_lifecycle_plan(
+                    record_store=record_store,
+                    context_name=request.context,
+                    plan_id=request.plan_id,
+                )
+                if plan is None or plan.product != request.product:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=404,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "not_found",
+                                "message": "Preview lifecycle cleanup requires an existing plan for the requested product/context.",
+                            },
+                        },
+                    )
+                driver_result = build_preview_lifecycle_cleanup_record(
+                    plan=plan,
+                    requested_at=_utc_now_timestamp(),
+                    source=request.source,
+                    apply=request.apply,
+                    destroy_reason=request.destroy_reason,
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    timeout_seconds=request.timeout_seconds,
+                )
+                preview_lifecycle_cleanup_id = _write_preview_lifecycle_cleanup_if_supported(
+                    record_store=record_store,
+                    record=driver_result,
+                )
+                result = {"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id}
             else:
                 request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

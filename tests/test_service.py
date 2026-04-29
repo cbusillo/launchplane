@@ -23,6 +23,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewPullRequestSummary,
 )
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -2699,6 +2700,229 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["status"], "missing_inventory")
         self.assertEqual(payload["result"]["orphaned_slugs"], [])
         self.assertIn("has not recorded", payload["result"]["error_message"])
+
+    def test_preview_lifecycle_cleanup_endpoint_records_report_only_cleanup(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    planned_at="2026-04-29T19:58:38Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-verireel-testing-20260429T195837Z",
+                    actual_slugs=("pr-41",),
+                    orphaned_slugs=("pr-41",),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-cleanup",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    "source": "preview-janitor",
+                    "apply": False,
+                },
+            )
+
+            cleanup_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["preview_lifecycle_cleanup_id"], cleanup_records[0].cleanup_id)
+        self.assertEqual(payload["result"]["status"], "report_only")
+        self.assertEqual(payload["result"]["planned_slugs"], ["pr-41"])
+        self.assertEqual(cleanup_records[0].apply, False)
+        self.assertEqual(cleanup_records[0].plan_id, "preview-lifecycle-plan-verireel-testing-20260429T195838Z")
+
+    def test_preview_lifecycle_cleanup_endpoint_executes_and_records_destroyed_preview(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-41",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/every/verireel/pull/41",
+                    preview_label="verireel-testing/verireel#41",
+                    canonical_url="https://pr-41.preview.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    planned_at="2026-04-29T19:58:38Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-verireel-testing-20260429T195837Z",
+                    actual_slugs=("pr-41",),
+                    orphaned_slugs=("pr-41",),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.execute_verireel_preview_destroy",
+                return_value=VeriReelPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-04-29T20:00:00Z",
+                    destroy_finished_at="2026-04-29T20:00:05Z",
+                    application_name="ver-preview-pr-41-app",
+                    application_id="app-41",
+                    preview_url="https://pr-41.preview.example",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/lifecycle-cleanup",
+                    payload={
+                        "product": "verireel",
+                        "context": "verireel-testing",
+                        "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                        "source": "preview-janitor",
+                        "apply": True,
+                        "destroy_reason": "external_preview_janitor_cleanup_completed",
+                    },
+                )
+
+            updated_preview = FilesystemRecordStore(state_dir=root / "state").read_preview_record(
+                "preview-verireel-testing-verireel-pr-41"
+            )
+            cleanup_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["destroyed_slugs"], ["pr-41"])
+        self.assertEqual(execute_mock.call_count, 1)
+        self.assertEqual(updated_preview.state, "destroyed")
+        self.assertEqual(updated_preview.destroyed_at, "2026-04-29T20:00:05Z")
+        self.assertEqual(cleanup_records[0].status, "pass")
+
+    def test_preview_lifecycle_cleanup_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-cleanup",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "plan_id": "preview-lifecycle-plan-verireel-testing-20260429T195838Z",
+                    "apply": False,
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_verireel_prod_deploy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

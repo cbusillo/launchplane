@@ -475,11 +475,14 @@ the app repo sends PR/image intent, Launchplane derives the live preview URL
 from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that returned URL with
 generation status and cleanup outcome.
 
-Launchplane now owns the first report-only preview lifecycle planning boundary:
+Launchplane now owns the preview lifecycle planning boundary:
 `POST /v1/previews/lifecycle-plan`. Product repos can send desired preview
 anchors while Launchplane compares them against the latest recorded provider
 inventory scan, writes a durable lifecycle plan, and returns keep/orphaned/missing
-sets without executing cleanup. This is the first extraction step toward a
+sets. Cleanup requests go through `POST /v1/previews/lifecycle-cleanup`, which
+requires an existing plan id, defaults to report-only, and records cleanup
+results. Destructive provider cleanup still requires explicit `apply=true` from
+an authorized GitHub Actions workflow. This is the next extraction step toward a
 cross-repo preview system; product repos remain thin adapters for labels,
 artifact build facts, and product-specific health/config hints.
 
@@ -491,9 +494,7 @@ inside `.github/workflows/preview-control-plane.yml` and
 `.github/workflows/preview-janitor.yml` should use the same Launchplane destroy
 and evidence contract rather than keeping a second repo-local teardown path.
 Launchplane's handoff contract is moving from evidence-only toward reusable
-preview lifecycle ownership. The first safe step is report-only planning in
-Launchplane; cleanup execution and PR feedback ownership should move later after
-the durable plan record has proven useful. The target integration is
+preview lifecycle ownership. The target integration is
 OIDC-authenticated HTTP into Launchplane. The local CLI examples below exist only
 to pin the payload shape while the Launchplane service ingress continues to
 absorb the reusable lifecycle behavior.
