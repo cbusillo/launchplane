@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -19,7 +18,8 @@ class LaunchplaneIdempotencyRecord(BaseModel):
     response_payload: dict[str, Any]
 
 
-def build_launchplane_idempotency_record_id(*, scope: str, route_path: str, request_token: str) -> str:
-    normalized = f"{scope.strip()}\n{route_path.strip()}\n{request_token.strip()}"
-    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
-    return f"idempotency-{digest}"
+def build_launchplane_idempotency_record_id(*, response_trace_id: str) -> str:
+    normalized_trace_id = response_trace_id.strip()
+    if not normalized_trace_id:
+        raise ValueError("idempotency record id requires response_trace_id")
+    return f"idempotency-{normalized_trace_id}"

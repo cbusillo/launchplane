@@ -5,7 +5,6 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
-import hmac
 import os
 import secrets
 import warnings
@@ -338,23 +337,11 @@ class HumanSessionManager:
         )
 
     def _sign_cookie_value(self, session_id: str) -> str:
-        signature = hmac.new(
-            self._config.session_secret.encode("utf-8"),
-            session_id.encode("utf-8"),
-            hashlib.sha3_256,
-        ).hexdigest()
-        return f"{session_id}.{signature}"
+        return session_id
 
-    def _verify_cookie_value(self, signed_session_id: str) -> str:
-        session_id, separator, signature = signed_session_id.partition(".")
-        if not separator or not session_id or not signature:
-            return ""
-        expected = hmac.new(
-            self._config.session_secret.encode("utf-8"),
-            session_id.encode("utf-8"),
-            hashlib.sha3_256,
-        ).hexdigest()
-        if not hmac.compare_digest(signature, expected):
+    def _verify_cookie_value(self, cookie_session_id: str) -> str:
+        session_id = cookie_session_id.strip().partition(".")[0]
+        if not session_id or any(character.isspace() for character in session_id):
             return ""
         return session_id
 

@@ -17,7 +17,6 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -715,14 +714,13 @@ class PostgresRecordStore(HumanSessionStore):
         route_path: str,
         idempotency_key: str,
     ) -> LaunchplaneIdempotencyRecord | None:
-        record_id = build_launchplane_idempotency_record_id(
-            scope=scope,
-            route_path=route_path,
-            request_token=idempotency_key,
-        )
         statement = (
             select(LaunchplaneIdempotencyRow)
-            .where(LaunchplaneIdempotencyRow.record_id == record_id)
+            .where(
+                LaunchplaneIdempotencyRow.scope == scope,
+                LaunchplaneIdempotencyRow.route_path == route_path,
+                LaunchplaneIdempotencyRow.idempotency_key == idempotency_key,
+            )
             .limit(1)
         )
         with self._session_factory() as session:

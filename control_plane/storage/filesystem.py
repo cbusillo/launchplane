@@ -10,7 +10,6 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
-from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -126,17 +125,14 @@ class FilesystemRecordStore:
         route_path: str,
         idempotency_key: str,
     ) -> LaunchplaneIdempotencyRecord | None:
-        record_id = build_launchplane_idempotency_record_id(
-            scope=scope,
-            route_path=route_path,
-            request_token=idempotency_key,
-        )
-        record_path = self._record_path("idempotency", record_id)
-        if not record_path.exists():
-            return None
-        return LaunchplaneIdempotencyRecord.model_validate(
-            self._read_model(LaunchplaneIdempotencyRecord, "idempotency", record_id).model_dump(mode="json")
-        )
+        for record in self._list_models(LaunchplaneIdempotencyRecord, "idempotency"):
+            if (
+                record.scope == scope
+                and record.route_path == route_path
+                and record.idempotency_key == idempotency_key
+            ):
+                return record
+        return None
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:
         return self._write_model("backup_gates", record.record_id, record)
