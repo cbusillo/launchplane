@@ -79,9 +79,11 @@
       "checkSecurityAndQuality": true
     },
     "capabilities": {
-      "codeScanning": "unsupported",
-      "secretScanning": "unsupported",
+      "codeScanning": "available",
+      "secretScanning": "available",
+      "dependencyGraph": "available",
       "dependabotAlerts": "available",
+      "ghcrPackage": "available_private",
       "securityAdvisories": "unsupported"
     },
     "refreshWhen": [

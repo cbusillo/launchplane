@@ -460,7 +460,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 record_id=build_launchplane_idempotency_record_id(
                     scope="every/verireel|workflow|repo:every/verireel:pull_request",
                     route_path="/v1/evidence/previews/generations",
-                    idempotency_key="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
+                    request_token="preview-generation:verireel:verireel-testing:verireel:35:abcdef",
                 ),
                 scope="every/verireel|workflow|repo:every/verireel:pull_request",
                 route_path="/v1/evidence/previews/generations",

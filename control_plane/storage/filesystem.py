@@ -129,7 +129,7 @@ class FilesystemRecordStore:
         record_id = build_launchplane_idempotency_record_id(
             scope=scope,
             route_path=route_path,
-            idempotency_key=idempotency_key,
+            request_token=idempotency_key,
         )
         record_path = self._record_path("idempotency", record_id)
         if not record_path.exists():
