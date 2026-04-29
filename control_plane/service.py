@@ -786,6 +786,7 @@ def _accepted_payload(
                 "release_tuple_id",
                 "inventory_record_id",
                 "preview_id",
+                "preview_inventory_scan_id",
                 "generation_id",
                 "promotion_record_id",
                 "target_id",
@@ -1084,17 +1085,18 @@ def _write_preview_inventory_scan_if_supported(
     *,
     record_store: object,
     result: VeriReelPreviewInventoryResult,
-) -> None:
+) -> str:
     if not hasattr(record_store, "write_preview_inventory_scan_record"):
-        return
+        return ""
     scanned_at = _utc_now_timestamp()
     preview_slugs = tuple(item.previewSlug for item in result.previews)
+    scan_id = build_preview_inventory_scan_id(
+        context_name=result.context,
+        scanned_at=scanned_at,
+    )
     getattr(record_store, "write_preview_inventory_scan_record")(
         PreviewInventoryScanRecord(
-            scan_id=build_preview_inventory_scan_id(
-                context_name=result.context,
-                scanned_at=scanned_at,
-            ),
+            scan_id=scan_id,
             context=result.context,
             scanned_at=scanned_at,
             source="verireel-preview-inventory",
@@ -1103,6 +1105,7 @@ def _write_preview_inventory_scan_if_supported(
             preview_slugs=preview_slugs,
         )
     )
+    return scan_id
 
 
 def create_launchplane_service_app(
@@ -2478,11 +2481,11 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     request=request.inventory,
                 )
-                _write_preview_inventory_scan_if_supported(
+                preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
                     record_store=record_store,
                     result=driver_result,
                 )
-                result = {}
+                result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == "/v1/drivers/verireel/preview-destroy":
                 request = VeriReelPreviewDestroyEnvelope.model_validate(payload)
                 if not authz_policy.allows(
