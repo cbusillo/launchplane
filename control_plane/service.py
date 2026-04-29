@@ -124,6 +124,16 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+_LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
+    {
+        "LAUNCHPLANE_GITHUB_CLIENT_ID",
+        "LAUNCHPLANE_GITHUB_CLIENT_SECRET",
+        "LAUNCHPLANE_PUBLIC_URL",
+        "LAUNCHPLANE_SESSION_SECRET",
+        "LAUNCHPLANE_COOKIE_SECURE",
+        "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS",
+    }
+)
 
 
 class PreviewGenerationEvidenceEnvelope(BaseModel):
@@ -444,6 +454,7 @@ class LaunchplaneSelfDeployRequest(BaseModel):
     target_id: str
     image_reference: str
     policy_b64: str = ""
+    oauth_env: dict[str, str] = Field(default_factory=dict)
     no_cache: bool = False
 
     @model_validator(mode="after")
@@ -470,6 +481,21 @@ class LaunchplaneSelfDeployRequest(BaseModel):
         self.target_id = self.target_id.strip()
         self.image_reference = self.image_reference.strip()
         self.policy_b64 = normalized_policy_b64
+        normalized_oauth_env: dict[str, str] = {}
+        for env_key, raw_value in self.oauth_env.items():
+            normalized_key = env_key.strip()
+            if normalized_key not in _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS:
+                raise ValueError(
+                    f"Launchplane self deploy does not accept oauth_env key {normalized_key!r}."
+                )
+            normalized_value = raw_value.strip()
+            if "\n" in normalized_value or "\r" in normalized_value:
+                raise ValueError(
+                    f"Launchplane self deploy oauth_env key {normalized_key!r} must be a single line."
+                )
+            if normalized_value:
+                normalized_oauth_env[normalized_key] = normalized_value
+        self.oauth_env = normalized_oauth_env
         return self
 
 
@@ -1002,6 +1028,7 @@ def _request_launchplane_self_deploy(
     raw_env_text = str(target_payload.get("env") or "")
     previous_env_map = control_plane_dokploy.parse_dokploy_env_text(raw_env_text)
     updates = {_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY: request.image_reference}
+    updates.update(request.oauth_env)
     removals: tuple[str, ...] = ()
     if request.policy_b64:
         updates["LAUNCHPLANE_POLICY_B64"] = request.policy_b64
@@ -1039,6 +1066,11 @@ def _request_launchplane_self_deploy(
             hashlib.sha256(base64.b64decode(request.policy_b64, validate=True)).hexdigest()
             if request.policy_b64
             else ""
+        ),
+        "oauth_env_keys_changed": sorted(
+            env_key
+            for env_key in request.oauth_env
+            if previous_env_map.get(env_key, "") != request.oauth_env[env_key]
         ),
     }
 

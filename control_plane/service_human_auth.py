@@ -26,6 +26,7 @@ GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
 GITHUB_ORGS_URL = "https://api.github.com/user/orgs"
 GITHUB_TEAMS_URL = "https://api.github.com/user/teams"
+GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 SESSION_COOKIE_NAME = "launchplane_session"
 SESSION_TTL_SECONDS = 12 * 60 * 60
 OAUTH_STATE_TTL_SECONDS = 10 * 60
@@ -38,7 +39,8 @@ class GitHubOAuthConfig:
     public_url: str
     session_secret: str
     cookie_secure: bool = True
-    scopes: tuple[str, ...] = ("read:user", "read:org")
+    scopes: tuple[str, ...] = ("read:user", "read:org", "user:email")
+    bootstrap_admin_emails: frozenset[str] = frozenset()
 
     @property
     def redirect_uri(self) -> str:
@@ -121,12 +123,19 @@ def load_github_oauth_config_from_env() -> GitHubOAuthConfig | None:
         return None
     secure_env = os.environ.get("LAUNCHPLANE_COOKIE_SECURE", "").strip().lower()
     cookie_secure = secure_env not in {"0", "false", "no"}
+    bootstrap_admin_emails = frozenset(
+        email.lower()
+        for email in _split_env_values(
+            os.environ.get("LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS", "")
+        )
+    )
     return GitHubOAuthConfig(
         client_id=client_id,
         client_secret=client_secret,
         public_url=public_url,
         session_secret=session_secret,
         cookie_secure=cookie_secure,
+        bootstrap_admin_emails=bootstrap_admin_emails,
     )
 
 
@@ -188,31 +197,69 @@ class GitHubOAuthClient:
         user_payload = client.get(GITHUB_USER_URL).json()
         org_payload = client.get(GITHUB_ORGS_URL).json()
         team_payload = client.get(GITHUB_TEAMS_URL).json()
+        email_payload = client.get(GITHUB_EMAILS_URL).json()
         login = str(user_payload.get("login", "")).strip()
         if not login:
             raise ValueError("GitHub OAuth user response did not include a login.")
+        public_email = str(user_payload.get("email") or "").strip()
+        verified_emails = _verified_email_addresses(email_payload)
+        primary_email = _primary_email_address(email_payload)
+        email_candidates = {email.lower() for email in verified_emails}
+        if public_email:
+            email_candidates.add(public_email.lower())
         organizations = frozenset(
             str(org.get("login", "")).strip()
             for org in org_payload
             if isinstance(org, dict) and str(org.get("login", "")).strip()
         )
         teams = frozenset(_team_names(team_payload))
-        role = authz_policy.human_role_for(
-            login=login,
-            organizations=organizations,
-            teams=teams,
-        )
+        if self._config.bootstrap_admin_emails.intersection(email_candidates):
+            role: str | None = "admin"
+        else:
+            role = authz_policy.human_role_for(
+                login=login,
+                organizations=organizations,
+                teams=teams,
+            )
         if role is None:
             raise PermissionError("GitHub user is not authorized for Launchplane.")
         return GitHubHumanIdentity(
             login=login,
             github_id=int(user_payload.get("id") or 0),
             name=str(user_payload.get("name") or "").strip(),
-            email=str(user_payload.get("email") or "").strip(),
+            email=primary_email or public_email or next(iter(verified_emails), ""),
             organizations=organizations,
             teams=teams,
             role=role,
         )
+
+
+def _split_env_values(raw_value: str) -> tuple[str, ...]:
+    return tuple(value.strip() for value in raw_value.split(",") if value.strip())
+
+
+def _verified_email_addresses(email_payload: object) -> tuple[str, ...]:
+    if not isinstance(email_payload, list):
+        return ()
+    emails: list[str] = []
+    for item in email_payload:
+        if not isinstance(item, dict) or item.get("verified") is not True:
+            continue
+        email = str(item.get("email") or "").strip()
+        if email:
+            emails.append(email)
+    return tuple(emails)
+
+
+def _primary_email_address(email_payload: object) -> str:
+    if not isinstance(email_payload, list):
+        return ""
+    for item in email_payload:
+        if not isinstance(item, dict):
+            continue
+        if item.get("primary") is True and item.get("verified") is True:
+            return str(item.get("email") or "").strip()
+    return ""
 
 
 def _team_names(team_payload: object) -> tuple[str, ...]:

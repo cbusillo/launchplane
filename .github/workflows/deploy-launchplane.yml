@@ -45,6 +45,12 @@ jobs:
       LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS: ${{ vars.LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS }}
       LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS: ${{ vars.LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS }}
       LAUNCHPLANE_IMAGE_REPOSITORY: ${{ vars.LAUNCHPLANE_IMAGE_REPOSITORY }}
+      LAUNCHPLANE_GITHUB_CLIENT_ID: ${{ vars.LAUNCHPLANE_GITHUB_CLIENT_ID }}
+      LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_COOKIE_SECURE: ${{ vars.LAUNCHPLANE_COOKIE_SECURE }}
+      LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: ${{ vars.LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS }}
+      LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
+      LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
     steps:
       - name: Resolve deploy inputs
         id: prep
@@ -194,6 +200,7 @@ jobs:
             local response_file="$2"
             local request_payload=""
             local idempotency_key=""
+            local oauth_env_json=""
             local oidc_token=""
 
             oidc_token="$({
@@ -204,13 +211,31 @@ jobs:
             })"
 
             if [ "$mode" = "with-policy" ]; then
+              oauth_env_json="$({
+                jq -n \
+                  --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
+                  --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
+                  --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
+                  --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
+                  --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
+                  --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
+                  '{
+                    LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
+                    LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
+                    LAUNCHPLANE_PUBLIC_URL: $public_url,
+                    LAUNCHPLANE_SESSION_SECRET: $session_secret,
+                    LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
+                    LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                  } | with_entries(select(.value != ""))'
+              })"
               request_payload="$({
                 jq -n \
                   --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
                   --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
                   --arg image_reference "${{ steps.image.outputs.image_reference }}" \
                   --arg policy_b64 "${{ steps.policy.outputs.policy_b64 }}" \
-                  '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, policy_b64: $policy_b64}}'
+                  --argjson oauth_env "$oauth_env_json" \
+                  '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference, policy_b64: $policy_b64} + (if ($oauth_env | length) > 0 then {oauth_env: $oauth_env} else {} end))}'
               })"
               idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ steps.policy.outputs.policy_sha256 }}"
             else
@@ -359,13 +384,32 @@ jobs:
             | jq -r '.value'
           })"
 
+          oauth_env_json="$({
+            jq -n \
+              --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
+              --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
+              --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
+              --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
+              --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
+              --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
+              '{
+                LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
+                LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
+                LAUNCHPLANE_PUBLIC_URL: $public_url,
+                LAUNCHPLANE_SESSION_SECRET: $session_secret,
+                LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
+                LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+              } | with_entries(select(.value != ""))'
+          })"
+
           request_payload="$({
             jq -n \
               --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
               --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
               --arg image_reference "${{ steps.image.outputs.image_reference }}" \
               --arg policy_b64 "${{ steps.policy.outputs.policy_b64 }}" \
-              '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, policy_b64: $policy_b64}}'
+              --argjson oauth_env "$oauth_env_json" \
+              '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference, policy_b64: $policy_b64} + (if ($oauth_env | length) > 0 then {oauth_env: $oauth_env} else {} end))}'
           })"
 
           response_file="$(mktemp)"
