@@ -577,7 +577,7 @@ def _serve_ui_route(
     if not index_path.is_file():
         return _not_found_response(start_response=start_response, trace_id=trace_id, path=path)
 
-    if path in {"/ui", "/ui/"}:
+    if path in {"/", "/ui", "/ui/"}:
         return _ui_file_response(
             start_response=start_response,
             file_path=index_path,
@@ -1009,7 +1009,7 @@ def create_launchplane_service_app(
         request_trace_id = _trace_id()
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
         path = str(environ.get("PATH_INFO", ""))
-        if method == "GET" and (path == "/ui" or path.startswith("/ui/")):
+        if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
             return _serve_ui_route(
                 start_response=start_response,
                 trace_id=request_trace_id,
