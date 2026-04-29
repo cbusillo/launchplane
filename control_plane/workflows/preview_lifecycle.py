@@ -14,6 +14,7 @@ def build_preview_lifecycle_plan(
     source: str,
     desired_previews: tuple[PreviewLifecycleDesiredPreview, ...],
     latest_inventory_scan: PreviewInventoryScanRecord | None,
+    desired_state_id: str = "",
 ) -> PreviewLifecyclePlanRecord:
     desired_by_slug = {
         preview.preview_slug.strip(): preview.model_copy(
@@ -32,6 +33,7 @@ def build_preview_lifecycle_plan(
             planned_at=planned_at,
             source=source,
             status="missing_inventory",
+            desired_state_id=desired_state_id,
             desired_previews=normalized_desired_previews,
             desired_slugs=desired_slugs,
             error_message="Launchplane has not recorded a preview inventory scan for this context.",
@@ -47,6 +49,7 @@ def build_preview_lifecycle_plan(
         planned_at=planned_at,
         source=source,
         status="pass" if latest_inventory_scan.status == "pass" else "fail",
+        desired_state_id=desired_state_id,
         inventory_scan_id=latest_inventory_scan.scan_id,
         desired_previews=normalized_desired_previews,
         desired_slugs=desired_slugs,

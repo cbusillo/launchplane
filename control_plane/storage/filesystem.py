@@ -12,6 +12,7 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -328,6 +329,27 @@ class FilesystemRecordStore:
             if not context_name or record.context == context_name
         ]
         records.sort(key=lambda record: (record.scanned_at, record.scan_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_desired_state_record(self, record: PreviewDesiredStateRecord) -> Path:
+        return self._write_model("launchplane_preview_desired_states", record.desired_state_id, record)
+
+    def list_preview_desired_state_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewDesiredStateRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewDesiredStateRecord, "launchplane_preview_desired_states"
+            )
+            if not context_name or record.context == context_name
+        ]
+        records.sort(key=lambda record: (record.discovered_at, record.desired_state_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)

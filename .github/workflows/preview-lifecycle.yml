@@ -1,0 +1,145 @@
+---
+name: Preview Lifecycle
+
+"on":
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Apply orphan preview cleanup instead of reporting only.
+        required: true
+        default: false
+        type: boolean
+  schedule:
+    - cron: "17 5 * * *"
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-preview-lifecycle-verireel-testing
+  cancel-in-progress: false
+
+jobs:
+  verireel_testing:
+    runs-on:
+      - self-hosted
+      - chris-testing
+    env:
+      APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply || false }}
+      LAUNCHPLANE_AUDIENCE: launchplane.shinycomputers.com
+      LAUNCHPLANE_URL: https://launchplane.shinycomputers.com
+      PRODUCT: verireel
+      CONTEXT: verireel-testing
+      SOURCE: launchplane-preview-lifecycle
+      REPOSITORY: cbusillo/verireel
+      ANCHOR_REPO: verireel
+      PREVIEW_LABEL: preview
+
+    steps:
+      - name: Run Launchplane-owned preview lifecycle
+        run: |
+          set -euo pipefail
+
+          oidc_response="$(curl -fsS \
+            -H "Authorization: Bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_AUDIENCE}")"
+          oidc_token="$(jq -r '.value // empty' <<< "$oidc_response")"
+          if [ -z "$oidc_token" ]; then
+            echo 'GitHub OIDC token response did not include a token value.' >&2
+            exit 1
+          fi
+
+          post_launchplane_json() {
+            local route="$1"
+            local idempotency_key="$2"
+            local payload="$3"
+            curl -fsS \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Accept: application/json' \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: ${idempotency_key}" \
+              --data "$payload" \
+              "${LAUNCHPLANE_URL}${route}"
+          }
+
+          run_identity="${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          apply_json='false'
+          if [ "$APPLY" = 'true' ]; then
+            apply_json='true'
+          fi
+
+          inventory_payload="$(jq -nc \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            '{schema_version: 1, product: $product, inventory: {context: $context}}')"
+          inventory_response="$(post_launchplane_json \
+            '/v1/drivers/verireel/preview-inventory' \
+            "preview-inventory:${CONTEXT}:${run_identity}" \
+            "$inventory_payload")"
+          echo "$inventory_response" | jq .
+
+          desired_payload="$(jq -nc \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg source "$SOURCE" \
+            --arg repository "$REPOSITORY" \
+            --arg label "$PREVIEW_LABEL" \
+            --arg anchor_repo "$ANCHOR_REPO" \
+            '{schema_version: 1, product: $product, context: $context, source: $source, repository: $repository, label: $label, anchor_repo: $anchor_repo}')"
+          desired_response="$(post_launchplane_json \
+            '/v1/previews/desired-state' \
+            "preview-desired-state:${CONTEXT}:${run_identity}" \
+            "$desired_payload")"
+          echo "$desired_response" | jq .
+          desired_status="$(jq -r '.result.status // empty' <<< "$desired_response")"
+          if [ "$desired_status" != 'pass' ]; then
+            echo 'Preview desired-state discovery did not pass.' >&2
+            exit 1
+          fi
+
+          desired_previews="$(jq -c '.result.desired_previews // []' <<< "$desired_response")"
+          desired_state_id="$(jq -r '.records.preview_desired_state_id // empty' <<< "$desired_response")"
+          plan_payload="$(jq -nc \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg source "$SOURCE" \
+            --arg desired_state_id "$desired_state_id" \
+            --argjson desired_previews "$desired_previews" \
+            '{schema_version: 1, product: $product, context: $context, source: $source, desired_state_id: $desired_state_id, desired_previews: $desired_previews}')"
+          plan_response="$(post_launchplane_json \
+            '/v1/previews/lifecycle-plan' \
+            "preview-lifecycle-plan:${CONTEXT}:${run_identity}" \
+            "$plan_payload")"
+          echo "$plan_response" | jq .
+          plan_id="$(jq -r '.records.preview_lifecycle_plan_id // empty' <<< "$plan_response")"
+          if [ -z "$plan_id" ]; then
+            echo 'Preview lifecycle plan response did not include a plan id.' >&2
+            exit 1
+          fi
+
+          cleanup_payload="$(jq -nc \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg source "$SOURCE" \
+            --arg plan_id "$plan_id" \
+            --argjson apply "$apply_json" \
+            '{schema_version: 1, product: $product, context: $context, source: $source, plan_id: $plan_id, apply: $apply, destroy_reason: "launchplane_preview_lifecycle_cleanup", timeout_seconds: 300}')"
+          cleanup_response="$(post_launchplane_json \
+            '/v1/previews/lifecycle-cleanup' \
+            "preview-lifecycle-cleanup:${CONTEXT}:${run_identity}:${apply_json}" \
+            "$cleanup_payload")"
+          echo "$cleanup_response" | jq .
+
+          {
+            echo '## Launchplane preview lifecycle'
+            echo
+            echo "- Desired state: $(jq -r '.records.preview_desired_state_id // empty' <<< "$desired_response")"
+            echo "- Lifecycle plan: ${plan_id}"
+            echo "- Cleanup: $(jq -r '.records.preview_lifecycle_cleanup_id // empty' <<< "$cleanup_response")"
+            echo "- Apply: ${apply_json}"
+            echo "- Desired previews: $(jq -r '.result.desired_count // 0' <<< "$desired_response")"
+            echo "- Orphaned previews: $(jq -r '.result.orphaned_slugs | length' <<< "$plan_response")"
+            echo "- Cleanup status: $(jq -r '.result.status // empty' <<< "$cleanup_response")"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -475,19 +475,17 @@ the app repo sends PR/image intent, Launchplane derives the live preview URL
 from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that returned URL with
 generation status and cleanup outcome.
 
-Launchplane now owns the preview lifecycle planning boundary:
-`POST /v1/previews/lifecycle-plan`. Product repos can send desired preview
-anchors while Launchplane compares them against the latest recorded provider
-inventory scan, writes a durable lifecycle plan, and returns keep/orphaned/missing
-sets. Cleanup requests go through `POST /v1/previews/lifecycle-cleanup`, which
-requires an existing plan id, defaults to report-only, and records cleanup
-results. Destructive provider cleanup still requires explicit `apply=true` from
-an authorized GitHub Actions workflow. PR feedback goes through
-`POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
-comment when runtime GitHub credentials are available, then records delivery
-status. This is the next extraction step toward a cross-repo preview system;
-product repos remain thin adapters for labels, artifact build facts, and
-product-specific health/config hints.
+Launchplane now owns the preview lifecycle planning boundary. The scheduled
+Launchplane `Preview Lifecycle` workflow discovers desired preview anchors from
+GitHub PR label state through `POST /v1/previews/desired-state`, refreshes the
+provider inventory, calls `POST /v1/previews/lifecycle-plan`, then records
+cleanup through `POST /v1/previews/lifecycle-cleanup`. Cleanup defaults to
+report-only and destructive provider cleanup still requires explicit
+`apply=true` from an authorized GitHub Actions workflow. PR feedback goes
+through `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the
+anchored PR comment when runtime GitHub credentials are available, then records
+delivery status. Product repos remain thin adapters for labels, artifact build
+facts, and product-specific health/config hints.
 
 ### VeriReel Preview Evidence Handoff
 
