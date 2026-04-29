@@ -60,9 +60,9 @@ as a compatibility alias. Built assets live under `/ui/assets/...`, while
 `/ui/*` falls back to the app shell so the frontend can own client-side routes.
 Versioned API ingress remains under `/v1`.
 
-## First Host Assumption
+## Host Assumption
 
-- Launchplane runs behind `https://launchplane.shinycomputers.com`.
+- Launchplane runs behind an operator-owned HTTPS host.
 - Launchplane exposes versioned API ingress under `/v1`.
 - Launchplane returns JSON for both success and failure cases.
 
@@ -94,9 +94,9 @@ Launchplane should verify:
 - signature validates against GitHub's published keys
 - token is not expired and is valid for current time
 
-Recommended first audience:
+Recommended audience:
 
-- `launchplane.shinycomputers.com`
+- the Launchplane service host name
 
 That keeps the audience tied to the Launchplane service identity instead of to a
 temporary repo or local CLI name.
@@ -221,8 +221,8 @@ allowed actions:
 Odoo stable-lane example:
 
 ```text
-repository: example-org/tenant-opw
-workflow_ref: example-org/tenant-opw/.github/workflows/deploy-odoo.yml@refs/heads/main
+repository: example-org/product-repo
+workflow_ref: example-org/product-repo/.github/workflows/deploy-product.yml@refs/heads/main
 event_name: workflow_dispatch
 allowed product: odoo
 allowed contexts: opw
@@ -375,11 +375,9 @@ image, verifies health, and writes durable rollback/deployment/inventory/release
 tuple evidence. Local Odoo runtime commands remain in `odoo-devkit`; these
 drivers are for remote control-plane execution only.
 
-VeriReel prod rollback now has a dedicated Launchplane driver route, but it
-still depends on a privileged delegated-worker runtime contract for Proxmox
-access rather than folding that authority into the main API host. The runtime
-posture and remaining decisions are captured in
-[`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
+Privileged product rollback actions should use a narrow delegated-worker runtime
+contract when they require network reach or host authority that does not belong
+inside the main Launchplane API container.
 
 Do not generalize the full driver surface before a few product-specific routes
 have proven the shape.
@@ -476,7 +474,7 @@ CLI adapters and expose them over HTTP.
     "anchor_repo": "verireel",
     "anchor_pr_number": 123,
     "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
-    "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
+    "canonical_url": "https://pr-123.preview.example.com",
     "state": "active",
     "updated_at": "2026-04-16T08:10:00Z",
     "eligible_at": "2026-04-16T08:10:00Z"

@@ -16,9 +16,6 @@ Use these docs as the source of truth for `launchplane`.
 - [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
   review rubric.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
-- [verireel-prod-rollback-runtime.md](verireel-prod-rollback-runtime.md) —
-  proposed runtime contract for moving VeriReel prod rollback behind
-  Launchplane-owned execution.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria
   before making Launchplane public.

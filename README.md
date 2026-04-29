@@ -1,27 +1,27 @@
 # launchplane
 
-Odoo control-plane repo for release records, environment operations,
-Launchplane preview state, and promotion orchestration.
+Launchplane control-plane repo for release records, environment operations,
+preview state, and promotion orchestration.
 
 ## Purpose
 
-- Own the current Odoo Launchplane operator surface for durable deployment truth.
+- Own the Launchplane operator surface for durable deployment truth.
 - Own artifact, backup-gate, deployment, promotion, and inventory records
   outside the code and local-DX repos.
 - Own ship and promotion orchestration behind explicit control-plane
   contracts.
-- Keep code and local DX in `odoo-devkit`, tenant repos, and shared-addons,
-  with only explicit artifact and operator handoffs into this repo.
+- Keep product code and local DX in product repos, with only explicit artifact
+  and operator handoffs into this repo.
 
-This repo's docs describe the implemented Odoo control-plane contracts that
-exist today. Launchplane is the operator surface name used inside this repo today;
-this repository is still the Odoo-specific implementation, not a standalone
-general Launchplane repo. Broader Launchplane product direction stays in saved plans
-until matching generic code and operator surfaces exist.
+This repo's docs describe the implemented Launchplane contracts that exist
+today. Some drivers are intentionally product-specific because they are the
+current proving grounds for the shared control-plane boundary; live customer,
+tenant, and runtime authority belongs outside git in Launchplane records and
+private product repos.
 
-The target shape is now explicit: Launchplane should become a long-running control
-plane service with authenticated ingress, rather than treating the repo-local
-CLI as the permanent cross-product boundary.
+The target shape is explicit: Launchplane is a long-running control-plane
+service with authenticated ingress, rather than a repo-local CLI as the
+permanent cross-product boundary.
 
 That rename has now started at the repo and CLI surface. The internal Python
 module layout still uses `control_plane` for continuity during the transition,
@@ -153,13 +153,13 @@ to read or write DB-backed managed secrets. Dokploy credentials now resolve
 from Launchplane-managed secrets only, and ship-mode overrides belong in
 runtime-environment records instead of process env.
 
-The intended first real Launchplane bring-up path is GitHub-driven deploy, not a
-manual laptop-side image swap. The current operator posture is:
+The intended Launchplane bring-up path is GitHub-driven deploy, not a manual
+laptop-side image swap. The current operator posture is:
 
 - `CI` remains the separate test gate and must pass before Launchplane deploy
   automation replaces the live Dokploy app.
-- Launchplane currently targets a single real Dokploy-hosted service instance,
-  without a separate Launchplane testing lane yet.
+- Launchplane currently targets a single Dokploy-hosted service instance unless
+  an operator configures additional service lanes.
 - Deploys should update Dokploy by immutable image digest and capture the
   previously running digest before replacement.
 - Deploy automation should verify Launchplane health after rollout and immediately
@@ -225,8 +225,8 @@ before launch or handoff:
 
 ```bash
 uv run launchplane service inspect-data-freshness \
-  --context verireel \
-  --preview-context verireel-testing
+  --context <product> \
+  --preview-context <product-preview-context>
 ```
 
 The first freshness gate reports lane and preview surfaces, their source record,
@@ -236,20 +236,21 @@ and whether provenance is present. The UI renders the same provenance as compact
 The deploy path still depends on two Dokploy-side prerequisites that Launchplane can
 document but cannot fully validate through the current Dokploy API surface:
 
-- Dokploy must have a working saved registry credential for the Launchplane GHCR
-  image repository.
+- Dokploy must be able to pull the Launchplane GHCR image repository. Public
+  images may not require a saved registry credential, while private images do.
 - The dedicated Postgres service referenced by `LAUNCHPLANE_DATABASE_URL` must
   already be deployed and reachable on the Dokploy network before Launchplane is
   redeployed.
 
 Manual `workflow_dispatch` may also deploy an explicit prior image reference,
-which acts as the first operator rollback path while Launchplane still has only one
-real Dokploy-hosted service instance.
+which acts as the first operator rollback path.
 
-## Public Readiness
+## Public Posture
 
-The repo is not ready to flip public blindly yet. The current gap list and the
-cleanup needed before that move live in [docs/public-readiness.md](docs/public-readiness.md).
+The repo is designed to be public source code. Runtime secrets, target IDs,
+operator catalogs, and product-specific authorization policy stay outside git in
+Launchplane records, GitHub environment/secret settings, or private product
+repos. See [docs/public-readiness.md](docs/public-readiness.md).
 
 ## Docs
 

@@ -17,26 +17,39 @@ permissions:
   id-token: write
 
 concurrency:
-  group: launchplane-preview-lifecycle-verireel-testing
+  group: >-
+    launchplane-preview-lifecycle-${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_CONTEXT || 'default' }}
   cancel-in-progress: false
 
 jobs:
-  verireel_testing:
+  preview_lifecycle:
     runs-on:
       - self-hosted
-      - chris-testing
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
     env:
       APPLY: ${{ github.event_name == 'workflow_dispatch' && inputs.apply || false }}
-      LAUNCHPLANE_AUDIENCE: launchplane.shinycomputers.com
-      LAUNCHPLANE_URL: https://launchplane.shinycomputers.com
-      PRODUCT: verireel
-      CONTEXT: verireel-testing
-      SOURCE: launchplane-preview-lifecycle
-      REPOSITORY: cbusillo/verireel
-      ANCHOR_REPO: verireel
-      PREVIEW_LABEL: preview
+      LAUNCHPLANE_AUDIENCE: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_AUDIENCE }}
+      LAUNCHPLANE_URL: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_URL }}
+      PRODUCT: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_PRODUCT }}
+      CONTEXT: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_CONTEXT }}
+      SOURCE: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_SOURCE || 'launchplane-preview-lifecycle' }}
+      REPOSITORY: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_REPOSITORY }}
+      ANCHOR_REPO: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_ANCHOR_REPO }}
+      PREVIEW_LABEL: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_LABEL || 'preview' }}
+      INVENTORY_ROUTE: ${{ vars.LAUNCHPLANE_PREVIEW_LIFECYCLE_INVENTORY_ROUTE }}
 
     steps:
+      - name: Validate preview lifecycle configuration
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_AUDIENCE:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_AUDIENCE variable}"
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_URL variable}"
+          : "${PRODUCT:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_PRODUCT variable}"
+          : "${CONTEXT:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_CONTEXT variable}"
+          : "${REPOSITORY:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_REPOSITORY variable}"
+          : "${ANCHOR_REPO:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_ANCHOR_REPO variable}"
+          : "${INVENTORY_ROUTE:?Missing LAUNCHPLANE_PREVIEW_LIFECYCLE_INVENTORY_ROUTE variable}"
+
       - name: Run Launchplane-owned preview lifecycle
         run: |
           set -euo pipefail
@@ -75,7 +88,7 @@ jobs:
             --arg context "$CONTEXT" \
             '{schema_version: 1, product: $product, inventory: {context: $context}}')"
           inventory_response="$(post_launchplane_json \
-            '/v1/drivers/verireel/preview-inventory' \
+            "$INVENTORY_ROUTE" \
             "preview-inventory:${CONTEXT}:${run_identity}" \
             "$inventory_payload")"
           echo "$inventory_response" | jq .
