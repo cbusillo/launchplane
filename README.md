@@ -221,6 +221,20 @@ when the target lacks a policy input, DB-backed target-id records, DB-backed
 runtime-environment records, or an existing `DOCKER_IMAGE_REFERENCE` rollback
 baseline.
 
+Operator UI data is record-backed evidence rather than an unlabeled live provider
+poll. Use the data freshness report to confirm visible surfaces carry provenance
+before launch or handoff:
+
+```bash
+uv run launchplane service inspect-data-freshness \
+  --context verireel \
+  --preview-context verireel-testing
+```
+
+The first freshness gate reports lane and preview surfaces, their source record,
+and whether provenance is present. The UI renders the same provenance as compact
+`verified`, `recorded`, `stale`, `missing`, or `unsupported` trust labels.
+
 The deploy path still depends on two Dokploy-side prerequisites that Launchplane can
 document but cannot fully validate through the current Dokploy API surface:
 

@@ -23,6 +23,7 @@ import { ReactNode, useEffect, useMemo, useState } from "react";
 import { LaunchplaneApiError, listDrivers, logout, readAuthSession, readDriverView } from "./api";
 import type {
   AuthIdentity,
+  DataProvenance,
   DriverActionDescriptor,
   DriverContextView,
   DriverDescriptor,
@@ -30,7 +31,8 @@ import type {
   LaneSummary,
   PreviewSummary,
   Safety,
-  Status
+  Status,
+  FreshnessStatus
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -520,7 +522,16 @@ function LanePanel({
 
   return (
     <section className={`panel lane-panel lane-${laneKind}`}>
-      <PanelHead eyebrow="environment lane" title={title} right={<StatusPill status={worstStatus([deployStatus, healthStatus])} />} />
+      <PanelHead
+        eyebrow="environment lane"
+        title={title}
+        right={(
+          <div className="panel-badges">
+            <TrustBadge provenance={lane?.provenance ?? null} />
+            <StatusPill status={worstStatus([deployStatus, healthStatus])} />
+          </div>
+        )}
+      />
       {loading ? (
         <SkeletonRows />
       ) : (
@@ -649,7 +660,12 @@ function PreviewInventory({
       <PanelHead
         eyebrow="preview lane"
         title={exposesPreviews ? "Preview inventory" : "Previews not exposed"}
-        right={exposesPreviews ? <span className="count-chip">{previews.length} active</span> : null}
+        right={(
+          <div className="panel-badges">
+            <TrustBadge provenance={previewInventoryProvenance(exposesPreviews, latestPreview)} />
+            {exposesPreviews ? <span className="count-chip">{previews.length} active</span> : null}
+          </div>
+        )}
       />
       {loading ? (
         <SkeletonRows />
@@ -668,7 +684,10 @@ function PreviewInventory({
                   <a href={summary.preview.anchor_pr_url}>{summary.preview.anchor_repo}#{summary.preview.anchor_pr_number}</a>
                 </div>
                 <code>{summary.latest_generation?.artifact_id ?? summary.preview.preview_id}</code>
-                <StatusPill status={health} />
+                <div className="preview-status-stack">
+                  <TrustBadge provenance={summary.provenance} compact />
+                  <StatusPill status={health} />
+                </div>
               </article>
             );
           })}
@@ -690,6 +709,92 @@ function PreviewInventory({
       </div>
     </section>
   );
+}
+
+function TrustBadge({ provenance, compact = false }: { provenance: DataProvenance | null; compact?: boolean }) {
+  const status = provenance?.freshness_status ?? "missing";
+  return (
+    <span
+      className={`trust-badge trust-${status}${compact ? " trust-compact" : ""}`}
+      title={provenanceDetail(provenance)}
+      data-freshness={status}
+    >
+      <span>{freshnessLabel(status)}</span>
+      {!compact ? <em>{provenanceSubLabel(provenance)}</em> : null}
+    </span>
+  );
+}
+
+function previewInventoryProvenance(exposesPreviews: boolean, latestPreview: PreviewSummary | undefined): DataProvenance {
+  if (!exposesPreviews) {
+    return {
+      source_kind: "unsupported",
+      source_record_id: "",
+      recorded_at: "",
+      refreshed_at: "",
+      freshness_status: "unsupported",
+      stale_after: "",
+      detail: "Driver does not expose preview lifecycle."
+    };
+  }
+  if (!latestPreview) {
+    return {
+      source_kind: "record",
+      source_record_id: "",
+      recorded_at: "",
+      refreshed_at: "",
+      freshness_status: "missing",
+      stale_after: "",
+      detail: "Launchplane has not recorded active preview inventory for this context."
+    };
+  }
+  return latestPreview.provenance;
+}
+
+function freshnessLabel(status: FreshnessStatus): string {
+  if (status === "verified") {
+    return "verified";
+  }
+  if (status === "recorded") {
+    return "recorded";
+  }
+  if (status === "stale") {
+    return "stale";
+  }
+  if (status === "unsupported") {
+    return "unsupported";
+  }
+  return "missing";
+}
+
+function provenanceSubLabel(provenance: DataProvenance | null): string {
+  if (!provenance) {
+    return "no evidence";
+  }
+  if (provenance.freshness_status === "unsupported") {
+    return provenance.source_kind;
+  }
+  if (provenance.refreshed_at) {
+    return formatTime(provenance.refreshed_at);
+  }
+  if (provenance.recorded_at) {
+    return formatTime(provenance.recorded_at);
+  }
+  return provenance.source_record_id ? "recorded" : "no evidence";
+}
+
+function provenanceDetail(provenance: DataProvenance | null): string {
+  if (!provenance) {
+    return "Launchplane has not recorded provenance for this surface.";
+  }
+  const parts = [provenance.detail];
+  if (provenance.source_record_id) {
+    parts.push(`source: ${provenance.source_record_id}`);
+  }
+  if (provenance.stale_after) {
+    parts.push(`stale after: ${formatTime(provenance.stale_after)}`);
+  }
+  return parts.filter(Boolean).join(" | ");
 }
 
 function ActionList({
@@ -1414,7 +1519,16 @@ function fixtureLane({
           evidence: backupStatus === "pass" ? { snapshot: "fixture-prod" } : {}
         }
       : null,
-    secret_bindings: []
+    secret_bindings: [],
+    provenance: {
+      source_kind: "record",
+      source_record_id: `fixture-deployment-${instance}`,
+      recorded_at: deploy.finished_at,
+      refreshed_at: deploy.finished_at,
+      freshness_status: "verified",
+      stale_after: "2026-04-28T15:35:00Z",
+      detail: "Development fixture lane evidence."
+    }
   };
 }
 

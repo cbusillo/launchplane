@@ -128,6 +128,7 @@ p {
 .icon-button,
 .command-button,
 .status-pill,
+.trust-badge,
 .count-chip,
 .action-group-title,
 .bridge-delta,
@@ -370,6 +371,19 @@ p {
   min-height: 28px;
 }
 
+.panel-badges,
+.preview-status-stack {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  min-width: 0;
+}
+
+.panel-badges {
+  flex-wrap: wrap;
+}
+
 .lane-body,
 .gate-list,
 .action-groups,
@@ -514,6 +528,60 @@ p {
   white-space: nowrap;
 }
 
+.trust-badge {
+  gap: 5px;
+  min-height: 24px;
+  max-width: 190px;
+  border: 1px solid var(--hair);
+  border-radius: 5px;
+  background: var(--bg-2);
+  padding: 2px 7px;
+  color: var(--fg-muted);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.trust-badge span,
+.trust-badge em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.trust-badge span {
+  text-transform: uppercase;
+}
+
+.trust-badge em {
+  color: var(--fg-faint);
+  font-style: normal;
+}
+
+.trust-compact {
+  max-width: 96px;
+}
+
+.trust-verified {
+  border-color: color-mix(in oklab, var(--status-ok) 45%, var(--hair));
+  color: var(--status-ok);
+}
+
+.trust-recorded {
+  border-color: color-mix(in oklab, var(--lane-preview) 42%, var(--hair));
+  color: var(--lane-preview);
+}
+
+.trust-stale {
+  border-color: color-mix(in oklab, var(--status-warn) 48%, var(--hair));
+  color: var(--status-warn);
+}
+
+.trust-missing,
+.trust-unsupported {
+  border-color: color-mix(in oklab, var(--status-unknown) 42%, var(--hair));
+}
+
 [data-status="pass"],
 [data-status="ready"] {
   color: var(--status-ok);
@@ -622,7 +690,7 @@ p {
 
 .preview-row {
   display: grid;
-  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1fr) auto;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(0, 1fr) minmax(118px, auto);
   gap: 12px;
   align-items: center;
   min-height: 48px;

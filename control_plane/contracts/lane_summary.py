@@ -1,6 +1,7 @@
 from pydantic import BaseModel, ConfigDict
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -27,3 +28,8 @@ class LaunchplaneLaneSummary(BaseModel):
     runtime_environment_records: tuple[RuntimeEnvironmentRecord, ...] = ()
     odoo_instance_override: OdooInstanceOverrideRecord | None = None
     secret_bindings: tuple[SecretBinding, ...] = ()
+    provenance: DataProvenance = DataProvenance(
+        source_kind="record",
+        freshness_status="missing",
+        detail="Launchplane has not recorded lane evidence for this context and instance.",
+    )
