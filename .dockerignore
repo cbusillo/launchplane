@@ -8,6 +8,9 @@ __pycache__
 *.pyc
 *.pyo
 *.pyd
+node_modules
+frontend/node_modules
+control_plane/ui_static
 state
 tmp
 tests
