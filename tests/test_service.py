@@ -4423,7 +4423,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "control_plane.service.execute_verireel_prod_rollback",
                     side_effect=RuntimeError("driver exploded"),
                 ),
-                patch("control_plane.service.traceback.print_exc"),
+                patch("control_plane.service._LOGGER.exception"),
             ):
                 status_code, payload = _invoke_app(
                     app,

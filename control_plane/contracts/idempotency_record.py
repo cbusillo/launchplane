@@ -19,7 +19,7 @@ class LaunchplaneIdempotencyRecord(BaseModel):
     response_payload: dict[str, Any]
 
 
-def build_launchplane_idempotency_record_id(*, scope: str, route_path: str, idempotency_key: str) -> str:
-    normalized = f"{scope.strip()}\n{route_path.strip()}\n{idempotency_key.strip()}"
+def build_launchplane_idempotency_record_id(*, scope: str, route_path: str, request_token: str) -> str:
+    normalized = f"{scope.strip()}\n{route_path.strip()}\n{request_token.strip()}"
     digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:24]
     return f"idempotency-{digest}"

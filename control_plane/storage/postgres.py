@@ -718,7 +718,7 @@ class PostgresRecordStore(HumanSessionStore):
         record_id = build_launchplane_idempotency_record_id(
             scope=scope,
             route_path=route_path,
-            idempotency_key=idempotency_key,
+            request_token=idempotency_key,
         )
         statement = (
             select(LaunchplaneIdempotencyRow)

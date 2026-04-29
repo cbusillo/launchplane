@@ -341,7 +341,7 @@ class HumanSessionManager:
         signature = hmac.new(
             self._config.session_secret.encode("utf-8"),
             session_id.encode("utf-8"),
-            hashlib.sha256,
+            hashlib.sha3_256,
         ).hexdigest()
         return f"{session_id}.{signature}"
 
@@ -352,7 +352,7 @@ class HumanSessionManager:
         expected = hmac.new(
             self._config.session_secret.encode("utf-8"),
             session_id.encode("utf-8"),
-            hashlib.sha256,
+            hashlib.sha3_256,
         ).hexdigest()
         if not hmac.compare_digest(signature, expected):
             return ""

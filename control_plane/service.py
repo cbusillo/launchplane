@@ -5,11 +5,11 @@ from datetime import datetime, timezone
 import hashlib
 import io
 import json
+import logging
 import mimetypes
 import os
 import secrets
 from socketserver import ThreadingMixIn
-import traceback
 import uuid
 from pathlib import Path
 from typing import Callable
@@ -153,6 +153,7 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
+_LOGGER = logging.getLogger(__name__)
 _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
     {
         "LAUNCHPLANE_GITHUB_CLIENT_ID",
@@ -1009,7 +1010,7 @@ def _write_idempotency_record(
             record_id=build_launchplane_idempotency_record_id(
                 scope=scope,
                 route_path=route_path,
-                idempotency_key=idempotency_key,
+                request_token=idempotency_key,
             ),
             scope=scope,
             route_path=route_path,
@@ -1509,17 +1510,21 @@ def create_launchplane_service_app(
                     code_verifier=login_state.code_verifier,
                     authz_policy=authz_policy,
                 )
-            except PermissionError as exc:
+            except PermissionError:
                 return _json_response(
                     start_response=start_response,
                     status_code=403,
                     payload={
                         "status": "rejected",
                         "trace_id": request_trace_id,
-                        "error": {"code": "authorization_denied", "message": str(exc)},
+                        "error": {
+                            "code": "authorization_denied",
+                            "message": "GitHub identity is not authorized for Launchplane.",
+                        },
                     },
                 )
-            except Exception as exc:  # noqa: BLE001
+            except Exception:  # noqa: BLE001
+                _LOGGER.exception("GitHub OAuth callback failed", extra={"trace_id": request_trace_id})
                 return _json_response(
                     start_response=start_response,
                     status_code=400,
@@ -1528,7 +1533,7 @@ def create_launchplane_service_app(
                         "trace_id": request_trace_id,
                         "error": {
                             "code": "invalid_oauth_callback",
-                            "message": f"GitHub OAuth callback could not be completed: {exc}",
+                            "message": "GitHub OAuth callback could not be completed.",
                         },
                     },
                 )
@@ -3135,14 +3140,17 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=request.destroy,
                 )
-        except (PermissionError, InvalidTokenError) as exc:
+        except (PermissionError, InvalidTokenError):
             return _json_response(
                 start_response=start_response,
                 status_code=401,
                 payload={
                     "status": "rejected",
                     "trace_id": request_trace_id,
-                    "error": {"code": "authentication_required", "message": str(exc)},
+                    "error": {
+                        "code": "authentication_required",
+                        "message": "A valid GitHub OIDC token or browser session is required.",
+                    },
                 },
             )
         except FileNotFoundError:
@@ -3151,28 +3159,34 @@ def create_launchplane_service_app(
                 trace_id=request_trace_id,
                 path=path,
             )
-        except ValidationError as exc:
+        except ValidationError:
             return _json_response(
                 start_response=start_response,
                 status_code=400,
                 payload={
                     "status": "rejected",
                     "trace_id": request_trace_id,
-                    "error": {"code": "invalid_request", "message": str(exc)},
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "Request payload failed validation.",
+                    },
                 },
             )
-        except (ValueError, click.ClickException) as exc:
+        except (ValueError, click.ClickException):
             return _json_response(
                 start_response=start_response,
                 status_code=400,
                 payload={
                     "status": "rejected",
                     "trace_id": request_trace_id,
-                    "error": {"code": "invalid_request", "message": str(exc)},
+                    "error": {
+                        "code": "invalid_request",
+                        "message": "Request could not be completed.",
+                    },
                 },
             )
         except Exception:  # noqa: BLE001
-            traceback.print_exc()
+            _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": request_trace_id})
             return _json_response(
                 start_response=start_response,
                 status_code=500,
