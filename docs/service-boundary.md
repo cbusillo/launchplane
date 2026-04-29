@@ -81,6 +81,12 @@ GitHub Actions workflow
 
 Machine callers should authenticate with GitHub Actions OIDC.
 
+Human browser callers authenticate with GitHub OAuth. Launchplane owns the
+browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
+session cookie. Sessions are backed by the Launchplane database when
+`LAUNCHPLANE_DATABASE_URL` is configured. GitHub access tokens stay server-side
+and are not exposed to the React operator UI.
+
 Launchplane should verify:
 
 - `iss` is GitHub's OIDC issuer
@@ -225,6 +231,12 @@ allowed actions:
 
 The initial policy engine can be config-backed and static. It does not need a
 full RBAC system yet.
+
+Human policy rules use the same reviewed policy file under `github_humans`.
+The first supported roles are `read_only` and `admin`. Browser sessions can
+authorize read endpoints, but POST mutation routes remain GitHub Actions OIDC
+only until browser-initiated mutation workflows get a dedicated CSRF and audit
+design.
 
 ## First API Surface
 

@@ -1,4 +1,10 @@
-import type { ApiErrorPayload, DriverListPayload, DriverViewPayload } from "./types";
+import type {
+  ApiErrorPayload,
+  AuthSessionPayload,
+  DriverListPayload,
+  DriverViewPayload,
+  LogoutPayload
+} from "./types";
 
 export class LaunchplaneApiError extends Error {
   statusCode: number;
@@ -12,12 +18,12 @@ export class LaunchplaneApiError extends Error {
   }
 }
 
-async function readJson<T>(path: string, bearerToken: string): Promise<T> {
+async function requestJson<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
   const response = await fetch(path, {
-    method: "GET",
+    method,
+    credentials: "same-origin",
     headers: {
-      Accept: "application/json",
-      Authorization: `Bearer ${bearerToken}`
+      Accept: "application/json"
     }
   });
   const payload = (await response.json()) as T | ApiErrorPayload;
@@ -32,21 +38,24 @@ async function readJson<T>(path: string, bearerToken: string): Promise<T> {
   return payload as T;
 }
 
-export function listDrivers(bearerToken: string): Promise<DriverListPayload> {
-  return readJson<DriverListPayload>("/v1/drivers", bearerToken);
+export function readAuthSession(): Promise<AuthSessionPayload> {
+  return requestJson<AuthSessionPayload>("/v1/auth/session");
 }
 
-export function readDriverView(
-  bearerToken: string,
-  context: string,
-  instance: string
-): Promise<DriverViewPayload> {
+export function logout(): Promise<LogoutPayload> {
+  return requestJson<LogoutPayload>("/auth/logout", "POST");
+}
+
+export function listDrivers(): Promise<DriverListPayload> {
+  return requestJson<DriverListPayload>("/v1/drivers");
+}
+
+export function readDriverView(context: string, instance: string): Promise<DriverViewPayload> {
   const encodedContext = encodeURIComponent(context);
   if (!instance) {
-    return readJson<DriverViewPayload>(`/v1/contexts/${encodedContext}/driver-view`, bearerToken);
+    return requestJson<DriverViewPayload>(`/v1/contexts/${encodedContext}/driver-view`);
   }
-  return readJson<DriverViewPayload>(
-    `/v1/contexts/${encodedContext}/instances/${encodeURIComponent(instance)}/driver-view`,
-    bearerToken
+  return requestJson<DriverViewPayload>(
+    `/v1/contexts/${encodedContext}/instances/${encodeURIComponent(instance)}/driver-view`
   );
 }

@@ -7,12 +7,13 @@ import io
 import json
 import mimetypes
 import os
+import secrets
 from socketserver import ThreadingMixIn
 import traceback
 import uuid
 from pathlib import Path
 from typing import Callable
-from urllib.parse import unquote
+from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 
 import click
@@ -42,10 +43,23 @@ from control_plane.launchplane_mutations import (
     control_plane_root,
 )
 from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
     TokenVerifier,
     load_authz_policy,
     parse_authz_policy_toml,
+)
+from control_plane.service_human_auth import (
+    GitHubOAuthClient,
+    GitHubOAuthConfig,
+    HumanSessionManager,
+    HumanSessionStore,
+    InMemoryHumanSessionStore,
+    OAuthLoginStateStore,
+    build_pkce_verifier,
+    load_github_oauth_config_from_env,
 )
 from control_plane.storage.factory import build_record_store, storage_backend_name
 from control_plane.workflows.evidence_ingestion import (
@@ -478,17 +492,30 @@ def _json_response(
     start_response: Callable[[str, list[tuple[str, str]]], None],
     status_code: int,
     payload: dict[str, object],
+    headers: list[tuple[str, str]] | None = None,
 ) -> list[bytes]:
     encoded = json.dumps(payload, indent=2, sort_keys=True).encode("utf-8")
     status_line = f"{status_code} {_http_status_text(status_code)}"
-    start_response(
-        status_line,
-        [
-            ("Content-Type", "application/json"),
-            ("Content-Length", str(len(encoded))),
-        ],
-    )
+    response_headers = [
+        ("Content-Type", "application/json"),
+        ("Content-Length", str(len(encoded))),
+    ]
+    response_headers.extend(headers or [])
+    start_response(status_line, response_headers)
     return [encoded]
+
+
+def _redirect_response(
+    *,
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    location: str,
+    headers: list[tuple[str, str]] | None = None,
+) -> list[bytes]:
+    body = b""
+    response_headers = [("Location", location), ("Content-Length", "0")]
+    response_headers.extend(headers or [])
+    start_response("302 Found", response_headers)
+    return [body]
 
 
 def _http_status_text(status_code: int) -> str:
@@ -669,6 +696,15 @@ def _idempotency_capable_store(record_store: object):
         record_store, "write_idempotency_record"
     ):
         return record_store
+    return None
+
+
+def _human_session_capable_store(record_store: object) -> HumanSessionStore | None:
+    if all(
+        hasattr(record_store, method_name)
+        for method_name in ("write_session", "read_session", "delete_session")
+    ):
+        return record_store  # type: ignore[return-value]
     return None
 
 
@@ -876,6 +912,48 @@ def _bearer_token(environ: dict[str, object]) -> str:
     return token.strip()
 
 
+def _session_identity(
+    *, environ: dict[str, object], session_manager: HumanSessionManager | None
+) -> GitHubHumanIdentity | None:
+    if session_manager is None:
+        return None
+    session = session_manager.read_cookie(str(environ.get("HTTP_COOKIE", "")))
+    return session.identity if session is not None else None
+
+
+def _read_identity(
+    *,
+    environ: dict[str, object],
+    verifier: TokenVerifier,
+    session_manager: HumanSessionManager | None,
+) -> LaunchplaneIdentity:
+    human_identity = _session_identity(environ=environ, session_manager=session_manager)
+    if human_identity is not None:
+        return human_identity
+    token = _bearer_token(environ)
+    return verifier.verify(token)
+
+
+def _human_identity_payload(identity: GitHubHumanIdentity) -> dict[str, object]:
+    return {
+        "provider": "github",
+        "login": identity.login,
+        "github_id": identity.github_id,
+        "name": identity.name,
+        "email": identity.email,
+        "organizations": sorted(identity.organizations),
+        "teams": sorted(identity.teams),
+        "role": identity.role,
+    }
+
+
+def _safe_return_to(value: str) -> str:
+    normalized = value.strip() or "/"
+    if not normalized.startswith("/") or normalized.startswith("//"):
+        return "/"
+    return normalized
+
+
 def _launchplane_policy_sha256_from_env() -> str:
     policy_toml = os.environ.get("LAUNCHPLANE_POLICY_TOML", "").strip()
     if policy_toml:
@@ -972,11 +1050,37 @@ def create_launchplane_service_app(
     authz_policy: LaunchplaneAuthzPolicy,
     control_plane_root_path: Path | None = None,
     database_url: str | None = None,
+    github_oauth_config: GitHubOAuthConfig | None = None,
+    github_oauth_client: GitHubOAuthClient | None = None,
+    human_session_store: HumanSessionStore | None = None,
 ):
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
     record_store = build_record_store(state_dir=state_dir, database_url=database_url)
     storage_backend = storage_backend_name(record_store)
+    resolved_github_oauth_config = github_oauth_config or load_github_oauth_config_from_env()
+    oauth_login_states = OAuthLoginStateStore()
+    session_manager = (
+        HumanSessionManager(
+            config=resolved_github_oauth_config,
+            session_store=(
+                human_session_store
+                or _human_session_capable_store(record_store)
+                or InMemoryHumanSessionStore()
+            ),
+        )
+        if resolved_github_oauth_config is not None
+        else None
+    )
+    resolved_github_oauth_client = (
+        github_oauth_client
+        if github_oauth_client is not None
+        else (
+            GitHubOAuthClient(resolved_github_oauth_config)
+            if resolved_github_oauth_config is not None
+            else None
+        )
+    )
     write_routes = {
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
@@ -1009,6 +1113,138 @@ def create_launchplane_service_app(
         request_trace_id = _trace_id()
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
         path = str(environ.get("PATH_INFO", ""))
+        query = parse_qs(str(environ.get("QUERY_STRING", "")), keep_blank_values=True)
+        if method == "GET" and path == "/auth/github/login":
+            if resolved_github_oauth_config is None or resolved_github_oauth_client is None:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=503,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "auth_not_configured",
+                            "message": "GitHub OAuth is not configured for Launchplane.",
+                        },
+                    },
+                )
+            state = secrets.token_urlsafe(32)
+            code_verifier, code_challenge = build_pkce_verifier()
+            return_to = _safe_return_to((query.get("return_to") or ["/"])[0])
+            oauth_login_states.put(
+                state=state,
+                code_verifier=code_verifier,
+                return_to=return_to,
+            )
+            return _redirect_response(
+                start_response=start_response,
+                location=resolved_github_oauth_client.authorization_url(
+                    state=state,
+                    code_challenge=code_challenge,
+                ),
+            )
+        if method == "GET" and path == "/auth/github/callback":
+            if session_manager is None or resolved_github_oauth_client is None:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=503,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "auth_not_configured",
+                            "message": "GitHub OAuth is not configured for Launchplane.",
+                        },
+                    },
+                )
+            code = str((query.get("code") or [""])[0]).strip()
+            state = str((query.get("state") or [""])[0]).strip()
+            login_state = oauth_login_states.pop(state)
+            if not code or login_state is None:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "invalid_oauth_callback",
+                            "message": "GitHub OAuth callback is missing a valid code or state.",
+                        },
+                    },
+                )
+            try:
+                human_identity = resolved_github_oauth_client.fetch_identity(
+                    code=code,
+                    code_verifier=login_state.code_verifier,
+                    authz_policy=authz_policy,
+                )
+            except PermissionError as exc:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=403,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {"code": "authorization_denied", "message": str(exc)},
+                    },
+                )
+            except Exception as exc:  # noqa: BLE001
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "invalid_oauth_callback",
+                            "message": f"GitHub OAuth callback could not be completed: {exc}",
+                        },
+                    },
+                )
+            session = session_manager.issue(human_identity)
+            return _redirect_response(
+                start_response=start_response,
+                location=login_state.return_to,
+                headers=[("Set-Cookie", session_manager.session_cookie_header(session))],
+            )
+        if method == "POST" and path == "/auth/logout":
+            if session_manager is not None:
+                session_manager.delete_cookie_session(str(environ.get("HTTP_COOKIE", "")))
+                clear_cookie = session_manager.clear_cookie_header()
+            else:
+                clear_cookie = "launchplane_session=; Path=/; Max-Age=0; HttpOnly; SameSite=Lax"
+            return _json_response(
+                start_response=start_response,
+                status_code=200,
+                payload={"status": "ok", "trace_id": request_trace_id},
+                headers=[("Set-Cookie", clear_cookie)],
+            )
+        if method == "GET" and path == "/v1/auth/session":
+            human_identity = _session_identity(environ=environ, session_manager=session_manager)
+            if human_identity is None:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=401,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "configured": resolved_github_oauth_config is not None,
+                        "error": {
+                            "code": "authentication_required",
+                            "message": "Sign in with GitHub to access Launchplane.",
+                        },
+                    },
+                )
+            return _json_response(
+                start_response=start_response,
+                status_code=200,
+                payload={
+                    "status": "ok",
+                    "trace_id": request_trace_id,
+                    "identity": _human_identity_payload(human_identity),
+                },
+            )
         if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
             return _serve_ui_route(
                 start_response=start_response,
@@ -1073,8 +1309,17 @@ def create_launchplane_service_app(
                 },
             )
         try:
-            token = _bearer_token(environ)
-            identity = verifier.verify(token)
+            if method == "GET":
+                identity = _read_identity(
+                    environ=environ,
+                    verifier=verifier,
+                    session_manager=session_manager,
+                )
+            else:
+                token = _bearer_token(environ)
+                identity = verifier.verify(token)
+                if not isinstance(identity, GitHubActionsIdentity):
+                    raise PermissionError("Mutation routes require GitHub Actions OIDC.")
             if method == "GET":
                 assert read_route is not None
                 action, params = read_route

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
+from datetime import datetime, timezone
 from typing import Any, TypeVar
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Index, Integer, String, create_engine, desc, select
+from sqlalchemy import JSON, Index, Integer, String, create_engine, delete, desc, select
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
@@ -30,6 +31,8 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_human_auth import HumanSessionStore, LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
@@ -252,6 +255,22 @@ class LaunchplaneIdempotencyRow(Base):
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
+class LaunchplaneHumanSessionRow(Base):
+    __tablename__ = "launchplane_human_sessions"
+    __table_args__ = (
+        Index("launchplane_human_sessions_login_idx", "login", desc("created_at")),
+        Index("launchplane_human_sessions_expires_idx", desc("expires_at")),
+    )
+
+    session_id: Mapped[str] = mapped_column(String, primary_key=True)
+    login: Mapped[str] = mapped_column(String, nullable=False)
+    github_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    role: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[str] = mapped_column(String, nullable=False)
+    expires_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
 class LaunchplaneSecretRow(Base):
     __tablename__ = "launchplane_secrets"
     __table_args__ = (
@@ -340,6 +359,45 @@ def _artifact_id_from_model(model: BaseModel) -> str:
     return artifact_id if isinstance(artifact_id, str) else ""
 
 
+def _human_session_payload(session: LaunchplaneHumanSession) -> PayloadDict:
+    return {
+        "session_id": session.session_id,
+        "created_at": session.created_at.isoformat(),
+        "expires_at": session.expires_at.isoformat(),
+        "identity": {
+            "login": session.identity.login,
+            "github_id": session.identity.github_id,
+            "name": session.identity.name,
+            "email": session.identity.email,
+            "organizations": sorted(session.identity.organizations),
+            "teams": sorted(session.identity.teams),
+            "role": session.identity.role,
+        },
+    }
+
+
+def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession:
+    identity_payload = payload.get("identity")
+    if not isinstance(identity_payload, dict):
+        raise ValueError("Launchplane human session payload is missing identity.")
+    return LaunchplaneHumanSession(
+        session_id=str(payload.get("session_id") or ""),
+        created_at=datetime.fromisoformat(str(payload.get("created_at") or "")),
+        expires_at=datetime.fromisoformat(str(payload.get("expires_at") or "")),
+        identity=GitHubHumanIdentity(
+            login=str(identity_payload.get("login") or ""),
+            github_id=int(identity_payload.get("github_id") or 0),
+            name=str(identity_payload.get("name") or ""),
+            email=str(identity_payload.get("email") or ""),
+            organizations=frozenset(
+                str(value) for value in identity_payload.get("organizations", [])
+            ),
+            teams=frozenset(str(value) for value in identity_payload.get("teams", [])),
+            role="admin" if identity_payload.get("role") == "admin" else "read_only",
+        ),
+    )
+
+
 def _build_engine(database_url: str, *, connection_factory: ConnectionFactory | None = None):
     engine_kwargs: dict[str, Any] = {}
     if connection_factory is not None:
@@ -349,7 +407,7 @@ def _build_engine(database_url: str, *, connection_factory: ConnectionFactory | 
     return create_engine(database_url, **engine_kwargs)
 
 
-class PostgresRecordStore:
+class PostgresRecordStore(HumanSessionStore):
     def __init__(
         self,
         *,
@@ -544,6 +602,45 @@ class PostgresRecordStore:
             if row is None:
                 return None
             return self._read_payload(model_type=LaunchplaneIdempotencyRecord, payload=row.payload)
+
+    def write_session(self, session: LaunchplaneHumanSession) -> None:
+        self._write_row(
+            LaunchplaneHumanSessionRow(
+                session_id=session.session_id,
+                login=session.identity.login,
+                github_id=session.identity.github_id,
+                role=session.identity.role,
+                created_at=session.created_at.isoformat(),
+                expires_at=session.expires_at.isoformat(),
+                payload=_human_session_payload(session),
+            )
+        )
+
+    def read_session(self, session_id: str) -> LaunchplaneHumanSession | None:
+        statement = (
+            select(LaunchplaneHumanSessionRow)
+            .where(LaunchplaneHumanSessionRow.session_id == session_id)
+            .limit(1)
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return None
+            human_session = _human_session_from_payload(row.payload)
+            if human_session.expires_at <= datetime.now(timezone.utc):
+                session.delete(row)
+                session.commit()
+                return None
+            return human_session
+
+    def delete_session(self, session_id: str) -> None:
+        with self._session_factory() as session:
+            session.execute(
+                delete(LaunchplaneHumanSessionRow).where(
+                    LaunchplaneHumanSessionRow.session_id == session_id
+                )
+            )
+            session.commit()
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self._write_row(

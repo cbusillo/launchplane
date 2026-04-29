@@ -127,6 +127,19 @@ reach DB-backed runtime authority:
 - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
 - `LAUNCHPLANE_POLICY_TOML` or `LAUNCHPLANE_POLICY_B64`
 
+The browser operator UI uses GitHub OAuth when these additional inputs are set:
+
+- `LAUNCHPLANE_GITHUB_CLIENT_ID`
+- `LAUNCHPLANE_GITHUB_CLIENT_SECRET`
+- `LAUNCHPLANE_PUBLIC_URL`
+- `LAUNCHPLANE_SESSION_SECRET`
+- optional `LAUNCHPLANE_COOKIE_SECURE` for local HTTP development
+
+Human browser sessions use signed cookies backed by the Launchplane database when
+`LAUNCHPLANE_DATABASE_URL` is configured. Human roles are authorized through
+`github_humans` rules in the same Launchplane authz policy. Machine writes
+continue to use GitHub Actions OIDC bearer tokens.
+
 Launchplane now fails closed at startup when no explicit policy input is provided.
 Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example`.
 Use `config/launchplane-authz.toml` for this repo's reviewed bootstrap policy,

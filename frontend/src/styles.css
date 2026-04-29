@@ -181,6 +181,36 @@ p {
   min-width: 0;
 }
 
+.operator-chip {
+  display: grid;
+  min-height: 34px;
+  align-content: center;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--bg-1);
+  padding: 4px 10px;
+}
+
+.operator-chip span,
+.operator-chip strong {
+  max-width: 150px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.operator-chip span {
+  color: var(--fg);
+  font-size: 12px;
+}
+
+.operator-chip strong {
+  color: var(--fg-muted);
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+}
+
 .select-label {
   position: relative;
   display: grid;
@@ -803,7 +833,7 @@ p {
 
 .auth-form {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   padding: 14px;
 }
