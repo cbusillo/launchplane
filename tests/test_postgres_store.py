@@ -1,4 +1,5 @@
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -41,6 +42,8 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
+from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -315,6 +318,24 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
     )
 
 
+def _human_session(*, session_id: str = "session-1") -> LaunchplaneHumanSession:
+    created_at = datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc)
+    return LaunchplaneHumanSession(
+        session_id=session_id,
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=12),
+        identity=GitHubHumanIdentity(
+            login="alice",
+            github_id=123,
+            name="Alice Operator",
+            email="alice@example.com",
+            organizations=frozenset({"shinycomputers"}),
+            teams=frozenset({"shinycomputers/launchplane-admins"}),
+            role="admin",
+        ),
+    )
+
+
 class PostgresRecordStoreTests(unittest.TestCase):
     def test_alembic_baseline_creates_schema_used_by_record_store(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -450,6 +471,43 @@ class PostgresRecordStoreTests(unittest.TestCase):
             assert loaded is not None
             self.assertEqual(loaded.request_fingerprint, "fingerprint-123")
             self.assertEqual(loaded.response_payload["records"]["preview_id"], "preview-35")
+
+    def test_human_sessions_round_trip_and_delete(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            session = _human_session()
+            store.write_session(session)
+            loaded = store.read_session(session.session_id)
+            store.delete_session(session.session_id)
+            deleted = store.read_session(session.session_id)
+
+        self.assertIsNotNone(loaded)
+        assert loaded is not None
+        self.assertEqual(loaded.identity.login, "alice")
+        self.assertEqual(loaded.identity.role, "admin")
+        self.assertEqual(loaded.identity.teams, frozenset({"shinycomputers/launchplane-admins"}))
+        self.assertIsNone(deleted)
+
+    def test_expired_human_session_reads_as_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            created_at = datetime(2020, 1, 1, tzinfo=timezone.utc)
+            expired_session = LaunchplaneHumanSession(
+                session_id="expired-session",
+                created_at=created_at,
+                expires_at=created_at + timedelta(minutes=1),
+                identity=_human_session().identity,
+            )
+
+            store.write_session(expired_session)
+            loaded = store.read_session(expired_session.session_id)
+
+        self.assertIsNone(loaded)
 
     def test_storage_import_core_records_command_reports_counts(self) -> None:
         runner = CliRunner()

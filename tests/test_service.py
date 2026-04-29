@@ -7,6 +7,8 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from typing import Literal
+from urllib.parse import parse_qs, urlparse
 from unittest.mock import Mock, patch
 
 from control_plane import secrets as control_plane_secrets
@@ -26,9 +28,11 @@ from control_plane.contracts.promotion_record import (
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
+    GitHubHumanIdentity,
     GitHubOidcVerifier,
     LaunchplaneAuthzPolicy,
 )
+from control_plane.service_human_auth import GitHubOAuthConfig
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_preview_driver import (
@@ -60,6 +64,27 @@ class _StubVerifier:
         return self.identity
 
 
+class _StubGitHubOAuthClient:
+    def __init__(self, identity: GitHubHumanIdentity):
+        self.identity = identity
+        self.code_verifier = ""
+
+    def authorization_url(self, *, state: str, code_challenge: str) -> str:
+        return f"https://github.example/authorize?state={state}&challenge={code_challenge}"
+
+    def fetch_identity(
+        self,
+        *,
+        code: str,
+        code_verifier: str,
+        authz_policy: LaunchplaneAuthzPolicy,
+    ) -> GitHubHumanIdentity:
+        self.code_verifier = code_verifier
+        if code != "github-code":
+            raise ValueError("unexpected code")
+        return self.identity
+
+
 def _identity(
     *,
     repository: str = "every/verireel",
@@ -80,6 +105,28 @@ def _identity(
         subject="repo:every/verireel:pull_request",
         sha="6b3c9d7e8f901234567890abcdef1234567890ab",
         raw_claims={"repository": repository, "workflow_ref": workflow_ref},
+    )
+
+
+def _human_identity(*, role: Literal["read_only", "admin"] = "read_only") -> GitHubHumanIdentity:
+    return GitHubHumanIdentity(
+        login="alice",
+        github_id=123,
+        name="Alice Operator",
+        email="alice@example.com",
+        organizations=frozenset({"shinycomputers"}),
+        teams=frozenset({"launchplane-readers", "shinycomputers/launchplane-readers"}),
+        role=role,
+    )
+
+
+def _github_oauth_config() -> GitHubOAuthConfig:
+    return GitHubOAuthConfig(
+        client_id="client-id",
+        client_secret="client-secret",
+        public_url="https://launchplane.example",
+        session_secret="test-session-secret",
+        cookie_secure=False,
     )
 
 
@@ -118,14 +165,19 @@ def _invoke_raw_app(
     method: str,
     path: str,
     authorization: str = "",
+    query_string: str = "",
+    headers: dict[str, str] | None = None,
 ):
     environ = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
+        "QUERY_STRING": query_string,
         "CONTENT_LENGTH": "0",
         "wsgi.input": io.BytesIO(b""),
         "HTTP_AUTHORIZATION": authorization,
     }
+    for header_name, header_value in (headers or {}).items():
+        environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
     captured: dict[str, object] = {}
 
     def start_response(status: str, headers: list[tuple[str, str]]) -> None:
@@ -207,6 +259,216 @@ class GitHubOidcVerifierTests(unittest.TestCase):
                 context="verireel-testing",
             )
         )
+
+
+class GitHubHumanAuthTests(unittest.TestCase):
+    def _signed_in_cookie(
+        self,
+        app,
+    ) -> str:
+        _, login_headers, _ = _invoke_raw_app(app, method="GET", path="/auth/github/login")
+        state = parse_qs(urlparse(login_headers["Location"]).query)["state"][0]
+        _, callback_headers, _ = _invoke_raw_app(
+            app,
+            method="GET",
+            path="/auth/github/callback",
+            query_string=f"code=github-code&state={state}",
+        )
+        return callback_headers["Set-Cookie"]
+
+    def test_github_oauth_callback_issues_session_cookie(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir),
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            status_code, headers, _ = _invoke_raw_app(
+                app,
+                method="GET",
+                path="/auth/github/login",
+                query_string="return_to=/ui",
+            )
+            self.assertEqual(status_code, 302)
+            state = parse_qs(urlparse(headers["Location"]).query)["state"][0]
+
+            status_code, headers, _ = _invoke_raw_app(
+                app,
+                method="GET",
+                path="/auth/github/callback",
+                query_string=f"code=github-code&state={state}",
+            )
+
+        self.assertEqual(status_code, 302)
+        self.assertEqual(headers["Location"], "/ui")
+        self.assertIn("launchplane_session=", headers["Set-Cookie"])
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.assertTrue(oauth_client.code_verifier)
+
+    def test_session_endpoint_reads_github_human_session(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir),
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            cookie = self._signed_in_cookie(app)
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/auth/session",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["identity"]["login"], "alice")
+        self.assertEqual(payload["identity"]["role"], "read_only")
+
+    def test_database_backed_human_session_survives_app_recreation(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as tmpdir:
+            database_url = f"sqlite+pysqlite:///{Path(tmpdir) / 'launchplane.sqlite3'}"
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            cookie = self._signed_in_cookie(app)
+            recreated_app = create_launchplane_service_app(
+                state_dir=Path(tmpdir) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+
+            status_code, payload = _invoke_app(
+                recreated_app,
+                method="GET",
+                path="/v1/auth/session",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["identity"]["login"], "alice")
+
+    def test_human_session_can_read_allowed_driver_metadata(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_humans": [
+                    {
+                        "logins": ["alice"],
+                        "roles": ["read_only"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["driver.read"],
+                    }
+                ]
+            }
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir),
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            cookie = self._signed_in_cookie(app)
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/drivers",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("drivers", payload)
+
+    def test_read_only_human_session_rejects_runtime_read(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_humans": [
+                    {
+                        "logins": ["alice"],
+                        "roles": ["read_only"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["driver.read"],
+                    }
+                ]
+            }
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir),
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            cookie = self._signed_in_cookie(app)
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/service/runtime",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_human_session_does_not_authorize_post_mutations(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {"github_humans": [{"logins": ["alice"], "roles": ["admin"]}]}
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity(role="admin"))
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir),
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            cookie = self._signed_in_cookie(app)
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/preview-inventory",
+                payload={"schema_version": 1, "context": "verireel-testing"},
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
 
 
 class LaunchplaneServiceTests(unittest.TestCase):

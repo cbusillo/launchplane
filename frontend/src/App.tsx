@@ -9,6 +9,7 @@ import {
   Eye,
   GitCompareArrows,
   KeyRound,
+  LogOut,
   Loader2,
   Moon,
   RefreshCw,
@@ -18,9 +19,10 @@ import {
   TerminalSquare,
   XCircle
 } from "lucide-react";
-import { FormEvent, ReactNode, useEffect, useMemo, useState } from "react";
-import { LaunchplaneApiError, listDrivers, readDriverView } from "./api";
+import { ReactNode, useEffect, useMemo, useState } from "react";
+import { LaunchplaneApiError, listDrivers, logout, readAuthSession, readDriverView } from "./api";
 import type {
+  AuthIdentity,
   DriverActionDescriptor,
   DriverContextView,
   DriverDescriptor,
@@ -32,6 +34,7 @@ import type {
 } from "./types";
 
 type Theme = "dark" | "light";
+type AuthStatus = "checking" | "signed_out" | "signed_in";
 type DriverChoice = {
   driverId: string;
   context: string;
@@ -69,7 +72,6 @@ type EvidenceFact = {
   status?: Status | string;
 };
 
-const TOKEN_STORAGE_KEY = "launchplane.operatorToken";
 const THEME_STORAGE_KEY = "launchplane.theme";
 const DEFAULT_CHOICES: DriverChoice[] = [
   { driverId: "verireel", context: "verireel", label: "VeriReel" },
@@ -131,8 +133,8 @@ export function App() {
   const [theme, setTheme] = useState<Theme>(() => {
     return window.sessionStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
   });
-  const [token, setToken] = useState(() => window.sessionStorage.getItem(TOKEN_STORAGE_KEY) ?? "");
-  const [tokenDraft, setTokenDraft] = useState(token);
+  const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
+  const [identity, setIdentity] = useState<AuthIdentity | null>(null);
   const [drivers, setDrivers] = useState<DriverDescriptor[]>([]);
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
@@ -141,6 +143,7 @@ export function App() {
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
   const [traceId, setTraceId] = useState<string>("");
+  const [refreshKey, setRefreshKey] = useState(0);
   const [reviewAction, setReviewAction] = useState<DriverActionDescriptor | null>(null);
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(null);
 
@@ -150,7 +153,34 @@ export function App() {
   }, [theme]);
 
   useEffect(() => {
-    if (!token) {
+    let active = true;
+    setAuthStatus("checking");
+    readAuthSession()
+      .then((payload) => {
+        if (!active) {
+          return;
+        }
+        setIdentity(payload.identity);
+        setAuthStatus("signed_in");
+      })
+      .catch((apiError: unknown) => {
+        if (!active) {
+          return;
+        }
+        setIdentity(null);
+        setAuthStatus("signed_out");
+        if (apiError instanceof LaunchplaneApiError && apiError.statusCode !== 401) {
+          setError(apiError.message);
+          setTraceId(apiError.traceId);
+        }
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (authStatus !== "signed_in") {
       setDrivers([]);
       setProdView(null);
       setTestingView(null);
@@ -164,11 +194,11 @@ export function App() {
     setError("");
     setTraceId("");
     Promise.all([
-      listDrivers(token),
-      readDriverView(token, selected.context, "prod"),
-      readDriverView(token, selected.context, "testing"),
+      listDrivers(),
+      readDriverView(selected.context, "prod"),
+      readDriverView(selected.context, "testing"),
       selected.driverId === "verireel"
-        ? readDriverView(token, "verireel-testing", "")
+        ? readDriverView("verireel-testing", "")
         : Promise.resolve(null)
     ])
       .then(([driverPayload, prodPayload, testingPayload, previewPayload]) => {
@@ -200,7 +230,7 @@ export function App() {
       });
 
     return () => controller.abort();
-  }, [selected, token]);
+  }, [authStatus, selected, refreshKey]);
 
   const choices = useMemo(() => {
     if (!drivers.length) {
@@ -232,17 +262,15 @@ export function App() {
   );
   const nextAction = pickNextAction(actions, promotionDecision.verdict);
 
-  function submitToken(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const normalizedToken = tokenDraft.trim();
-    window.sessionStorage.setItem(TOKEN_STORAGE_KEY, normalizedToken);
-    setToken(normalizedToken);
-  }
-
-  function clearToken() {
-    window.sessionStorage.removeItem(TOKEN_STORAGE_KEY);
-    setToken("");
-    setTokenDraft("");
+  function signOut() {
+    logout().finally(() => {
+      setIdentity(null);
+      setAuthStatus("signed_out");
+      setDrivers([]);
+      setProdView(null);
+      setTestingView(null);
+      setPreviewView(null);
+    });
   }
 
   return (
@@ -254,18 +282,20 @@ export function App() {
         theme={theme}
         onThemeChange={setTheme}
         loading={loading}
-        onRefresh={() => setSelected({ ...selected })}
+        identity={identity}
+        onLogout={signOut}
+        onRefresh={() => setRefreshKey((value) => value + 1)}
       />
       <main className="operator-main">
-        {!token ? (
+        {authStatus !== "signed_in" ? (
           showFixtureGallery ? (
             <StateFixtureGallery actions={FIXTURE_ACTIONS} />
           ) : (
-            <AuthPanel tokenDraft={tokenDraft} setTokenDraft={setTokenDraft} onSubmit={submitToken} />
+            <AuthPanel checking={authStatus === "checking"} />
           )
         ) : (
           <>
-            {error ? <ApiErrorPanel message={error} traceId={traceId} onClearToken={clearToken} /> : null}
+            {error ? <ApiErrorPanel message={error} traceId={traceId} onClearToken={signOut} /> : null}
             <section className="lane-grid" aria-busy={loading}>
               <LanePanel
                 title="Prod"
@@ -321,6 +351,8 @@ function Header({
   theme,
   onThemeChange,
   loading,
+  identity,
+  onLogout,
   onRefresh
 }: {
   choices: DriverChoice[];
@@ -329,6 +361,8 @@ function Header({
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   loading: boolean;
+  identity: AuthIdentity | null;
+  onLogout: () => void;
   onRefresh: () => void;
 }) {
   const selectedValue = `${selected.driverId}:${selected.context}`;
@@ -349,6 +383,12 @@ function Header({
         </div>
       </div>
       <div className="topbar-controls">
+        {identity ? (
+          <div className="operator-chip" title={identity.login}>
+            <span>{identity.login}</span>
+            <strong>{identity.role === "admin" ? "Admin" : "Read only"}</strong>
+          </div>
+        ) : null}
         <label className="select-label">
           <span>Context</span>
           <select
@@ -379,6 +419,17 @@ function Header({
         >
           {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
         </button>
+        {identity ? (
+          <button
+            className="icon-button"
+            type="button"
+            title="Sign out"
+            aria-label="Sign out of Launchplane"
+            onClick={onLogout}
+          >
+            <LogOut size={16} />
+          </button>
+        ) : null}
         <button
           className="icon-button"
           type="button"
@@ -403,15 +454,8 @@ function Header({
   );
 }
 
-function AuthPanel({
-  tokenDraft,
-  setTokenDraft,
-  onSubmit
-}: {
-  tokenDraft: string;
-  setTokenDraft: (value: string) => void;
-  onSubmit: (event: FormEvent<HTMLFormElement>) => void;
-}) {
+function AuthPanel({ checking }: { checking: boolean }) {
+  const loginHref = `/auth/github/login?return_to=${encodeURIComponent(window.location.pathname || "/")}`;
   return (
     <section className="auth-panel" aria-labelledby="auth-heading">
       <div className="section-heading">
@@ -421,22 +465,12 @@ function AuthPanel({
         </div>
         <ShieldCheck size={22} aria-hidden="true" />
       </div>
-      <form className="auth-form" onSubmit={onSubmit}>
-        <label>
-          <span>Bearer token</span>
-          <input
-            type="password"
-            value={tokenDraft}
-            onChange={(event) => setTokenDraft(event.target.value)}
-            autoComplete="off"
-            spellCheck={false}
-          />
-        </label>
-        <button className="button button-primary" type="submit" disabled={!tokenDraft.trim()}>
-          <RefreshCw size={15} />
-          <span>Load console</span>
-        </button>
-      </form>
+      <div className="auth-form">
+        <a className="button button-primary" href={loginHref} aria-disabled={checking}>
+          {checking ? <Loader2 className="spin" size={15} /> : <KeyRound size={15} />}
+          <span>{checking ? "Checking session" : "Sign in with GitHub"}</span>
+        </a>
+      </div>
     </section>
   );
 }
@@ -458,7 +492,7 @@ function ApiErrorPanel({
         {traceId ? <code>{traceId}</code> : null}
       </div>
       <button className="button" type="button" onClick={onClearToken}>
-        Clear token
+        Sign out
       </button>
     </section>
   );

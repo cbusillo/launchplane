@@ -4,7 +4,7 @@ from fnmatch import fnmatchcase
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Protocol
+from typing import Literal, Protocol
 
 import jwt
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,6 +26,20 @@ class GitHubActionsIdentity:
     subject: str
     sha: str
     raw_claims: dict[str, object]
+
+
+@dataclass(frozen=True)
+class GitHubHumanIdentity:
+    login: str
+    github_id: int
+    name: str
+    email: str
+    organizations: frozenset[str]
+    teams: frozenset[str]
+    role: Literal["read_only", "admin"]
+
+
+LaunchplaneIdentity = GitHubActionsIdentity | GitHubHumanIdentity
 
 
 class TokenVerifier(Protocol):
@@ -125,19 +139,110 @@ class GitHubActionsPolicyRule(BaseModel):
         return True
 
 
+class GitHubHumanPolicyRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    logins: tuple[str, ...] = ()
+    organizations: tuple[str, ...] = ()
+    teams: tuple[str, ...] = ()
+    roles: tuple[Literal["read_only", "admin"], ...] = ()
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
+
+    @staticmethod
+    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
+        normalized_value = value.strip()
+        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
+
+    @staticmethod
+    def _intersects(values: frozenset[str], allowed_values: tuple[str, ...]) -> bool:
+        return any(
+            fnmatchcase(value.strip(), allowed_value)
+            for value in values
+            for allowed_value in allowed_values
+        )
+
+    def allows(
+        self, *, identity: GitHubHumanIdentity, action: str, product: str, context: str
+    ) -> bool:
+        if self.logins and not self._matches_any(identity.login, self.logins):
+            return False
+        if self.organizations and not self._intersects(identity.organizations, self.organizations):
+            return False
+        if self.teams and not self._intersects(identity.teams, self.teams):
+            return False
+        if self.roles and identity.role not in self.roles:
+            return False
+        if self.products and product not in self.products:
+            return False
+        if self.contexts and context not in self.contexts:
+            return False
+        if self.actions and action not in self.actions:
+            return False
+        return True
+
+    def matches_principal(
+        self,
+        *,
+        login: str,
+        organizations: frozenset[str],
+        teams: frozenset[str],
+        role: Literal["read_only", "admin"],
+    ) -> bool:
+        if self.logins and not self._matches_any(login, self.logins):
+            return False
+        if self.organizations and not self._intersects(organizations, self.organizations):
+            return False
+        if self.teams and not self._intersects(teams, self.teams):
+            return False
+        if self.roles and role not in self.roles:
+            return False
+        return True
+
+
 class LaunchplaneAuthzPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     github_actions: tuple[GitHubActionsPolicyRule, ...] = ()
+    github_humans: tuple[GitHubHumanPolicyRule, ...] = ()
 
     def allows(
-        self, *, identity: GitHubActionsIdentity, action: str, product: str, context: str
+        self, *, identity: LaunchplaneIdentity, action: str, product: str, context: str
     ) -> bool:
+        if isinstance(identity, GitHubHumanIdentity):
+            return any(
+                rule.allows(identity=identity, action=action, product=product, context=context)
+                for rule in self.github_humans
+            )
         return any(
             rule.allows(identity=identity, action=action, product=product, context=context)
             for rule in self.github_actions
         )
+
+    def human_role_for(
+        self,
+        *,
+        login: str,
+        organizations: frozenset[str],
+        teams: frozenset[str],
+    ) -> Literal["read_only", "admin"] | None:
+        if any(
+            rule.matches_principal(
+                login=login, organizations=organizations, teams=teams, role="admin"
+            )
+            for rule in self.github_humans
+        ):
+            return "admin"
+        if any(
+            rule.matches_principal(
+                login=login, organizations=organizations, teams=teams, role="read_only"
+            )
+            for rule in self.github_humans
+        ):
+            return "read_only"
+        return None
 
 
 def parse_authz_policy_toml(policy_toml: str) -> LaunchplaneAuthzPolicy:

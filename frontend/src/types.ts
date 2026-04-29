@@ -217,6 +217,28 @@ export interface DriverViewPayload {
   view: DriverContextView;
 }
 
+export interface AuthIdentity {
+  provider: "github";
+  login: string;
+  github_id: number;
+  name: string;
+  email: string;
+  organizations: string[];
+  teams: string[];
+  role: "read_only" | "admin";
+}
+
+export interface AuthSessionPayload {
+  status: "ok";
+  trace_id: string;
+  identity: AuthIdentity;
+}
+
+export interface LogoutPayload {
+  status: "ok";
+  trace_id: string;
+}
+
 export interface ApiErrorPayload {
   status: "rejected";
   trace_id?: string;

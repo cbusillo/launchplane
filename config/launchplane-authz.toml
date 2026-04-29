@@ -203,3 +203,8 @@ event_names = ["workflow_run", "workflow_dispatch"]
 products = ["launchplane"]
 contexts = ["launchplane"]
 actions = ["launchplane_service.read", "launchplane_service_deploy.execute"]
+
+[[github_humans]]
+logins = ["cbusillo"]
+roles = ["admin"]
+products = ["launchplane"]
