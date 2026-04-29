@@ -31,6 +31,10 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_inventory_scan_record import (
+    PreviewInventoryScanRecord,
+    build_preview_inventory_scan_id,
+)
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.drivers.registry import (
     build_driver_context_view,
@@ -1073,6 +1077,31 @@ def _request_launchplane_self_deploy(
             if previous_env_map.get(env_key, "") != request.oauth_env[env_key]
         ),
     }
+
+
+def _write_preview_inventory_scan_if_supported(
+    *,
+    record_store: object,
+    result: VeriReelPreviewInventoryResult,
+) -> None:
+    if not hasattr(record_store, "write_preview_inventory_scan_record"):
+        return
+    scanned_at = _utc_now_timestamp()
+    preview_slugs = tuple(item.previewSlug for item in result.previews)
+    getattr(record_store, "write_preview_inventory_scan_record")(
+        PreviewInventoryScanRecord(
+            scan_id=build_preview_inventory_scan_id(
+                context_name=result.context,
+                scanned_at=scanned_at,
+            ),
+            context=result.context,
+            scanned_at=scanned_at,
+            source="verireel-preview-inventory",
+            status="pass",
+            preview_count=len(preview_slugs),
+            preview_slugs=preview_slugs,
+        )
+    )
 
 
 def create_launchplane_service_app(
@@ -2447,6 +2476,10 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_preview_inventory(
                     control_plane_root=resolved_root,
                     request=request.inventory,
+                )
+                _write_preview_inventory_scan_if_supported(
+                    record_store=record_store,
+                    result=driver_result,
                 )
                 result = {}
             elif path == "/v1/drivers/verireel/preview-destroy":

@@ -22,6 +22,7 @@ from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
 )
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -1119,6 +1120,48 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "verireel-testing/preview-verireel-testing-verireel-pr-123",
             },
         )
+
+    def test_data_freshness_report_uses_empty_preview_inventory_scan(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_inventory_scan_record(
+                PreviewInventoryScanRecord(
+                    scan_id="preview-inventory-scan-verireel-testing-20260420T100500Z",
+                    context="verireel-testing",
+                    scanned_at="2026-04-20T10:05:00Z",
+                    source="verireel-preview-inventory",
+                    status="pass",
+                    preview_count=0,
+                    preview_slugs=(),
+                )
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "service",
+                    "inspect-data-freshness",
+                    "--state-dir",
+                    str(state_dir),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1, msg=result.output)
+        payload = json.loads(result.output.split("\nError:", maxsplit=1)[0])
+        self.assertEqual(payload["status"], "rejected")
+        preview_surface = next(
+            surface
+            for surface in payload["surfaces"]
+            if surface["name"] == "verireel-testing/preview-inventory"
+        )
+        self.assertTrue(preview_surface["has_provenance"])
+        self.assertEqual(
+            preview_surface["source_record_id"],
+            "preview-inventory-scan-verireel-testing-20260420T100500Z",
+        )
+        self.assertEqual(payload["missing_provenance_count"], 2)
 
     def test_driver_context_view_endpoint_rejects_unauthorized_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2402,6 +2445,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["status"], "accepted")
             self.assertEqual(payload["result"]["previews"][0]["previewSlug"], "pr-42")
             execute_mock.assert_called_once()
+            scan_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_inventory_scan_records(context_name="verireel-testing")
+
+            self.assertEqual(len(scan_records), 1)
+            self.assertEqual(scan_records[0].preview_count, 1)
+            self.assertEqual(scan_records[0].preview_slugs, ("pr-42",))
 
     def test_verireel_preview_inventory_driver_does_not_replay_cached_inventory(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

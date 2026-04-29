@@ -209,6 +209,7 @@ export interface DriverView {
   available_actions: DriverActionDescriptor[];
   lane_summary?: LaneSummary | null;
   preview_summaries: PreviewSummary[];
+  preview_inventory_provenance?: DataProvenance | null;
 }
 
 export interface DriverContextView {

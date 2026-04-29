@@ -324,6 +324,7 @@ export function App() {
               <PreviewInventory
                 driver={currentDriver ?? null}
                 previews={previewDriverView?.preview_summaries ?? []}
+                inventoryProvenance={previewDriverView?.preview_inventory_provenance ?? null}
                 loading={loading}
               />
               <ActionList actions={actions} nextAction={nextAction} loading={loading} onAction={setReviewAction} />
@@ -637,10 +638,12 @@ function PromotionBridge({
 function PreviewInventory({
   driver,
   previews,
+  inventoryProvenance,
   loading
 }: {
   driver: DriverDescriptor | null;
   previews: PreviewSummary[];
+  inventoryProvenance: DataProvenance | null;
   loading: boolean;
 }) {
   const exposesPreviews = Boolean(
@@ -662,7 +665,7 @@ function PreviewInventory({
         title={exposesPreviews ? "Preview inventory" : "Previews not exposed"}
         right={(
           <div className="panel-badges">
-            <TrustBadge provenance={previewInventoryProvenance(exposesPreviews, latestPreview)} />
+            <TrustBadge provenance={previewInventoryProvenance(exposesPreviews, latestPreview, inventoryProvenance)} />
             {exposesPreviews ? <span className="count-chip">{previews.length} active</span> : null}
           </div>
         )}
@@ -725,7 +728,11 @@ function TrustBadge({ provenance, compact = false }: { provenance: DataProvenanc
   );
 }
 
-function previewInventoryProvenance(exposesPreviews: boolean, latestPreview: PreviewSummary | undefined): DataProvenance {
+function previewInventoryProvenance(
+  exposesPreviews: boolean,
+  latestPreview: PreviewSummary | undefined,
+  inventoryProvenance: DataProvenance | null
+): DataProvenance {
   if (!exposesPreviews) {
     return {
       source_kind: "unsupported",
@@ -736,6 +743,9 @@ function previewInventoryProvenance(exposesPreviews: boolean, latestPreview: Pre
       stale_after: "",
       detail: "Driver does not expose preview lifecycle."
     };
+  }
+  if (inventoryProvenance) {
+    return inventoryProvenance;
   }
   if (!latestPreview) {
     return {
@@ -1029,10 +1039,10 @@ function StateFixtureGallery({ actions }: { actions: DriverActionDescriptor[] })
           <LanePanel title="Failed testing lane" laneKind="testing" lane={failedTesting} loading={false} />
         </div>
         <div className="fixture-card">
-          <PreviewInventory driver={FIXTURE_VERIREEL_DRIVER} previews={[]} loading={false} />
+          <PreviewInventory driver={FIXTURE_VERIREEL_DRIVER} previews={[]} inventoryProvenance={null} loading={false} />
         </div>
         <div className="fixture-card">
-          <PreviewInventory driver={FIXTURE_ODOO_DRIVER} previews={[]} loading={false} />
+          <PreviewInventory driver={FIXTURE_ODOO_DRIVER} previews={[]} inventoryProvenance={null} loading={false} />
         </div>
       </div>
     </section>

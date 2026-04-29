@@ -2,6 +2,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from control_plane.contracts.data_provenance import DataProvenance
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 
@@ -81,6 +82,7 @@ class DriverView(BaseModel):
     available_actions: tuple[DriverActionDescriptor, ...] = ()
     lane_summary: LaunchplaneLaneSummary | None = None
     preview_summaries: tuple[LaunchplanePreviewSummary, ...] = ()
+    preview_inventory_provenance: DataProvenance | None = None
 
 
 class DriverContextView(BaseModel):
