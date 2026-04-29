@@ -45,7 +45,7 @@ shape. The intended direction is:
   defining the contract themselves.
 
 The first implemented ingress slice now exists in this repo as a local Launchplane
-service command with GitHub OIDC verification, a static workflow policy, and
+service command with GitHub OIDC verification, DB-backed workflow policy records, and
 evidence ingress for deployments, promotions, and the full preview lifecycle.
 Shared-service core records can now be backed by Postgres with
 `LAUNCHPLANE_DATABASE_URL` or `uv run launchplane service serve --database-url ...`.
@@ -78,14 +78,15 @@ Use `uv run launchplane environments put --scope ... --set KEY=VALUE` to write
 non-secret runtime values directly into DB-backed runtime-environment records;
 secret-shaped keys are rejected there. Use `uv run launchplane secrets put ...`
 for managed secret values. TOML/env files are not supported runtime import
-surfaces outside bootstrap policy/env. Use `uv run launchplane environments
+surfaces outside minimal bootstrap policy/env. Use `uv run launchplane environments
 unset --scope ... --key KEY` to remove stale runtime keys without reading or
 printing plaintext values. Use `uv run launchplane environments relabel` to
 correct stale record metadata without changing runtime values.
 
-The tracked bootstrap authz policy source for this repo now lives at
-`config/launchplane-authz.toml`. `config/launchplane-authz.toml.example`
-remains the placeholder template for other installs or future variants.
+Live authz policy is DB-backed through `authz-policies` records. The service
+still requires a minimal bootstrap policy input at startup so it can fail closed
+and seed or repair DB-backed policy records, but the repo does not track a live
+authz TOML file.
 
 Steady-state tracked Dokploy route definitions and target IDs should come from
 Launchplane DB-backed target records and target-id records. The stable remote
@@ -125,7 +126,7 @@ reach DB-backed runtime authority:
 
 - `LAUNCHPLANE_DATABASE_URL`
 - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
-- `LAUNCHPLANE_POLICY_TOML` or `LAUNCHPLANE_POLICY_B64`
+- `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, or `LAUNCHPLANE_POLICY_FILE`
 
 The browser operator UI uses GitHub OAuth when these additional inputs are set:
 
@@ -139,15 +140,13 @@ The browser operator UI uses GitHub OAuth when these additional inputs are set:
 
 Human browser sessions use signed cookies backed by the Launchplane database when
 `LAUNCHPLANE_DATABASE_URL` is configured. Human roles are authorized through
-`github_humans` rules in the same Launchplane authz policy, with the bootstrap
-admin email list available for first-access recovery. Machine writes continue to
-use GitHub Actions OIDC bearer tokens.
+DB-backed Launchplane authz policy records, with the bootstrap admin email list
+available for first-access recovery. Machine writes continue to use GitHub
+Actions OIDC bearer tokens.
 
 Launchplane now fails closed at startup when no explicit policy input is provided.
-Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example`.
-Use `config/launchplane-authz.toml` for this repo's reviewed bootstrap policy,
-or copy the example to a non-`.example` path first and replace the placeholder
-repo identities.
+The bootstrap policy input should be minimal; live product and workflow grants
+belong in DB-backed policy records.
 
 `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` must be present whenever Launchplane needs
 to read or write DB-backed managed secrets. Dokploy credentials now resolve
@@ -187,11 +186,10 @@ Configure these GitHub settings before enabling it:
   - optional `LAUNCHPLANE_SESSION_SECRET`
 
 The deploy workflow now uses GitHub OIDC plus Launchplane's own service API to
-request a self-deploy. It renders `config/launchplane-authz.toml` into
-`LAUNCHPLANE_POLICY_B64` during the same rollout so bootstrap policy changes and
-image changes follow one reviewed deploy contract. When GitHub OAuth settings
-are configured in repository variables/secrets, that same self-deploy request
-syncs only the known OAuth env keys onto the live Dokploy target. Dokploy
+request a self-deploy. It updates the immutable image reference and known OAuth
+env keys while preserving the target's minimal bootstrap policy env. Live
+product/workflow authz changes should move through DB-backed policy records, not
+repo-local TOML. Dokploy
 credentials should live in Launchplane-managed secrets inside the shared store,
 not in GitHub repository secrets.
 

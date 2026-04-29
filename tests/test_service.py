@@ -16,6 +16,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord, authz_policy_sha256
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -660,9 +661,68 @@ class LaunchplaneServiceTests(unittest.TestCase):
         )
         self.assertEqual(
             payload["runtime"]["authz_policy_sha256"],
+            authz_policy_sha256(policy),
+        )
+        self.assertEqual(payload["runtime"]["authz_policy_source"], "bootstrap_seeded_store")
+        self.assertEqual(
+            payload["runtime"]["bootstrap_authz_policy_sha256"],
             hashlib.sha256(policy_text.encode("utf-8")).hexdigest(),
         )
         self.assertEqual(payload["runtime"]["service_audience"], "launchplane.shinycomputers.com")
+
+    def test_service_uses_db_backed_authz_policy_when_present(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'launchplane.sqlite3'}"
+            db_policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service.read"],
+                        }
+                    ]
+                }
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_authz_policy_record(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="launchplane-authz-policy-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-04-20T10:05:00Z",
+                    policy=db_policy,
+                )
+            )
+            store.close()
+
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                database_url=database_url,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            status_code, payload = _invoke_app(app, method="GET", path="/v1/service/runtime")
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["runtime"]["authz_policy_sha256"], authz_policy_sha256(db_policy))
+        self.assertEqual(payload["runtime"]["authz_policy_source"], "db")
 
     def test_ui_route_serves_static_shell_without_authentication(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

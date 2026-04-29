@@ -22,6 +22,11 @@ from jwt import InvalidTokenError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import secrets as control_plane_secrets
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -1128,6 +1133,53 @@ def _safe_return_to(value: str) -> str:
     return normalized
 
 
+def _now_timestamp() -> str:
+    return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _bootstrap_policy_source_from_env() -> str:
+    if os.environ.get("LAUNCHPLANE_POLICY_TOML", "").strip():
+        return "bootstrap-env:LAUNCHPLANE_POLICY_TOML"
+    if os.environ.get("LAUNCHPLANE_POLICY_B64", "").strip():
+        return "bootstrap-env:LAUNCHPLANE_POLICY_B64"
+    if os.environ.get("LAUNCHPLANE_POLICY_FILE", "").strip():
+        return "bootstrap-env:LAUNCHPLANE_POLICY_FILE"
+    return "bootstrap-policy"
+
+
+def _resolve_authz_policy(
+    *,
+    record_store: object,
+    bootstrap_policy: LaunchplaneAuthzPolicy,
+) -> tuple[LaunchplaneAuthzPolicy, str, str]:
+    list_records = getattr(record_store, "list_authz_policy_records", None)
+    if callable(list_records):
+        records = list_records(status="active", limit=1)
+        if records:
+            record = records[0]
+            return record.policy, record.policy_sha256, "db"
+
+    policy_sha256 = authz_policy_sha256(bootstrap_policy)
+    write_record = getattr(record_store, "write_authz_policy_record", None)
+    if callable(write_record):
+        updated_at = _now_timestamp()
+        record = LaunchplaneAuthzPolicyRecord(
+            record_id=build_authz_policy_record_id(
+                updated_at=updated_at,
+                policy_sha256=policy_sha256,
+            ),
+            status="active",
+            source=_bootstrap_policy_source_from_env(),
+            updated_at=updated_at,
+            policy_sha256=policy_sha256,
+            policy=bootstrap_policy,
+        )
+        write_record(record)
+        return record.policy, record.policy_sha256, "bootstrap_seeded_store"
+
+    return bootstrap_policy, policy_sha256, "bootstrap"
+
+
 def _launchplane_policy_sha256_from_env() -> str:
     policy_toml = os.environ.get("LAUNCHPLANE_POLICY_TOML", "").strip()
     if policy_toml:
@@ -1150,9 +1202,13 @@ def _launchplane_policy_sha256_from_env() -> str:
         return ""
 
 
-def _launchplane_runtime_payload(*, storage_backend: str) -> dict[str, object]:
+def _launchplane_runtime_payload(
+    *, storage_backend: str, authz_policy_sha256_value: str, authz_policy_source: str
+) -> dict[str, object]:
     return {
-        "authz_policy_sha256": _launchplane_policy_sha256_from_env(),
+        "authz_policy_sha256": authz_policy_sha256_value,
+        "authz_policy_source": authz_policy_source,
+        "bootstrap_authz_policy_sha256": _launchplane_policy_sha256_from_env(),
         "docker_image_reference": os.environ.get(_LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY, "").strip(),
         "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
         "storage_backend": storage_backend,
@@ -1325,6 +1381,9 @@ def create_launchplane_service_app(
     ui_static_root = resolved_root / "control_plane" / "ui_static"
     record_store = build_record_store(state_dir=state_dir, database_url=database_url)
     storage_backend = storage_backend_name(record_store)
+    authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source = (
+        _resolve_authz_policy(record_store=record_store, bootstrap_policy=authz_policy)
+    )
     resolved_github_oauth_config = github_oauth_config or load_github_oauth_config_from_env()
     oauth_login_states = OAuthLoginStateStore()
     session_manager = (
@@ -1909,7 +1968,9 @@ def create_launchplane_service_app(
                             "status": "ok",
                             "trace_id": request_trace_id,
                             "runtime": _launchplane_runtime_payload(
-                                storage_backend=storage_backend
+                                storage_backend=storage_backend,
+                                authz_policy_sha256_value=resolved_authz_policy_sha256,
+                                authz_policy_source=resolved_authz_policy_source,
                             ),
                         },
                     )

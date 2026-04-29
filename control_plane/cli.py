@@ -21,6 +21,11 @@ from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+    build_authz_policy_record_id,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
@@ -139,7 +144,6 @@ _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_B64",
     "LAUNCHPLANE_POLICY_FILE",
 )
-_DEFAULT_BOOTSTRAP_POLICY_FILE = Path("config/launchplane-authz.toml")
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
 _SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
@@ -159,7 +163,12 @@ def _control_plane_root() -> Path:
 
 
 def _resolve_bootstrap_policy_file(*, control_plane_root: Path, policy_file: Path | None) -> Path:
-    resolved = policy_file or _DEFAULT_BOOTSTRAP_POLICY_FILE
+    if policy_file is None:
+        raise click.ClickException(
+            "Launchplane bootstrap policy rendering requires --policy-file. "
+            "The repo no longer tracks a live authz policy file."
+        )
+    resolved = policy_file
     if not resolved.is_absolute():
         resolved = control_plane_root / resolved
     if resolved.name.endswith(".example"):
@@ -188,6 +197,40 @@ def _build_bootstrap_policy_payload(
         "policy_b64": base64.b64encode(policy_bytes).decode("ascii"),
         "policy_sha256": hashlib.sha256(policy_bytes).hexdigest(),
         "github_actions_rule_count": len(policy.github_actions),
+    }
+
+
+def _build_authz_policy_record(
+    *,
+    policy_file: Path,
+    source_label: str,
+    status: str = "active",
+) -> LaunchplaneAuthzPolicyRecord:
+    policy = load_authz_policy(policy_file)
+    updated_at = utc_now_timestamp()
+    policy_sha256 = authz_policy_sha256(policy)
+    return LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            updated_at=updated_at,
+            policy_sha256=policy_sha256,
+        ),
+        status=status,
+        source=source_label,
+        updated_at=updated_at,
+        policy_sha256=policy_sha256,
+        policy=policy,
+    )
+
+
+def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "status": record.status,
+        "source": record.source,
+        "updated_at": record.updated_at,
+        "policy_sha256": record.policy_sha256,
+        "github_actions_rule_count": len(record.policy.github_actions),
+        "github_humans_rule_count": len(record.policy.github_humans),
     }
 
 
@@ -6232,6 +6275,7 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
         managed_store_status.get("dokploy_target_id_record_count") or 0
     )
     release_tuple_record_count = int(managed_store_status.get("release_tuple_record_count") or 0)
+    authz_policy_record_count = int(managed_store_status.get("authz_policy_record_count") or 0)
     dokploy_host_managed = bool(managed_secret_bindings.get("DOKPLOY_HOST"))
     dokploy_token_managed = bool(managed_secret_bindings.get("DOKPLOY_TOKEN"))
     dokploy_managed_complete = dokploy_host_managed and dokploy_token_managed
@@ -6291,6 +6335,7 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
             "dokploy_target_record_count": dokploy_target_record_count,
             "dokploy_target_id_record_count": dokploy_target_id_record_count,
             "release_tuple_record_count": release_tuple_record_count,
+            "authz_policy_record_count": authz_policy_record_count,
         },
         "legacy_paths": {
             "repo_env_file": _launchplane_path_payload(repo_env_file, kind="repo_file"),
@@ -6315,6 +6360,7 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
             "dokploy_target_ids": "db_only" if dokploy_target_id_record_count > 0 else "missing",
             "stable_targets": "db_only" if dokploy_target_record_count > 0 else "missing",
             "release_tuples_catalog": "db_only" if release_tuple_record_count > 0 else "missing",
+            "authz_policy": "db_only" if authz_policy_record_count > 0 else "bootstrap_only",
         },
         "transition_inputs": {
             "selector_env_keys_present": [],
@@ -6333,6 +6379,7 @@ def _launchplane_managed_store_status(*, database_url: str) -> dict[str, object]
             "runtime_environment_record_count": 0,
             "dokploy_target_id_record_count": 0,
             "release_tuple_record_count": 0,
+            "authz_policy_record_count": 0,
         }
     record_store: PostgresRecordStore | None = None
     try:
@@ -6356,6 +6403,7 @@ def _launchplane_managed_store_status(*, database_url: str) -> dict[str, object]
             "runtime_environment_record_count": len(runtime_environment_records),
             "dokploy_target_id_record_count": len(dokploy_target_id_records),
             "release_tuple_record_count": len(record_store.list_release_tuple_records()),
+            "authz_policy_record_count": len(record_store.list_authz_policy_records(status="active")),
         }
     except Exception as error:
         return {
@@ -6366,6 +6414,7 @@ def _launchplane_managed_store_status(*, database_url: str) -> dict[str, object]
             "runtime_environment_record_count": 0,
             "dokploy_target_id_record_count": 0,
             "release_tuple_record_count": 0,
+            "authz_policy_record_count": 0,
         }
     finally:
         if record_store is not None:
@@ -6431,6 +6480,9 @@ def _build_launchplane_service_target_preflight(
             env_map=env_map,
             env_keys=_LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS,
         ),
+        "authz_policy_record_count": int(managed_store_status.get("authz_policy_record_count") or 0),
+        "authz_policy_db_configured": int(managed_store_status.get("authz_policy_record_count") or 0)
+        > 0,
         "target_ids_env_configured": False,
         "target_ids_record_count": int(
             managed_store_status.get("dokploy_target_id_record_count") or 0
@@ -6496,6 +6548,11 @@ def _build_launchplane_service_target_preflight(
         blockers.append(
             "Launchplane service target is missing LAUNCHPLANE_POLICY_* or LAUNCHPLANE_POLICY_FILE. "
             "Startup fails closed without an explicit policy input."
+        )
+    if not runtime_contract["authz_policy_db_configured"]:
+        warnings.append(
+            "Launchplane service target has no confirmed DB-backed authz policy records. "
+            "The service will seed from bootstrap policy on startup until DB-backed policy exists."
         )
     if not runtime_contract["target_ids_configured"]:
         warnings.append(
@@ -9110,8 +9167,8 @@ def service_serve(
 @click.option(
     "--policy-file",
     type=click.Path(path_type=Path),
-    default=None,
-    help="Bootstrap authz policy source. Defaults to config/launchplane-authz.toml.",
+    required=True,
+    help="Explicit bootstrap authz policy source. Live policy should be DB-backed.",
 )
 @click.option(
     "--format",
@@ -9124,7 +9181,7 @@ def service_serve(
     "--control-plane-root",
     type=click.Path(path_type=Path),
     default=None,
-    help="Optional Launchplane repo root used to resolve the default policy file.",
+    help="Optional Launchplane repo root used to resolve a relative policy file.",
 )
 def service_render_authz_policy(
     policy_file: Path | None,
@@ -9158,15 +9215,15 @@ def service_render_authz_policy(
 @click.option(
     "--policy-file",
     type=click.Path(path_type=Path),
-    default=None,
-    help="Bootstrap authz policy source. Defaults to config/launchplane-authz.toml.",
+    required=True,
+    help="Explicit bootstrap authz policy source. Live policy should be DB-backed.",
 )
 @click.option("--apply", "apply_changes", is_flag=True, default=False)
 @click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path),
     default=None,
-    help="Optional Launchplane repo root used to resolve Dokploy credentials and policy file.",
+    help="Optional Launchplane repo root used to resolve Dokploy credentials and a relative policy file.",
 )
 def service_sync_bootstrap_policy(
     target_type: str,
@@ -11506,6 +11563,69 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
 @main.group("dokploy-targets")
 def dokploy_targets() -> None:
     """Tracked Dokploy target record commands."""
+
+
+@main.group("authz-policies")
+def authz_policies() -> None:
+    """DB-backed Launchplane authorization policy commands."""
+
+
+@authz_policies.command("list")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane authz policy records.",
+)
+@click.option("--status", "status_filter", default="", help="Optional policy status filter.")
+def authz_policies_list(database_url: str, status_filter: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        records = postgres_store.list_authz_policy_records(status=status_filter)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [_summarize_authz_policy_record(record) for record in records],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@authz_policies.command("import-toml")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane authz policy records.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="TOML policy file to import into DB-backed authz policy records.",
+)
+@click.option("--source-label", default="cli:import-toml", show_default=True)
+def authz_policies_import_toml(database_url: str, policy_file: Path, source_label: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    record = _build_authz_policy_record(policy_file=policy_file, source_label=source_label)
+    try:
+        postgres_store.write_authz_policy_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_authz_policy_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
 
 
 @dokploy_targets.command("list")

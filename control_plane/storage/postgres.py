@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -302,6 +303,18 @@ class LaunchplaneReleaseTupleRow(Base):
     artifact_id: Mapped[str] = mapped_column(String, nullable=False)
     minted_at: Mapped[str] = mapped_column(String, nullable=False)
     provenance: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAuthzPolicyRow(Base):
+    __tablename__ = "launchplane_authz_policies"
+    __table_args__ = (Index("launchplane_authz_policies_updated_idx", desc("updated_at")),)
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1221,6 +1234,40 @@ class PostgresRecordStore(HumanSessionStore):
             ),
         )
 
+    def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> None:
+        self._write_row(
+            LaunchplaneAuthzPolicyRow(
+                record_id=record.record_id,
+                status=record.status,
+                source=record.source,
+                updated_at=record.updated_at,
+                policy_sha256=record.policy_sha256,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        filters: list[object] = []
+        if status:
+            filters.append(LaunchplaneAuthzPolicyRow.status == status)
+        records = self._list_models(
+            model_type=LaunchplaneAuthzPolicyRecord,
+            orm_model=LaunchplaneAuthzPolicyRow,
+            filters=filters,
+            order_by=(
+                desc(LaunchplaneAuthzPolicyRow.updated_at),
+                desc(LaunchplaneAuthzPolicyRow.record_id),
+            ),
+        )
+        if limit is not None:
+            return records[:limit]
+        return records
+
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
         self._write_row(
             LaunchplaneDokployTargetIdRow(
@@ -1616,6 +1663,7 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> dict[str, int]:
         counts = {
             "artifacts": 0,
+            "authz_policies": 0,
             "backup_gates": 0,
             "deployments": 0,
             "promotions": 0,
@@ -1633,6 +1681,9 @@ class PostgresRecordStore(HumanSessionStore):
         for record in filesystem_store.list_artifact_manifests():
             self.write_artifact_manifest(record)
             counts["artifacts"] += 1
+        for record in filesystem_store.list_authz_policy_records():
+            self.write_authz_policy_record(record)
+            counts["authz_policies"] += 1
         for record in filesystem_store.list_backup_gate_records():
             self.write_backup_gate_record(record)
             counts["backup_gates"] += 1

@@ -31,7 +31,6 @@ WORKDIR /app
 COPY pyproject.toml uv.lock README.md /app/
 COPY alembic.ini /app/alembic.ini
 COPY control_plane /app/control_plane
-COPY config /app/config
 COPY scripts /app/scripts
 COPY --from=frontend-build /app/control_plane/ui_static /app/control_plane/ui_static
 
