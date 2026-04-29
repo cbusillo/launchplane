@@ -21,6 +21,7 @@ from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
@@ -214,6 +215,30 @@ class LaunchplanePreviewLifecyclePlanRow(Base):
     planned_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     inventory_scan_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewLifecycleCleanupRow(Base):
+    __tablename__ = "launchplane_preview_lifecycle_cleanups"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_lifecycle_cleanups_context_idx",
+            "context",
+            desc("requested_at"),
+        ),
+        Index(
+            "launchplane_preview_lifecycle_cleanups_plan_idx",
+            "plan_id",
+            desc("requested_at"),
+        ),
+    )
+
+    cleanup_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    plan_id: Mapped[str] = mapped_column(String, nullable=False)
+    requested_at: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -966,6 +991,41 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_preview_lifecycle_cleanup_record(
+        self, record: PreviewLifecycleCleanupRecord
+    ) -> None:
+        self._write_row(
+            LaunchplanePreviewLifecycleCleanupRow(
+                cleanup_id=record.cleanup_id,
+                product=record.product,
+                context=record.context,
+                plan_id=record.plan_id,
+                requested_at=record.requested_at,
+                status=record.status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_lifecycle_cleanup_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewLifecycleCleanupRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplanePreviewLifecycleCleanupRow.context == context_name)
+        return self._list_models(
+            model_type=PreviewLifecycleCleanupRecord,
+            orm_model=LaunchplanePreviewLifecycleCleanupRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewLifecycleCleanupRow.requested_at.desc(),
+                LaunchplanePreviewLifecycleCleanupRow.cleanup_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def read_preview_summary(
         self,
         *,
@@ -1444,6 +1504,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_records": 0,
             "preview_generations": 0,
             "preview_inventory_scans": 0,
+            "preview_lifecycle_cleanups": 0,
             "preview_lifecycle_plans": 0,
             "release_tuples": 0,
         }
@@ -1479,6 +1540,10 @@ class PostgresRecordStore(HumanSessionStore):
             for record in filesystem_store.list_preview_lifecycle_plan_records():
                 self.write_preview_lifecycle_plan_record(record)
                 counts["preview_lifecycle_plans"] += 1
+        if hasattr(filesystem_store, "list_preview_lifecycle_cleanup_records"):
+            for record in filesystem_store.list_preview_lifecycle_cleanup_records():
+                self.write_preview_lifecycle_cleanup_record(record)
+                counts["preview_lifecycle_cleanups"] += 1
         for record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(record)
             counts["release_tuples"] += 1

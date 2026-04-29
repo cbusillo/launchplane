@@ -393,15 +393,23 @@ state/
 
 ## Launchplane Preview Lifecycle Plan Record
 
-- One append-only report-only decision record per preview lifecycle planning run.
+- One append-only decision record per preview lifecycle planning run.
 - Record the desired preview anchors submitted by a product repo, the latest
   inventory scan used as current provider state, and the derived keep/orphaned/
   missing slug sets.
-- The first implementation must not execute cleanup. It exists to move reusable
-  desired-vs-actual preview decisions into Launchplane before cleanup execution,
-  PR feedback, or scheduling are centralized.
-- Product repos should eventually submit thin desired-state adapters to this
-  boundary instead of each owning a separate preview janitor implementation.
+- The plan record is the required input for cleanup execution. Product repos
+  should eventually submit thin desired-state adapters to this boundary instead
+  of each owning a separate preview janitor implementation.
+
+## Launchplane Preview Lifecycle Cleanup Record
+
+- One append-only cleanup record per lifecycle cleanup request.
+- Record the source plan id, inventory scan id, requested source, whether
+  `apply=true` was explicitly requested, the planned orphan slugs, and per-slug
+  cleanup results.
+- `apply=false` is the default report-only mode. Destructive provider cleanup is
+  only allowed through an authorized workflow request with `apply=true` and an
+  existing passing lifecycle plan.
 
 ## Inventory
 

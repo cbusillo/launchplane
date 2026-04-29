@@ -14,6 +14,7 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import PromotionRecord
@@ -347,6 +348,29 @@ class FilesystemRecordStore:
             if not context_name or record.context == context_name
         ]
         records.sort(key=lambda record: (record.planned_at, record.plan_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_preview_lifecycle_cleanup_record(
+        self, record: PreviewLifecycleCleanupRecord
+    ) -> Path:
+        return self._write_model("launchplane_preview_lifecycle_cleanups", record.cleanup_id, record)
+
+    def list_preview_lifecycle_cleanup_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewLifecycleCleanupRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                PreviewLifecycleCleanupRecord, "launchplane_preview_lifecycle_cleanups"
+            )
+            if not context_name or record.context == context_name
+        ]
+        records.sort(key=lambda record: (record.requested_at, record.cleanup_id), reverse=True)
         if limit is not None:
             records = records[:limit]
         return tuple(records)
