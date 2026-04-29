@@ -51,7 +51,7 @@ repo-specific variation in thin request/config surfaces.
 ## Target Launchplane Shape
 
 - Launchplane should become a long-running control-plane service, expected to live
-  behind a stable address such as `launchplane.shinycomputers.com`.
+  behind an operator-owned stable address.
 - Launchplane should expose authenticated service ingress for runtime evidence,
   operator actions, and eventually driver-triggered orchestration.
 - GitHub Actions OIDC should be the default machine-to-machine authentication
@@ -75,8 +75,7 @@ repo-specific variation in thin request/config surfaces.
 ## Launchplane Shape Today
 
 - Stable remote environment lanes are `testing` and `prod` only.
-- Launchplane runs as the shared service behind
-  `launchplane.shinycomputers.com` with Postgres-backed operational truth.
+- Launchplane runs as a shared service with Postgres-backed operational truth.
 - The CLI and file-backed state directory are local-development, test, and
   emergency operator scaffolding around the service boundary. They are not the
   production integration contract for product workflows.
@@ -97,7 +96,7 @@ repo-specific variation in thin request/config surfaces.
   post-deploy/update, Odoo backup/promotion/rollback, VeriReel deploy,
   maintenance, promotion, rollback, and preview lifecycle operations.
 - `provider`: an external execution or data system such as Dokploy, GitHub,
-  GHCR, Proxmox, public health endpoints, or backup storage.
+  GHCR, delegated worker hosts, public health endpoints, or backup storage.
 - `repo extension`: the minimal source-adjacent wrapper, manifest, or workflow
   input that lets a product repo ask Launchplane to act without owning durable
   runtime truth.

@@ -70,19 +70,8 @@
   ],
   "qaLabels": [],
   "deployLabels": [],
-  "healthUrls": [
-    {
-      "name": "launchplane",
-      "url": "https://launchplane.shinycomputers.com/v1/health"
-    }
-  ],
-  "relatedRepos": [
-    "verireel",
-    "odoo-devkit",
-    "odoo-shared-addons",
-    "odoo-tenant-cm",
-    "odoo-tenant-opw"
-  ],
+  "healthUrls": [],
+  "relatedRepos": [],
   "validatedThrough": [],
   "githubSignals": {
     "postMerge": {

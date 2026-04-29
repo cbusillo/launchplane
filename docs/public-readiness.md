@@ -4,39 +4,26 @@ title: Public Readiness
 
 ## Current Verdict
 
-Do not flip `cbusillo/launchplane` public yet.
+The repo is acceptable to make public once the public-readiness scrub PR is
+merged and the first public CodeQL run is reviewed.
 
-The immediate deploy incident is fixed, but the repo and its runtime contract
-still carry private-operations assumptions that should be cleaned up first.
+Launchplane is still product-proving-ground code, not a polished standalone
+distribution. That is acceptable for public source visibility because live
+runtime authority now stays outside git in DB-backed records, managed secrets,
+GitHub settings, and private product repos.
 
-## Current Blockers
+## Public Boundary
 
-- The repo still documents Launchplane as the Odoo-specific implementation
-  rather than a generic public Launchplane surface. That is accurate today, but
-  it means a public move would expose product-specific internals before the
-  public story is coherent.
-- The live Dokploy target depends on a private git compose source plus a
-  Dokploy-managed SSH key. Public visibility for the repo does not remove that
-  contract automatically, and operators still need an intentional Dokploy key
-  story.
-- Launchplane image pulls still depend on a Dokploy-side saved GHCR credential.
-  A public repo does not help if the image package remains private or if
-  Dokploy is configured with stale registry credentials.
-- Repo visibility and GHCR package visibility are separate decisions. Making the
-  source repo public does not automatically make `ghcr.io/cbusillo/launchplane`
-  public, and making the image public should be an explicit package-level choice.
-- Launchplane runtime secrets and operator catalogs remain intentionally
-  external to git. That is the correct contract, but the repo must make it
-  obvious that public source visibility does not imply public runtime
-  configuration.
-- Live operational identifiers and product-specific authorization policy should
-  stay out of checked-in config. Target IDs and authz grants are DB-backed
-  Launchplane records; bootstrap env remains the only non-DB root-of-trust
-  surface.
-- Product and tenant-specific examples remain throughout the docs. They are
-  acceptable for a private Odoo control-plane repo today, but they should be
-  pruned or generalized before treating the repo as a public Launchplane
-  reference implementation.
+- Public source contains Launchplane code, docs, tests, workflows, schema code,
+  and generic contract examples.
+- Product drivers may be visible when they are part of the current implementation,
+  but product-private runtime memos, target IDs, and customer-specific policy
+  do not belong in this repo.
+- Live Dokploy targets, runtime env, target IDs, managed secrets, and authz policy
+  are DB-backed Launchplane records or bootstrap env, not checked-in files.
+- GHCR package visibility is separate from source visibility. The image can be
+  public when image inspection confirms no runtime secret material is baked into
+  layers.
 
 ## Image And Secret Posture
 
@@ -47,38 +34,33 @@ keys, Dokploy credentials, product tokens, passwords, and SSH private keys shoul
 remain runtime inputs or Launchplane-managed encrypted records.
 
 The public-readiness concern is therefore not "the image has secrets baked in."
-The remaining concern is public-facing product-specific docs and whether the
-private runtime/package prerequisites are explicit enough for operators.
+The remaining concern is keeping product-private operations in private product
+repos and verifying the first public code-scanning signal after visibility
+changes.
 
 ## Ready-To-Public Checklist
 
-- Replace or generalize tenant-specific examples that do not need to be public
-  product documentation.
 - Keep the checked-in CodeQL workflow enabled once the repo is public and verify
   initial code-scanning alerts are clean or tracked.
-- Decide whether the Launchplane GHCR package should also become public, or keep
-  the repo public while documenting the private package contract explicitly.
 - Confirm live target identifiers and product-specific authorization policy stay
   out of checked-in config and are represented by DB-backed Launchplane records.
 - Audit the built image layers before any package visibility change and confirm
   they contain no runtime secret material.
-- Document the Dokploy SSH and registry prerequisites in one operator-facing
-  place, with a short failure-mode checklist.
-- Keep all runtime secrets, target-id catalogs, and runtime-environment files
-  outside git. Treat that as a hard invariant, not a best effort.
-- Confirm the repo README tells a public reader what Launchplane is today, what
-  is Odoo-specific, and what is still intentionally private operational state.
+- Keep all runtime secrets, target-id catalogs, runtime-environment files, and
+  product-private runtime memos outside git. Treat that as a hard invariant.
+- Move product/customer-specific operational detail to private product repos when
+  it is useful to preserve but not part of the shared Launchplane contract.
 
 ## Safe Public Posture
 
-If the repo needs to go public before Launchplane is fully generalized, the safe
-interim posture is:
+The safe public posture before Launchplane is fully generalized is:
 
 - public source code
 - private runtime secrets and operator catalogs
-- explicit docs for private GHCR and Dokploy prerequisites
+- public or private GHCR package visibility chosen independently from source
+  visibility
 - no checked-in live environment identifiers, credentials, or rendered secret
   files
 
-That posture is workable, but only once the docs and examples stop implying
-that private operator knowledge is stored in the repo.
+That posture is workable because private operator knowledge is not stored in the
+repo.

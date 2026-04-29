@@ -7,11 +7,10 @@ title: Operations
 Use `uv run launchplane --help` for the complete CLI surface. The current
 top-level groups are:
 
-Today this CLI is the local Launchplane operator surface for the Odoo system owned
-by this repo. It owns stable-lane deploy and promotion workflows for
-`testing` and `prod`, plus Launchplane preview records and read models for PR
-review flows. It should not be treated as the final cross-product ingress
-boundary for Launchplane.
+Today this CLI is the local Launchplane operator surface around the service API.
+It owns stable-lane deploy and promotion records for `testing` and `prod`, plus
+Launchplane preview records and read models for PR review flows. It should not
+be treated as the final cross-product ingress boundary for Launchplane.
 
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
@@ -43,8 +42,8 @@ contract itself.
 
 The target communication model is:
 
-- Launchplane runs as a long-running service behind a stable host such as
-  `launchplane.shinycomputers.com`.
+- Launchplane runs as a long-running service behind an operator-owned stable
+  host.
 - Product workflows communicate with Launchplane over authenticated HTTP.
 - GitHub Actions OIDC is the default machine-to-machine trust boundary.
 - Launchplane authorizes requests from GitHub-issued identity claims such as repo,
@@ -97,14 +96,10 @@ Current implementation scope:
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
 
-VeriReel prod rollback now has a dedicated Launchplane route, but the
-privileged Proxmox path is still intended to stay behind a narrow delegated
-worker contract rather than being absorbed into the main API host. That runtime
-posture is documented in
-[`verireel-prod-rollback-runtime.md`](verireel-prod-rollback-runtime.md).
-The constrained Proxmox forced-command guard lives with Launchplane at
-[`../scripts/proxmox-prod-gate-filter.sh`](../scripts/proxmox-prod-gate-filter.sh)
-so product repos do not carry privileged backup or rollback shell contracts.
+Privileged product rollback routes should stay behind narrow delegated-worker
+contracts rather than being absorbed into the main API host. Product-private
+runtime memos belong in product repos; this repo keeps only the shared driver
+and record contracts.
 
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
 Additional evidence routes should land against the same authn/authz boundary
@@ -186,9 +181,9 @@ own live product/workflow grants; keep Dokploy host/token authority in
 Launchplane-managed secrets instead of duplicating those credentials in GitHub
 repository secrets.
 
-`LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the `chris-testing`
-self-hosted GitHub runner. Use the public Launchplane `GET /v1/health` endpoint
-rather than an internal-only Dokploy network hostname.
+`LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
+deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that
+runner rather than an internal-only provider hostname.
 
 The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` from
 its env so deploy automation can switch the service by immutable digest and
@@ -430,12 +425,12 @@ Artifact handoff example:
 
 ```bash
 uv run launchplane odoo-artifacts publish \
-  --context opw \
+  --context example \
   --instance testing \
-  --manifest ../odoo-workspaces/migration/sources/tenant-opw/workspace.toml \
-  --devkit-root ../odoo-workspaces/migration/sources/devkit \
-  --image-repository ghcr.io/example/odoo-opw \
-  --image-tag opw-20260416-deadbeef
+  --manifest ../product-repo/workspace.toml \
+  --devkit-root ../devkit \
+  --image-repository ghcr.io/example/product \
+  --image-tag example-20260416-deadbeef
 ```
 
 The Odoo artifact publish driver is the control-plane-owned handoff. It
@@ -514,7 +509,7 @@ is `launchplane-previews write-from-generation`:
   "anchor_repo": "verireel",
   "anchor_pr_number": 123,
   "anchor_pr_url": "https://github.com/example-org/verireel/pull/123",
-  "canonical_url": "https://pr-123.ver-preview.shinycomputers.com",
+  "canonical_url": "https://pr-123.preview.example.com",
   "state": "active",
   "updated_at": "2026-04-16T08:10:00Z",
   "eligible_at": "2026-04-16T08:10:00Z"
@@ -583,9 +578,9 @@ a review surface over durable Launchplane records: preview URL/state, manifest a
 baseline tuple, source inputs, artifact identity when present, health status,
 next action, and apply outcome.
 
-Launchplane treats tenant PRs as preview anchors in the current workspace:
-`tenant-opw -> opw` and `tenant-cm -> cm`. `shared-addons` is companion-only,
-and infra/tooling repos are not preview anchors.
+Launchplane treats product PRs as preview anchors. Companion, infra, and tooling
+repos should remain source inputs only unless a product explicitly maps them to
+a preview context.
 
 Preview enablement records retain the anchor PR head SHA plus any resolved
 companion PR head SHA snapshots from ingest. Tenant renders use those stored

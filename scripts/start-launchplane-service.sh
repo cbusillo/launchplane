@@ -33,7 +33,7 @@ launchplane_policy_b64="${LAUNCHPLANE_POLICY_B64:-}"
 launchplane_policy_file="${LAUNCHPLANE_POLICY_FILE:-}"
 launchplane_service_host="${LAUNCHPLANE_SERVICE_HOST:-0.0.0.0}"
 launchplane_service_port="${LAUNCHPLANE_SERVICE_PORT:-8080}"
-launchplane_service_audience="${LAUNCHPLANE_SERVICE_AUDIENCE:-launchplane.shinycomputers.com}"
+launchplane_service_audience="${LAUNCHPLANE_SERVICE_AUDIENCE:-localhost}"
 policy_file=""
 
 mkdir -p "$state_dir"

@@ -25,25 +25,13 @@ title: Secrets
 - Launchplane preview routing now uses a dedicated `LAUNCHPLANE_PREVIEW_BASE_URL`
   runtime-environment value instead of piggybacking on ordinary live-instance
   web base URLs.
-- VeriReel prod rollback worker dispatch now resolves
-  `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
-  `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
-  `VERIREEL_PROD_CT_ID` from the `verireel/prod` runtime-environment contract.
-  The worker also requires `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` and
-  `VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS`; the private key must come from a
-  managed runtime-environment secret binding.
-- VeriReel prod backup-gate dispatch resolves
-  `LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND` from the same
-  `verireel/prod` runtime-environment contract and shares the Proxmox SSH
-  secret surface with rollback. Non-secret backup-shape values such as
-  `VERIREEL_PROD_BACKUP_MODE`, `VERIREEL_PROD_BACKUP_STORAGE`,
-  `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
-  `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS` also belong in DB-backed
-  runtime-environment records instead of repo or host env.
-- VeriReel app maintenance and preview inventory drivers use Launchplane-managed
-  Dokploy secret bindings. GitHub workflows should not carry `DOKPLOY_HOST`,
-  `DOKPLOY_TOKEN`, or `DOKPLOY_PROJECT_NAME`; they should call Launchplane with
-  OIDC and operation intent.
+- Product backup, rollback, maintenance, and preview drivers should resolve
+  runtime worker commands, host/user metadata, and non-secret operation settings
+  from DB-backed runtime-environment records. Private keys, tokens, and
+  known-host material must come from managed secret bindings.
+- GitHub workflows should not carry provider credentials such as `DOKPLOY_HOST`,
+  `DOKPLOY_TOKEN`, or project names; they should call Launchplane with OIDC and
+  operation intent.
 
 ## DB-Backed Secret Resolution
 
@@ -72,16 +60,8 @@ title: Secrets
   - `DOKPLOY_SHIP_MODE`
   - per-context/runtime values such as `LAUNCHPLANE_PREVIEW_BASE_URL`,
     `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET`, and tenant/product env keys
-  - rollback worker values such as
-    `LAUNCHPLANE_VERIREEL_PROD_ROLLBACK_WORKER_COMMAND`,
-    `VERIREEL_PROD_PROXMOX_HOST`, `VERIREEL_PROD_PROXMOX_USER`, and
-    `VERIREEL_PROD_CT_ID`, with `VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY` stored
-    as a managed secret
-  - backup-gate worker values such as
-    `LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND`,
-    `VERIREEL_PROD_BACKUP_MODE`, `VERIREEL_PROD_BACKUP_STORAGE`,
-    `VERIREEL_PROD_SNAPSHOT_PREFIX`, `VERIREEL_PROD_SNAPSHOT_KEEP`, and
-    `VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS`
+  - product rollback, backup-gate, and maintenance worker values, with private
+    key/token material stored as managed secrets
 
 ## Rules
 
