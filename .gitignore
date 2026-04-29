@@ -16,6 +16,7 @@ control_plane/ui_static/
 
 # Local env and secrets
 .env
+*.override.*
 config/dokploy-targets.toml
 
 # Local state and scratch artifacts

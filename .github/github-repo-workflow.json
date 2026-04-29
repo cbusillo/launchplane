@@ -1,6 +1,71 @@
 {
   "defaultBranch": "main",
-  "importantWorkflows": ["CI", "Deploy Launchplane"],
+  "projectType": "control-plane",
+  "docs": {
+    "index": "docs/README.md",
+    "architecture": "docs/architecture.md",
+    "configBoundary": "docs/config-boundary.md",
+    "serviceBoundary": "docs/service-boundary.md",
+    "driverDescriptors": "docs/driver-descriptors.md",
+    "operations": "docs/operations.md",
+    "records": "docs/records.md",
+    "secrets": "docs/secrets.md",
+    "publicReadiness": "docs/public-readiness.md",
+    "style": [
+      "docs/style/python.md",
+      "docs/style/testing.md"
+    ],
+    "policies": [
+      "docs/policies/coding-standards.md"
+    ]
+  },
+  "qualityGate": {
+    "test": {
+      "default": "uv run python -m unittest"
+    },
+    "lint": {
+      "default": "uv run --extra dev ruff check .",
+      "changedFiles": "uv run --extra dev ruff check {files}"
+    },
+    "format": {
+      "check": "uv run --extra dev ruff format --check ."
+    },
+    "typecheck": {
+      "default": "uv run --extra dev mypy control_plane tests"
+    },
+    "build": {
+      "frontend": "pnpm --dir frontend validate",
+      "container": "docker build -t launchplane-ci:test ."
+    },
+    "audit": {
+      "pythonDependencies": "uv run --with pip-audit pip-audit",
+      "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" aquasec/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test"
+    },
+    "inspection": {
+      "tool": "jetbrains",
+      "ide": "PyCharm",
+      "scopePreference": [
+        "changed_files",
+        "directory",
+        "whole_project"
+      ]
+    },
+    "docsRequiredWhen": [
+      "behavior changes",
+      "api changes",
+      "config changes",
+      "operations changes",
+      "ownership boundaries change",
+      "user-visible UI changes",
+      "runtime or config authority changes"
+    ]
+  },
+  "importantWorkflows": [
+    "CI",
+    "Security",
+    "Deploy Launchplane",
+    "Dependency Graph"
+  ],
   "qaLabels": [],
   "deployLabels": [],
   "healthUrls": [
@@ -17,8 +82,38 @@
     "odoo-tenant-opw"
   ],
   "validatedThrough": [],
+  "githubSignals": {
+    "postMerge": {
+      "waitForActions": true,
+      "checkSecurityAndQuality": true
+    },
+    "capabilities": {
+      "codeScanning": "unsupported",
+      "secretScanning": "unsupported",
+      "dependabotAlerts": "available",
+      "securityAdvisories": "unsupported"
+    },
+    "refreshWhen": [
+      "repo visibility changes",
+      "GitHub plan changes",
+      "security settings change",
+      "token permissions change"
+    ]
+  },
   "cleanup": {
-    "deleteMergedLocalBranches": false,
-    "removeMergedCleanWorktrees": false
+    "deleteMergedLocalBranches": true,
+    "removeMergedCleanWorktrees": true
+  },
+  "metadataFreshness": {
+    "updateWhen": [
+      "docs routing changes",
+      "validation gates change",
+      "primary commands change",
+      "important workflows change",
+      "health endpoint changes",
+      "repo relationship changes",
+      "cleanup policy changes",
+      "ownership boundaries change"
+    ]
   }
 }
