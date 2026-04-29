@@ -24,6 +24,7 @@ from control_plane.contracts.idempotency_record import build_launchplane_idempot
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
@@ -759,6 +760,43 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
         self.assertEqual(listed_records[0].orphaned_slugs, ("pr-122",))
 
+    def test_preview_desired_state_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_preview_desired_state_record(
+                PreviewDesiredStateRecord(
+                    desired_state_id="preview-desired-state-verireel-testing-20260420T100500Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    source="launchplane-preview-lifecycle",
+                    discovered_at="2026-04-20T10:05:00Z",
+                    repository="every/verireel",
+                    label="preview",
+                    anchor_repo="verireel",
+                    status="pass",
+                    desired_count=1,
+                    desired_previews=(PreviewLifecycleDesiredPreview(preview_slug="pr-123"),),
+                )
+            )
+            listed_records = store.list_preview_desired_state_records(
+                context_name="verireel-testing",
+                limit=1,
+            )
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(
+            listed_records[0].desired_state_id,
+            "preview-desired-state-verireel-testing-20260420T100500Z",
+        )
+        self.assertEqual(listed_records[0].desired_count, 1)
+        self.assertEqual(listed_records[0].desired_previews[0].preview_slug, "pr-123")
+
     def test_preview_lifecycle_cleanup_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1158,6 +1196,21 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     preview_slugs=("pr-123",),
                 )
             )
+            filesystem_store.write_preview_desired_state_record(
+                PreviewDesiredStateRecord(
+                    desired_state_id="preview-desired-state-verireel-testing-20260420T100550Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    source="launchplane-preview-lifecycle",
+                    discovered_at="2026-04-20T10:05:50Z",
+                    repository="every/verireel",
+                    label="preview",
+                    anchor_repo="verireel",
+                    status="pass",
+                    desired_count=1,
+                    desired_previews=(PreviewLifecycleDesiredPreview(preview_slug="pr-123"),),
+                )
+            )
             filesystem_store.write_preview_lifecycle_plan_record(
                 PreviewLifecyclePlanRecord(
                     plan_id="preview-lifecycle-plan-verireel-testing-20260420T100600Z",
@@ -1218,6 +1271,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "odoo_instance_overrides": 1,
                     "preview_records": 1,
                     "preview_generations": 1,
+                    "preview_desired_states": 1,
                     "preview_inventory_scans": 1,
                     "preview_lifecycle_cleanups": 1,
                     "preview_lifecycle_plans": 1,
@@ -1243,6 +1297,13 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     limit=1,
                 )[0].scan_id,
                 "preview-inventory-scan-verireel-testing-20260420T100500Z",
+            )
+            self.assertEqual(
+                store.list_preview_desired_state_records(
+                    context_name="verireel-testing",
+                    limit=1,
+                )[0].desired_state_id,
+                "preview-desired-state-verireel-testing-20260420T100550Z",
             )
             self.assertEqual(
                 store.list_preview_lifecycle_plan_records(

@@ -32,6 +32,7 @@ class PreviewLifecyclePlanRecord(BaseModel):
     planned_at: str
     source: str
     status: PreviewLifecyclePlanStatus
+    desired_state_id: str = ""
     inventory_scan_id: str = ""
     desired_previews: tuple[PreviewLifecycleDesiredPreview, ...] = ()
     desired_slugs: tuple[str, ...] = ()

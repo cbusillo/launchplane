@@ -18,12 +18,16 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
 )
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
-from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
+from control_plane.contracts.preview_lifecycle_plan_record import (
+    PreviewLifecycleDesiredPreview,
+    PreviewLifecyclePlanRecord,
+)
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -2581,6 +2585,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "product": "verireel",
                     "context": "verireel-testing",
                     "source": "preview-janitor",
+                    "desired_state_id": "preview-desired-state-verireel-testing-20260429T192314Z",
                     "desired_previews": [
                         {"preview_slug": "pr-42", "anchor_repo": "verireel", "anchor_pr_number": 42},
                         {"preview_slug": "pr-43", "anchor_repo": "verireel", "anchor_pr_number": 43},
@@ -2600,6 +2605,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "preview-inventory-scan-verireel-testing-20260429T192315Z",
         )
         self.assertEqual(payload["result"]["keep_slugs"], ["pr-42"])
+        self.assertEqual(
+            payload["result"]["desired_state_id"],
+            "preview-desired-state-verireel-testing-20260429T192314Z",
+        )
         self.assertEqual(payload["result"]["orphaned_slugs"], ["pr-41"])
         self.assertEqual(payload["result"]["missing_slugs"], ["pr-43"])
         self.assertEqual(len(plan_records), 1)
@@ -2700,6 +2709,141 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["status"], "missing_inventory")
         self.assertEqual(payload["result"]["orphaned_slugs"], [])
         self.assertIn("has not recorded", payload["result"]["error_message"])
+
+    def test_preview_desired_state_endpoint_discovers_and_records_labeled_prs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_desired_state.discover"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.discover_github_preview_desired_state",
+                return_value=PreviewDesiredStateRecord(
+                    desired_state_id="preview-desired-state-verireel-testing-20260429T213000Z",
+                    product="verireel",
+                    context="verireel-testing",
+                    source="launchplane-preview-lifecycle",
+                    discovered_at="2026-04-29T21:30:00Z",
+                    repository="every/verireel",
+                    label="preview",
+                    anchor_repo="verireel",
+                    status="pass",
+                    desired_count=1,
+                    desired_previews=(
+                        PreviewLifecycleDesiredPreview(
+                            preview_slug="pr-42",
+                            anchor_repo="verireel",
+                            anchor_pr_number=42,
+                            anchor_pr_url="https://github.com/every/verireel/pull/42",
+                            head_sha="abc1234",
+                        ),
+                    ),
+                ),
+            ) as discover_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/desired-state",
+                    payload={
+                        "product": "verireel",
+                        "context": "verireel-testing",
+                        "source": "launchplane-preview-lifecycle",
+                        "repository": "every/verireel",
+                        "label": "preview",
+                        "anchor_repo": "verireel",
+                    },
+                )
+
+            records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_desired_state_records(context_name="verireel-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(
+            payload["records"]["preview_desired_state_id"],
+            "preview-desired-state-verireel-testing-20260429T213000Z",
+        )
+        self.assertEqual(payload["result"]["desired_previews"][0]["preview_slug"], "pr-42")
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0].desired_count, 1)
+        discover_mock.assert_called_once()
+
+    def test_preview_desired_state_endpoint_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_lifecycle.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/desired-state",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_preview_pr_feedback_endpoint_records_skipped_delivery_without_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -31,6 +31,7 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_inventory_scan_record import (
     PreviewInventoryScanRecord,
     build_preview_inventory_scan_id,
@@ -79,6 +80,7 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
     build_preview_lifecycle_cleanup_record,
@@ -230,6 +232,7 @@ class PreviewLifecyclePlanEnvelope(BaseModel):
     product: str
     context: str
     desired_previews: tuple[PreviewLifecycleDesiredPreview, ...] = ()
+    desired_state_id: str = ""
     source: str = "workflow"
 
     @model_validator(mode="after")
@@ -240,6 +243,38 @@ class PreviewLifecyclePlanEnvelope(BaseModel):
             raise ValueError("preview lifecycle plan requires context")
         if not self.source.strip():
             raise ValueError("preview lifecycle plan requires source")
+        return self
+
+
+class PreviewDesiredStateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    source: str = "workflow"
+    repository: str
+    label: str = "preview"
+    anchor_repo: str
+    preview_slug_prefix: str = "pr-"
+    max_pages: int = Field(default=10, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewDesiredStateEnvelope":
+        if not self.product.strip():
+            raise ValueError("preview desired state requires product")
+        if not self.context.strip():
+            raise ValueError("preview desired state requires context")
+        if not self.source.strip():
+            raise ValueError("preview desired state requires source")
+        if not self.repository.strip():
+            raise ValueError("preview desired state requires repository")
+        if not self.label.strip():
+            raise ValueError("preview desired state requires label")
+        if not self.anchor_repo.strip():
+            raise ValueError("preview desired state requires anchor_repo")
+        if not self.preview_slug_prefix.strip():
+            raise ValueError("preview desired state requires preview_slug_prefix")
         return self
 
 
@@ -889,6 +924,7 @@ def _accepted_payload(
                 "release_tuple_id",
                 "inventory_record_id",
                 "preview_id",
+                "preview_desired_state_id",
                 "preview_inventory_scan_id",
                 "preview_pr_feedback_id",
                 "preview_lifecycle_cleanup_id",
@@ -1214,6 +1250,15 @@ def _write_preview_inventory_scan_if_supported(
     return scan_id
 
 
+def _write_preview_desired_state_if_supported(
+    *, record_store: object, record: PreviewDesiredStateRecord
+) -> str:
+    if not hasattr(record_store, "write_preview_desired_state_record"):
+        return ""
+    getattr(record_store, "write_preview_desired_state_record")(record)
+    return record.desired_state_id
+
+
 def _latest_preview_inventory_scan(
     *, record_store: object, context_name: str
 ) -> PreviewInventoryScanRecord | None:
@@ -1308,6 +1353,7 @@ def create_launchplane_service_app(
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
+        "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-plan",
@@ -2803,6 +2849,7 @@ def create_launchplane_service_app(
                     planned_at=_utc_now_timestamp(),
                     source=request.source,
                     desired_previews=request.desired_previews,
+                    desired_state_id=request.desired_state_id,
                     latest_inventory_scan=_latest_preview_inventory_scan(
                         record_store=record_store,
                         context_name=request.context,
@@ -2813,6 +2860,57 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_lifecycle_plan_id": preview_lifecycle_plan_id}
+            elif path == "/v1/previews/desired-state":
+                request = PreviewDesiredStateEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_desired_state.discover",
+                    product=request.product,
+                    context=request.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot discover preview desired state for the requested"
+                                    " product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = discover_github_preview_desired_state(
+                    control_plane_root=resolved_root,
+                    product=request.product,
+                    context=request.context,
+                    source=request.source,
+                    discovered_at=_utc_now_timestamp(),
+                    repository=request.repository,
+                    label=request.label,
+                    anchor_repo=request.anchor_repo,
+                    preview_slug_prefix=request.preview_slug_prefix,
+                    max_pages=request.max_pages,
+                )
+                preview_desired_state_id = _write_preview_desired_state_if_supported(
+                    record_store=record_store,
+                    record=driver_result,
+                )
+                result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == "/v1/previews/pr-feedback":
                 request = PreviewPrFeedbackEnvelope.model_validate(payload)
                 if not authz_policy.allows(

@@ -19,6 +19,7 @@ from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRec
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
 from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLifecycleCleanupRecord
@@ -197,6 +198,27 @@ class LaunchplanePreviewInventoryScanRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     preview_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplanePreviewDesiredStateRow(Base):
+    __tablename__ = "launchplane_preview_desired_states"
+    __table_args__ = (
+        Index(
+            "launchplane_preview_desired_states_context_idx",
+            "context",
+            desc("discovered_at"),
+        ),
+    )
+
+    desired_state_id: Mapped[str] = mapped_column(String, primary_key=True)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    discovered_at: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    label: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    desired_count: Mapped[int] = mapped_column(Integer, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -986,6 +1008,41 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_preview_desired_state_record(self, record: PreviewDesiredStateRecord) -> None:
+        self._write_row(
+            LaunchplanePreviewDesiredStateRow(
+                desired_state_id=record.desired_state_id,
+                product=record.product,
+                context=record.context,
+                discovered_at=record.discovered_at,
+                repository=record.repository,
+                label=record.label,
+                status=record.status,
+                desired_count=record.desired_count,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_preview_desired_state_records(
+        self,
+        *,
+        context_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PreviewDesiredStateRecord, ...]:
+        filters: list[object] = []
+        if context_name:
+            filters.append(LaunchplanePreviewDesiredStateRow.context == context_name)
+        return self._list_models(
+            model_type=PreviewDesiredStateRecord,
+            orm_model=LaunchplanePreviewDesiredStateRow,
+            filters=filters,
+            order_by=(
+                LaunchplanePreviewDesiredStateRow.discovered_at.desc(),
+                LaunchplanePreviewDesiredStateRow.desired_state_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def write_preview_lifecycle_plan_record(self, record: PreviewLifecyclePlanRecord) -> None:
         self._write_row(
             LaunchplanePreviewLifecyclePlanRow(
@@ -1566,6 +1623,7 @@ class PostgresRecordStore(HumanSessionStore):
             "odoo_instance_overrides": 0,
             "preview_records": 0,
             "preview_generations": 0,
+            "preview_desired_states": 0,
             "preview_inventory_scans": 0,
             "preview_lifecycle_cleanups": 0,
             "preview_lifecycle_plans": 0,
@@ -1600,6 +1658,10 @@ class PostgresRecordStore(HumanSessionStore):
             for record in filesystem_store.list_preview_inventory_scan_records():
                 self.write_preview_inventory_scan_record(record)
                 counts["preview_inventory_scans"] += 1
+        if hasattr(filesystem_store, "list_preview_desired_state_records"):
+            for record in filesystem_store.list_preview_desired_state_records():
+                self.write_preview_desired_state_record(record)
+                counts["preview_desired_states"] += 1
         if hasattr(filesystem_store, "list_preview_lifecycle_plan_records"):
             for record in filesystem_store.list_preview_lifecycle_plan_records():
                 self.write_preview_lifecycle_plan_record(record)

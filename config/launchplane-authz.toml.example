@@ -34,6 +34,16 @@ contexts = ["verireel-testing"]
 actions = ["verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_destroyed.write", "preview_lifecycle.plan", "preview_lifecycle.cleanup"]
 
 [[github_actions]]
+repository = "example-org/launchplane"
+workflow_refs = [
+  "example-org/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main",
+]
+event_names = ["schedule", "workflow_dispatch"]
+products = ["verireel"]
+contexts = ["verireel-testing"]
+actions = ["preview_desired_state.discover", "verireel_preview_inventory.read", "verireel_preview_destroy.execute", "preview_lifecycle.plan", "preview_lifecycle.cleanup"]
+
+[[github_actions]]
 repository = "example-org/verireel"
 workflow_refs = [
   "example-org/verireel/.github/workflows/publish-image.yml@refs/heads/main",

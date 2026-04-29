@@ -395,11 +395,20 @@ state/
 
 - One append-only decision record per preview lifecycle planning run.
 - Record the desired preview anchors submitted by a product repo, the latest
-  inventory scan used as current provider state, and the derived keep/orphaned/
-  missing slug sets.
+  desired-state discovery record when present, the latest inventory scan used as
+  current provider state, and the derived keep/orphaned/missing slug sets.
 - The plan record is the required input for cleanup execution. Product repos
   should eventually submit thin desired-state adapters to this boundary instead
   of each owning a separate preview janitor implementation.
+
+## Launchplane Preview Desired State Record
+
+- One append-only record per Launchplane discovery of desired preview anchors.
+- Record the product/context/source, GitHub repository, label, anchor repo,
+  preview slug prefix, discovered timestamp, discovered desired previews, and
+  pass/fail status.
+- Desired-state records let Launchplane own the recurring PR label discovery
+  loop before it plans cleanup against provider inventory.
 
 ## Launchplane Preview Lifecycle Cleanup Record
 
