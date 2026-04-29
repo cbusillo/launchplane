@@ -238,6 +238,11 @@ authorize read endpoints, but POST mutation routes remain GitHub Actions OIDC
 only until browser-initiated mutation workflows get a dedicated CSRF and audit
 design.
 
+For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
+verified GitHub email addresses that receive the `admin` role even before a
+matching `github_humans` rule exists. The GitHub OAuth client requests
+`user:email` so that this bootstrap path works for private profile emails.
+
 ## First API Surface
 
 The first Launchplane service surface should focus on evidence ingress and record

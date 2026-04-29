@@ -134,11 +134,14 @@ The browser operator UI uses GitHub OAuth when these additional inputs are set:
 - `LAUNCHPLANE_PUBLIC_URL`
 - `LAUNCHPLANE_SESSION_SECRET`
 - optional `LAUNCHPLANE_COOKIE_SECURE` for local HTTP development
+- optional `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` for comma-separated verified
+  GitHub email addresses that receive the initial `admin` role
 
 Human browser sessions use signed cookies backed by the Launchplane database when
 `LAUNCHPLANE_DATABASE_URL` is configured. Human roles are authorized through
-`github_humans` rules in the same Launchplane authz policy. Machine writes
-continue to use GitHub Actions OIDC bearer tokens.
+`github_humans` rules in the same Launchplane authz policy, with the bootstrap
+admin email list available for first-access recovery. Machine writes continue to
+use GitHub Actions OIDC bearer tokens.
 
 Launchplane now fails closed at startup when no explicit policy input is provided.
 Do not point `LAUNCHPLANE_POLICY_FILE` at `config/launchplane-authz.toml.example`.
@@ -175,13 +178,22 @@ Configure these GitHub settings before enabling it:
   - optional `LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
+  - optional `LAUNCHPLANE_GITHUB_CLIENT_ID`
+  - optional `LAUNCHPLANE_PUBLIC_URL`
+  - optional `LAUNCHPLANE_COOKIE_SECURE`
+  - optional `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS`
+- repository secrets:
+  - optional `LAUNCHPLANE_GITHUB_CLIENT_SECRET`
+  - optional `LAUNCHPLANE_SESSION_SECRET`
 
 The deploy workflow now uses GitHub OIDC plus Launchplane's own service API to
 request a self-deploy. It renders `config/launchplane-authz.toml` into
 `LAUNCHPLANE_POLICY_B64` during the same rollout so bootstrap policy changes and
-image changes follow one reviewed deploy contract. Dokploy credentials should
-live in Launchplane-managed secrets inside the shared store, not in GitHub
-repository secrets.
+image changes follow one reviewed deploy contract. When GitHub OAuth settings
+are configured in repository variables/secrets, that same self-deploy request
+syncs only the known OAuth env keys onto the live Dokploy target. Dokploy
+credentials should live in Launchplane-managed secrets inside the shared store,
+not in GitHub repository secrets.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must point at Launchplane URLs that GitHub-hosted
 runners can reach, typically the public `https://.../v1/health` endpoint.

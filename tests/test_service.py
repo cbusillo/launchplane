@@ -32,7 +32,15 @@ from control_plane.service_auth import (
     GitHubOidcVerifier,
     LaunchplaneAuthzPolicy,
 )
-from control_plane.service_human_auth import GitHubOAuthConfig
+from control_plane.service_human_auth import (
+    GITHUB_EMAILS_URL,
+    GITHUB_ORGS_URL,
+    GITHUB_TEAMS_URL,
+    GITHUB_USER_URL,
+    GitHubOAuthClient,
+    GitHubOAuthConfig,
+    load_github_oauth_config_from_env,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.verireel_preview_driver import (
@@ -83,6 +91,32 @@ class _StubGitHubOAuthClient:
         if code != "github-code":
             raise ValueError("unexpected code")
         return self.identity
+
+
+class _FakeGitHubResponse:
+    def __init__(self, payload: object):
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class _FakeOAuth2Session:
+    def __init__(self, payloads: dict[str, object]):
+        self.payloads = payloads
+        self.requested_urls: list[str] = []
+        self.token_request: dict[str, str] = {}
+
+    def fetch_token(self, url: str, *, code: str, code_verifier: str) -> None:
+        self.token_request = {
+            "url": url,
+            "code": code,
+            "code_verifier": code_verifier,
+        }
+
+    def get(self, url: str) -> _FakeGitHubResponse:
+        self.requested_urls.append(url)
+        return _FakeGitHubResponse(self.payloads[url])
 
 
 def _identity(
@@ -262,6 +296,79 @@ class GitHubOidcVerifierTests(unittest.TestCase):
 
 
 class GitHubHumanAuthTests(unittest.TestCase):
+    def test_github_oauth_config_loads_bootstrap_admin_emails(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "LAUNCHPLANE_GITHUB_CLIENT_ID": "client-id",
+                "LAUNCHPLANE_GITHUB_CLIENT_SECRET": "client-secret",
+                "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example/",
+                "LAUNCHPLANE_SESSION_SECRET": "session-secret",
+                "LAUNCHPLANE_COOKIE_SECURE": "false",
+                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": (
+                    " Info@ShinyComputers.com, ops@example.com "
+                ),
+            },
+            clear=True,
+        ):
+            config = load_github_oauth_config_from_env()
+
+        self.assertIsNotNone(config)
+        assert config is not None
+        self.assertFalse(config.cookie_secure)
+        self.assertEqual(config.public_url, "https://launchplane.example")
+        self.assertIn("user:email", config.scopes)
+        self.assertEqual(
+            config.bootstrap_admin_emails,
+            frozenset({"info@shinycomputers.com", "ops@example.com"}),
+        )
+
+    def test_github_oauth_bootstrap_admin_can_use_verified_private_email(self) -> None:
+        config = GitHubOAuthConfig(
+            client_id="client-id",
+            client_secret="client-secret",
+            public_url="https://launchplane.example",
+            session_secret="session-secret",
+            bootstrap_admin_emails=frozenset({"info@shinycomputers.com"}),
+        )
+        oauth_session = _FakeOAuth2Session(
+            {
+                GITHUB_USER_URL: {
+                    "login": "bootstrapper",
+                    "id": 987,
+                    "name": "Bootstrap Operator",
+                    "email": None,
+                },
+                GITHUB_ORGS_URL: [],
+                GITHUB_TEAMS_URL: [],
+                GITHUB_EMAILS_URL: [
+                    {
+                        "email": "info@shinycomputers.com",
+                        "primary": True,
+                        "verified": True,
+                    },
+                    {
+                        "email": "unverified@example.com",
+                        "primary": False,
+                        "verified": False,
+                    },
+                ],
+            }
+        )
+        client = GitHubOAuthClient(config)
+
+        with patch.object(GitHubOAuthClient, "_new_session", return_value=oauth_session):
+            identity = client.fetch_identity(
+                code="github-code",
+                code_verifier="verifier",
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_humans": []}),
+            )
+
+        self.assertEqual(identity.login, "bootstrapper")
+        self.assertEqual(identity.email, "info@shinycomputers.com")
+        self.assertEqual(identity.role, "admin")
+        self.assertIn(GITHUB_EMAILS_URL, oauth_session.requested_urls)
+
     def _signed_in_cookie(
         self,
         app,
@@ -1004,6 +1111,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "target_id": "compose-123",
                             "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
                             "policy_b64": policy_b64,
+                            "oauth_env": {
+                                "LAUNCHPLANE_GITHUB_CLIENT_ID": "client-id",
+                                "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
+                                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": (
+                                    "info@shinycomputers.com"
+                                ),
+                            },
                         },
                     },
                     headers={"Idempotency-Key": "launchplane-self-deploy:test"},
@@ -1023,6 +1137,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/launchplane@sha256:new", updated_env_text
         )
         self.assertIn(f"LAUNCHPLANE_POLICY_B64={policy_b64}", updated_env_text)
+        self.assertIn("LAUNCHPLANE_GITHUB_CLIENT_ID=client-id", updated_env_text)
+        self.assertIn("LAUNCHPLANE_PUBLIC_URL=https://launchplane.example", updated_env_text)
+        self.assertIn(
+            "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS=info@shinycomputers.com",
+            updated_env_text,
+        )
         self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", updated_env_text)
         self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", updated_env_text)
         trigger_mock.assert_called_once_with(
@@ -1032,6 +1152,58 @@ class LaunchplaneServiceTests(unittest.TestCase):
             target_id="compose-123",
             no_cache=False,
         )
+
+    def test_self_deploy_endpoint_rejects_unknown_oauth_env_keys(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/launchplane/self-deploy",
+                payload={
+                    "product": "launchplane",
+                    "deploy": {
+                        "target_type": "compose",
+                        "target_id": "compose-123",
+                        "image_reference": "ghcr.io/cbusillo/launchplane@sha256:new",
+                        "oauth_env": {"DOKPLOY_TOKEN": "nope"},
+                    },
+                },
+                headers={"Idempotency-Key": "launchplane-self-deploy:bad-oauth-env"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_preview_generation_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
