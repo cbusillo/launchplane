@@ -14,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     ArtifactImageReference,
 )
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -53,7 +54,7 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
-from control_plane.service_auth import GitHubHumanIdentity
+from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -723,6 +724,46 @@ class PostgresRecordStoreTests(unittest.TestCase):
         )
         self.assertEqual(listed_records[0].preview_count, 0)
 
+    def test_authz_policy_records_round_trip(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["launchplane_service_deploy.execute"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_authz_policy_record(
+                LaunchplaneAuthzPolicyRecord(
+                    record_id="launchplane-authz-policy-20260420T100500Z-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-04-20T10:05:00Z",
+                    policy=policy,
+                )
+            )
+            listed_records = store.list_authz_policy_records(status="active", limit=1)
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(listed_records[0].record_id, "launchplane-authz-policy-20260420T100500Z-test")
+        self.assertEqual(listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane")
+
     def test_preview_lifecycle_plan_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1264,6 +1305,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 counts,
                 {
                     "artifacts": 1,
+                    "authz_policies": 0,
                     "backup_gates": 1,
                     "deployments": 1,
                     "promotions": 1,

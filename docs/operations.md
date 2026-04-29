@@ -69,12 +69,12 @@ The first implemented service command is:
 ```bash
 uv run launchplane service serve \
   --state-dir ./state \
-  --policy-file ./config/launchplane-authz.toml
+  --policy-file ./bootstrap-policy.toml
 ```
 
-`config/launchplane-authz.toml` is the tracked bootstrap authz policy source for
-this repo's live service. `config/launchplane-authz.toml.example` remains the
-placeholder template for other installs.
+The service needs an explicit minimal bootstrap policy input, but the repo no
+longer tracks the live policy. Product and workflow grants should be represented
+as DB-backed authz policy records.
 
 Current implementation scope:
 
@@ -106,29 +106,33 @@ The constrained Proxmox forced-command guard lives with Launchplane at
 [`../scripts/proxmox-prod-gate-filter.sh`](../scripts/proxmox-prod-gate-filter.sh)
 so product repos do not carry privileged backup or rollback shell contracts.
 
-The service currently uses a static authz policy file and GitHub OIDC bearer
-tokens. Additional evidence routes should land against the same authn/authz
-boundary rather than creating separate ad hoc ingress patterns.
+The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
+Additional evidence routes should land against the same authn/authz boundary
+rather than creating separate ad hoc ingress patterns.
 
-Render the tracked bootstrap policy or inspect the encoded deploy artifact with:
+Render an explicit emergency bootstrap policy or import a policy into DB-backed
+records with:
 
 ```bash
-uv run launchplane service render-authz-policy
-uv run launchplane service render-authz-policy --format b64
+uv run launchplane service render-authz-policy --policy-file ./bootstrap-policy.toml
+uv run launchplane service render-authz-policy --policy-file ./bootstrap-policy.toml --format b64
+uv run launchplane authz-policies import-toml --policy-file ./bootstrap-policy.toml
 ```
 
-When operators need to preview or apply the current tracked bootstrap policy to
+When operators need to preview or apply an explicit emergency bootstrap policy to
 the live Launchplane Dokploy target without editing any rendered host-side env
 file, use:
 
 ```bash
 uv run launchplane service sync-bootstrap-policy \
   --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-  --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID"
+  --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+  --policy-file ./bootstrap-policy.toml
 
 uv run launchplane service sync-bootstrap-policy \
   --target-type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
   --target-id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+  --policy-file ./bootstrap-policy.toml \
   --apply
 ```
 
@@ -176,11 +180,11 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
 
-The workflow should use GitHub OIDC to call Launchplane's own service API,
-render `config/launchplane-authz.toml`, and update `LAUNCHPLANE_POLICY_B64`
-during the same reviewed rollout as the image digest change. Keep Dokploy
-host/token authority in Launchplane-managed secrets instead of duplicating
-those credentials in GitHub repository secrets.
+The workflow should use GitHub OIDC to call Launchplane's own service API and
+update the image digest plus known OAuth env only. DB-backed authz policy records
+own live product/workflow grants; keep Dokploy host/token authority in
+Launchplane-managed secrets instead of duplicating those credentials in GitHub
+repository secrets.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the `chris-testing`
 self-hosted GitHub runner. Use the public Launchplane `GET /v1/health` endpoint

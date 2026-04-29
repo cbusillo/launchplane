@@ -5,6 +5,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -79,6 +80,27 @@ class FilesystemRecordStore:
 
     def write_release_tuple_record(self, record: ReleaseTupleRecord) -> Path:
         return self._write_model("release_tuples", f"{record.context}-{record.channel}", record)
+
+    def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> Path:
+        return self._write_model("launchplane_authz_policies", record.record_id, record)
+
+    def list_authz_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[LaunchplaneAuthzPolicyRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                LaunchplaneAuthzPolicyRecord, "launchplane_authz_policies"
+            )
+            if not status or record.status == status
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_release_tuple_record(self, *, context_name: str, channel_name: str) -> ReleaseTupleRecord:
         return ReleaseTupleRecord.model_validate(

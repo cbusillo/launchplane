@@ -126,19 +126,6 @@ jobs:
       - name: Install Python
         run: uv python install 3.13
 
-      - name: Render bootstrap authz policy
-        id: policy
-        shell: bash
-        run: |
-          set -euo pipefail
-          policy_json="$(uv run launchplane service render-authz-policy --format json)"
-          policy_b64="$(printf '%s' "$policy_json" | jq -r '.policy_b64')"
-          policy_sha256="$(printf '%s' "$policy_json" | jq -r '.policy_sha256')"
-          {
-            echo "policy_b64=$policy_b64"
-            echo "policy_sha256=$policy_sha256"
-          } >> "$GITHUB_OUTPUT"
-
       - name: Set up Docker Buildx
         if: steps.prep.outputs.should_build == 'true'
         uses: docker/setup-buildx-action@v4
@@ -196,8 +183,7 @@ jobs:
           set -euo pipefail
 
           request_deploy() {
-            local mode="$1"
-            local response_file="$2"
+            local response_file="$1"
             local request_payload=""
             local idempotency_key=""
             local oauth_env_json=""
@@ -210,44 +196,32 @@ jobs:
               | jq -r '.value'
             })"
 
-            if [ "$mode" = "with-policy" ]; then
-              oauth_env_json="$({
-                jq -n \
-                  --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
-                  --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
-                  --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
-                  --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
-                  --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
-                  --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
-                  '{
-                    LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
-                    LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
-                    LAUNCHPLANE_PUBLIC_URL: $public_url,
-                    LAUNCHPLANE_SESSION_SECRET: $session_secret,
-                    LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                    LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
-                  } | with_entries(select(.value != ""))'
-              })"
-              request_payload="$({
-                jq -n \
-                  --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-                  --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
-                  --arg image_reference "${{ steps.image.outputs.image_reference }}" \
-                  --arg policy_b64 "${{ steps.policy.outputs.policy_b64 }}" \
-                  --argjson oauth_env "$oauth_env_json" \
-                  '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference, policy_b64: $policy_b64} + (if ($oauth_env | length) > 0 then {oauth_env: $oauth_env} else {} end))}'
-              })"
-              idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ steps.policy.outputs.policy_sha256 }}"
-            else
-              request_payload="$({
-                jq -n \
-                  --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-                  --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
-                  --arg image_reference "${{ steps.image.outputs.image_reference }}" \
-                  '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference}}'
-              })"
-              idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:bootstrap-image-only"
-            fi
+            oauth_env_json="$({
+              jq -n \
+                --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
+                --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
+                --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
+                --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
+                --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
+                --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
+                '{
+                  LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
+                  LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
+                  LAUNCHPLANE_PUBLIC_URL: $public_url,
+                  LAUNCHPLANE_SESSION_SECRET: $session_secret,
+                  LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
+                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                } | with_entries(select(.value != ""))'
+            })"
+            request_payload="$({
+              jq -n \
+                --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+                --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+                --arg image_reference "${{ steps.image.outputs.image_reference }}" \
+                --argjson oauth_env "$oauth_env_json" \
+                '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($oauth_env | length) > 0 then {oauth_env: $oauth_env} else {} end))}'
+            })"
+            idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:db-authz"
 
             curl -sS \
               -o "$response_file" \
@@ -261,75 +235,17 @@ jobs:
           }
 
           response_file="$(mktemp)"
-          status_code="$(request_deploy with-policy "$response_file")"
+          status_code="$(request_deploy "$response_file")"
           if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
             cat "$response_file"
-            echo "deploy_mode=with-policy" >> "$GITHUB_OUTPUT"
             exit 0
-          fi
-
-          if [ "$status_code" = "400" ]; then
-            echo "Live Launchplane rejected policy_b64 during self-deploy bootstrap; retrying image-only rollout first." >&2
-            cat "$response_file" >&2
-            status_code="$(request_deploy image-only "$response_file")"
-            if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
-              cat "$response_file"
-              echo "deploy_mode=image-only-then-policy" >> "$GITHUB_OUTPUT"
-              exit 0
-            fi
           fi
 
           cat "$response_file" >&2
           echo "Launchplane self deploy request failed with HTTP ${status_code}." >&2
           exit 1
 
-      - name: Wait for deployed Launchplane image and policy
-        if: steps.self_deploy.outputs.deploy_mode == 'with-policy'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
-          expected_image_reference="${{ steps.image.outputs.image_reference }}"
-          expected_policy_sha256="${{ steps.policy.outputs.policy_sha256 }}"
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            all_healthy=1
-            while IFS= read -r raw_url; do
-              health_url="$(printf '%s' "$raw_url" | xargs)"
-              if [ -z "$health_url" ]; then
-                continue
-              fi
-              response_body="$(curl -fsSL "$health_url" 2>/dev/null || true)"
-              if [ -z "$response_body" ] || ! printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
-                all_healthy=0
-                break
-              fi
-            done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
-
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-              | jq -r '.value'
-            })"
-
-            runtime_payload="$(curl -fsSL \
-              -H "Authorization: Bearer ${oidc_token}" \
-              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
-            actual_policy_sha256="$(printf '%s' "$runtime_payload" | jq -r '.runtime.authz_policy_sha256 // empty' 2>/dev/null || true)"
-
-            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$expected_image_reference" ] && [ "$actual_policy_sha256" = "$expected_policy_sha256" ]; then
-              exit 0
-            fi
-            sleep 5
-          done
-
-          echo "Timed out waiting for Launchplane image '$expected_image_reference' and policy '$expected_policy_sha256' to become live and healthy." >&2
-          exit 1
-
       - name: Wait for deployed Launchplane image
-        if: steps.self_deploy.outputs.deploy_mode == 'image-only-then-policy'
         shell: bash
         run: |
           set -euo pipefail
@@ -369,109 +285,4 @@ jobs:
           done
 
           echo "Timed out waiting for Launchplane image '$expected_image_reference' to become live and healthy." >&2
-          exit 1
-
-      - name: Apply bootstrap policy after image rollout
-        if: steps.self_deploy.outputs.deploy_mode == 'image-only-then-policy'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          oidc_token="$({
-            curl -fsSL \
-              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-            | jq -r '.value'
-          })"
-
-          oauth_env_json="$({
-            jq -n \
-              --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
-              --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
-              --arg public_url "${LAUNCHPLANE_PUBLIC_URL:-}" \
-              --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
-              --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
-              --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
-              '{
-                LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
-                LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
-                LAUNCHPLANE_PUBLIC_URL: $public_url,
-                LAUNCHPLANE_SESSION_SECRET: $session_secret,
-                LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
-              } | with_entries(select(.value != ""))'
-          })"
-
-          request_payload="$({
-            jq -n \
-              --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
-              --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
-              --arg image_reference "${{ steps.image.outputs.image_reference }}" \
-              --arg policy_b64 "${{ steps.policy.outputs.policy_b64 }}" \
-              --argjson oauth_env "$oauth_env_json" \
-              '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference, policy_b64: $policy_b64} + (if ($oauth_env | length) > 0 then {oauth_env: $oauth_env} else {} end))}'
-          })"
-
-          response_file="$(mktemp)"
-          status_code="$(curl -sS \
-            -o "$response_file" \
-            -w '%{http_code}' \
-            -X POST \
-            -H "Authorization: Bearer ${oidc_token}" \
-            -H "Content-Type: application/json" \
-            -H "Idempotency-Key: launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ steps.policy.outputs.policy_sha256 }}:post-upgrade-policy" \
-            --data "$request_payload" \
-            "${{ steps.service.outputs.service_url }}/v1/drivers/launchplane/self-deploy")"
-          if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
-            cat "$response_file"
-            exit 0
-          fi
-
-          cat "$response_file" >&2
-          echo "Launchplane post-upgrade bootstrap policy sync failed with HTTP ${status_code}." >&2
-          exit 1
-
-      - name: Wait for deployed Launchplane policy
-        if: steps.self_deploy.outputs.deploy_mode == 'image-only-then-policy'
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
-          expected_image_reference="${{ steps.image.outputs.image_reference }}"
-          expected_policy_sha256="${{ steps.policy.outputs.policy_sha256 }}"
-          while [ "$SECONDS" -lt "$deadline" ]; do
-            all_healthy=1
-            while IFS= read -r raw_url; do
-              health_url="$(printf '%s' "$raw_url" | xargs)"
-              if [ -z "$health_url" ]; then
-                continue
-              fi
-              response_body="$(curl -fsSL "$health_url" 2>/dev/null || true)"
-              if [ -z "$response_body" ] || ! printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
-                all_healthy=0
-                break
-              fi
-            done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
-
-            oidc_token="$({
-              curl -fsSL \
-                -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-                "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
-              | jq -r '.value'
-            })"
-
-            runtime_payload="$(curl -fsSL \
-              -H "Authorization: Bearer ${oidc_token}" \
-              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
-            actual_policy_sha256="$(printf '%s' "$runtime_payload" | jq -r '.runtime.authz_policy_sha256 // empty' 2>/dev/null || true)"
-
-            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$expected_image_reference" ] && [ "$actual_policy_sha256" = "$expected_policy_sha256" ]; then
-              exit 0
-            fi
-            sleep 5
-          done
-
-          echo "Timed out waiting for Launchplane policy '$expected_policy_sha256' to become live on image '$expected_image_reference'." >&2
           exit 1

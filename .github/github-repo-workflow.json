@@ -63,6 +63,7 @@
   "importantWorkflows": [
     "CI",
     "Security",
+    "CodeQL",
     "Deploy Launchplane",
     "Preview Lifecycle",
     "Dependency Graph"

@@ -93,6 +93,10 @@ an ORM column/table or remains only in the evidence payload.
 - Release tuple: modeled fields are `context`, `channel`, `tuple_id`,
   `artifact_id`, `minted_at`, and `provenance`. Repo SHA maps and source
   provenance details stay payload-only.
+- Authz policy: modeled fields are `record_id`, `status`, `source`,
+  `updated_at`, and `policy_sha256`. The parsed GitHub Actions and human grant
+  policy stays payload-only until Launchplane needs per-rule filtering or
+  browser-side policy editing.
 - Dokploy target id: modeled fields are `context`, `instance`, `target_id`, and
   `updated_at`. Provider lookup/import evidence stays payload-only.
 - Dokploy target: modeled fields are `context`, `instance`, and `updated_at`.

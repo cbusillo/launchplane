@@ -50,14 +50,14 @@ fi
 
 if [ -z "$policy_file" ]; then
   echo "Launchplane service requires an explicit policy input via LAUNCHPLANE_POLICY_TOML, LAUNCHPLANE_POLICY_B64, or LAUNCHPLANE_POLICY_FILE." >&2
-  echo "Use $launchplane_app_root/config/launchplane-authz.toml for this repo's tracked bootstrap policy, or copy $launchplane_app_root/config/launchplane-authz.toml.example to a real policy file and point LAUNCHPLANE_POLICY_FILE at that copy." >&2
+  echo "Use a minimal bootstrap policy input; live product/workflow authorization belongs in DB-backed Launchplane records." >&2
   exit 1
 fi
 
 case "$policy_file" in
   *.example)
     echo "Refusing to start Launchplane with example policy file: $policy_file" >&2
-    echo "Copy the example to a non-.example path and update the placeholder repo/workflow values first." >&2
+    echo "Provide a real bootstrap policy through LAUNCHPLANE_POLICY_TOML, LAUNCHPLANE_POLICY_B64, or LAUNCHPLANE_POLICY_FILE." >&2
     exit 1
     ;;
 esac

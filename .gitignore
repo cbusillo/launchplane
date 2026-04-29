@@ -17,6 +17,8 @@ control_plane/ui_static/
 # Local env and secrets
 .env
 *.override.*
+config/launchplane-authz.toml
+config/launchplane-authz.toml.example
 config/dokploy-targets.toml
 
 # Local state and scratch artifacts

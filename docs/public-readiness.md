@@ -29,36 +29,37 @@ still carry private-operations assumptions that should be cleaned up first.
   external to git. That is the correct contract, but the repo must make it
   obvious that public source visibility does not imply public runtime
   configuration.
-- The checked-in config still includes live operational identifiers and
-  product-specific authorization policy. These are not plaintext secrets, but
-  they expose private infrastructure shape that should be moved, generalized, or
-  intentionally documented before a public launch.
-- Product and tenant-specific examples remain throughout the docs and config
-  examples. They are acceptable for a private Odoo control-plane repo today,
-  but they should be pruned or generalized before treating the repo as a public
-  Launchplane reference implementation.
+- Live operational identifiers and product-specific authorization policy should
+  stay out of checked-in config. Target IDs and authz grants are DB-backed
+  Launchplane records; bootstrap env remains the only non-DB root-of-trust
+  surface.
+- Product and tenant-specific examples remain throughout the docs. They are
+  acceptable for a private Odoo control-plane repo today, but they should be
+  pruned or generalized before treating the repo as a public Launchplane
+  reference implementation.
 
 ## Image And Secret Posture
 
 The Launchplane container image should not contain runtime secrets. The Docker
-build copies source, scripts, and tracked config, while `.dockerignore` excludes
+build copies source, scripts, and public-safe config/docs, while `.dockerignore` excludes
 runtime state and local artifacts. Secrets such as database URLs, encryption
 keys, Dokploy credentials, product tokens, passwords, and SSH private keys should
 remain runtime inputs or Launchplane-managed encrypted records.
 
 The public-readiness concern is therefore not "the image has secrets baked in."
-The concern is that a public repo or public image would currently reveal private
-operational assumptions, live target identifiers, and product-specific control
-plane policy unless those are cleaned up first.
+The remaining concern is public-facing product-specific docs and whether the
+private runtime/package prerequisites are explicit enough for operators.
 
 ## Ready-To-Public Checklist
 
 - Replace or generalize tenant-specific examples that do not need to be public
   product documentation.
+- Keep the checked-in CodeQL workflow enabled once the repo is public and verify
+  initial code-scanning alerts are clean or tracked.
 - Decide whether the Launchplane GHCR package should also become public, or keep
   the repo public while documenting the private package contract explicitly.
-- Move live target identifiers and product-specific authorization policy out of
-  checked-in public-facing config, or replace them with example values.
+- Confirm live target identifiers and product-specific authorization policy stay
+  out of checked-in config and are represented by DB-backed Launchplane records.
 - Audit the built image layers before any package visibility change and confirm
   they contain no runtime secret material.
 - Document the Dokploy SSH and registry prerequisites in one operator-facing

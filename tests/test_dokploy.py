@@ -1375,7 +1375,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         )
         self.assertEqual(evidence["changed"], "true")
 
-    def test_service_render_authz_policy_uses_tracked_policy_source(self) -> None:
+    def test_service_render_authz_policy_uses_explicit_policy_source(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -1400,6 +1400,8 @@ actions = ["launchplane_service_deploy.execute"]
                 [
                     "service",
                     "render-authz-policy",
+                    "--policy-file",
+                    str(policy_file),
                     "--control-plane-root",
                     str(control_plane_root),
                 ],
@@ -1469,6 +1471,8 @@ actions = ["launchplane_service_deploy.execute"]
                         "compose",
                         "--target-id",
                         "compose-123",
+                        "--policy-file",
+                        str(policy_file),
                         "--control-plane-root",
                         str(control_plane_root),
                         "--apply",

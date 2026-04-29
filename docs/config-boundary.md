@@ -15,8 +15,8 @@ Launchplane's long-term config model is:
 
 - bootstrap/root-of-trust stays outside the database
 - all other live mutable config is DB-backed
-- checked-in repo files are examples, docs, schemas, tests, or the reviewed
-  bootstrap authz policy source
+- checked-in repo files are examples, docs, schemas, tests, and workflows; live
+  authz and target files are not repo authority
 - local files under `~/.config/launchplane/` are not Launchplane config
   authority and should be archived or deleted when found
 - the service never silently falls back across multiple live authorities
@@ -35,7 +35,7 @@ it can reach, trust, or decrypt DB-backed state.
 | --- | --- | --- | --- |
 | Database connectivity | `LAUNCHPLANE_DATABASE_URL` | Bootstrap env | Required before Launchplane can read DB-backed config. |
 | Secret decryption root | `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` | Bootstrap env | Must stay outside the DB it decrypts. |
-| Authz bootstrap | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE` | Bootstrap env/file | Current root of trust. May evolve later, but still needs a non-DB bootstrap path. |
+| Authz bootstrap | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE` | Minimal bootstrap env/file | Root of trust for first start and DB policy repair only. Live product/workflow grants are DB-backed authz policy records. |
 | Launchplane self image ref | `DOCKER_IMAGE_REFERENCE` | Service target env | Needed for Launchplane self-deploy and rollback posture. |
 | Process wiring | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT` | Service target env | Runtime/process wiring, not product config. |
 
@@ -65,8 +65,7 @@ These stay in git, but not as live mutable runtime authority.
 
 | Class | Examples |
 | --- | --- |
-| Bootstrap policy source | `config/launchplane-authz.toml` for this repo's reviewed service policy |
-| Examples/templates | `config/launchplane-authz.toml.example` for bootstrap policy placeholders only |
+| Bootstrap policy snippets | Docs and test fixtures only; no tracked live `config/*.toml` policy source |
 | Docs/specs | `docs/*`, `README.md` |
 | Schemas/tests | storage schema code, tests, fixtures |
 
@@ -90,6 +89,7 @@ DB-backed config classes.
 - repo-local `.env`
 - repo-local `config/runtime-environments.toml`
 - repo-local `config/dokploy-targets.toml` as live target authority
+- repo-local `config/launchplane-authz.toml` as live authz policy authority
 - `~/.config/launchplane/dokploy.env`
 - `~/.config/launchplane/runtime-environments.toml`
 
