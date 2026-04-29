@@ -118,6 +118,7 @@ from control_plane.workflows.verireel_prod_rollback import (
 )
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
+    VeriReelPreviewInventoryResult,
     VeriReelPreviewInventoryRequest,
     VeriReelPreviewRefreshRequest,
     execute_verireel_preview_destroy,
