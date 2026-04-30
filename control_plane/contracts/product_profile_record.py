@@ -36,6 +36,7 @@ class ProductPreviewProfile(BaseModel):
     enabled: bool = False
     context: str = ""
     slug_template: str = "pr-{number}"
+    app_name_prefix: str = ""
 
     @model_validator(mode="after")
     def _validate_preview(self) -> "ProductPreviewProfile":
