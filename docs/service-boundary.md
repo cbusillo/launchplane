@@ -39,6 +39,8 @@ VeriReel product paths:
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/preview-desired-state`
+  - `POST /v1/drivers/generic-web/preview-inventory`
+  - `POST /v1/drivers/generic-web/preview-destroy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
   - `POST /v1/drivers/odoo/post-deploy`
@@ -309,6 +311,13 @@ Generic web preview desired-state discovery uses
 product and optional pull-request label/page limit; Launchplane resolves the
 repository, preview context, anchor repo, and preview slug template from the
 DB-backed product profile before recording desired preview state.
+
+Generic web preview inventory and destroy use
+`POST /v1/drivers/generic-web/preview-inventory` and
+`POST /v1/drivers/generic-web/preview-destroy`. They scan and delete stateless
+Dokploy preview applications by the preview application-name prefix in the
+DB-backed product profile. Lifecycle cleanup can dispatch to this generic path
+only after a passing plan and a matching stored preview record are present.
 
 ### Operator read endpoints
 

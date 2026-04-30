@@ -1273,6 +1273,79 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_generic_web_preview_inventory_route_writes_scan_from_driver_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_inventory.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = SimpleNamespace(
+                context="sellyouroutboard-testing",
+                source="generic-web-preview-inventory",
+                previews=(SimpleNamespace(previewSlug="pr-42"),),
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_inventory",
+                return_value=driver_result,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-inventory",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "inventory": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                        },
+                    },
+                )
+            records = FilesystemRecordStore(state_dir=state_dir).list_preview_inventory_scan_records(
+                context_name="sellyouroutboard-testing"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(
+            payload["records"]["preview_inventory_scan_id"],
+            records[0].scan_id,
+        )
+        self.assertEqual(records[0].source, "generic-web-preview-inventory")
+        self.assertEqual(records[0].preview_slugs, ("pr-42",))
+
     def test_driver_context_view_endpoint_returns_lane_summary(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -98,6 +98,13 @@ the product key; Launchplane resolves the preview context, owning repository,
 anchor repo, and slug template from the DB-backed product profile before writing
 desired preview state records.
 
+The `preview_inventory` and `preview_destroy` actions route to
+`POST /v1/drivers/generic-web/preview-inventory` and
+`POST /v1/drivers/generic-web/preview-destroy`. They are intentionally limited
+to stateless container previews: Launchplane scans and deletes Dokploy
+applications by the product profile's preview application-name prefix, while
+preview creation/refresh remains a separate contract.
+
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still

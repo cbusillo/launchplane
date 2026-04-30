@@ -86,6 +86,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             capability_id="preview_inventory_managed",
             label="Preview inventory managed",
             description="Read provider inventory and reconcile current preview state through Launchplane records.",
+            actions=("preview_inventory", "preview_destroy"),
             panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
         DriverCapabilityDescriptor(
@@ -113,6 +114,24 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             scope="context",
             route_path="/v1/drivers/generic-web/preview-desired-state",
             writes_records=("preview_desired_state",),
+        ),
+        _action(
+            "preview_inventory",
+            "Read preview inventory",
+            "Scan provider state for active generic-web previews and record inventory evidence.",
+            safety="safe_write",
+            scope="context",
+            route_path="/v1/drivers/generic-web/preview-inventory",
+            writes_records=("preview_inventory_scan",),
+        ),
+        _action(
+            "preview_destroy",
+            "Destroy preview",
+            "Destroy a generic-web preview application and record cleanup evidence.",
+            safety="destructive",
+            scope="preview",
+            route_path="/v1/drivers/generic-web/preview-destroy",
+            writes_records=("preview",),
         ),
     ),
 )

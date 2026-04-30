@@ -93,7 +93,11 @@ from control_plane.workflows.generic_web_deploy import (
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
+    GenericWebPreviewDestroyRequest,
+    GenericWebPreviewInventoryRequest,
     discover_generic_web_preview_desired_state,
+    execute_generic_web_preview_destroy,
+    execute_generic_web_preview_inventory,
     resolve_generic_web_preview_profile,
 )
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
@@ -153,7 +157,6 @@ from control_plane.workflows.verireel_prod_rollback import (
 )
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
-    VeriReelPreviewInventoryResult,
     VeriReelPreviewInventoryRequest,
     VeriReelPreviewRefreshRequest,
     execute_verireel_preview_destroy,
@@ -257,6 +260,38 @@ class GenericWebPreviewDesiredStateEnvelope(BaseModel):
             raise ValueError("generic web preview desired state requires product")
         if self.product.strip() != self.desired_state.product.strip():
             raise ValueError("generic web preview desired state requires matching product values")
+        return self
+
+
+class GenericWebPreviewInventoryEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    inventory: GenericWebPreviewInventoryRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPreviewInventoryEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web preview inventory requires product")
+        if self.product.strip() != self.inventory.product.strip():
+            raise ValueError("generic web preview inventory requires matching product values")
+        return self
+
+
+class GenericWebPreviewDestroyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    destroy: GenericWebPreviewDestroyRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPreviewDestroyEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web preview destroy requires product")
+        if self.product.strip() != self.destroy.product.strip():
+            raise ValueError("generic web preview destroy requires matching product values")
         return self
 
 
@@ -1329,22 +1364,23 @@ def _request_launchplane_self_deploy(
 def _write_preview_inventory_scan_if_supported(
     *,
     record_store: object,
-    result: VeriReelPreviewInventoryResult,
+    context: str,
+    source: str,
+    preview_slugs: tuple[str, ...],
 ) -> str:
     if not hasattr(record_store, "write_preview_inventory_scan_record"):
         return ""
     scanned_at = _utc_now_timestamp()
-    preview_slugs = tuple(item.previewSlug for item in result.previews)
     scan_id = build_preview_inventory_scan_id(
-        context_name=result.context,
+        context_name=context,
         scanned_at=scanned_at,
     )
     getattr(record_store, "write_preview_inventory_scan_record")(
         PreviewInventoryScanRecord(
             scan_id=scan_id,
-            context=result.context,
+            context=context,
             scanned_at=scanned_at,
-            source="verireel-preview-inventory",
+            source=source,
             status="pass",
             preview_count=len(preview_slugs),
             preview_slugs=preview_slugs,
@@ -1468,6 +1504,8 @@ def create_launchplane_service_app(
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/generic-web/deploy",
         "/v1/drivers/generic-web/preview-desired-state",
+        "/v1/drivers/generic-web/preview-inventory",
+        "/v1/drivers/generic-web/preview-destroy",
         "/v1/drivers/odoo/artifact-publish-inputs",
         "/v1/drivers/odoo/artifact-publish",
         "/v1/drivers/odoo/post-deploy",
@@ -2347,6 +2385,91 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
+            elif path == "/v1/drivers/generic-web/preview-inventory":
+                request = GenericWebPreviewInventoryEnvelope.model_validate(payload)
+                profile = resolve_generic_web_preview_profile(
+                    record_store=record_store,
+                    product=request.product,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_inventory.read",
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot read generic web preview inventory"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                driver_result = execute_generic_web_preview_inventory(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.inventory,
+                    profile=profile,
+                )
+                preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
+                    record_store=record_store,
+                    context=driver_result.context,
+                    source=driver_result.source,
+                    preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
+                )
+                result = {"preview_inventory_scan_id": preview_inventory_scan_id}
+            elif path == "/v1/drivers/generic-web/preview-destroy":
+                request = GenericWebPreviewDestroyEnvelope.model_validate(payload)
+                profile = resolve_generic_web_preview_profile(
+                    record_store=record_store,
+                    product=request.product,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_destroy.execute",
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot destroy generic web preview state"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_generic_web_preview_destroy(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.destroy,
+                    profile=profile,
+                )
+                result = {}
             elif path == "/v1/drivers/odoo/post-deploy":
                 request = OdooPostDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -2960,7 +3083,9 @@ def create_launchplane_service_app(
                 )
                 preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
                     record_store=record_store,
-                    result=driver_result,
+                    context=driver_result.context,
+                    source="verireel-preview-inventory",
+                    preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == "/v1/drivers/verireel/preview-destroy":
@@ -3325,6 +3450,14 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                cleanup_driver_id = "verireel" if request.product == "verireel" else ""
+                cleanup_slug_template = "pr-{number}"
+                try:
+                    cleanup_profile = record_store.read_product_profile_record(request.product)
+                    cleanup_driver_id = cleanup_profile.driver_id
+                    cleanup_slug_template = cleanup_profile.preview.slug_template
+                except FileNotFoundError:
+                    pass
                 driver_result = build_preview_lifecycle_cleanup_record(
                     plan=plan,
                     requested_at=_utc_now_timestamp(),
@@ -3334,6 +3467,8 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     record_store=record_store,
                     timeout_seconds=request.timeout_seconds,
+                    driver_id=cleanup_driver_id,
+                    preview_slug_template=cleanup_slug_template,
                 )
                 preview_lifecycle_cleanup_id = _write_preview_lifecycle_cleanup_if_supported(
                     record_store=record_store,
