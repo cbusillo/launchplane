@@ -142,6 +142,11 @@ The service exposes product profile records through `GET /v1/product-profiles`,
 require the `product_profile.write` action for the target product in the
 Launchplane service context; reads use `product_profile.read`.
 
+For initial seed or repair work, operators can write the same DB-backed record
+directly with `uv run launchplane product-profiles upsert --database-url ...`.
+That command is an operator tool for creating the Launchplane record; it is not a
+repo-local manifest and should not become product repo authority.
+
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
 be Launchplane's authenticated service ingress plus the durable record semantics
