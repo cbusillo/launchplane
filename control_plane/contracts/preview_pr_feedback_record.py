@@ -3,7 +3,14 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
-PreviewPrFeedbackStatus = Literal["ready", "destroyed", "failed", "cleanup_failed"]
+PreviewPrFeedbackStatus = Literal[
+    "ready",
+    "destroyed",
+    "failed",
+    "cleanup_failed",
+    "unsupported",
+    "cleared",
+]
 PreviewPrFeedbackDeliveryStatus = Literal["delivered", "skipped", "failed"]
 
 

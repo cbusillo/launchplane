@@ -331,7 +331,7 @@ def _secret_audit_event(*, event_id: str, secret_id: str, recorded_at: str) -> S
 
 
 def _human_session(*, session_id: str = "session-1") -> LaunchplaneHumanSession:
-    created_at = datetime(2026, 4, 29, 12, 0, tzinfo=timezone.utc)
+    created_at = datetime.now(timezone.utc).replace(microsecond=0)
     return LaunchplaneHumanSession(
         session_id=session_id,
         created_at=created_at,

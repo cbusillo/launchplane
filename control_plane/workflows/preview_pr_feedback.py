@@ -9,6 +9,7 @@ from control_plane.contracts.preview_pr_feedback_record import (
 )
 from control_plane.workflows.launchplane import (
     create_github_issue_comment,
+    delete_github_issue_comment,
     find_github_issue_comment_by_marker,
     github_pull_request_reference,
     resolve_launchplane_github_token,
@@ -57,6 +58,20 @@ def _render_preview_pr_feedback_markdown(
                 "",
             ]
         )
+    elif status == "unsupported":
+        lines.extend(
+            [
+                f"Launchplane preview automation is unavailable for PR #{anchor_pr_number}.",
+                "",
+            ]
+        )
+    elif status == "cleared":
+        lines.extend(
+            [
+                f"Launchplane cleared preview feedback for PR #{anchor_pr_number}.",
+                "",
+            ]
+        )
     else:
         lines.extend(
             [
@@ -101,6 +116,20 @@ def _render_preview_pr_feedback_markdown(
             [
                 "",
                 "The preview may still exist. Check the Launchplane cleanup record before retrying.",
+            ]
+        )
+    elif status == "unsupported":
+        lines.extend(
+            [
+                "",
+                "No preview environment was requested because this pull request cannot use the protected preview provisioning path.",
+            ]
+        )
+    elif status == "cleared":
+        lines.extend(
+            [
+                "",
+                "Launchplane keeps this record as evidence of the cleared PR feedback request.",
             ]
         )
     else:
@@ -171,17 +200,30 @@ def build_preview_pr_feedback_record(
                 existing_comment_id = existing_comment.get("id")
                 if not isinstance(existing_comment_id, int):
                     raise click.ClickException("Existing preview feedback comment is missing a numeric id.")
-                updated_comment = update_github_issue_comment(
-                    owner=github_reference["owner"],
-                    repo=github_reference["repo"],
-                    comment_id=existing_comment_id,
-                    token=github_token,
-                    body=comment_markdown,
-                )
-                delivery_status = "delivered"
-                delivery_action = "updated_comment"
-                comment_id = existing_comment_id
-                comment_url = _comment_url(updated_comment)
+                if status == "cleared":
+                    delete_github_issue_comment(
+                        owner=github_reference["owner"],
+                        repo=github_reference["repo"],
+                        comment_id=existing_comment_id,
+                        token=github_token,
+                    )
+                    delivery_status = "delivered"
+                    delivery_action = "deleted_comment"
+                    comment_id = existing_comment_id
+                else:
+                    updated_comment = update_github_issue_comment(
+                        owner=github_reference["owner"],
+                        repo=github_reference["repo"],
+                        comment_id=existing_comment_id,
+                        token=github_token,
+                        body=comment_markdown,
+                    )
+                    delivery_status = "delivered"
+                    delivery_action = "updated_comment"
+                    comment_id = existing_comment_id
+                    comment_url = _comment_url(updated_comment)
+            elif status == "cleared":
+                delivery_action = "no_existing_comment"
             else:
                 created_comment = create_github_issue_comment(
                     owner=github_reference["owner"],
