@@ -25,6 +25,7 @@ PROVIDER_BOUNDARY_NOTE = (
 )
 LANE_STALE_AFTER = timedelta(minutes=30)
 PREVIEW_STALE_AFTER = timedelta(minutes=30)
+PREVIEW_CAPABILITY_IDS = {"preview_lifecycle", "previewable", "preview_inventory_managed"}
 
 
 def _action(
@@ -48,6 +49,51 @@ def _action(
         route_path=route_path,
         writes_records=writes_records,
     )
+
+
+GENERIC_WEB_DRIVER = DriverDescriptor(
+    driver_id="generic-web",
+    label="Generic web",
+    product="generic-web",
+    description=(
+        "Reusable containerized web-app lifecycle driver for image deploys, "
+        "health checks, previews, and PR feedback."
+    ),
+    context_patterns=(),
+    provider_boundary=PROVIDER_BOUNDARY_NOTE,
+    capabilities=(
+        DriverCapabilityDescriptor(
+            capability_id="image_deployable",
+            label="Image deployable",
+            description="Deploy immutable container images and record stable-lane deployment evidence.",
+            panels=("lane_health", "deployment_evidence"),
+        ),
+        DriverCapabilityDescriptor(
+            capability_id="health_checked",
+            label="Health checked",
+            description="Verify HTTP health endpoints and surface freshness through Launchplane read models.",
+            panels=("lane_health",),
+        ),
+        DriverCapabilityDescriptor(
+            capability_id="previewable",
+            label="Previewable",
+            description="Model desired preview state, creation, refresh, cleanup, and preview evidence for web products.",
+            panels=("preview_inventory", "deployment_evidence", "audit"),
+        ),
+        DriverCapabilityDescriptor(
+            capability_id="preview_inventory_managed",
+            label="Preview inventory managed",
+            description="Read provider inventory and reconcile current preview state through Launchplane records.",
+            panels=("preview_inventory", "deployment_evidence", "audit"),
+        ),
+        DriverCapabilityDescriptor(
+            capability_id="pr_feedback",
+            label="PR feedback",
+            description="Render and persist pull-request feedback from Launchplane preview and deploy records.",
+            panels=("audit",),
+        ),
+    ),
+)
 
 
 ODOO_DRIVER = DriverDescriptor(
@@ -157,6 +203,7 @@ ODOO_DRIVER = DriverDescriptor(
 
 VERIREEL_DRIVER = DriverDescriptor(
     driver_id="verireel",
+    base_driver_id="generic-web",
     label="VeriReel",
     product="verireel",
     description="VeriReel stable-lane and preview lifecycle driver.",
@@ -292,7 +339,11 @@ VERIREEL_DRIVER = DriverDescriptor(
     ),
 )
 
-_DESCRIPTORS: tuple[DriverDescriptor, ...] = (ODOO_DRIVER, VERIREEL_DRIVER)
+_DESCRIPTORS: tuple[DriverDescriptor, ...] = (
+    GENERIC_WEB_DRIVER,
+    ODOO_DRIVER,
+    VERIREEL_DRIVER,
+)
 
 
 def list_driver_descriptors() -> tuple[DriverDescriptor, ...]:
@@ -581,6 +632,13 @@ def _list_preview_summaries(
     return tuple(summaries)
 
 
+def _driver_exposes_preview_inventory(descriptor: DriverDescriptor) -> bool:
+    capability_ids = {capability.capability_id for capability in descriptor.capabilities}
+    if capability_ids.intersection(PREVIEW_CAPABILITY_IDS):
+        return True
+    return any("preview_inventory" in capability.panels for capability in descriptor.capabilities)
+
+
 def build_driver_context_view(
     *,
     record_store: object,
@@ -597,13 +655,13 @@ def build_driver_context_view(
             instance_name=instance_name,
         )
         preview_summaries = ()
-        if descriptor.driver_id == "verireel":
+        if _driver_exposes_preview_inventory(descriptor):
             preview_summaries = _list_preview_summaries(
                 record_store=record_store,
                 context_name=context_name,
             )
         preview_inventory_provenance = None
-        if descriptor.driver_id == "verireel":
+        if _driver_exposes_preview_inventory(descriptor):
             preview_inventory_provenance = _preview_inventory_provenance(
                 record_store=record_store,
                 context_name=context_name,

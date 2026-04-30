@@ -19,6 +19,7 @@ from control_plane.contracts.preview_lifecycle_cleanup_record import PreviewLife
 from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyclePlanRecord
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
@@ -82,6 +83,31 @@ class FilesystemRecordStore:
 
     def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> Path:
         return self._write_model("launchplane_authz_policies", record.record_id, record)
+
+    def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> Path:
+        return self._write_model("launchplane_product_profiles", record.product, record)
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        return LaunchplaneProductProfileRecord.model_validate(
+            self._read_model(
+                LaunchplaneProductProfileRecord, "launchplane_product_profiles", product
+            ).model_dump(mode="json")
+        )
+
+    def list_product_profile_records(
+        self,
+        *,
+        driver_id: str = "",
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                LaunchplaneProductProfileRecord, "launchplane_product_profiles"
+            )
+            if not driver_id or record.driver_id == driver_id
+        ]
+        records.sort(key=lambda record: record.product)
+        return tuple(records)
 
     def list_authz_policy_records(
         self,

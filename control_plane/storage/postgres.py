@@ -27,6 +27,7 @@ from control_plane.contracts.preview_lifecycle_plan_record import PreviewLifecyc
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -314,6 +315,20 @@ class LaunchplaneAuthzPolicyRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneProductProfileRow(Base):
+    __tablename__ = "launchplane_product_profiles"
+    __table_args__ = (
+        Index("launchplane_product_profiles_driver_idx", "driver_id", desc("updated_at")),
+    )
+
+    product: Mapped[str] = mapped_column(String, primary_key=True)
+    display_name: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    driver_id: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1266,6 +1281,40 @@ class PostgresRecordStore(HumanSessionStore):
             return records[:limit]
         return records
 
+    def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> None:
+        self._write_row(
+            LaunchplaneProductProfileRow(
+                product=record.product,
+                display_name=record.display_name,
+                repository=record.repository,
+                driver_id=record.driver_id,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        return self._read_model(
+            model_type=LaunchplaneProductProfileRecord,
+            orm_model=LaunchplaneProductProfileRow,
+            filters=(LaunchplaneProductProfileRow.product == product,),
+        )
+
+    def list_product_profile_records(
+        self,
+        *,
+        driver_id: str = "",
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        filters: list[object] = []
+        if driver_id:
+            filters.append(LaunchplaneProductProfileRow.driver_id == driver_id)
+        return self._list_models(
+            model_type=LaunchplaneProductProfileRecord,
+            orm_model=LaunchplaneProductProfileRow,
+            filters=filters,
+            order_by=(LaunchplaneProductProfileRow.product.asc(),),
+        )
+
     def write_dokploy_target_id_record(self, record: DokployTargetIdRecord) -> None:
         self._write_row(
             LaunchplaneDokployTargetIdRow(
@@ -1667,6 +1716,7 @@ class PostgresRecordStore(HumanSessionStore):
             "promotions": 0,
             "inventory": 0,
             "odoo_instance_overrides": 0,
+            "product_profiles": 0,
             "preview_records": 0,
             "preview_generations": 0,
             "preview_desired_states": 0,
@@ -1697,6 +1747,9 @@ class PostgresRecordStore(HumanSessionStore):
         for record in filesystem_store.list_odoo_instance_override_records():
             self.write_odoo_instance_override_record(record)
             counts["odoo_instance_overrides"] += 1
+        for record in filesystem_store.list_product_profile_records():
+            self.write_product_profile_record(record)
+            counts["product_profiles"] += 1
         for record in filesystem_store.list_preview_records():
             self.write_preview_record(record)
             counts["preview_records"] += 1

@@ -13,12 +13,49 @@ from control_plane.contracts.odoo_instance_override_record import OdooAddonSetti
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+    ProductPreviewProfile,
+)
 from control_plane.contracts.promotion_record import DeploymentEvidence, PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_write_and_read_product_profile_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            record = LaunchplaneProductProfileRecord(
+                product="sellyouroutboard",
+                display_name="SellYourOutboard.com",
+                repository="cbusillo/sellyouroutboard",
+                driver_id="generic-web",
+                image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
+                runtime_port=3000,
+                health_path="/api/health",
+                lanes=(ProductLaneProfile(instance="testing", context="sellyouroutboard"),),
+                preview=ProductPreviewProfile(
+                    enabled=True,
+                    context="sellyouroutboard-testing",
+                    slug_template="pr-{number}",
+                ),
+                updated_at="2026-04-30T20:00:00Z",
+                source="operator:test",
+            )
+
+            written_path = store.write_product_profile_record(record)
+            loaded_record = store.read_product_profile_record("sellyouroutboard")
+            listed_records = store.list_product_profile_records(driver_id="generic-web")
+            self.assertTrue(written_path.exists())
+
+        self.assertEqual(loaded_record.driver_id, "generic-web")
+        self.assertEqual(loaded_record.preview.context, "sellyouroutboard-testing")
+        self.assertEqual([listed_record.product for listed_record in listed_records], ["sellyouroutboard"])
+
     def test_write_and_read_artifact_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

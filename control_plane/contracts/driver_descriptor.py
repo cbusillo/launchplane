@@ -64,6 +64,7 @@ class DriverDescriptor(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     driver_id: str
+    base_driver_id: str = ""
     label: str
     product: str
     description: str

@@ -124,6 +124,19 @@ order, join, authorize, constrain, display it regularly, or drive an action from
 it. Keep unstable provider envelopes, replay/debug context, and raw evidence in
 JSONB until they graduate into normal product behavior.
 
+## Product Profiles
+
+Product profile records are DB-backed Launchplane configuration for product
+identity and driver selection. They hold product key, display name, owning repo,
+driver id, image repository, runtime port, health path, stable lane bindings,
+and preview context policy.
+
+These records replace repo-local Launchplane lifecycle manifests. Product repos
+still own their normal app/runtime contract, such as Dockerfile, image publish,
+health endpoint, tests, and source/build inputs. Launchplane owns the product
+profile that maps those app facts into preview, deploy, promotion, and evidence
+behavior.
+
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
 be Launchplane's authenticated service ingress plus the durable record semantics
