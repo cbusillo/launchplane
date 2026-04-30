@@ -98,14 +98,15 @@ the product key; Launchplane resolves the preview context, owning repository,
 anchor repo, and slug template from the DB-backed product profile before writing
 desired preview state records.
 
-The `preview_inventory`, `preview_readiness`, and `preview_destroy` actions
-route to `POST /v1/drivers/generic-web/preview-inventory`,
+The `preview_refresh`, `preview_inventory`, `preview_readiness`, and
+`preview_destroy` actions route to `POST /v1/drivers/generic-web/preview-refresh`,
+`POST /v1/drivers/generic-web/preview-inventory`,
 `POST /v1/drivers/generic-web/preview-readiness`, and
-`POST /v1/drivers/generic-web/preview-destroy`. Inventory and destroy scan and
-delete Dokploy applications by the product profile's preview application-name
-prefix. Readiness validates the DB-backed preview template lane, provider field,
-settings, and transport policy before any provider mutation. Preview
-creation/refresh remains a separate contract built on that readiness result.
+`POST /v1/drivers/generic-web/preview-destroy`. Refresh runs readiness first,
+then creates or updates a stateless Dokploy application from the DB-backed
+template lane, applies explicit settings transport, deploys the submitted image,
+and checks the product health path. Inventory and destroy scan and delete
+Dokploy applications by the product profile's preview application-name prefix.
 
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.

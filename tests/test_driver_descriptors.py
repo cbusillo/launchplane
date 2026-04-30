@@ -92,6 +92,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertEqual(actions["preview_desired_state"].safety, "safe_write")
         self.assertEqual(
+            actions["preview_refresh"].route_path,
+            "/v1/drivers/generic-web/preview-refresh",
+        )
+        self.assertEqual(actions["preview_refresh"].safety, "mutation")
+        self.assertEqual(
             actions["preview_inventory"].route_path,
             "/v1/drivers/generic-web/preview-inventory",
         )

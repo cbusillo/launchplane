@@ -1346,6 +1346,74 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(records[0].source, "generic-web-preview-inventory")
         self.assertEqual(records[0].preview_slugs, ("pr-42",))
 
+    def test_generic_web_preview_refresh_route_returns_driver_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={"refresh_status": "pass", "application_id": "app-preview"},
+            ) as refresh:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "refresh": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "preview_slug": "pr-42",
+                            "preview_url": "https://pr-42.example.test",
+                            "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["refresh_status"], "pass")
+        self.assertEqual(payload["result"]["application_id"], "app-preview")
+        refresh.assert_called_once()
+        _, kwargs = refresh.call_args
+        self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
+
     def test_generic_web_preview_readiness_route_returns_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
