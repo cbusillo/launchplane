@@ -1,5 +1,6 @@
 import unittest
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import Mock, patch
@@ -813,6 +814,83 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded_record.image.repository, "ghcr.io/cbusillo/sellyouroutboard")
         self.assertEqual(loaded_record.preview.context, "sellyouroutboard-testing")
         self.assertEqual([record.product for record in listed_records], ["internal-tool", "sellyouroutboard"])
+
+    def test_product_profiles_cli_upserts_lists_and_shows_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            lanes_json = json.dumps(
+                [
+                    {
+                        "instance": "testing",
+                        "context": "sellyouroutboard-testing",
+                        "base_url": "https://testing.sellyouroutboard.com",
+                        "health_url": "https://testing.sellyouroutboard.com/api/health",
+                    }
+                ]
+            )
+            runner = CliRunner()
+
+            upsert_result = runner.invoke(
+                main,
+                [
+                    "product-profiles",
+                    "upsert",
+                    "--database-url",
+                    database_url,
+                    "--product",
+                    "sellyouroutboard",
+                    "--display-name",
+                    "SellYourOutboard.com",
+                    "--repository",
+                    "cbusillo/sellyouroutboard",
+                    "--image-repository",
+                    "ghcr.io/cbusillo/sellyouroutboard",
+                    "--runtime-port",
+                    "3000",
+                    "--health-path",
+                    "/api/health",
+                    "--lanes-json",
+                    lanes_json,
+                    "--preview-enabled",
+                    "--preview-context",
+                    "sellyouroutboard-testing",
+                    "--updated-at",
+                    "2026-04-30T22:00:00Z",
+                    "--source-label",
+                    "test",
+                ],
+            )
+            self.assertEqual(upsert_result.exit_code, 0, upsert_result.output)
+
+            list_result = runner.invoke(
+                main,
+                [
+                    "product-profiles",
+                    "list",
+                    "--database-url",
+                    database_url,
+                    "--driver-id",
+                    "generic-web",
+                ],
+            )
+            show_result = runner.invoke(
+                main,
+                [
+                    "product-profiles",
+                    "show",
+                    "--database-url",
+                    database_url,
+                    "--product",
+                    "sellyouroutboard",
+                ],
+            )
+
+        self.assertEqual(list_result.exit_code, 0, list_result.output)
+        self.assertIn('"count": 1', list_result.output)
+        self.assertIn('"product": "sellyouroutboard"', list_result.output)
+        self.assertEqual(show_result.exit_code, 0, show_result.output)
+        self.assertIn('"preview_context": "sellyouroutboard-testing"', list_result.output)
+        self.assertIn('"health_path": "/api/health"', show_result.output)
 
     def test_preview_lifecycle_plan_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

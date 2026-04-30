@@ -56,6 +56,10 @@ from control_plane.contracts.preview_request_metadata import (
     LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING,
     LaunchplanePreviewRequestParseResult,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import ProductImageProfile
+from control_plane.contracts.product_profile_record import ProductLaneProfile
+from control_plane.contracts.product_profile_record import ProductPreviewProfile
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
@@ -232,6 +236,45 @@ def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict
         "github_actions_rule_count": len(record.policy.github_actions),
         "github_humans_rule_count": len(record.policy.github_humans),
     }
+
+
+def _summarize_product_profile_record(record: LaunchplaneProductProfileRecord) -> dict[str, object]:
+    return {
+        "product": record.product,
+        "display_name": record.display_name,
+        "repository": record.repository,
+        "driver_id": record.driver_id,
+        "image_repository": record.image.repository,
+        "runtime_port": record.runtime_port,
+        "health_path": record.health_path,
+        "lane_count": len(record.lanes),
+        "preview_enabled": record.preview.enabled,
+        "preview_context": record.preview.context,
+        "updated_at": record.updated_at,
+        "source": record.source,
+    }
+
+
+def _parse_product_profile_lanes(lanes_json: str) -> tuple[ProductLaneProfile, ...]:
+    normalized_lanes_json = lanes_json.strip()
+    if not normalized_lanes_json:
+        return ()
+    try:
+        payload = json.loads(normalized_lanes_json)
+    except JSONDecodeError as exc:
+        raise click.ClickException(f"--lanes-json must be valid JSON: {exc}") from exc
+    if not isinstance(payload, list):
+        raise click.ClickException("--lanes-json must decode to a JSON array.")
+    try:
+        return tuple(ProductLaneProfile.model_validate(item) for item in payload)
+    except ValidationError as exc:
+        raise click.ClickException(f"--lanes-json failed validation: {exc}") from exc
+
+
+def _product_profile_store(database_url: str) -> PostgresRecordStore:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    return store
 
 
 def _sync_launchplane_bootstrap_policy(
@@ -11570,6 +11613,11 @@ def authz_policies() -> None:
     """DB-backed Launchplane authorization policy commands."""
 
 
+@main.group("product-profiles")
+def product_profiles() -> None:
+    """DB-backed Launchplane product profile commands."""
+
+
 @authz_policies.command("list")
 @click.option(
     "--database-url",
@@ -11622,6 +11670,132 @@ def authz_policies_import_toml(database_url: str, policy_file: Path, source_labe
     click.echo(
         json.dumps(
             {"status": "ok", "record": _summarize_authz_policy_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@product_profiles.command("list")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane product profile records.",
+)
+@click.option("--driver-id", default="", help="Optional driver id filter.")
+def product_profiles_list(database_url: str, driver_id: str) -> None:
+    store = _product_profile_store(database_url)
+    try:
+        records = store.list_product_profile_records(driver_id=driver_id)
+    finally:
+        store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "driver_id": driver_id.strip(),
+                "profiles": [_summarize_product_profile_record(record) for record in records],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@product_profiles.command("show")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane product profile records.",
+)
+@click.option("--product", required=True, help="Product key to show.")
+def product_profiles_show(database_url: str, product: str) -> None:
+    store = _product_profile_store(database_url)
+    try:
+        record = store.read_product_profile_record(product)
+    finally:
+        store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "profile": record.model_dump(mode="json")},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@product_profiles.command("upsert")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane product profile records.",
+)
+@click.option("--product", required=True, help="Stable product key.")
+@click.option("--display-name", required=True, help="Human-facing product name.")
+@click.option("--repository", required=True, help="Owning GitHub repository, owner/name.")
+@click.option("--driver-id", default="generic-web", show_default=True)
+@click.option("--image-repository", required=True, help="Container image repository.")
+@click.option("--runtime-port", type=int, required=True, help="Container HTTP port.")
+@click.option("--health-path", required=True, help="HTTP health path, starting with /.")
+@click.option(
+    "--lanes-json",
+    default="[]",
+    show_default=True,
+    help="JSON array of lane objects with instance, context, base_url, and health_url.",
+)
+@click.option("--preview-enabled/--preview-disabled", default=False, show_default=True)
+@click.option("--preview-context", default="", help="Preview context when previews are enabled.")
+@click.option("--preview-slug-template", default="pr-{number}", show_default=True)
+@click.option("--updated-at", default="", help="Override updated timestamp.")
+@click.option("--source-label", default="cli:product-profiles:upsert", show_default=True)
+def product_profiles_upsert(
+    database_url: str,
+    product: str,
+    display_name: str,
+    repository: str,
+    driver_id: str,
+    image_repository: str,
+    runtime_port: int,
+    health_path: str,
+    lanes_json: str,
+    preview_enabled: bool,
+    preview_context: str,
+    preview_slug_template: str,
+    updated_at: str,
+    source_label: str,
+) -> None:
+    try:
+        record = LaunchplaneProductProfileRecord(
+            product=product,
+            display_name=display_name,
+            repository=repository,
+            driver_id=driver_id,
+            image=ProductImageProfile(repository=image_repository),
+            runtime_port=runtime_port,
+            health_path=health_path,
+            lanes=_parse_product_profile_lanes(lanes_json),
+            preview=ProductPreviewProfile(
+                enabled=preview_enabled,
+                context=preview_context,
+                slug_template=preview_slug_template,
+            ),
+            updated_at=updated_at.strip() or utc_now_timestamp(),
+            source=source_label,
+        )
+    except ValidationError as exc:
+        raise click.ClickException(f"Product profile failed validation: {exc}") from exc
+    store = _product_profile_store(database_url)
+    try:
+        store.write_product_profile_record(record)
+    finally:
+        store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "profile": record.model_dump(mode="json")},
             indent=2,
             sort_keys=True,
         )
