@@ -81,12 +81,16 @@ inspect JSONB payloads directly.
 
 ## Initial Drivers
 
-Generic web exposes base capabilities without executable routes yet:
+Generic web exposes base capabilities and the first common deploy action:
 
 - image deployment evidence
 - HTTP health checking
 - preview lifecycle and inventory read models
 - PR feedback ownership
+
+The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
+route resolves product lane context from DB-backed product profile records and
+runtime target bindings from DB-backed Dokploy target records.
 
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.
