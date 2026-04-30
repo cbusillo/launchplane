@@ -37,6 +37,7 @@ VeriReel product paths:
   - `GET /v1/product-profiles/{product}`
   - `POST /v1/product-profiles`
 - product driver routes:
+  - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
   - `POST /v1/drivers/odoo/post-deploy`
@@ -296,6 +297,11 @@ with the comment body, delivery action, comment URL, and any skip/failure reason
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through authenticated service ingress and stored in Launchplane records; product
 repos do not carry repo-local Launchplane lifecycle manifests.
+
+Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
+the product, target instance, immutable artifact/image reference, and source ref;
+Launchplane resolves the context from the DB-backed product profile lane and the
+runtime target from DB-backed Dokploy target records.
 
 ### Operator read endpoints
 

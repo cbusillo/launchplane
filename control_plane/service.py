@@ -86,6 +86,11 @@ from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
+from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployRequest,
+    execute_generic_web_deploy,
+    resolve_generic_web_profile_lane,
+)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -215,6 +220,22 @@ class DeploymentEvidenceEnvelope(BaseModel):
     def _validate_alignment(self) -> "DeploymentEvidenceEnvelope":
         if not self.product.strip():
             raise ValueError("deployment evidence requires product")
+        return self
+
+
+class GenericWebDeployEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    deploy: GenericWebDeployRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebDeployEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web deploy requires product")
+        if self.product.strip() != self.deploy.product.strip():
+            raise ValueError("generic web deploy requires matching product values")
         return self
 
 
@@ -1424,6 +1445,7 @@ def create_launchplane_service_app(
         "/v1/product-profiles",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
+        "/v1/drivers/generic-web/deploy",
         "/v1/drivers/odoo/artifact-publish-inputs",
         "/v1/drivers/odoo/artifact-publish",
         "/v1/drivers/odoo/post-deploy",
@@ -2207,6 +2229,52 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=request.deploy,
                 )
+            elif path == "/v1/drivers/generic-web/deploy":
+                request = GenericWebDeployEnvelope.model_validate(payload)
+                profile, lane = resolve_generic_web_profile_lane(
+                    record_store=record_store,
+                    request=request.deploy,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="generic_web_deploy.execute",
+                    product=profile.product,
+                    context=lane.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the generic web deploy driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_generic_web_deploy(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.deploy,
+                    profile=profile,
+                    lane=lane,
+                )
+                result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == "/v1/drivers/odoo/post-deploy":
                 request = OdooPostDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(

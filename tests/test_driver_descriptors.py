@@ -83,7 +83,9 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertIn("previewable", capability_ids)
         self.assertIn("preview_inventory_managed", capability_ids)
         self.assertIn("pr_feedback", capability_ids)
-        self.assertEqual(descriptor.actions, ())
+        actions = {action.action_id: action for action in descriptor.actions}
+        self.assertEqual(actions["stable_deploy"].route_path, "/v1/drivers/generic-web/deploy")
+        self.assertEqual(actions["stable_deploy"].safety, "mutation")
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
