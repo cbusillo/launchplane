@@ -104,6 +104,7 @@ const FIXTURE_ACTIONS: DriverActionDescriptor[] = [
 const FIXTURE_VERIREEL_DRIVER: DriverDescriptor = {
   schema_version: 1,
   driver_id: "verireel",
+  base_driver_id: "generic-web",
   label: "VeriReel",
   product: "verireel",
   description: "Fixture VeriReel driver.",
@@ -124,6 +125,7 @@ const FIXTURE_VERIREEL_DRIVER: DriverDescriptor = {
 const FIXTURE_ODOO_DRIVER: DriverDescriptor = {
   ...FIXTURE_VERIREEL_DRIVER,
   driver_id: "odoo",
+  base_driver_id: "",
   label: "Odoo",
   product: "odoo",
   capabilities: [],
@@ -646,9 +648,8 @@ function PreviewInventory({
   inventoryProvenance: DataProvenance | null;
   loading: boolean;
 }) {
-  const exposesPreviews = Boolean(
-    driver?.capabilities.some((capability) => capability.capability_id === "preview_lifecycle")
-  );
+  const previewCapabilityId = previewInventoryCapabilityId(driver);
+  const exposesPreviews = Boolean(previewCapabilityId);
   const latestPreview = previews
     .slice()
     .sort((left, right) => {
@@ -699,7 +700,7 @@ function PreviewInventory({
       <div className="preview-footer">
         <KeyValue
           label="Capability"
-          value={exposesPreviews ? "preview_lifecycle" : "not exposed by driver"}
+          value={previewCapabilityId || "not exposed by driver"}
           mono
           status={exposesPreviews ? "pass" : "unknown"}
         />
@@ -712,6 +713,13 @@ function PreviewInventory({
       </div>
     </section>
   );
+}
+
+function previewInventoryCapabilityId(driver: DriverDescriptor | null): string {
+  const previewCapabilityIds = new Set(["previewable", "preview_inventory_managed", "preview_lifecycle"]);
+  return driver?.capabilities.find((capability) => {
+    return previewCapabilityIds.has(capability.capability_id) || capability.panels.includes("preview_inventory");
+  })?.capability_id ?? "";
 }
 
 function TrustBadge({ provenance, compact = false }: { provenance: DataProvenance | null; compact?: boolean }) {

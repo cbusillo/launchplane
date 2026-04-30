@@ -41,6 +41,12 @@ from control_plane.contracts.preview_lifecycle_plan_record import (
 )
 from control_plane.contracts.preview_pr_feedback_record import PreviewPrFeedbackRecord
 from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductImageProfile,
+    ProductLaneProfile,
+    ProductPreviewProfile,
+)
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
@@ -64,6 +70,33 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _product_profile_record(*, product: str = "sellyouroutboard") -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product=product,
+        display_name="SellYourOutboard.com",
+        repository="cbusillo/sellyouroutboard",
+        driver_id="generic-web",
+        image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
+        runtime_port=3000,
+        health_path="/api/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context=product,
+                base_url="https://sellyouroutboard-testing.shinycomputers.com",
+                health_url="https://sellyouroutboard-testing.shinycomputers.com/api/health",
+            ),
+        ),
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context=f"{product}-testing",
+            slug_template="pr-{number}",
+        ),
+        updated_at="2026-04-30T20:00:00Z",
+        source="operator:test",
+    )
 
 
 def _alembic_config(database_url: str) -> AlembicConfig:
@@ -762,6 +795,25 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(listed_records[0].record_id, "launchplane-authz-policy-20260420T100500Z-test")
         self.assertEqual(listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane")
 
+    def test_product_profile_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_product_profile_record(_product_profile_record())
+            store.write_product_profile_record(_product_profile_record(product="internal-tool"))
+            loaded_record = store.read_product_profile_record("sellyouroutboard")
+            listed_records = store.list_product_profile_records(driver_id="generic-web")
+            store.close()
+
+        self.assertEqual(loaded_record.driver_id, "generic-web")
+        self.assertEqual(loaded_record.image.repository, "ghcr.io/cbusillo/sellyouroutboard")
+        self.assertEqual(loaded_record.preview.context, "sellyouroutboard-testing")
+        self.assertEqual([record.product for record in listed_records], ["internal-tool", "sellyouroutboard"])
+
     def test_preview_lifecycle_plan_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1297,6 +1349,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 )
             )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
+            filesystem_store.write_product_profile_record(_product_profile_record())
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
             self.assertEqual(
@@ -1309,6 +1362,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "promotions": 1,
                     "inventory": 1,
                     "odoo_instance_overrides": 1,
+                    "product_profiles": 1,
                     "preview_records": 1,
                     "preview_generations": 1,
                     "preview_desired_states": 1,

@@ -853,7 +853,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(list_status_code, 200)
         self.assertEqual(
-            [driver["driver_id"] for driver in list_payload["drivers"]], ["odoo", "verireel"]
+            [driver["driver_id"] for driver in list_payload["drivers"]],
+            ["generic-web", "odoo", "verireel"],
         )
         self.assertNotIn("Dokploy", json.dumps(list_payload["drivers"]))
         self.assertEqual(show_status_code, 200)

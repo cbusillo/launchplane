@@ -29,8 +29,8 @@ frontend plugin system.
 The descriptor contracts live in
 `control_plane/contracts/driver_descriptor.py`.
 
-- `DriverDescriptor`: static driver metadata, context patterns, capabilities,
-  actions, and setting groups.
+- `DriverDescriptor`: static driver metadata, optional base driver id, context
+  patterns, capabilities, actions, and setting groups.
 - `DriverCapabilityDescriptor`: grouped product capability such as stable
   promotion, artifact publish, preview lifecycle, or post-deploy settings.
 - `DriverActionDescriptor`: read-only action metadata, route path, method,
@@ -52,14 +52,16 @@ Action safety levels are intentionally coarse:
 ## Registry
 
 The v1 registry is in code at `control_plane/drivers/registry.py`. It contains
-Odoo and VeriReel descriptors and composes driver views from existing storage
-repository methods:
+the reusable generic-web base descriptor plus Odoo and VeriReel descriptors, and
+composes driver views from existing storage repository methods:
 
 - `LaunchplaneLaneSummary` for stable lane state.
 - `LaunchplanePreviewSummary` for preview lifecycle state.
 
 The registry is deliberately not a database table yet. Driver descriptor shape
-should stabilize before Launchplane adds writable driver metadata.
+should stabilize before Launchplane adds writable driver metadata. Product and
+lane configuration still belongs in DB-backed Launchplane records, not in
+repo-local Launchplane TOML manifests.
 
 ## Read Endpoints
 
@@ -79,6 +81,18 @@ inspect JSONB payloads directly.
 
 ## Initial Drivers
 
+Generic web exposes base capabilities without executable routes yet:
+
+- image deployment evidence
+- HTTP health checking
+- preview lifecycle and inventory read models
+- PR feedback ownership
+
+Product drivers can declare `base_driver_id="generic-web"` when they reuse the
+generic web lifecycle and add named product-specific gates or runtime actions.
+The relationship is explicit metadata; product-specific capabilities are still
+declared directly on the product driver.
+
 Odoo exposes:
 
 - artifact publish handoff
@@ -97,3 +111,8 @@ VeriReel exposes:
 
 These descriptors intentionally reference Launchplane routes, not runtime
 provider concepts, as the future GUI-facing action surface.
+
+Preview read models are capability-driven. A driver that exposes
+`previewable`, `preview_inventory_managed`, legacy `preview_lifecycle`, or the
+`preview_inventory` panel receives preview summaries without being named VeriReel
+in the registry.

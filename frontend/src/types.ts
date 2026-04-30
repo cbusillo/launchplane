@@ -43,6 +43,7 @@ export interface DriverSettingGroupDescriptor {
 export interface DriverDescriptor {
   schema_version: number;
   driver_id: string;
+  base_driver_id: string;
   label: string;
   product: string;
   description: string;
