@@ -116,6 +116,14 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             writes_records=("preview_desired_state",),
         ),
         _action(
+            "preview_refresh",
+            "Refresh preview",
+            "Create or update a generic-web preview application after readiness passes.",
+            safety="mutation",
+            scope="preview",
+            route_path="/v1/drivers/generic-web/preview-refresh",
+        ),
+        _action(
             "preview_inventory",
             "Read preview inventory",
             "Scan provider state for active generic-web previews and record inventory evidence.",

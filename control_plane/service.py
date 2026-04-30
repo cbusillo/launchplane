@@ -96,10 +96,12 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
+    GenericWebPreviewRefreshRequest,
     discover_generic_web_preview_desired_state,
     evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
+    execute_generic_web_preview_refresh,
     resolve_generic_web_preview_profile,
 )
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
@@ -262,6 +264,22 @@ class GenericWebPreviewDesiredStateEnvelope(BaseModel):
             raise ValueError("generic web preview desired state requires product")
         if self.product.strip() != self.desired_state.product.strip():
             raise ValueError("generic web preview desired state requires matching product values")
+        return self
+
+
+class GenericWebPreviewRefreshEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    refresh: GenericWebPreviewRefreshRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPreviewRefreshEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web preview refresh requires product")
+        if self.product.strip() != self.refresh.product.strip():
+            raise ValueError("generic web preview refresh requires matching product values")
         return self
 
 
@@ -1522,6 +1540,7 @@ def create_launchplane_service_app(
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/generic-web/deploy",
         "/v1/drivers/generic-web/preview-desired-state",
+        "/v1/drivers/generic-web/preview-refresh",
         "/v1/drivers/generic-web/preview-inventory",
         "/v1/drivers/generic-web/preview-readiness",
         "/v1/drivers/generic-web/preview-destroy",
@@ -2444,6 +2463,51 @@ def create_launchplane_service_app(
                     preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
+            elif path == "/v1/drivers/generic-web/preview-refresh":
+                request = GenericWebPreviewRefreshEnvelope.model_validate(payload)
+                profile = resolve_generic_web_preview_profile(
+                    record_store=record_store,
+                    product=request.product,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_refresh.execute",
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot refresh generic web preview state"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_generic_web_preview_refresh(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.refresh,
+                    profile=profile,
+                )
+                result = {}
             elif path == "/v1/drivers/generic-web/preview-readiness":
                 request = GenericWebPreviewReadinessEnvelope.model_validate(payload)
                 profile = resolve_generic_web_preview_profile(

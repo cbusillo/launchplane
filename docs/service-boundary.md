@@ -39,6 +39,7 @@ VeriReel product paths:
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/preview-desired-state`
+  - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
   - `POST /v1/drivers/generic-web/preview-readiness`
   - `POST /v1/drivers/generic-web/preview-destroy`
