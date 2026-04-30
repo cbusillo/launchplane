@@ -95,7 +95,9 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
+    GenericWebPreviewReadinessRequest,
     discover_generic_web_preview_desired_state,
+    evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
     resolve_generic_web_preview_profile,
@@ -276,6 +278,22 @@ class GenericWebPreviewInventoryEnvelope(BaseModel):
             raise ValueError("generic web preview inventory requires product")
         if self.product.strip() != self.inventory.product.strip():
             raise ValueError("generic web preview inventory requires matching product values")
+        return self
+
+
+class GenericWebPreviewReadinessEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    readiness: GenericWebPreviewReadinessRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPreviewReadinessEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web preview readiness requires product")
+        if self.product.strip() != self.readiness.product.strip():
+            raise ValueError("generic web preview readiness requires matching product values")
         return self
 
 
@@ -1505,6 +1523,7 @@ def create_launchplane_service_app(
         "/v1/drivers/generic-web/deploy",
         "/v1/drivers/generic-web/preview-desired-state",
         "/v1/drivers/generic-web/preview-inventory",
+        "/v1/drivers/generic-web/preview-readiness",
         "/v1/drivers/generic-web/preview-destroy",
         "/v1/drivers/odoo/artifact-publish-inputs",
         "/v1/drivers/odoo/artifact-publish",
@@ -2425,6 +2444,41 @@ def create_launchplane_service_app(
                     preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
+            elif path == "/v1/drivers/generic-web/preview-readiness":
+                request = GenericWebPreviewReadinessEnvelope.model_validate(payload)
+                profile = resolve_generic_web_preview_profile(
+                    record_store=record_store,
+                    product=request.product,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_readiness.evaluate",
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot evaluate generic web preview readiness"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                driver_result = evaluate_generic_web_preview_readiness(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.readiness,
+                    checked_at=_utc_now_timestamp(),
+                    profile=profile,
+                )
+                result = {}
             elif path == "/v1/drivers/generic-web/preview-destroy":
                 request = GenericWebPreviewDestroyEnvelope.model_validate(payload)
                 profile = resolve_generic_web_preview_profile(

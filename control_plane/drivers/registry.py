@@ -125,6 +125,14 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             writes_records=("preview_inventory_scan",),
         ),
         _action(
+            "preview_readiness",
+            "Evaluate preview readiness",
+            "Validate generic-web preview template settings before provider mutation.",
+            safety="read",
+            scope="context",
+            route_path="/v1/drivers/generic-web/preview-readiness",
+        ),
+        _action(
             "preview_destroy",
             "Destroy preview",
             "Destroy a generic-web preview application and record cleanup evidence.",

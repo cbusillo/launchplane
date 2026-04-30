@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
@@ -37,6 +39,17 @@ class ProductPreviewProfile(BaseModel):
     context: str = ""
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
+    template_instance: str = "testing"
+    required_template_env_keys: tuple[str, ...] = ()
+    copied_env_keys: tuple[str, ...] = ()
+    omitted_env_keys: tuple[str, ...] = ()
+    override_env: dict[str, str] = Field(default_factory=dict)
+    preview_url_env_keys: tuple[str, ...] = ()
+    preview_domain_env_keys: tuple[str, ...] = ()
+    required_provider_fields: tuple[str, ...] = ()
+    data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"] = "none"
+    migration_command: str = ""
+    seed_command: str = ""
 
     @model_validator(mode="after")
     def _validate_preview(self) -> "ProductPreviewProfile":
@@ -44,6 +57,42 @@ class ProductPreviewProfile(BaseModel):
             raise ValueError("enabled product preview profile requires context")
         if self.enabled and "{number}" not in self.slug_template:
             raise ValueError("enabled product preview profile slug_template requires {number}")
+        if self.enabled and not self.template_instance.strip():
+            raise ValueError("enabled product preview profile requires template_instance")
+        key_fields = {
+            "required_template_env_keys": self.required_template_env_keys,
+            "copied_env_keys": self.copied_env_keys,
+            "omitted_env_keys": self.omitted_env_keys,
+            "preview_url_env_keys": self.preview_url_env_keys,
+            "preview_domain_env_keys": self.preview_domain_env_keys,
+            "required_provider_fields": self.required_provider_fields,
+        }
+        normalized: dict[str, tuple[str, ...]] = {}
+        for field_name, raw_keys in key_fields.items():
+            keys: list[str] = []
+            for raw_key in raw_keys:
+                key = raw_key.strip()
+                if not key:
+                    raise ValueError(f"product preview profile {field_name} values must be non-empty")
+                if key in keys:
+                    raise ValueError(f"product preview profile {field_name} values must be unique")
+                keys.append(key)
+            normalized[field_name] = tuple(keys)
+        copied = set(normalized["copied_env_keys"])
+        omitted = set(normalized["omitted_env_keys"])
+        overlap = sorted(copied & omitted)
+        if overlap:
+            raise ValueError("product preview profile cannot both copy and omit env keys: " + ", ".join(overlap))
+        for raw_key, raw_value in self.override_env.items():
+            key = raw_key.strip()
+            if not key:
+                raise ValueError("product preview profile override_env keys must be non-empty")
+            if raw_value is None:
+                raise ValueError("product preview profile override_env values must not be null")
+        if self.data_transport_mode == "none" and (self.migration_command or self.seed_command):
+            raise ValueError(
+                "product preview profile migration_command/seed_command require a data transport mode"
+            )
         return self
 
 
