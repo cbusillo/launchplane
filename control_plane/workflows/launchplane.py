@@ -884,6 +884,18 @@ def update_github_issue_comment(
     return payload
 
 
+def delete_github_issue_comment(*, owner: str, repo: str, comment_id: int, token: str) -> None:
+    payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/issues/comments/{comment_id}",
+        token=token,
+        method="DELETE",
+    )
+    if payload is not None:
+        raise click.ClickException(
+            f"GitHub comment delete response for {owner}/{repo} comment {comment_id} must be empty."
+        )
+
+
 def github_api_request(
     *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
 ) -> object:
@@ -904,7 +916,8 @@ def github_api_request(
     )
     try:
         with urlopen(request, timeout=15) as response:
-            return json.loads(response.read().decode("utf-8"))
+            response_text = response.read().decode("utf-8")
+            return json.loads(response_text) if response_text.strip() else None
     except (HTTPError, URLError, OSError, json.JSONDecodeError) as exc:
         raise click.ClickException(f"GitHub API request failed for {path}: {exc}") from exc
 

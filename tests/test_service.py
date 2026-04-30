@@ -2971,6 +2971,68 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
         self.assertEqual(feedback_records[0].anchor_pr_number, 42)
 
+    def test_preview_pr_feedback_endpoint_records_unsupported_notice(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-fork-notice.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request_target"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/preview-fork-notice.yml@refs/heads/main"
+                        ),
+                        event_name="pull_request_target",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "source": "preview-fork-notice",
+                    "repository": "every/verireel",
+                    "anchor_repo": "verireel",
+                    "anchor_pr_number": 43,
+                    "anchor_pr_url": "https://github.com/every/verireel/pull/43",
+                    "status": "unsupported",
+                    "run_url": "https://github.com/every/verireel/actions/runs/124",
+                    "failure_summary": "Preview automation is unavailable for forked pull requests.",
+                },
+            )
+
+            feedback_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_pr_feedback_records(context_name="verireel-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(feedback_records[0].status, "unsupported")
+        self.assertIn("preview automation is unavailable", payload["result"]["comment_markdown"])
+        self.assertIn("protected preview provisioning path", payload["result"]["comment_markdown"])
+        self.assertEqual(payload["result"]["delivery_status"], "skipped")
+
     def test_preview_pr_feedback_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
