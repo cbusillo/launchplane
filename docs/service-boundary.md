@@ -38,6 +38,7 @@ VeriReel product paths:
   - `POST /v1/product-profiles`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
+  - `POST /v1/drivers/generic-web/preview-desired-state`
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
   - `POST /v1/drivers/odoo/post-deploy`
@@ -302,6 +303,12 @@ Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
 Launchplane resolves the context from the DB-backed product profile lane and the
 runtime target from DB-backed Dokploy target records.
+
+Generic web preview desired-state discovery uses
+`POST /v1/drivers/generic-web/preview-desired-state`. The request names the
+product and optional pull-request label/page limit; Launchplane resolves the
+repository, preview context, anchor repo, and preview slug template from the
+DB-backed product profile before recording desired preview state.
 
 ### Operator read endpoints
 

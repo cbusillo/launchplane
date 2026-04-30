@@ -1134,6 +1134,145 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_generic_web_preview_desired_state_route_uses_profile_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_desired_state.discover"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            record = PreviewDesiredStateRecord(
+                desired_state_id="preview-desired-state-syo-testing-1",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+                source="generic-web-preview",
+                discovered_at="2026-04-30T21:00:00Z",
+                repository="cbusillo/sellyouroutboard",
+                label="preview",
+                anchor_repo="sellyouroutboard",
+                status="pass",
+                desired_count=0,
+            )
+
+            with patch(
+                "control_plane.service.discover_generic_web_preview_desired_state",
+                return_value=record,
+            ) as discover:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-desired-state",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "desired_state": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-preview-desired-state:syo"},
+                )
+            records = FilesystemRecordStore(state_dir=state_dir).list_preview_desired_state_records(
+                context_name="sellyouroutboard-testing"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(
+            payload["records"]["preview_desired_state_id"],
+            "preview-desired-state-syo-testing-1",
+        )
+        discover.assert_called_once()
+        _, kwargs = discover.call_args
+        self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
+        self.assertEqual(kwargs["profile"].preview.context, "sellyouroutboard-testing")
+        self.assertEqual(records[0].desired_state_id, "preview-desired-state-syo-testing-1")
+
+    def test_generic_web_preview_desired_state_route_rejects_wrong_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["different-context"],
+                            "actions": ["preview_desired_state.discover"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/preview-desired-state",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "desired_state": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_driver_context_view_endpoint_returns_lane_summary(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

@@ -92,6 +92,12 @@ The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
 runtime target bindings from DB-backed Dokploy target records.
 
+The `preview_desired_state` action routes to
+`POST /v1/drivers/generic-web/preview-desired-state`. Product workflows provide
+the product key; Launchplane resolves the preview context, owning repository,
+anchor repo, and slug template from the DB-backed product profile before writing
+desired preview state records.
+
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
