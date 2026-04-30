@@ -22,6 +22,19 @@ def _repository_parts(repository: str) -> tuple[str, str]:
     return owner.strip(), repo.strip()
 
 
+def render_preview_slug(
+    *,
+    anchor_pr_number: int,
+    preview_slug_prefix: str = "pr-",
+    preview_slug_template: str = "",
+) -> str:
+    if preview_slug_template.strip():
+        if "{number}" not in preview_slug_template:
+            raise click.ClickException("Preview slug template must contain {number}.")
+        return preview_slug_template.strip().replace("{number}", str(anchor_pr_number))
+    return f"{preview_slug_prefix}{anchor_pr_number}"
+
+
 def list_github_open_pull_requests_with_label(
     *,
     owner: str,
@@ -115,6 +128,7 @@ def discover_github_preview_desired_state(
     label: str,
     anchor_repo: str,
     preview_slug_prefix: str = "pr-",
+    preview_slug_template: str = "",
     max_pages: int = 10,
 ) -> PreviewDesiredStateRecord:
     try:
@@ -136,7 +150,11 @@ def discover_github_preview_desired_state(
         )
         desired_previews = tuple(
             PreviewLifecycleDesiredPreview(
-                preview_slug=f"{preview_slug_prefix}{pull_request['number']}",
+                preview_slug=render_preview_slug(
+                    anchor_pr_number=int(pull_request["number"]),
+                    preview_slug_prefix=preview_slug_prefix,
+                    preview_slug_template=preview_slug_template,
+                ),
                 anchor_repo=anchor_repo,
                 anchor_pr_number=int(pull_request["number"]),
                 anchor_pr_url=str(pull_request["html_url"]),

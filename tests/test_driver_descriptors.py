@@ -86,6 +86,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         actions = {action.action_id: action for action in descriptor.actions}
         self.assertEqual(actions["stable_deploy"].route_path, "/v1/drivers/generic-web/deploy")
         self.assertEqual(actions["stable_deploy"].safety, "mutation")
+        self.assertEqual(
+            actions["preview_desired_state"].route_path,
+            "/v1/drivers/generic-web/preview-desired-state",
+        )
+        self.assertEqual(actions["preview_desired_state"].safety, "safe_write")
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(

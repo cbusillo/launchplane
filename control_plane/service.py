@@ -91,6 +91,11 @@ from control_plane.workflows.generic_web_deploy import (
     execute_generic_web_deploy,
     resolve_generic_web_profile_lane,
 )
+from control_plane.workflows.generic_web_preview import (
+    GenericWebPreviewDesiredStateRequest,
+    discover_generic_web_preview_desired_state,
+    resolve_generic_web_preview_profile,
+)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -236,6 +241,22 @@ class GenericWebDeployEnvelope(BaseModel):
             raise ValueError("generic web deploy requires product")
         if self.product.strip() != self.deploy.product.strip():
             raise ValueError("generic web deploy requires matching product values")
+        return self
+
+
+class GenericWebPreviewDesiredStateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    desired_state: GenericWebPreviewDesiredStateRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPreviewDesiredStateEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web preview desired state requires product")
+        if self.product.strip() != self.desired_state.product.strip():
+            raise ValueError("generic web preview desired state requires matching product values")
         return self
 
 
@@ -1446,6 +1467,7 @@ def create_launchplane_service_app(
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/generic-web/deploy",
+        "/v1/drivers/generic-web/preview-desired-state",
         "/v1/drivers/odoo/artifact-publish-inputs",
         "/v1/drivers/odoo/artifact-publish",
         "/v1/drivers/odoo/post-deploy",
@@ -2275,6 +2297,56 @@ def create_launchplane_service_app(
                     lane=lane,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/generic-web/preview-desired-state":
+                request = GenericWebPreviewDesiredStateEnvelope.model_validate(payload)
+                profile = resolve_generic_web_preview_profile(
+                    record_store=record_store,
+                    product=request.product,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_desired_state.discover",
+                    product=profile.product,
+                    context=profile.preview.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot discover generic web preview desired state"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = discover_generic_web_preview_desired_state(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=request.desired_state,
+                    discovered_at=_utc_now_timestamp(),
+                    profile=profile,
+                )
+                preview_desired_state_id = _write_preview_desired_state_if_supported(
+                    record_store=record_store,
+                    record=driver_result,
+                )
+                result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == "/v1/drivers/odoo/post-deploy":
                 request = OdooPostDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(

@@ -79,6 +79,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             capability_id="previewable",
             label="Previewable",
             description="Model desired preview state, creation, refresh, cleanup, and preview evidence for web products.",
+            actions=("preview_desired_state",),
             panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
         DriverCapabilityDescriptor(
@@ -103,6 +104,15 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             scope="instance",
             route_path="/v1/drivers/generic-web/deploy",
             writes_records=("deployment",),
+        ),
+        _action(
+            "preview_desired_state",
+            "Discover desired previews",
+            "Discover labeled pull requests for a generic-web product profile and record desired preview state.",
+            safety="safe_write",
+            scope="context",
+            route_path="/v1/drivers/generic-web/preview-desired-state",
+            writes_records=("preview_desired_state",),
         ),
     ),
 )
