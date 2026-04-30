@@ -32,6 +32,10 @@ VeriReel product paths:
   - `POST /v1/evidence/promotions`
   - `POST /v1/evidence/previews/generations`
   - `POST /v1/evidence/previews/destroyed`
+- product profile routes:
+  - `GET /v1/product-profiles`
+  - `GET /v1/product-profiles/{product}`
+  - `POST /v1/product-profiles`
 - product driver routes:
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
@@ -282,6 +286,16 @@ repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
 Launchplane renders the review comment, upserts the anchored GitHub PR comment
 when its runtime token is available, and stores an append-only feedback record
 with the comment body, delivery action, comment URL, and any skip/failure reason.
+
+### Product profile endpoints
+
+- `GET /v1/product-profiles`
+- `GET /v1/product-profiles/{product}`
+- `POST /v1/product-profiles`
+
+Product profiles are Launchplane-owned product/driver bindings. They are written
+through authenticated service ingress and stored in Launchplane records; product
+repos do not carry repo-local Launchplane lifecycle manifests.
 
 ### Operator read endpoints
 

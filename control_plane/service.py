@@ -50,6 +50,7 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.drivers.registry import (
     build_driver_context_view,
@@ -857,6 +858,10 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "operations.read", {"context": segments[2]}
     if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
         return "launchplane_service.read", {}
+    if len(segments) == 2 and segments == ["v1", "product-profiles"]:
+        return "product_profile.read", {}
+    if len(segments) == 3 and segments[:2] == ["v1", "product-profiles"]:
+        return "product_profile.read", {"product": segments[2]}
     return None
 
 
@@ -935,6 +940,7 @@ def _accepted_payload(
                 "preview_pr_feedback_id",
                 "preview_lifecycle_cleanup_id",
                 "preview_lifecycle_plan_id",
+                "product_profile",
                 "generation_id",
                 "promotion_record_id",
                 "target_id",
@@ -1415,6 +1421,7 @@ def create_launchplane_service_app(
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-plan",
+        "/v1/product-profiles",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/odoo/artifact-publish-inputs",
@@ -1975,6 +1982,66 @@ def create_launchplane_service_app(
                                 authz_policy_sha256_value=resolved_authz_policy_sha256,
                                 authz_policy_source=resolved_authz_policy_source,
                             ),
+                        },
+                    )
+                if action == "product_profile.read":
+                    if "product" in params:
+                        profile = record_store.read_product_profile_record(params["product"])
+                        if not authz_policy.allows(
+                            identity=identity,
+                            action=action,
+                            product=profile.product,
+                            context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                        ):
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=403,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "authorization_denied",
+                                        "message": "Workflow cannot read the requested product profile.",
+                                    },
+                                },
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "profile": profile.model_dump(mode="json"),
+                            },
+                        )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot list Launchplane product profiles.",
+                                },
+                            },
+                        )
+                    driver_id_filter = str((query.get("driver_id") or [""])[0] or "").strip()
+                    profiles = record_store.list_product_profile_records(driver_id=driver_id_filter)
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "driver_id": driver_id_filter,
+                            "profiles": [profile.model_dump(mode="json") for profile in profiles],
                         },
                     )
                 context_name = params["context"]
@@ -2795,6 +2862,39 @@ def create_launchplane_service_app(
                     request=request.destroy,
                 )
                 result = {}
+            elif path == "/v1/product-profiles":
+                request = LaunchplaneProductProfileRecord.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="product_profile.write",
+                    product=request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write the requested product profile.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                record_store.write_product_profile_record(request)
+                result = {"product_profile": request.product}
             elif path == "/v1/evidence/promotions":
                 request = PromotionEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
