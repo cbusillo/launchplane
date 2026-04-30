@@ -137,6 +137,11 @@ health endpoint, tests, and source/build inputs. Launchplane owns the product
 profile that maps those app facts into preview, deploy, promotion, and evidence
 behavior.
 
+The service exposes product profile records through `GET /v1/product-profiles`,
+`GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
+require the `product_profile.write` action for the target product in the
+Launchplane service context; reads use `product_profile.read`.
+
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
 be Launchplane's authenticated service ingress plus the durable record semantics
