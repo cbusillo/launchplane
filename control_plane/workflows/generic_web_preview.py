@@ -8,7 +8,10 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -99,6 +102,62 @@ class GenericWebPreviewDestroyResult(BaseModel):
     application_name: str
     application_id: str
     error_message: str = ""
+
+
+class GenericWebPreviewReadinessRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    source: str = "generic-web-preview-readiness"
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "GenericWebPreviewReadinessRequest":
+        if not self.product.strip():
+            raise ValueError("Generic web preview readiness requires product.")
+        if not self.source.strip():
+            raise ValueError("Generic web preview readiness requires source.")
+        return self
+
+
+class GenericWebPreviewTransportSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    data_transport_mode: Literal["none", "clone", "bootstrap", "migrate_seed", "driver"]
+    copied_env_keys: tuple[str, ...]
+    omitted_env_keys: tuple[str, ...]
+    override_env_keys: tuple[str, ...]
+    preview_url_env_keys: tuple[str, ...]
+    preview_domain_env_keys: tuple[str, ...]
+    migration_command_configured: bool
+    seed_command_configured: bool
+
+
+class GenericWebPreviewReadinessCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check_id: str
+    status: Literal["pass", "blocked"]
+    message: str
+
+
+class GenericWebPreviewReadinessResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    readiness_status: Literal["pass", "blocked"]
+    checked_at: str
+    product: str
+    context: str
+    template_context: str
+    template_instance: str
+    template_target_type: str = ""
+    template_target_id: str = ""
+    template_target_name: str = ""
+    source: str
+    missing_template_env_keys: tuple[str, ...]
+    missing_provider_fields: tuple[str, ...]
+    transport: GenericWebPreviewTransportSummary
+    checks: tuple[GenericWebPreviewReadinessCheck, ...]
 
 
 def _anchor_repo(repository: str) -> str:
@@ -214,6 +273,234 @@ def resolve_generic_web_preview_profile(
     if not profile.preview.context.strip():
         raise click.ClickException(f"Product {profile.product!r} does not define a preview context.")
     return profile
+
+
+def _template_lane(*, profile: LaunchplaneProductProfileRecord) -> ProductLaneProfile | None:
+    template_instance = profile.preview.template_instance.strip()
+    for lane in profile.lanes:
+        if lane.instance == template_instance:
+            return lane
+    return None
+
+
+def _field_value(payload: dict[str, object], field_path: str) -> object:
+    current: object = payload
+    for part in field_path.split("."):
+        if not part:
+            return None
+        if not isinstance(current, dict):
+            return None
+        current = current.get(part)
+    return current
+
+
+def _is_blank(value: object) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _read_template_payload(
+    *, control_plane_root: Path, template_lane: ProductLaneProfile
+) -> tuple[control_plane_dokploy.DokployTargetDefinition | None, dict[str, object] | None, str]:
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = control_plane_dokploy.find_dokploy_target_definition(
+        source_of_truth,
+        context_name=template_lane.context,
+        instance_name=template_lane.instance,
+    )
+    if target_definition is None:
+        return None, None, f"No Dokploy target definition found for {template_lane.context}/{template_lane.instance}."
+    if target_definition.target_type != "application":
+        return (
+            target_definition,
+            None,
+            "Generic web preview readiness requires the template lane to be a Dokploy application.",
+        )
+    if not target_definition.target_id.strip():
+        return (
+            target_definition,
+            None,
+            "Generic web preview readiness requires the template lane to have a Dokploy target_id.",
+        )
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_definition.target_type,
+        target_id=target_definition.target_id,
+    )
+    return target_definition, payload, ""
+
+
+def _transport_summary(*, profile: LaunchplaneProductProfileRecord) -> GenericWebPreviewTransportSummary:
+    return GenericWebPreviewTransportSummary(
+        data_transport_mode=profile.preview.data_transport_mode,
+        copied_env_keys=profile.preview.copied_env_keys,
+        omitted_env_keys=profile.preview.omitted_env_keys,
+        override_env_keys=tuple(sorted(profile.preview.override_env)),
+        preview_url_env_keys=profile.preview.preview_url_env_keys,
+        preview_domain_env_keys=profile.preview.preview_domain_env_keys,
+        migration_command_configured=bool(profile.preview.migration_command.strip()),
+        seed_command_configured=bool(profile.preview.seed_command.strip()),
+    )
+
+
+def evaluate_generic_web_preview_readiness(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    request: GenericWebPreviewReadinessRequest,
+    checked_at: str,
+    profile: LaunchplaneProductProfileRecord | None = None,
+) -> GenericWebPreviewReadinessResult:
+    resolved_profile = profile
+    if resolved_profile is None:
+        resolved_profile = resolve_generic_web_preview_profile(
+            record_store=record_store,
+            product=request.product,
+        )
+
+    checks: list[GenericWebPreviewReadinessCheck] = []
+    template_lane = _template_lane(profile=resolved_profile)
+    if template_lane is None:
+        checks.append(
+            GenericWebPreviewReadinessCheck(
+                check_id="template_lane",
+                status="blocked",
+                message=(
+                    "Product profile has no lane matching preview.template_instance "
+                    f"{resolved_profile.preview.template_instance!r}."
+                ),
+            )
+        )
+        return GenericWebPreviewReadinessResult(
+            readiness_status="blocked",
+            checked_at=checked_at,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            template_context="",
+            template_instance=resolved_profile.preview.template_instance,
+            source=request.source,
+            missing_template_env_keys=(),
+            missing_provider_fields=(),
+            transport=_transport_summary(profile=resolved_profile),
+            checks=tuple(checks),
+        )
+
+    target_definition: control_plane_dokploy.DokployTargetDefinition | None = None
+    template_payload: dict[str, object] | None = None
+    target_error = ""
+    try:
+        target_definition, template_payload, target_error = _read_template_payload(
+            control_plane_root=control_plane_root,
+            template_lane=template_lane,
+        )
+    except click.ClickException as exc:
+        target_error = str(exc)
+    if target_error:
+        checks.append(
+            GenericWebPreviewReadinessCheck(
+                check_id="template_target",
+                status="blocked",
+                message=target_error,
+            )
+        )
+        return GenericWebPreviewReadinessResult(
+            readiness_status="blocked",
+            checked_at=checked_at,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            template_context=template_lane.context,
+            template_instance=template_lane.instance,
+            template_target_type=(target_definition.target_type if target_definition is not None else ""),
+            template_target_id=(target_definition.target_id if target_definition is not None else ""),
+            template_target_name=(target_definition.target_name if target_definition is not None else ""),
+            source=request.source,
+            missing_template_env_keys=(),
+            missing_provider_fields=(),
+            transport=_transport_summary(profile=resolved_profile),
+            checks=tuple(checks),
+        )
+
+    assert target_definition is not None
+    assert template_payload is not None
+    env_map = control_plane_dokploy.parse_dokploy_env_text(str(template_payload.get("env") or ""))
+    required_env_keys = tuple(
+        dict.fromkeys(
+            (
+                *resolved_profile.preview.required_template_env_keys,
+                *resolved_profile.preview.copied_env_keys,
+            )
+        )
+    )
+    missing_env_keys = tuple(key for key in required_env_keys if not env_map.get(key, "").strip())
+    missing_provider_fields = tuple(
+        field
+        for field in resolved_profile.preview.required_provider_fields
+        if _is_blank(_field_value(template_payload, field))
+    )
+
+    if missing_env_keys:
+        checks.append(
+            GenericWebPreviewReadinessCheck(
+                check_id="template_env",
+                status="blocked",
+                message="Template lane is missing required env keys: " + ", ".join(missing_env_keys),
+            )
+        )
+    else:
+        checks.append(
+            GenericWebPreviewReadinessCheck(
+                check_id="template_env",
+                status="pass",
+                message="Template lane includes required env keys.",
+            )
+        )
+    if missing_provider_fields:
+        checks.append(
+            GenericWebPreviewReadinessCheck(
+                check_id="template_provider_fields",
+                status="blocked",
+                message="Template lane is missing required provider fields: "
+                + ", ".join(missing_provider_fields),
+            )
+        )
+    else:
+        checks.append(
+            GenericWebPreviewReadinessCheck(
+                check_id="template_provider_fields",
+                status="pass",
+                message="Template lane includes required provider fields.",
+            )
+        )
+    checks.append(
+        GenericWebPreviewReadinessCheck(
+            check_id="transport_policy",
+            status="pass",
+            message=(
+                "Preview transport policy is configured for "
+                f"{resolved_profile.preview.data_transport_mode!r} mode."
+            ),
+        )
+    )
+    status: Literal["pass", "blocked"] = "blocked" if missing_env_keys or missing_provider_fields else "pass"
+    return GenericWebPreviewReadinessResult(
+        readiness_status=status,
+        checked_at=checked_at,
+        product=resolved_profile.product,
+        context=resolved_profile.preview.context,
+        template_context=template_lane.context,
+        template_instance=template_lane.instance,
+        template_target_type=target_definition.target_type,
+        template_target_id=target_definition.target_id,
+        template_target_name=target_definition.target_name,
+        source=request.source,
+        missing_template_env_keys=missing_env_keys,
+        missing_provider_fields=missing_provider_fields,
+        transport=_transport_summary(profile=resolved_profile),
+        checks=tuple(checks),
+    )
 
 
 def discover_generic_web_preview_desired_state(

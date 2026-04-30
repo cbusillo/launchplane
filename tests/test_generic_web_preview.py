@@ -4,17 +4,21 @@ from unittest.mock import patch
 
 import click
 
+from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
+    ProductLaneProfile,
     ProductPreviewProfile,
 )
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
     GenericWebPreviewInventoryRequest,
+    GenericWebPreviewReadinessRequest,
     discover_generic_web_preview_desired_state,
+    evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
     execute_generic_web_preview_inventory,
     preview_pr_number_from_slug,
@@ -42,11 +46,26 @@ def _profile(*, preview_enabled: bool = True) -> LaunchplaneProductProfileRecord
         image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
         runtime_port=3000,
         health_path="/api/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context="sellyouroutboard-testing",
+                base_url="https://testing.sellyouroutboard.com",
+                health_url="https://testing.sellyouroutboard.com/api/health",
+            ),
+        ),
         preview=ProductPreviewProfile(
             enabled=preview_enabled,
             context="sellyouroutboard-testing" if preview_enabled else "",
             slug_template="preview-{number}-site",
             app_name_prefix="syo-preview",
+            required_template_env_keys=("SMTP_HOST",),
+            copied_env_keys=("SMTP_FROM",),
+            omitted_env_keys=("PUBLIC_URL",),
+            override_env={"NODE_ENV": "production"},
+            preview_url_env_keys=("PUBLIC_URL",),
+            preview_domain_env_keys=("PUBLIC_DOMAIN",),
+            required_provider_fields=("dockerImage", "registry.username"),
         ),
         updated_at="2026-04-30T21:00:00Z",
         source="test",
@@ -110,6 +129,15 @@ class GenericWebPreviewTests(unittest.TestCase):
                 product="sellyouroutboard",
             )
 
+    def test_preview_profile_rejects_copy_omit_overlap(self) -> None:
+        with self.assertRaises(ValueError):
+            ProductPreviewProfile(
+                enabled=True,
+                context="sellyouroutboard-testing",
+                copied_env_keys=("SMTP_HOST",),
+                omitted_env_keys=("SMTP_HOST",),
+            )
+
     def test_preview_pr_number_from_slug_uses_template(self) -> None:
         self.assertEqual(
             preview_pr_number_from_slug(
@@ -159,6 +187,101 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.context, "sellyouroutboard-testing")
         self.assertEqual(result.app_name_prefix, "syo-preview")
         self.assertEqual([item.previewSlug for item in result.previews], ["preview-42-site"])
+
+    def test_evaluate_generic_web_preview_readiness_passes_with_template_contract(self) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_id="app-testing",
+                    target_name="sellyouroutboard-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "SMTP_HOST=smtp.example\nSMTP_FROM=hello@example.com\n",
+                    "dockerImage": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                    "registry": {"username": "github-actions"},
+                },
+            ),
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="sellyouroutboard"),
+                checked_at="2026-04-30T21:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "pass")
+        self.assertEqual(result.template_instance, "testing")
+        self.assertEqual(result.template_target_id, "app-testing")
+        self.assertEqual(result.missing_template_env_keys, ())
+        self.assertEqual(result.missing_provider_fields, ())
+        self.assertEqual(result.transport.copied_env_keys, ("SMTP_FROM",))
+        self.assertEqual(result.transport.preview_url_env_keys, ("PUBLIC_URL",))
+
+    def test_evaluate_generic_web_preview_readiness_blocks_missing_template_inputs(self) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_id="app-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "SMTP_HOST=\n",
+                    "dockerImage": "",
+                    "registry": {},
+                },
+            ),
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="sellyouroutboard"),
+                checked_at="2026-04-30T21:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "blocked")
+        self.assertEqual(result.missing_template_env_keys, ("SMTP_HOST", "SMTP_FROM"))
+        self.assertEqual(result.missing_provider_fields, ("dockerImage", "registry.username"))
+        self.assertEqual(
+            [check.check_id for check in result.checks],
+            ["template_env", "template_provider_fields", "transport_policy"],
+        )
 
     def test_execute_generic_web_preview_destroy_deletes_domains_and_application(self) -> None:
         store = _GenericWebPreviewStore(_profile())
