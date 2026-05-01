@@ -4300,6 +4300,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "source_git_ref": "abcdef1234567890",
                             "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
                             "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                            "source_health_status": "success",
                         },
                     },
                 )
@@ -4319,6 +4320,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1",
             )
             execute_mock.assert_called_once()
+            request = execute_mock.call_args.kwargs["request"]
+            self.assertEqual(request.source_health_status, "pass")
 
     def test_odoo_post_deploy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

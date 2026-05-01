@@ -65,6 +65,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 source_git_ref="abcdef1234567890",
                 backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
                 promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                source_health_status="success",
                 expected_build_revision="abcdef1234567890",
                 expected_build_tag="sha-abcdef1234567890",
             )
@@ -122,6 +123,7 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
             self.assertEqual(promotion.backup_record_id, "backup-gate-verireel-prod-run-12345-attempt-1")
+            self.assertEqual(promotion.source_health.status, "pass")
             self.assertEqual(promotion.deploy.status, "pass")
             self.assertEqual(promotion.deploy.deployment_id, "prod-app-123")
             self.assertEqual(promotion.deploy.started_at, "2026-04-21T18:20:00Z")

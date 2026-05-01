@@ -4,7 +4,7 @@ from pathlib import Path
 import time
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.backup_gate_record import BackupGateRecord
@@ -16,6 +16,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
     PromotionRecord,
+    ReleaseStatus,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.verireel_stable_deploy import (
@@ -42,11 +43,17 @@ class VeriReelProdPromotionRequest(BaseModel):
     source_git_ref: str
     backup_record_id: str
     promotion_record_id: str
+    source_health_status: ReleaseStatus = "skipped"
     expected_build_revision: str = ""
     expected_build_tag: str = ""
     rollout_timeout_seconds: int = Field(default=DEFAULT_ROLLOUT_TIMEOUT_SECONDS, ge=1)
     rollout_interval_seconds: int = Field(default=DEFAULT_ROLLOUT_INTERVAL_SECONDS, ge=1)
     no_cache: bool = False
+
+    @field_validator("source_health_status", mode="before")
+    @classmethod
+    def _normalize_source_health_status(cls, value: object) -> ReleaseStatus:
+        return _normalize_release_status(str(value or ""), label="Source health status")
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelProdPromotionRequest":
@@ -65,6 +72,19 @@ class VeriReelProdPromotionRequest(BaseModel):
         if not self.promotion_record_id.strip():
             raise ValueError("VeriReel prod promotion requires promotion_record_id.")
         return self
+
+
+def _normalize_release_status(value: str, *, label: str) -> ReleaseStatus:
+    normalized = value.strip().lower()
+    if normalized in {"success", "passed", "pass"}:
+        return "pass"
+    if normalized in {"failure", "failed", "fail", "cancelled", "canceled", "timed_out"}:
+        return "fail"
+    if normalized in {"skipped", "not-run", "not_run", ""}:
+        return "skipped"
+    if normalized in {"pending", "in_progress", "in-progress"}:
+        return "pending"
+    raise ValueError(f"{label} must be pass, fail, skipped, or pending.")
 
 
 class VeriReelProdPromotionResult(BaseModel):
@@ -184,7 +204,7 @@ def _build_promotion_record(
         context=request.context,
         from_instance=request.from_instance,
         to_instance=request.to_instance,
-        source_health=HealthcheckEvidence(status="skipped"),
+        source_health=HealthcheckEvidence(status=request.source_health_status),
         backup_gate=BackupGateEvidence(
             required=backup_gate_record.required,
             status=backup_gate_record.status,
@@ -278,7 +298,7 @@ def _write_failed_promotion_record(
             context=request.context,
             from_instance=request.from_instance,
             to_instance=request.to_instance,
-            source_health=HealthcheckEvidence(status="skipped"),
+            source_health=HealthcheckEvidence(status=request.source_health_status),
             backup_gate=BackupGateEvidence(
                 required=(backup_gate_record.required if backup_gate_record is not None else True),
                 status=(backup_gate_record.status if backup_gate_record is not None else "fail"),
