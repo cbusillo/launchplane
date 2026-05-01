@@ -7825,6 +7825,166 @@ def _sync_live_target_from_tracked_contract(
     return payload
 
 
+def _runtime_env_live_target_delta(
+    *,
+    desired_env_map: dict[str, str],
+    live_env_map: dict[str, str],
+) -> dict[str, object]:
+    desired_keys = sorted(desired_env_map)
+    missing_keys = [env_key for env_key in desired_keys if env_key not in live_env_map]
+    different_keys = [
+        env_key
+        for env_key in desired_keys
+        if env_key in live_env_map and live_env_map[env_key] != desired_env_map[env_key]
+    ]
+    unchanged_keys = [
+        env_key
+        for env_key in desired_keys
+        if env_key in live_env_map and live_env_map[env_key] == desired_env_map[env_key]
+    ]
+    return {
+        "desired_key_count": len(desired_keys),
+        "live_key_count": len(live_env_map),
+        "missing_keys": missing_keys,
+        "different_keys": different_keys,
+        "changed_keys": sorted({*missing_keys, *different_keys}),
+        "unchanged_key_count": len(unchanged_keys),
+    }
+
+
+def _apply_live_target_runtime_environment(
+    *,
+    context_name: str,
+    instance_name: str,
+    apply_changes: bool,
+    deploy: bool,
+    no_cache: bool,
+    deploy_timeout_seconds: int | None,
+) -> dict[str, object]:
+    control_plane_root = _control_plane_root()
+    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+        control_plane_root=control_plane_root,
+    )
+    target_definition = _require_dokploy_target_definition(
+        source_of_truth=source_of_truth,
+        context_name=context_name,
+        instance_name=instance_name,
+        operation_name="Runtime environment live target apply",
+    )
+    desired_env_map = control_plane_runtime_environments.resolve_runtime_environment_values(
+        control_plane_root=control_plane_root,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if not desired_env_map:
+        raise click.ClickException(
+            f"No Launchplane runtime environment values resolved for {context_name}/{instance_name}."
+        )
+
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_definition.target_type,
+        target_id=target_definition.target_id,
+    )
+    live_env_map = control_plane_dokploy.parse_dokploy_env_text(
+        str(target_payload.get("env") or "")
+    )
+    initial_delta = _runtime_env_live_target_delta(
+        desired_env_map=desired_env_map,
+        live_env_map=live_env_map,
+    )
+    changed_keys = initial_delta["changed_keys"]
+    changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
+    deploy_result: dict[str, str] | None = None
+    verification = {
+        "status": "skipped",
+        "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
+    }
+
+    if apply_changes and changed_key_count:
+        refreshed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target_definition.target_type,
+            target_id=target_definition.target_id,
+        )
+        refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+            str(refreshed_payload.get("env") or "")
+        )
+        updated_env_map = dict(refreshed_env_map)
+        updated_env_map.update(desired_env_map)
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type=target_definition.target_type,
+            target_id=target_definition.target_id,
+            target_payload=refreshed_payload,
+            env_text=control_plane_dokploy.serialize_dokploy_env_text(updated_env_map),
+        )
+        persisted_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type=target_definition.target_type,
+            target_id=target_definition.target_id,
+        )
+        persisted_env_map = control_plane_dokploy.parse_dokploy_env_text(
+            str(persisted_payload.get("env") or "")
+        )
+        verification_delta = _runtime_env_live_target_delta(
+            desired_env_map=desired_env_map,
+            live_env_map=persisted_env_map,
+        )
+        verification_changed_keys = verification_delta["changed_keys"]
+        verification = {
+            "status": "pass" if verification_changed_keys == [] else "fail",
+            "missing_keys": verification_delta["missing_keys"],
+            "different_keys": verification_delta["different_keys"],
+            "verified_key_count": verification_delta["unchanged_key_count"],
+        }
+        if verification["status"] != "pass":
+            raise click.ClickException(
+                "Dokploy target env did not persist all Launchplane runtime environment keys."
+            )
+
+    if apply_changes and deploy:
+        deploy_result = _trigger_and_wait_for_dokploy_target_deploy(
+            host=host,
+            token=token,
+            target_type=target_definition.target_type,
+            target_id=target_definition.target_id,
+            deploy_timeout_seconds=control_plane_dokploy.resolve_ship_timeout_seconds(
+                timeout_override_seconds=deploy_timeout_seconds,
+                target_definition=target_definition,
+            ),
+            no_cache=no_cache,
+        )
+
+    return {
+        "status": "ok",
+        "mode": "apply" if apply_changes else "dry-run",
+        "context": context_name,
+        "instance": instance_name,
+        "tracked_target": {
+            "target_id": target_definition.target_id,
+            "target_type": target_definition.target_type,
+            "target_name": target_definition.target_name,
+        },
+        "runtime_environment": initial_delta,
+        "apply": {
+            "applied": apply_changes,
+            "env_updated": bool(apply_changes and changed_key_count),
+            "verification": verification,
+        },
+        "deploy": {
+            "requested": deploy,
+            "triggered": deploy_result is not None,
+            **({"result": deploy_result} if deploy_result is not None else {}),
+        },
+    }
+
+
 def _sync_artifact_image_reference_for_target(
     *,
     context_name: str,
@@ -12391,6 +12551,38 @@ def environments_sync_live_target(
         context_name=context_name,
         instance_name=instance_name,
         apply_changes=apply_changes,
+    )
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@environments.command("apply-live-target")
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--dry-run", "dry_run", is_flag=True, default=False)
+@click.option("--apply", "apply_changes", is_flag=True, default=False)
+@click.option("--deploy", is_flag=True, default=False)
+@click.option("--no-cache", is_flag=True, default=False)
+@click.option("--deploy-timeout-seconds", type=int, default=None, show_default=False)
+def environments_apply_live_target(
+    context_name: str,
+    instance_name: str,
+    dry_run: bool,
+    apply_changes: bool,
+    deploy: bool,
+    no_cache: bool,
+    deploy_timeout_seconds: int | None,
+) -> None:
+    if dry_run == apply_changes:
+        raise click.ClickException("Choose exactly one of --dry-run or --apply.")
+    if dry_run and (deploy or no_cache or deploy_timeout_seconds is not None):
+        raise click.ClickException("Deploy options require --apply.")
+    payload = _apply_live_target_runtime_environment(
+        context_name=context_name,
+        instance_name=instance_name,
+        apply_changes=apply_changes,
+        deploy=deploy,
+        no_cache=no_cache,
+        deploy_timeout_seconds=deploy_timeout_seconds,
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
