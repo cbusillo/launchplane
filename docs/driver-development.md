@@ -44,6 +44,11 @@ Each driver should have these pieces:
   records, and read-model behavior.
 - Docs that explain whether the driver extends `generic-web` or stands alone.
 
+Driver routes that mutate runtime state should write the lifecycle records they
+can derive from the request and provider result in the same request. Product
+repos should not have to shape preview, deployment, promotion, rollback, or
+cleanup records after asking Launchplane to perform the matching action.
+
 Product drivers that reuse common web behavior should declare
 `base_driver_id="generic-web"` in the descriptor and delegate common work rather
 than copying preview/deploy logic. The product-specific behavior still needs
@@ -126,3 +131,8 @@ Legacy product repos may still carry scripts that shape Launchplane evidence or
 call provider APIs directly. Treat those as migration candidates: classify them,
 move the durable behavior into Launchplane, then delete or shrink the product
 repo scripts.
+
+When product-specific smoke checks still run in the product repo, keep the
+follow-up contract thin: the repo reports the primitive result facts, and the
+driver translates them into Launchplane records. Do not leave rendered evidence
+payload construction in the product repo.

@@ -102,6 +102,9 @@ A product repo is approved when all of these are true:
 - Scripts do not own Launchplane record or evidence shaping that Launchplane can
   derive from profiles, driver requests, provider results, or GitHub OIDC
   claims.
+- Driver-trigger workflows rely on Launchplane routes to write the records for
+  provider actions they execute. If product-specific smoke checks still run in
+  the repo, the repo sends only primitive result facts back to Launchplane.
 - Preview, deploy, promotion, rollback, and cleanup triggers pass minimal inputs
   only.
 - Product-specific checks remain in the repo only when they validate product
