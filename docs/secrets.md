@@ -88,6 +88,12 @@ title: Secrets
   non-secret runtime values directly to DB-backed runtime-environment records
   and redacts values from command output. Secret-shaped keys are rejected and
   should be written with `secrets put`.
+- `uv run launchplane product-config apply --input-file bundle.json --dry-run`
+  previews an approved product runtime/secret bundle without printing plaintext
+  values or writing records. `--apply` writes non-secret runtime keys and
+  managed secret values through the same DB-backed stores. Run this command only
+  from a trusted Launchplane context with current `LAUNCHPLANE_DATABASE_URL` and,
+  when secrets are present, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
 - `uv run launchplane environments unset --scope <scope> --key KEY` removes
   stale keys from DB-backed runtime-environment records without reading or
   printing plaintext values.

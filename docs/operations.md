@@ -22,6 +22,8 @@ be treated as the final cross-product ingress boundary for Launchplane.
 - `inventory`: inspect current environment inventory.
 - `promote`: record, resolve, and execute artifact-backed promotions.
 - `promotions`: write and inspect promotion records.
+- `product-config`: dry-run and apply trusted product runtime/secret config
+  bundles from a live Launchplane context.
 - `release-tuples`: inspect state-backed tuple records and explicitly export a
   TOML catalog from minted state.
 - `service`: run the first local Launchplane HTTP ingress slice.
@@ -332,6 +334,13 @@ Current derived-state behavior:
   directly into DB-backed runtime-environment records for `global`, `context`,
   or `instance` scope. It rejects secret-shaped keys and returns key metadata
   only, not plaintext values.
+- `product-config apply --dry-run|--apply --input-file <json>` is the supported
+  trusted-context bundle path for product runtime config changes. It writes
+  non-secret values to runtime-environment records and secret-shaped values to
+  managed secret records while returning only key names, actions, counts, actor,
+  and source metadata. Use it from a live Launchplane context that already has
+  current `LAUNCHPLANE_DATABASE_URL`; bundles with secrets also require
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
 - `environments relabel` updates runtime-environment record source metadata
@@ -342,6 +351,37 @@ Current derived-state behavior:
   contract for a context and instance.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
+- Product repos and GitHub issues must not contain product secret values. Put
+  the JSON bundle on an operator-controlled machine or inside the hosted
+  Launchplane execution context, run `--dry-run` first, then run `--apply` only
+  after the key/action summary matches the approved change.
+
+Example product config bundle shape:
+
+```json
+{
+  "schema_version": 1,
+  "product": "sellyouroutboard",
+  "context": "sellyouroutboard",
+  "instance": "prod",
+  "runtime_env": {
+    "CONTACT_EMAIL_MODE": "smtp",
+    "CONTACT_FROM_EMAIL": "owner@example.com"
+  },
+  "secrets": [
+    {
+      "name": "smtp-password",
+      "binding_key": "SMTP_PASSWORD",
+      "value": "operator-supplied-secret"
+    }
+  ]
+}
+```
+
+`runtime_env` values are non-secret scalar values. `secrets` default to the
+`runtime_environment` integration and the current context/instance, which makes
+them available as managed runtime environment overlays.
+
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.
