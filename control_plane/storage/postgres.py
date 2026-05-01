@@ -30,7 +30,10 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentDeleteEvent,
+    RuntimeEnvironmentRecord,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -361,6 +364,26 @@ class LaunchplaneRuntimeEnvironmentRow(Base):
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRuntimeEnvironmentDeleteEventRow(Base):
+    __tablename__ = "launchplane_runtime_environment_delete_events"
+    __table_args__ = (
+        Index(
+            "launchplane_runtime_environment_delete_events_route_idx",
+            "scope",
+            "context",
+            "instance",
+            desc("recorded_at"),
+        ),
+    )
+
+    event_id: Mapped[str] = mapped_column(String, primary_key=True)
+    scope: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
+    instance: Mapped[str] = mapped_column(String, nullable=False)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1102,9 +1125,7 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
-    def write_preview_lifecycle_cleanup_record(
-        self, record: PreviewLifecycleCleanupRecord
-    ) -> None:
+    def write_preview_lifecycle_cleanup_record(self, record: PreviewLifecycleCleanupRecord) -> None:
         self._write_row(
             LaunchplanePreviewLifecycleCleanupRow(
                 cleanup_id=record.cleanup_id,
@@ -1389,6 +1410,74 @@ class PostgresRecordStore(HumanSessionStore):
                 updated_at=record.updated_at,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def delete_runtime_environment_record_with_event(
+        self,
+        *,
+        event: RuntimeEnvironmentDeleteEvent,
+    ) -> int:
+        statement = (
+            select(LaunchplaneRuntimeEnvironmentRow)
+            .where(
+                LaunchplaneRuntimeEnvironmentRow.scope == event.scope,
+                LaunchplaneRuntimeEnvironmentRow.context == event.context,
+                LaunchplaneRuntimeEnvironmentRow.instance == event.instance,
+            )
+            .limit(1)
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return 0
+            session.delete(row)
+            session.add(
+                LaunchplaneRuntimeEnvironmentDeleteEventRow(
+                    event_id=event.event_id,
+                    scope=event.scope,
+                    context=event.context,
+                    instance=event.instance,
+                    recorded_at=event.recorded_at,
+                    payload=self._payload_dict(event),
+                )
+            )
+            session.commit()
+            return 1
+
+    def write_runtime_environment_delete_event(self, event: RuntimeEnvironmentDeleteEvent) -> None:
+        self._write_row(
+            LaunchplaneRuntimeEnvironmentDeleteEventRow(
+                event_id=event.event_id,
+                scope=event.scope,
+                context=event.context,
+                instance=event.instance,
+                recorded_at=event.recorded_at,
+                payload=self._payload_dict(event),
+            )
+        )
+
+    def list_runtime_environment_delete_events(
+        self,
+        *,
+        scope: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+    ) -> tuple[RuntimeEnvironmentDeleteEvent, ...]:
+        filters: list[object] = []
+        if scope:
+            filters.append(LaunchplaneRuntimeEnvironmentDeleteEventRow.scope == scope)
+        if context_name:
+            filters.append(LaunchplaneRuntimeEnvironmentDeleteEventRow.context == context_name)
+        if instance_name:
+            filters.append(LaunchplaneRuntimeEnvironmentDeleteEventRow.instance == instance_name)
+        return self._list_models(
+            model_type=RuntimeEnvironmentDeleteEvent,
+            orm_model=LaunchplaneRuntimeEnvironmentDeleteEventRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneRuntimeEnvironmentDeleteEventRow.recorded_at.desc(),
+                LaunchplaneRuntimeEnvironmentDeleteEventRow.event_id.desc(),
+            ),
         )
 
     def list_runtime_environment_records(

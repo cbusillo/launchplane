@@ -360,6 +360,12 @@ Current derived-state behavior:
   submit, and shows only key/action/count metadata from Launchplane responses.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
+- `environments delete-record --dry-run|--apply` deletes a whole mistaken
+  runtime-environment record for `global`, `context`, or `instance` scope. The
+  dry-run and apply responses include record identity, source label, update
+  timestamp, key names, key count, actor, and delete-event metadata only. Apply
+  refuses records that can affect a tracked Dokploy target unless
+  `--allow-tracked-target` is provided.
 - `environments relabel` updates runtime-environment record source metadata
   without reading or printing plaintext values.
 - `environments list` shows DB-backed runtime-environment record metadata and

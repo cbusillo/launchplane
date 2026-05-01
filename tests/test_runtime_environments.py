@@ -31,7 +31,9 @@ def _seed_runtime_environment_records(
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
-        for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        for (
+            record
+        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
             definition,
             updated_at=updated_at,
             source_label=source_label,
@@ -115,10 +117,12 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="verireel",
-                    instance_name="prod",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="verireel",
+                        instance_name="prod",
+                    )
                 )
 
         self.assertEqual(resolved_values["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.example.com")
@@ -173,10 +177,12 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="verireel",
-                    instance_name="prod",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="verireel",
+                        instance_name="prod",
+                    )
                 )
 
         self.assertEqual(resolved_values["VERIREEL_PROD_PROXMOX_HOST"], "proxmox.example.com")
@@ -184,7 +190,9 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
     def test_environments_put_rejects_instance_scope_without_instance(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             result = CliRunner().invoke(
                 main,
                 [
@@ -206,7 +214,9 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
     def test_environments_put_rejects_secret_shaped_keys(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             result = CliRunner().invoke(
                 main,
                 [
@@ -284,10 +294,12 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             self.assertEqual(payload["missing_keys"], ["MISSING_KEY"])
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="verireel",
-                    instance_name="prod",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="verireel",
+                        instance_name="prod",
+                    )
                 )
 
         self.assertNotIn("VERIREEL_PROD_CT_ID", resolved_values)
@@ -295,7 +307,9 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
     def test_environments_unset_rejects_empty_result_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             _seed_runtime_environment_records(
                 database_url=database_url,
                 definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
@@ -323,9 +337,388 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertIn("Refusing to leave an empty runtime environment record", result.output)
         self.assertNotIn("only-value", result.output)
 
+    def test_environments_delete_record_dry_run_reports_key_only_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "sellyouroutboard": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"TAWK_WIDGET_ID": "widget-123"}
+                                )
+                            },
+                        )
+                    },
+                ),
+                source_label="operator:mistake",
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "sellyouroutboard",
+                    "--instance",
+                    "prod",
+                    "--actor",
+                    "operator@example.com",
+                    "--dry-run",
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                remaining_records = store.list_runtime_environment_records(
+                    scope="instance",
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("widget-123", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "dry_run")
+        self.assertFalse(payload["deleted"])
+        self.assertEqual(payload["record"]["source_label"], "operator:mistake")
+        self.assertEqual(payload["record"]["env_keys"], ["TAWK_WIDGET_ID"])
+        self.assertEqual(payload["event"]["actor"], "operator@example.com")
+        self.assertEqual(payload["event"]["env_value_count"], 1)
+        self.assertEqual(len(remaining_records), 1)
+
+    def test_environments_delete_record_apply_deletes_whole_record_and_audits(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "sellyouroutboard": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={
+                                        "TAWK_PROPERTY_ID": "property-123",
+                                        "TAWK_WIDGET_ID": "widget-123",
+                                    }
+                                )
+                            },
+                        )
+                    },
+                ),
+                source_label="operator:mistake",
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "sellyouroutboard",
+                    "--instance",
+                    "prod",
+                    "--actor",
+                    "operator@example.com",
+                    "--apply",
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                remaining_records = store.list_runtime_environment_records(
+                    scope="instance",
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+                delete_events = store.list_runtime_environment_delete_events(
+                    scope="instance",
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("widget-123", result.output)
+        self.assertNotIn("property-123", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["deleted"])
+        self.assertEqual(payload["record"]["env_keys"], ["TAWK_PROPERTY_ID", "TAWK_WIDGET_ID"])
+        self.assertEqual(remaining_records, ())
+        self.assertEqual(len(delete_events), 1)
+        self.assertEqual(delete_events[0].actor, "operator@example.com")
+        self.assertEqual(delete_events[0].env_keys, ("TAWK_PROPERTY_ID", "TAWK_WIDGET_ID"))
+
+    def test_environments_delete_record_appends_audit_events_for_repeated_delete_shape(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            definition = control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                schema_version=1,
+                shared_env={},
+                contexts={
+                    "sellyouroutboard": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                        shared_env={},
+                        instances={
+                            "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                env={"TAWK_WIDGET_ID": "widget-123"}
+                            )
+                        },
+                    )
+                },
+            )
+            for _ in range(2):
+                _seed_runtime_environment_records(
+                    database_url=database_url,
+                    definition=definition,
+                    updated_at="2026-04-22T00:00:00Z",
+                    source_label="operator:mistake",
+                )
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "environments",
+                        "delete-record",
+                        "--database-url",
+                        database_url,
+                        "--scope",
+                        "instance",
+                        "--context",
+                        "sellyouroutboard",
+                        "--instance",
+                        "prod",
+                        "--actor",
+                        "operator@example.com",
+                        "--apply",
+                    ],
+                )
+                self.assertEqual(result.exit_code, 0, result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                delete_events = store.list_runtime_environment_delete_events(
+                    scope="instance",
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(len(delete_events), 2)
+        self.assertNotEqual(delete_events[0].event_id, delete_events[1].event_id)
+
+    def test_environments_delete_record_refuses_tracked_target_without_allow_flag(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "sellyouroutboard-testing": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"TAWK_WIDGET_ID": "widget-123"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+            _seed_dokploy_target_records(
+                database_url=database_url,
+                payload=(
+                    "schema_version = 2\n\n"
+                    "[[targets]]\n"
+                    'context = "sellyouroutboard-testing"\n'
+                    'instance = "prod"\n'
+                    'target_id = "target-syo-prod"\n'
+                    'target_name = "syo-prod-app"\n'
+                ),
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "sellyouroutboard-testing",
+                    "--instance",
+                    "prod",
+                    "--apply",
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                remaining_records = store.list_runtime_environment_records(
+                    scope="instance",
+                    context_name="sellyouroutboard-testing",
+                    instance_name="prod",
+                )
+                delete_events = store.list_runtime_environment_delete_events()
+            finally:
+                store.close()
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Refusing to delete", result.output)
+        self.assertIn("sellyouroutboard-testing/prod", result.output)
+        self.assertNotIn("widget-123", result.output)
+        self.assertEqual(len(remaining_records), 1)
+        self.assertEqual(delete_events, ())
+
+    def test_environments_delete_record_allow_flag_deletes_tracked_target_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "sellyouroutboard-testing": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"TAWK_WIDGET_ID": "widget-123"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+            _seed_dokploy_target_records(
+                database_url=database_url,
+                payload=(
+                    "schema_version = 2\n\n"
+                    "[[targets]]\n"
+                    'context = "sellyouroutboard-testing"\n'
+                    'instance = "prod"\n'
+                    'target_id = "target-syo-prod"\n'
+                    'target_name = "syo-prod-app"\n'
+                ),
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "instance",
+                    "--context",
+                    "sellyouroutboard-testing",
+                    "--instance",
+                    "prod",
+                    "--allow-tracked-target",
+                    "--apply",
+                ],
+            )
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                remaining_records = store.list_runtime_environment_records(
+                    scope="instance",
+                    context_name="sellyouroutboard-testing",
+                    instance_name="prod",
+                )
+                delete_events = store.list_runtime_environment_delete_events()
+            finally:
+                store.close()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertNotIn("widget-123", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["protected_tracked_targets"][0]["target_name"], "syo-prod-app")
+        self.assertFalse(payload["requires_allow_tracked_target"])
+        self.assertEqual(remaining_records, ())
+        self.assertEqual(len(delete_events), 1)
+
+    def test_environments_delete_record_distinguishes_missing_and_invalid_routes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            missing_result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "global",
+                    "--dry-run",
+                ],
+            )
+            invalid_result = CliRunner().invoke(
+                main,
+                [
+                    "environments",
+                    "delete-record",
+                    "--database-url",
+                    database_url,
+                    "--scope",
+                    "context",
+                    "--context",
+                    "sellyouroutboard",
+                    "--instance",
+                    "prod",
+                    "--dry-run",
+                ],
+            )
+
+        self.assertNotEqual(missing_result.exit_code, 0)
+        self.assertIn("Missing DB-backed runtime environment record", missing_result.output)
+        self.assertNotEqual(invalid_result.exit_code, 0)
+        self.assertIn("require --context and do not accept --instance", invalid_result.output)
+
     def test_environments_relabel_updates_metadata_without_echoing_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             _seed_runtime_environment_records(
                 database_url=database_url,
                 definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
@@ -417,10 +810,12 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="opw",
-                    instance_name="local",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="opw",
+                        instance_name="local",
+                    )
                 )
 
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
@@ -488,22 +883,24 @@ class RuntimeEnvironmentTests(unittest.TestCase):
             _seed_dokploy_target_records(
                 database_url=database_url,
                 payload=(
-                    'schema_version = 2\n\n'
-                    '[[targets]]\n'
+                    "schema_version = 2\n\n"
+                    "[[targets]]\n"
                     'context = "cm"\n'
                     'instance = "testing"\n'
                     'target_id = "target-cm-testing"\n\n'
-                    '[targets.env]\n'
+                    "[targets.env]\n"
                     'ODOO_ADDON_REPOSITORIES = "cbusillo/disable_odoo_online@411f6b8e85cac72dc7aa2e2dc5540001043c327d"\n'
                     'ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL = "https://cm-testing.example.com"\n'
                 ),
             )
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="cm",
-                    instance_name="testing",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="cm",
+                        instance_name="testing",
+                    )
                 )
 
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
@@ -544,11 +941,15 @@ class RuntimeEnvironmentTests(unittest.TestCase):
                     context_name="opw",
                 )
 
-        self.assertEqual(resolved_values["LAUNCHPLANE_PREVIEW_BASE_URL"], "https://launchplane.example")
+        self.assertEqual(
+            resolved_values["LAUNCHPLANE_PREVIEW_BASE_URL"], "https://launchplane.example"
+        )
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "shared-master")
         self.assertEqual(resolved_values["ENV_OVERRIDE_DISABLE_CRON"], "True")
 
-    def test_load_runtime_environment_definition_prefers_postgres_records_without_file_fallback(self) -> None:
+    def test_load_runtime_environment_definition_prefers_postgres_records_without_file_fallback(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -594,20 +995,26 @@ ODOO_DB_PASSWORD = "cm-file-secret"
             store.close()
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="opw",
-                    instance_name="local",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="opw",
+                        instance_name="local",
+                    )
                 )
-                loaded_definition = control_plane_runtime_environments.load_runtime_environment_definition(
-                    control_plane_root=control_plane_root,
+                loaded_definition = (
+                    control_plane_runtime_environments.load_runtime_environment_definition(
+                        control_plane_root=control_plane_root,
+                    )
                 )
 
         self.assertEqual(resolved_values["ODOO_MASTER_PASSWORD"], "db-master")
         self.assertEqual(resolved_values["ODOO_DB_PASSWORD"], "db-secret")
         self.assertNotIn("cm", loaded_definition.contexts)
 
-    def test_load_runtime_environment_definition_requires_database_records_without_file_fallback(self) -> None:
+    def test_load_runtime_environment_definition_requires_database_records_without_file_fallback(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             environments_file = control_plane_root / "config" / "runtime-environments.toml"
@@ -624,7 +1031,9 @@ ODOO_DB_PASSWORD = "file-secret"
             )
 
             with patch.dict(os.environ, {}, clear=True):
-                with self.assertRaisesRegex(Exception, "Missing Launchplane runtime environment authority"):
+                with self.assertRaisesRegex(
+                    Exception, "Missing Launchplane runtime environment authority"
+                ):
                     control_plane_runtime_environments.load_runtime_environment_definition(
                         control_plane_root=control_plane_root,
                     )
@@ -738,7 +1147,9 @@ ODOO_DB_PASSWORD = "file-secret"
             finally:
                 store.close()
 
-    def test_product_config_apply_writes_runtime_env_and_secret_without_echoing_values(self) -> None:
+    def test_product_config_apply_writes_runtime_env_and_secret_without_echoing_values(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -786,18 +1197,22 @@ ODOO_DB_PASSWORD = "file-secret"
                         "--apply",
                     ],
                 )
-                resolved_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-                    control_plane_root=control_plane_root,
-                    context_name="sellyouroutboard",
-                    instance_name="prod",
+                resolved_values = (
+                    control_plane_runtime_environments.resolve_runtime_environment_values(
+                        control_plane_root=control_plane_root,
+                        context_name="sellyouroutboard",
+                        instance_name="prod",
+                    )
                 )
 
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertNotIn("smtp-secret-value", result.output)
-            self.assertNotIn("smtp\"", result.output)
+            self.assertNotIn('smtp"', result.output)
             payload = json.loads(result.output)
             self.assertEqual(payload["mode"], "apply")
-            self.assertEqual(payload["runtime_environment"]["record"]["source_label"], "issue-110-test")
+            self.assertEqual(
+                payload["runtime_environment"]["record"]["source_label"], "issue-110-test"
+            )
             self.assertEqual(payload["secrets"][0]["action"], "created")
             self.assertEqual(resolved_values["CONTACT_EMAIL_MODE"], "smtp")
             self.assertEqual(resolved_values["SMTP_PASSWORD"], "smtp-secret-value")
@@ -806,9 +1221,7 @@ ODOO_DB_PASSWORD = "file-secret"
             try:
                 secret_records = store.list_secret_records()
                 self.assertEqual(len(secret_records), 1)
-                audit_events = store.list_secret_audit_events(
-                    secret_id=secret_records[0].secret_id
-                )
+                audit_events = store.list_secret_audit_events(secret_id=secret_records[0].secret_id)
                 self.assertEqual(audit_events[0].actor, "operator@example.com")
                 self.assertEqual(audit_events[0].metadata["source"], "issue-110-test")
             finally:
@@ -1013,7 +1426,9 @@ ODOO_DB_PASSWORD = "file-secret"
                 )
 
         self.assertNotEqual(result.exit_code, 0)
-        self.assertIn("Product config secrets require LAUNCHPLANE_MASTER_ENCRYPTION_KEY", result.output)
+        self.assertIn(
+            "Product config secrets require LAUNCHPLANE_MASTER_ENCRYPTION_KEY", result.output
+        )
         self.assertNotIn("smtp-secret-value", result.output)
 
     def test_product_config_apply_rejects_secret_shaped_runtime_env(self) -> None:
