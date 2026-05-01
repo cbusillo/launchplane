@@ -1120,6 +1120,40 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_tracked_target_logs_endpoint_requires_db_backed_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["target_logs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
+
     def test_product_profile_endpoints_round_trip_authorized_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

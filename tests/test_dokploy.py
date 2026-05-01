@@ -103,6 +103,18 @@ class DokployConfigTests(unittest.TestCase):
             '{"API_KEY":"[redacted]","nested":{"SERVICE_TOKEN":"[redacted]"},"note":"safe"}',
         )
 
+    def test_normalize_dokploy_log_payload_reads_message_objects_in_dict_lists(self) -> None:
+        lines = control_plane_dokploy.normalize_dokploy_log_payload(
+            {
+                "logs": [
+                    {"message": "started"},
+                    {"line": "SERVICE_TOKEN=inner-secret"},
+                ]
+            }
+        )
+
+        self.assertEqual(lines, ("started", "SERVICE_TOKEN=[redacted]"))
+
     def test_fetch_application_logs_calls_dokploy_read_logs_endpoint(self) -> None:
         requests: list[dict[str, object]] = []
 

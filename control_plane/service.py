@@ -2588,6 +2588,19 @@ def create_launchplane_service_app(
                     )
                     since = str((query.get("since") or ["all"])[0])
                     search = str((query.get("search") or [""])[0])
+                    if not isinstance(record_store, PostgresRecordStore):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=503,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "database_required",
+                                    "message": "Tracked target logs require DB-backed Launchplane storage.",
+                                },
+                            },
+                        )
                     log_payload = build_tracked_target_logs_payload(
                         record_store=record_store,
                         control_plane_root=resolved_root,

@@ -714,6 +714,11 @@ def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
                 if message is not None:
                     raw_lines.extend(str(message).splitlines())
     elif isinstance(payload, dict):
+        for key_name in ("message", "line"):
+            value = payload.get(key_name)
+            if value is not None:
+                raw_lines.extend(str(value).splitlines())
+                break
         for key_name in ("logs", "log", "lines", "output", "raw"):
             value = payload.get(key_name)
             if isinstance(value, str):
