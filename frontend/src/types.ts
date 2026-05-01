@@ -1,6 +1,17 @@
 export type Safety = "read" | "safe_write" | "mutation" | "destructive";
-export type Status = "pass" | "fail" | "pending" | "skipped" | "unknown" | "blocked";
-export type FreshnessStatus = "verified" | "recorded" | "stale" | "missing" | "unsupported";
+export type Status =
+  | "pass"
+  | "fail"
+  | "pending"
+  | "skipped"
+  | "unknown"
+  | "blocked";
+export type FreshnessStatus =
+  | "verified"
+  | "recorded"
+  | "stale"
+  | "missing"
+  | "unsupported";
 
 export interface DataProvenance {
   source_kind: "record" | "provider" | "descriptor" | "unsupported";
@@ -265,7 +276,10 @@ export interface ApiErrorPayload {
 
 export type ProductConfigMode = "dry-run" | "apply";
 export type ProductConfigRuntimeScope = "global" | "context" | "instance";
-export type ProductConfigSecretScope = "global" | "context" | "context_instance";
+export type ProductConfigSecretScope =
+  | "global"
+  | "context"
+  | "context_instance";
 
 export interface ProductConfigRuntimeInput {
   scope?: ProductConfigRuntimeScope;
@@ -342,5 +356,66 @@ export interface ProductConfigApplyPayload {
   summary: {
     runtime_changed_key_count: number;
     secret_change_count: number;
+  };
+}
+
+export interface ProductProfileRecord {
+  schema_version: number;
+  product: string;
+  display_name: string;
+  repository: string;
+  driver_id: string;
+  health_path: string;
+  lanes: Array<{
+    instance: string;
+    context: string;
+    base_url: string;
+    health_url: string;
+  }>;
+}
+
+export interface ProductProfileListPayload {
+  status: "ok";
+  trace_id: string;
+  driver_id: string;
+  profiles: ProductProfileRecord[];
+}
+
+export interface GenericWebProdPromotionRequest {
+  schema_version: 1;
+  product: string;
+  promotion: {
+    schema_version: 1;
+    product: string;
+    artifact_id: string;
+    source_git_ref: string;
+    from_instance: "testing";
+    to_instance: "prod";
+    timeout_seconds: number;
+    health_timeout_seconds: number;
+    dry_run: true;
+  };
+}
+
+export interface GenericWebProdPromotionPayload {
+  status: "accepted";
+  trace_id: string;
+  records: {
+    promotion_record_id?: string;
+    deployment_record_id?: string;
+    backup_record_id?: string;
+    inventory_record_id?: string;
+  };
+  result: {
+    promotion_record_id: string;
+    deployment_record_id: string;
+    backup_record_id: string;
+    inventory_record_id: string;
+    promotion_status: Status;
+    deployment_status: Status;
+    source_health_status: Status;
+    destination_health_status: Status;
+    backup_status: Status;
+    dry_run: boolean;
   };
 }

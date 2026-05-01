@@ -21,8 +21,12 @@
   --safe-write: #6e9bd9;
   --safe-mutation: #4fb286;
   --safe-destructive: #d8736b;
-  --font-ui: "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: "Geist Mono", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas, monospace;
+  --font-ui:
+    "Geist", ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  --font-mono:
+    "Geist Mono", ui-monospace, "SFMono-Regular", "SF Mono", Menlo, Consolas,
+    monospace;
   --radius: 7px;
 }
 
@@ -317,18 +321,29 @@ p {
 
 .lane-prod {
   border-top-color: var(--lane-prod);
-  background: linear-gradient(180deg, color-mix(in oklab, var(--lane-prod) 7%, var(--bg-1)), var(--bg-1) 145px);
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--lane-prod) 7%, var(--bg-1)),
+    var(--bg-1) 145px
+  );
 }
 
 .lane-testing {
   border-top-color: var(--lane-testing);
-  background: linear-gradient(180deg, color-mix(in oklab, var(--lane-testing) 8%, var(--bg-1)), var(--bg-1) 145px);
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--lane-testing) 8%, var(--bg-1)),
+    var(--bg-1) 145px
+  );
 }
 
 .promotion-bridge {
   border-top: 4px solid var(--lane-preview);
-  background:
-    linear-gradient(180deg, color-mix(in oklab, var(--lane-preview) 12%, var(--bg-2)), var(--bg-2) 190px);
+  background: linear-gradient(
+    180deg,
+    color-mix(in oklab, var(--lane-preview) 12%, var(--bg-2)),
+    var(--bg-2) 190px
+  );
 }
 
 .verdict-ready {
@@ -684,9 +699,19 @@ p {
   font-size: 11px;
 }
 
+.bridge-action-stack {
+  display: grid;
+  gap: 10px;
+  padding: 10px 14px 14px;
+}
+
 .bridge-action {
-  width: calc(100% - 28px);
-  margin: 10px 14px 14px;
+  width: 100%;
+}
+
+.bridge-inline-alert,
+.bridge-dry-run-result {
+  border: 1px solid var(--hair-soft);
 }
 
 .product-config-panel {
@@ -780,7 +805,10 @@ p {
 }
 
 .config-row-secret {
-  grid-template-columns: minmax(130px, 0.85fr) minmax(130px, 0.85fr) minmax(130px, 1fr) minmax(120px, 0.9fr) auto;
+  grid-template-columns: minmax(130px, 0.85fr) minmax(130px, 0.85fr) minmax(
+      130px,
+      1fr
+    ) minmax(120px, 0.9fr) auto;
 }
 
 .config-inline-alert {
