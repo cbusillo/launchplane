@@ -19,6 +19,12 @@ The current repo-local CLI and file-backed state directory are implementation
 scaffolding. This document defines the boundary those adapters should converge
 on.
 
+Product repos should build, test, and publish product artifacts, then call this
+boundary with minimal trigger facts. They should not carry Launchplane lifecycle
+truth, provider mutation logic, rendered evidence payloads, or copied driver
+behavior. See [product-repo-contract.md](product-repo-contract.md) for the
+approval gate.
+
 ## Current Implementation Status
 
 The service boundary is implemented and deployed for the current Odoo and
