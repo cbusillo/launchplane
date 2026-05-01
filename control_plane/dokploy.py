@@ -716,10 +716,8 @@ def update_dokploy_target_env(
             "env": env_text,
             "createEnvFile": bool(create_env_file) if isinstance(create_env_file, bool) else True,
         }
-        if isinstance(build_args, str):
-            payload["buildArgs"] = build_args
-        if isinstance(build_secrets, str):
-            payload["buildSecrets"] = build_secrets
+        payload["buildArgs"] = build_args if isinstance(build_args, str) else ""
+        payload["buildSecrets"] = build_secrets if isinstance(build_secrets, str) else ""
         dokploy_request(
             host=host,
             token=token,

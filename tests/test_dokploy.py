@@ -76,6 +76,29 @@ def _seed_dokploy_target_records(
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_update_application_env_includes_empty_build_fields_when_missing(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=lambda **kwargs: requests.append(kwargs) or {"ok": True},
+        ):
+            control_plane_dokploy.update_dokploy_target_env(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_type="application",
+                target_id="app-123",
+                target_payload={"createEnvFile": True, "buildArgs": None, "buildSecrets": None},
+                env_text="APP_URL=https://example.com",
+            )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["path"], "/api/application.saveEnvironment")
+        payload = requests[0]["payload"]
+        self.assertIsInstance(payload, dict)
+        self.assertEqual(payload["buildArgs"], "")
+        self.assertEqual(payload["buildSecrets"], "")
+
     def test_dokploy_targets_list_and_show_include_shopify_policy_metadata(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
