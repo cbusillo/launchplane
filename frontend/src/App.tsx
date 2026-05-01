@@ -12,15 +12,19 @@ import {
   LogOut,
   Loader2,
   Moon,
+  Play,
+  Plus,
   RefreshCw,
+  Save,
   ShieldAlert,
   ShieldCheck,
   Sun,
   TerminalSquare,
+  Trash2,
   XCircle
 } from "lucide-react";
 import { ReactNode, useEffect, useMemo, useState } from "react";
-import { LaunchplaneApiError, listDrivers, logout, readAuthSession, readDriverView } from "./api";
+import { LaunchplaneApiError, applyProductConfig, listDrivers, logout, readAuthSession, readDriverView } from "./api";
 import type {
   AuthIdentity,
   DataProvenance,
@@ -29,6 +33,10 @@ import type {
   DriverDescriptor,
   DriverView,
   LaneSummary,
+  ProductConfigApplyPayload,
+  ProductConfigApplyRequest,
+  ProductConfigRuntimeScope,
+  ProductConfigSecretScope,
   PreviewSummary,
   Safety,
   Status,
@@ -72,6 +80,18 @@ type EvidenceFact = {
   value: string;
   mono?: boolean;
   status?: Status | string;
+};
+type RuntimeConfigRow = {
+  id: string;
+  key: string;
+  value: string;
+};
+type SecretConfigRow = {
+  id: string;
+  name: string;
+  bindingKey: string;
+  value: string;
+  description: string;
 };
 
 const THEME_STORAGE_KEY = "launchplane.theme";
@@ -322,6 +342,12 @@ export function App() {
                 loading={loading}
               />
             </section>
+            <ProductConfigPanel
+              productDefault={currentDriver?.product ?? selected.driverId}
+              contextDefault={selected.context}
+              instanceDefault="prod"
+              disabled={loading}
+            />
             <section className="work-grid">
               <PreviewInventory
                 driver={currentDriver ?? null}
@@ -501,6 +527,346 @@ function ApiErrorPanel({
       </button>
     </section>
   );
+}
+
+function ProductConfigPanel({
+  productDefault,
+  contextDefault,
+  instanceDefault,
+  disabled,
+  applyConfig = applyProductConfig
+}: {
+  productDefault: string;
+  contextDefault: string;
+  instanceDefault: string;
+  disabled: boolean;
+  applyConfig?: (payload: ProductConfigApplyRequest) => Promise<ProductConfigApplyPayload>;
+}) {
+  const [product, setProduct] = useState(productDefault);
+  const [contextName, setContextName] = useState(contextDefault);
+  const [instanceName, setInstanceName] = useState(instanceDefault);
+  const [sourceLabel, setSourceLabel] = useState("product-config-ui");
+  const [runtimeRows, setRuntimeRows] = useState<RuntimeConfigRow[]>(() => [newRuntimeConfigRow()]);
+  const [secretRows, setSecretRows] = useState<SecretConfigRow[]>(() => [newSecretConfigRow()]);
+  const [result, setResult] = useState<ProductConfigApplyPayload | null>(null);
+  const [pendingApplyPayload, setPendingApplyPayload] = useState<ProductConfigApplyRequest | null>(null);
+  const [reviewed, setReviewed] = useState(false);
+  const [submitting, setSubmitting] = useState<ProductConfigApplyRequest["mode"] | null>(null);
+  const [panelError, setPanelError] = useState("");
+  const [traceId, setTraceId] = useState("");
+
+  useEffect(() => {
+    setProduct(productDefault);
+    setContextName(contextDefault);
+    setInstanceName(instanceDefault);
+    clearReviewState();
+  }, [productDefault, contextDefault, instanceDefault]);
+
+  const runtimeScope = runtimeScopeForTarget(contextName, instanceName);
+  const secretScope = secretScopeForTarget(contextName, instanceName);
+  const runtimeInputCount = runtimeRows.filter((row) => row.key.trim()).length;
+  const completeSecretRows = secretRows.filter((row) => row.name.trim() && row.bindingKey.trim() && row.value.trim());
+  const partialSecretRows = secretRows.filter((row) => {
+    const filledFields = [row.name, row.bindingKey, row.value].filter((value) => value.trim()).length;
+    return filledFields > 0 && filledFields < 3;
+  });
+  const showPartialSecretWarning = partialSecretRows.length > 0 && !result;
+  const hasConfigInput = runtimeInputCount > 0 || completeSecretRows.length > 0;
+  const canDryRun = Boolean(product.trim() && hasConfigInput && partialSecretRows.length === 0 && !disabled && !submitting);
+  const canApply = Boolean(pendingApplyPayload && reviewed && !disabled && !submitting);
+
+  function clearReviewState() {
+    setResult(null);
+    setPendingApplyPayload(null);
+    setReviewed(false);
+    setPanelError("");
+    setTraceId("");
+  }
+
+  function updateRuntimeRow(rowId: string, patch: Partial<RuntimeConfigRow>) {
+    clearReviewState();
+    setRuntimeRows((rows) => rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
+  }
+
+  function updateSecretRow(rowId: string, patch: Partial<SecretConfigRow>) {
+    clearReviewState();
+    setSecretRows((rows) => rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
+  }
+
+  function addRuntimeRow() {
+    clearReviewState();
+    setRuntimeRows((rows) => [...rows, newRuntimeConfigRow()]);
+  }
+
+  function addSecretRow() {
+    clearReviewState();
+    setSecretRows((rows) => [...rows, newSecretConfigRow()]);
+  }
+
+  function removeRuntimeRow(rowId: string) {
+    clearReviewState();
+    setRuntimeRows((rows) => rows.filter((row) => row.id !== rowId));
+  }
+
+  function removeSecretRow(rowId: string) {
+    clearReviewState();
+    setSecretRows((rows) => rows.filter((row) => row.id !== rowId));
+  }
+
+  function buildPayload(mode: ProductConfigApplyRequest["mode"]): ProductConfigApplyRequest {
+    const runtimeEnv = runtimeRows.reduce<Record<string, string>>((env, row) => {
+      const key = row.key.trim();
+      if (key) {
+        env[key] = row.value;
+      }
+      return env;
+    }, {});
+    const secrets = completeSecretRows.map((row) => ({
+      scope: secretScope,
+      context: contextName.trim(),
+      instance: instanceName.trim(),
+      name: row.name.trim(),
+      binding_key: row.bindingKey.trim(),
+      value: row.value,
+      description: row.description.trim()
+    }));
+    const payload: ProductConfigApplyRequest = {
+      schema_version: 1,
+      mode,
+      product: product.trim(),
+      context: contextName.trim(),
+      instance: instanceName.trim(),
+      source_label: sourceLabel.trim() || "product-config-ui"
+    };
+    if (Object.keys(runtimeEnv).length) {
+      payload.runtime_env = {
+        scope: runtimeScope,
+        context: contextName.trim(),
+        instance: instanceName.trim(),
+        env: runtimeEnv
+      };
+    }
+    if (secrets.length) {
+      payload.secrets = secrets;
+    }
+    return payload;
+  }
+
+  function runDryRun() {
+    const payload = buildPayload("dry-run");
+    setSubmitting("dry-run");
+    setPanelError("");
+    setTraceId("");
+    applyConfig(payload)
+      .then((payloadResult) => {
+        setResult(payloadResult);
+        setPendingApplyPayload({ ...payload, mode: "apply" });
+        setReviewed(false);
+        setSecretRows((rows) => rows.map((row) => ({ ...row, value: "" })));
+      })
+      .catch((apiError: unknown) => {
+        if (apiError instanceof LaunchplaneApiError) {
+          setPanelError(apiError.message);
+          setTraceId(apiError.traceId);
+        } else if (apiError instanceof Error) {
+          setPanelError(apiError.message);
+        } else {
+          setPanelError("Product config request failed.");
+        }
+      })
+      .finally(() => setSubmitting(null));
+  }
+
+  function runApply() {
+    if (!pendingApplyPayload) {
+      return;
+    }
+    setSubmitting("apply");
+    setPanelError("");
+    setTraceId("");
+    applyConfig(pendingApplyPayload)
+      .then((payloadResult) => {
+        setResult(payloadResult);
+        setPendingApplyPayload(null);
+        setReviewed(false);
+        setSecretRows((rows) => rows.map((row) => ({ ...row, value: "" })));
+      })
+      .catch((apiError: unknown) => {
+        if (apiError instanceof LaunchplaneApiError) {
+          setPanelError(apiError.message);
+          setTraceId(apiError.traceId);
+        } else if (apiError instanceof Error) {
+          setPanelError(apiError.message);
+        } else {
+          setPanelError("Product config apply failed.");
+        }
+      })
+      .finally(() => setSubmitting(null));
+  }
+
+  return (
+    <section className="panel product-config-panel">
+      <PanelHead
+        eyebrow="runtime authority"
+        title="Product config"
+        right={<StatusPill status={result?.mode === "apply" ? "pass" : pendingApplyPayload ? "pending" : "unknown"} />}
+      />
+      <div className="config-target-grid">
+        <label className="config-label">
+          <span>Product</span>
+          <input value={product} onChange={(event) => { clearReviewState(); setProduct(event.target.value); }} spellCheck={false} />
+        </label>
+        <label className="config-label">
+          <span>Context</span>
+          <input value={contextName} onChange={(event) => { clearReviewState(); setContextName(event.target.value); }} spellCheck={false} />
+        </label>
+        <label className="config-label">
+          <span>Instance</span>
+          <input value={instanceName} onChange={(event) => { clearReviewState(); setInstanceName(event.target.value); }} spellCheck={false} />
+        </label>
+        <label className="config-label">
+          <span>Source</span>
+          <input value={sourceLabel} onChange={(event) => { clearReviewState(); setSourceLabel(event.target.value); }} spellCheck={false} />
+        </label>
+      </div>
+      <div className="config-edit-grid">
+        <div className="config-editor">
+          <div className="config-editor-head">
+            <div>
+              <p className="eyebrow">runtime env</p>
+              <strong>{runtimeScope}</strong>
+            </div>
+            <button className="icon-button" type="button" title="Add runtime key" aria-label="Add runtime key" onClick={addRuntimeRow}>
+              <Plus size={15} />
+            </button>
+          </div>
+          <div className="config-row-list">
+            {runtimeRows.map((row) => (
+              <div className="config-row config-row-runtime" key={row.id}>
+                <input aria-label="Runtime key" placeholder="KEY" value={row.key} onChange={(event) => updateRuntimeRow(row.id, { key: event.target.value })} spellCheck={false} />
+                <input aria-label="Runtime value" placeholder="value" value={row.value} onChange={(event) => updateRuntimeRow(row.id, { value: event.target.value })} spellCheck={false} />
+                <button className="icon-button" type="button" title="Remove runtime key" aria-label="Remove runtime key" disabled={runtimeRows.length === 1} onClick={() => removeRuntimeRow(row.id)}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+        <div className="config-editor">
+          <div className="config-editor-head">
+            <div>
+              <p className="eyebrow">managed secrets</p>
+              <strong>{secretScope}</strong>
+            </div>
+            <button className="icon-button" type="button" title="Add secret" aria-label="Add secret" onClick={addSecretRow}>
+              <Plus size={15} />
+            </button>
+          </div>
+          <div className="config-row-list">
+            {secretRows.map((row) => (
+              <div className="config-row config-row-secret" key={row.id}>
+                <input aria-label="Secret name" placeholder="SECRET_NAME" value={row.name} onChange={(event) => updateSecretRow(row.id, { name: event.target.value, bindingKey: row.bindingKey || event.target.value })} spellCheck={false} />
+                <input aria-label="Secret binding key" placeholder="BINDING_KEY" value={row.bindingKey} onChange={(event) => updateSecretRow(row.id, { bindingKey: event.target.value })} spellCheck={false} />
+                <input aria-label="Secret value" placeholder="value" type="password" value={row.value} onChange={(event) => updateSecretRow(row.id, { value: event.target.value })} autoComplete="off" spellCheck={false} />
+                <input aria-label="Secret description" placeholder="description" value={row.description} onChange={(event) => updateSecretRow(row.id, { description: event.target.value })} spellCheck={false} />
+                <button className="icon-button" type="button" title="Remove secret" aria-label="Remove secret" disabled={secretRows.length === 1} onClick={() => removeSecretRow(row.id)}>
+                  <Trash2 size={15} />
+                </button>
+              </div>
+            ))}
+          </div>
+        </div>
+      </div>
+      {showPartialSecretWarning ? (
+        <div className="config-inline-alert" role="alert">
+          <AlertTriangle size={15} aria-hidden="true" />
+          <span>Complete or remove partial secret rows.</span>
+        </div>
+      ) : null}
+      {panelError ? (
+        <div className="config-inline-alert" role="alert">
+          <AlertTriangle size={15} aria-hidden="true" />
+          <span>{panelError}</span>
+          {traceId ? <code>{traceId}</code> : null}
+        </div>
+      ) : null}
+      {result ? <ProductConfigResult result={result} /> : null}
+      <div className="config-actions">
+        <button className="button" type="button" disabled={!canDryRun} onClick={runDryRun}>
+          {submitting === "dry-run" ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
+          <span>Dry run</span>
+        </button>
+        <label className="config-review-check">
+          <input type="checkbox" checked={reviewed} disabled={!pendingApplyPayload || Boolean(submitting)} onChange={(event) => setReviewed(event.target.checked)} />
+          <span>Reviewed dry run</span>
+        </label>
+        <button className="button button-primary" type="button" disabled={!canApply} onClick={runApply}>
+          {submitting === "apply" ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
+          <span>Apply</span>
+        </button>
+      </div>
+    </section>
+  );
+}
+
+function ProductConfigResult({ result }: { result: ProductConfigApplyPayload }) {
+  const runtime = result.runtime_environment;
+  return (
+    <div className="config-result" aria-live="polite">
+      <div className="config-result-summary">
+        <KeyValue label="Mode" value={result.mode} status={result.mode === "apply" ? "pass" : "pending"} />
+        <KeyValue label="Actor" value={result.actor} mono />
+        <KeyValue label="Runtime" value={`${runtime.action} / ${result.summary.runtime_changed_key_count} changed`} status={runtime.action === "unchanged" ? "unknown" : "pass"} />
+        <KeyValue label="Secrets" value={`${result.summary.secret_change_count} changed`} status={result.summary.secret_change_count ? "pass" : "unknown"} />
+      </div>
+      <div className="config-result-list">
+        {runtime.keys.length ? (
+          <div className="config-result-row">
+            <strong>Runtime keys</strong>
+            <code>{runtime.keys.join(", ")}</code>
+          </div>
+        ) : null}
+        {result.secrets.map((secret) => (
+          <div className="config-result-row" key={`${secret.secret_id}:${secret.binding_key}`}>
+            <strong>{secret.binding_key}</strong>
+            <code>{secret.action} / {secret.secret_id}</code>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function newRuntimeConfigRow(): RuntimeConfigRow {
+  return { id: clientId(), key: "", value: "" };
+}
+
+function newSecretConfigRow(): SecretConfigRow {
+  return { id: clientId(), name: "", bindingKey: "", value: "", description: "" };
+}
+
+function clientId(): string {
+  return window.crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
+}
+
+function runtimeScopeForTarget(contextName: string, instanceName: string): ProductConfigRuntimeScope {
+  if (contextName.trim() && instanceName.trim()) {
+    return "instance";
+  }
+  if (contextName.trim()) {
+    return "context";
+  }
+  return "global";
+}
+
+function secretScopeForTarget(contextName: string, instanceName: string): ProductConfigSecretScope {
+  if (contextName.trim() && instanceName.trim()) {
+    return "context_instance";
+  }
+  if (contextName.trim()) {
+    return "context";
+  }
+  return "global";
 }
 
 function LanePanel({
@@ -1053,8 +1419,56 @@ function StateFixtureGallery({ actions }: { actions: DriverActionDescriptor[] })
           <PreviewInventory driver={FIXTURE_ODOO_DRIVER} previews={[]} inventoryProvenance={null} loading={false} />
         </div>
       </div>
+      <div className="fixture-wide">
+        <ProductConfigPanel
+          productDefault="sellyouroutboard"
+          contextDefault="sellyouroutboard-testing"
+          instanceDefault="prod"
+          disabled={false}
+          applyConfig={fixtureProductConfigApply}
+        />
+      </div>
     </section>
   );
+}
+
+function fixtureProductConfigApply(payload: ProductConfigApplyRequest): Promise<ProductConfigApplyPayload> {
+  const runtimeKeys = Object.keys(payload.runtime_env?.env ?? {});
+  return Promise.resolve({
+    status: "ok",
+    mode: payload.mode,
+    product: payload.product,
+    context: payload.context,
+    instance: payload.instance,
+    actor: "fixture-operator",
+    source_label: payload.source_label ?? "product-config-ui",
+    runtime_environment: {
+      action: "updated",
+      scope: payload.runtime_env?.scope ?? runtimeScopeForTarget(payload.context, payload.instance),
+      context: payload.context,
+      instance: payload.instance,
+      keys: runtimeKeys,
+      changed_keys: runtimeKeys,
+      unchanged_keys: [],
+      env_value_count_after: runtimeKeys.length
+    },
+    secrets: (payload.secrets ?? []).map((secret, index) => ({
+      action: "rotated",
+      scope: secret.scope ?? secretScopeForTarget(payload.context, payload.instance),
+      context: payload.context,
+      instance: payload.instance,
+      integration: secret.integration ?? "runtime_environment",
+      name: secret.name,
+      binding_key: secret.binding_key,
+      secret_id: `fixture-secret-${index + 1}`,
+      description: secret.description ?? "",
+      value_present: true
+    })),
+    summary: {
+      runtime_changed_key_count: runtimeKeys.length,
+      secret_change_count: (payload.secrets ?? []).length
+    }
+  });
 }
 
 function ActionReviewDialog({

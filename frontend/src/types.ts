@@ -262,3 +262,85 @@ export interface ApiErrorPayload {
     message?: string;
   };
 }
+
+export type ProductConfigMode = "dry-run" | "apply";
+export type ProductConfigRuntimeScope = "global" | "context" | "instance";
+export type ProductConfigSecretScope = "global" | "context" | "context_instance";
+
+export interface ProductConfigRuntimeInput {
+  scope?: ProductConfigRuntimeScope;
+  context?: string;
+  instance?: string;
+  env: Record<string, string | number | boolean>;
+}
+
+export interface ProductConfigSecretInput {
+  scope?: ProductConfigSecretScope;
+  context?: string;
+  instance?: string;
+  integration?: string;
+  name: string;
+  binding_key: string;
+  value: string;
+  description?: string;
+}
+
+export interface ProductConfigApplyRequest {
+  schema_version: 1;
+  mode: ProductConfigMode;
+  product: string;
+  context: string;
+  instance: string;
+  source_label?: string;
+  runtime_env?: ProductConfigRuntimeInput;
+  secrets?: ProductConfigSecretInput[];
+}
+
+export interface ProductConfigRuntimeResult {
+  action: "skipped" | "created" | "updated" | "unchanged";
+  scope: ProductConfigRuntimeScope | string;
+  context: string;
+  instance: string;
+  keys: string[];
+  changed_keys: string[];
+  unchanged_keys: string[];
+  env_value_count_after: number;
+  record?: {
+    scope: ProductConfigRuntimeScope | string;
+    context: string;
+    instance: string;
+    updated_at: string;
+    source_label: string;
+    env_keys: string[];
+    env_value_count: number;
+  };
+}
+
+export interface ProductConfigSecretResult {
+  action: "created" | "rotated" | "unchanged";
+  scope: ProductConfigSecretScope | string;
+  context: string;
+  instance: string;
+  integration: string;
+  name: string;
+  binding_key: string;
+  secret_id: string;
+  description: string;
+  value_present: boolean;
+}
+
+export interface ProductConfigApplyPayload {
+  status: "ok";
+  mode: ProductConfigMode;
+  product: string;
+  context: string;
+  instance: string;
+  actor: string;
+  source_label: string;
+  runtime_environment: ProductConfigRuntimeResult;
+  secrets: ProductConfigSecretResult[];
+  summary: {
+    runtime_changed_key_count: number;
+    secret_change_count: number;
+  };
+}

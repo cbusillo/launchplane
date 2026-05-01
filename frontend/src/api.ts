@@ -3,7 +3,9 @@ import type {
   AuthSessionPayload,
   DriverListPayload,
   DriverViewPayload,
-  LogoutPayload
+  LogoutPayload,
+  ProductConfigApplyPayload,
+  ProductConfigApplyRequest
 } from "./types";
 
 export class LaunchplaneApiError extends Error {
@@ -18,13 +20,18 @@ export class LaunchplaneApiError extends Error {
   }
 }
 
-async function requestJson<T>(path: string, method: "GET" | "POST" = "GET"): Promise<T> {
+async function requestJson<T>(path: string, method: "GET" | "POST" = "GET", body?: unknown): Promise<T> {
+  const headers: HeadersInit = {
+    Accept: "application/json"
+  };
+  if (body !== undefined) {
+    headers["Content-Type"] = "application/json";
+  }
   const response = await fetch(path, {
     method,
     credentials: "same-origin",
-    headers: {
-      Accept: "application/json"
-    }
+    headers,
+    body: body === undefined ? undefined : JSON.stringify(body)
   });
   const payload = (await response.json()) as T | ApiErrorPayload;
   if (!response.ok) {
@@ -58,4 +65,8 @@ export function readDriverView(context: string, instance: string): Promise<Drive
   return requestJson<DriverViewPayload>(
     `/v1/contexts/${encodedContext}/instances/${encodeURIComponent(instance)}/driver-view`
   );
+}
+
+export function applyProductConfig(payload: ProductConfigApplyRequest): Promise<ProductConfigApplyPayload> {
+  return requestJson<ProductConfigApplyPayload>("/v1/product-config/apply", "POST", payload);
 }
