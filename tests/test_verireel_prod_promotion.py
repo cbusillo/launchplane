@@ -79,6 +79,11 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     target_name="ver-prod-app",
                     target_type="application",
                     target_id="prod-app-123",
+                    rollout_status="pass",
+                    rollout_base_url="https://ver-prod.shinycomputers.com",
+                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                    rollout_started_at="2026-04-21T18:21:16Z",
+                    rollout_finished_at="2026-04-21T18:21:45Z",
                 ),
             ), patch(
                 "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
@@ -86,13 +91,6 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             ), patch(
                 "control_plane.workflows.verireel_prod_promotion._verify_rollout",
                 side_effect=[
-                    VeriReelRolloutVerificationResult(
-                        status="pass",
-                        base_url="https://ver-prod.shinycomputers.com",
-                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                        started_at="2026-04-21T18:21:16Z",
-                        finished_at="2026-04-21T18:21:45Z",
-                    ),
                     VeriReelRolloutVerificationResult(
                         status="pass",
                         base_url="https://ver-prod.shinycomputers.com",
@@ -170,6 +168,11 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     target_name="ver-prod-app",
                     target_type="application",
                     target_id="prod-app-123",
+                    rollout_status="pass",
+                    rollout_base_url="https://ver-prod.shinycomputers.com",
+                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                    rollout_started_at="2026-04-21T18:21:16Z",
+                    rollout_finished_at="2026-04-21T18:21:45Z",
                 ),
             ), patch(
                 "control_plane.workflows.verireel_prod_promotion._verify_rollout",
@@ -238,6 +241,11 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     target_name="ver-prod-app",
                     target_type="application",
                     target_id="prod-app-123",
+                    rollout_status="pass",
+                    rollout_base_url="https://ver-prod.shinycomputers.com",
+                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                    rollout_started_at="2026-04-21T18:21:16Z",
+                    rollout_finished_at="2026-04-21T18:21:45Z",
                 ),
             ), patch(
                 "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
@@ -245,13 +253,6 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             ), patch(
                 "control_plane.workflows.verireel_prod_promotion._verify_rollout",
                 side_effect=[
-                    VeriReelRolloutVerificationResult(
-                        status="pass",
-                        base_url="https://ver-prod.shinycomputers.com",
-                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                        started_at="2026-04-21T18:21:16Z",
-                        finished_at="2026-04-21T18:21:45Z",
-                    ),
                     click.ClickException("VeriReel prod rollout verification timed out: health payload mismatch."),
                 ],
             ), patch(
@@ -309,10 +310,14 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     target_name="ver-prod-app",
                     target_type="application",
                     target_id="prod-app-123",
+                    rollout_status="fail",
+                    rollout_base_url="https://ver-prod.shinycomputers.com",
+                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                    error_message=(
+                        "VeriReel prod rollout page verification expected "
+                        "https://ver-prod.shinycomputers.com/ to include \"VeriReel\"."
+                    ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._verify_rollout",
-                side_effect=click.ClickException("VeriReel prod rollout page verification expected https://ver-prod.shinycomputers.com/ to include \"VeriReel\"."),
             ), patch(
                 "control_plane.workflows.verireel_prod_promotion._resolve_rollout_base_urls",
                 return_value=("https://ver-prod.shinycomputers.com",),

@@ -271,7 +271,13 @@ VERIREEL_DRIVER = DriverDescriptor(
             capability_id="stable_deploy",
             label="Stable deploy",
             description="Deploy and inspect stable VeriReel environments through Launchplane evidence records.",
-            actions=("testing_deploy", "prod_deploy", "stable_environment", "app_maintenance"),
+            actions=(
+                "testing_deploy",
+                "prod_deploy",
+                "stable_environment",
+                "runtime_verification",
+                "app_maintenance",
+            ),
             panels=("lane_health", "deployment_evidence", "settings"),
         ),
         DriverCapabilityDescriptor(
@@ -306,6 +312,14 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/verireel/stable-environment",
+        ),
+        _action(
+            "runtime_verification",
+            "Verify stable runtime",
+            "Verify stable VeriReel health and public page responses through Launchplane.",
+            safety="read",
+            scope="instance",
+            route_path="/v1/drivers/verireel/runtime-verification",
         ),
         _action(
             "app_maintenance",

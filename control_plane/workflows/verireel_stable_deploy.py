@@ -14,6 +14,14 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.ship import build_deployment_record, generate_deployment_record_id, utc_now_timestamp
+from control_plane.workflows.verireel_rollout import (
+    DEFAULT_ROLLOUT_INTERVAL_SECONDS,
+    DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
+    VeriReelRolloutVerificationResult,
+    failed_verireel_rollout_result,
+    health_evidence_from_rollout,
+    verify_verireel_rollout,
+)
 
 
 StableInstanceName = Literal["testing", "prod"]
@@ -27,6 +35,10 @@ class VeriReelStableDeployRequest(BaseModel):
     instance: StableInstanceName = "testing"
     artifact_id: str
     source_git_ref: str
+    expected_build_revision: str = ""
+    expected_build_tag: str = ""
+    rollout_timeout_seconds: int = Field(default=DEFAULT_ROLLOUT_TIMEOUT_SECONDS, ge=1)
+    rollout_interval_seconds: int = Field(default=DEFAULT_ROLLOUT_INTERVAL_SECONDS, ge=1)
     timeout_seconds: int | None = Field(default=None, ge=1)
     no_cache: bool = False
 
@@ -53,7 +65,27 @@ class VeriReelStableDeployResult(BaseModel):
     target_name: str
     target_type: str
     target_id: str
+    rollout_status: str = "skipped"
+    rollout_base_url: str = ""
+    rollout_health_urls: tuple[str, ...] = ()
+    rollout_started_at: str = ""
+    rollout_finished_at: str = ""
     error_message: str = ""
+
+
+def _artifact_tag(artifact_id: str) -> str:
+    artifact_name = artifact_id.rsplit("/", 1)[-1]
+    if ":" not in artifact_name:
+        return ""
+    return artifact_name.rsplit(":", 1)[-1]
+
+
+def _expected_build_revision(request: VeriReelStableDeployRequest) -> str:
+    return request.expected_build_revision.strip() or request.source_git_ref.strip()
+
+
+def _expected_build_tag(request: VeriReelStableDeployRequest) -> str:
+    return request.expected_build_tag.strip() or _artifact_tag(request.artifact_id)
 
 
 def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
@@ -160,6 +192,23 @@ def _execute_dokploy_deploy(
     )
 
 
+def _verify_rollout(
+    *,
+    control_plane_root: Path,
+    request: VeriReelStableDeployRequest,
+) -> VeriReelRolloutVerificationResult:
+    return verify_verireel_rollout(
+        control_plane_root=control_plane_root,
+        context=request.context,
+        instance=request.instance,
+        expected_build_revision=_expected_build_revision(request),
+        expected_build_tag=_expected_build_tag(request),
+        timeout_seconds=request.rollout_timeout_seconds,
+        interval_seconds=request.rollout_interval_seconds,
+        error_prefix=f"VeriReel {request.instance} rollout",
+    )
+
+
 def execute_verireel_stable_deploy(
     *,
     control_plane_root: Path,
@@ -245,6 +294,47 @@ def execute_verireel_stable_deploy(
         )
 
     finished_at = utc_now_timestamp()
+    try:
+        rollout_result = _verify_rollout(
+            control_plane_root=control_plane_root,
+            request=request,
+        )
+    except click.ClickException as exc:
+        failed_rollout_result = failed_verireel_rollout_result(
+            control_plane_root=control_plane_root,
+            context=request.context,
+            instance=request.instance,
+            error_message=str(exc),
+        )
+        record_store.write_deployment_record(
+            build_deployment_record(
+                request=ship_request,
+                record_id=record_id,
+                deployment_id="control-plane-dokploy",
+                deployment_status="pass",
+                started_at=started_at,
+                finished_at=finished_at,
+                resolved_target=resolved_target,
+                destination_health=health_evidence_from_rollout(
+                    result=failed_rollout_result,
+                    timeout_seconds=request.rollout_timeout_seconds,
+                ),
+            )
+        )
+        return VeriReelStableDeployResult(
+            deployment_record_id=record_id,
+            deploy_status="pass",
+            deploy_started_at=started_at,
+            deploy_finished_at=finished_at,
+            target_name=resolved_target.target_name,
+            target_type=resolved_target.target_type,
+            target_id=resolved_target.target_id,
+            rollout_status="fail",
+            rollout_base_url=failed_rollout_result.base_url,
+            rollout_health_urls=failed_rollout_result.health_urls,
+            error_message=str(exc),
+        )
+
     record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
@@ -254,6 +344,10 @@ def execute_verireel_stable_deploy(
             started_at=started_at,
             finished_at=finished_at,
             resolved_target=resolved_target,
+            destination_health=health_evidence_from_rollout(
+                result=rollout_result,
+                timeout_seconds=request.rollout_timeout_seconds,
+            ),
         )
     )
     return VeriReelStableDeployResult(
@@ -264,4 +358,9 @@ def execute_verireel_stable_deploy(
         target_name=resolved_target.target_name,
         target_type=resolved_target.target_type,
         target_id=resolved_target.target_id,
+        rollout_status=rollout_result.status,
+        rollout_base_url=rollout_result.base_url,
+        rollout_health_urls=rollout_result.health_urls,
+        rollout_started_at=rollout_result.started_at,
+        rollout_finished_at=rollout_result.finished_at,
     )

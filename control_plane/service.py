@@ -145,6 +145,10 @@ from control_plane.workflows.verireel_environment import (
     VeriReelStableEnvironmentRequest,
     resolve_verireel_stable_environment,
 )
+from control_plane.workflows.verireel_rollout import (
+    VeriReelRolloutVerificationRequest,
+    execute_verireel_rollout_verification,
+)
 from control_plane.workflows.verireel_app_maintenance import (
     VeriReelAppMaintenanceRequest,
     execute_verireel_app_maintenance,
@@ -623,6 +627,20 @@ class VeriReelStableEnvironmentEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelStableEnvironmentEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel stable environment requires product 'verireel'.")
+        return self
+
+
+class VeriReelRuntimeVerificationEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    verification: VeriReelRolloutVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelRuntimeVerificationEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel runtime verification requires product 'verireel'.")
         return self
 
 
@@ -1803,6 +1821,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/preview-verification",
         "/v1/drivers/verireel/testing-deploy",
         "/v1/drivers/verireel/stable-environment",
+        "/v1/drivers/verireel/runtime-verification",
         "/v1/drivers/verireel/app-maintenance",
         "/v1/drivers/verireel/prod-deploy",
         "/v1/drivers/verireel/prod-backup-gate",
@@ -3170,10 +3189,38 @@ def create_launchplane_service_app(
                                 ),
                             },
                         },
-                    )
+                )
                 driver_result = resolve_verireel_stable_environment(
                     control_plane_root=resolved_root,
                     request=request.environment,
+                )
+                result = {}
+            elif path == "/v1/drivers/verireel/runtime-verification":
+                request = VeriReelRuntimeVerificationEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="verireel_stable_environment.read",
+                    product=request.product,
+                    context=request.verification.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot execute the VeriReel runtime verification driver"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                driver_result = execute_verireel_rollout_verification(
+                    control_plane_root=resolved_root,
+                    request=request.verification,
                 )
                 result = {}
             elif path == "/v1/drivers/verireel/app-maintenance":
@@ -3996,6 +4043,7 @@ def create_launchplane_service_app(
         should_store_idempotency = True
         if path in {
             "/v1/drivers/verireel/stable-environment",
+            "/v1/drivers/verireel/runtime-verification",
             "/v1/drivers/verireel/preview-inventory",
         }:
             should_store_idempotency = False

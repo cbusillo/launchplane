@@ -1,16 +1,12 @@
 from __future__ import annotations
 
-import json
 from pathlib import Path
 import time
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
-from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import (
@@ -22,26 +18,17 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
 )
-
-
-DEFAULT_ROLLOUT_TIMEOUT_SECONDS = 300
-DEFAULT_ROLLOUT_INTERVAL_SECONDS = 5
-DEFAULT_ROLLOUT_PAGE_PATHS = ("/", "/sign-in")
-
-
-class VeriReelRolloutVerificationResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    status: str
-    base_url: str = ""
-    health_urls: tuple[str, ...] = ()
-    started_at: str = ""
-    finished_at: str = ""
+from control_plane.workflows.verireel_rollout import (
+    DEFAULT_ROLLOUT_INTERVAL_SECONDS,
+    DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
+    VeriReelRolloutVerificationResult,
+    resolve_verireel_rollout_base_urls,
+    verify_verireel_rollout,
+)
 
 
 class VeriReelProdPromotionRequest(BaseModel):
@@ -325,90 +312,11 @@ def _resolve_rollout_base_urls(
     control_plane_root: Path,
     request: VeriReelProdPromotionRequest,
 ) -> tuple[str, ...]:
-    source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+    return resolve_verireel_rollout_base_urls(
         control_plane_root=control_plane_root,
+        context=request.context,
+        instance=request.to_instance,
     )
-    target_definition = control_plane_dokploy.find_dokploy_target_definition(
-        source_of_truth,
-        context_name=request.context,
-        instance_name=request.to_instance,
-    )
-    if target_definition is None:
-        raise click.ClickException(
-            f"No Dokploy target definition found for {request.context}/{request.to_instance}."
-        )
-    environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
-        context_name=request.context,
-        instance_name=request.to_instance,
-    )
-    base_urls = control_plane_dokploy.resolve_healthcheck_base_urls(
-        target_definition=target_definition,
-        environment_values=environment_values,
-    )
-    if not base_urls:
-        raise click.ClickException(
-            f"No rollout base URL configured for {request.context}/{request.to_instance}."
-        )
-    return base_urls
-
-
-def _fetch_url_text(url: str, *, accept: str) -> tuple[int, str]:
-    request = Request(
-        url,
-        headers={
-            "Accept": accept,
-            "Cache-Control": "no-store",
-        },
-    )
-    with urlopen(request, timeout=15) as response:
-        return response.status, response.read().decode("utf-8")
-
-
-def _validate_health_payload(
-    payload: object,
-    *,
-    health_url: str,
-    expected_build_revision: str,
-    expected_build_tag: str,
-) -> str | None:
-    if not isinstance(payload, dict) or payload.get("ok") is not True:
-        return f"health payload from {health_url} did not report ok=true"
-    if expected_build_revision and payload.get("buildRevision") != expected_build_revision:
-        return (
-            f"health payload from {health_url} reported buildRevision "
-            f"'{payload.get('buildRevision', 'unknown')}' instead of expected "
-            f"'{expected_build_revision}'"
-        )
-    if expected_build_tag and payload.get("buildTag") != expected_build_tag:
-        return (
-            f"health payload from {health_url} reported buildTag "
-            f"'{payload.get('buildTag', 'unknown')}' instead of expected "
-            f"'{expected_build_tag}'"
-        )
-    return None
-
-
-def _assert_rollout_pages(base_url: str) -> None:
-    for page_path in DEFAULT_ROLLOUT_PAGE_PATHS:
-        page_url = f"{base_url.rstrip('/')}{page_path}"
-        try:
-            status_code, response_text = _fetch_url_text(
-                page_url,
-                accept="text/html,application/json",
-            )
-        except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-            raise click.ClickException(
-                f"VeriReel prod rollout page verification failed for {page_url}: {exc}"
-            ) from exc
-        if status_code < 200 or status_code >= 300:
-            raise click.ClickException(
-                f"VeriReel prod rollout page verification expected {page_url} to return 2xx, received {status_code}."
-            )
-        if "VeriReel" not in response_text:
-            raise click.ClickException(
-                f'VeriReel prod rollout page verification expected {page_url} to include "VeriReel".'
-            )
 
 
 def _verify_rollout(
@@ -416,51 +324,16 @@ def _verify_rollout(
     control_plane_root: Path,
     request: VeriReelProdPromotionRequest,
 ) -> VeriReelRolloutVerificationResult:
-    started_at = utc_now_timestamp()
-    base_urls = _resolve_rollout_base_urls(
+    return verify_verireel_rollout(
         control_plane_root=control_plane_root,
-        request=request,
+        context=request.context,
+        instance=request.to_instance,
+        expected_build_revision=request.expected_build_revision,
+        expected_build_tag=request.expected_build_tag,
+        timeout_seconds=request.rollout_timeout_seconds,
+        interval_seconds=request.rollout_interval_seconds,
+        error_prefix="VeriReel prod rollout",
     )
-    health_urls = tuple(f"{base_url.rstrip('/')}/api/health" for base_url in base_urls)
-    last_error = "health endpoint not checked yet"
-    deadline = time.monotonic() + request.rollout_timeout_seconds
-    while time.monotonic() <= deadline:
-        for base_url, health_url in zip(base_urls, health_urls, strict=False):
-            try:
-                status_code, response_text = _fetch_url_text(
-                    health_url,
-                    accept="application/json,text/html",
-                )
-                if status_code < 200 or status_code >= 300:
-                    last_error = f"received {status_code} from {health_url}"
-                    continue
-                payload = json.loads(response_text)
-                validation_error = _validate_health_payload(
-                    payload,
-                    health_url=health_url,
-                    expected_build_revision=request.expected_build_revision,
-                    expected_build_tag=request.expected_build_tag,
-                )
-                if validation_error is not None:
-                    last_error = validation_error
-                    continue
-                _assert_rollout_pages(base_url)
-                return VeriReelRolloutVerificationResult(
-                    status="pass",
-                    base_url=base_url,
-                    health_urls=(health_url,),
-                    started_at=started_at,
-                    finished_at=utc_now_timestamp(),
-                )
-            except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, ValueError) as exc:
-                last_error = str(exc)
-            except click.ClickException as exc:
-                raise click.ClickException(str(exc)) from exc
-        remaining_seconds = deadline - time.monotonic()
-        if remaining_seconds <= 0:
-            break
-        time.sleep(min(request.rollout_interval_seconds, remaining_seconds))
-    raise click.ClickException(f"VeriReel prod rollout verification timed out: {last_error}")
 
 
 def _resolve_application_id(
@@ -670,6 +543,10 @@ def execute_verireel_prod_promotion(
             instance=request.to_instance,
             artifact_id=request.artifact_id,
             source_git_ref=request.source_git_ref,
+            expected_build_revision=request.expected_build_revision,
+            expected_build_tag=request.expected_build_tag,
+            rollout_timeout_seconds=request.rollout_timeout_seconds,
+            rollout_interval_seconds=request.rollout_interval_seconds,
             no_cache=request.no_cache,
         ),
     )
@@ -716,26 +593,13 @@ def execute_verireel_prod_promotion(
             error_message=deployment_result.error_message,
         )
 
-    try:
-        rollout_result = _verify_rollout(
-            control_plane_root=control_plane_root,
-            request=request,
+    if deployment_result.rollout_status != "pass":
+        error_message = deployment_result.error_message or "VeriReel prod rollout verification failed."
+        failed_rollout_result = VeriReelRolloutVerificationResult(
+            status="fail",
+            base_url=deployment_result.rollout_base_url,
+            health_urls=deployment_result.rollout_health_urls,
         )
-    except click.ClickException as exc:
-        error_message = str(exc)
-        failed_rollout_result = VeriReelRolloutVerificationResult(status="fail")
-        try:
-            base_urls = _resolve_rollout_base_urls(
-                control_plane_root=control_plane_root,
-                request=request,
-            )
-            failed_rollout_result = VeriReelRolloutVerificationResult(
-                status="fail",
-                base_url=base_urls[0],
-                health_urls=(f"{base_urls[0].rstrip('/')}/api/health",),
-            )
-        except click.ClickException:
-            pass
         _write_failed_promotion_record(
             record_store=record_store,
             request=request,
@@ -765,6 +629,13 @@ def execute_verireel_prod_promotion(
             target_id=deployment_result.target_id,
             error_message=error_message,
         )
+    rollout_result = VeriReelRolloutVerificationResult(
+        status=deployment_result.rollout_status,
+        base_url=deployment_result.rollout_base_url,
+        health_urls=deployment_result.rollout_health_urls,
+        started_at=deployment_result.rollout_started_at,
+        finished_at=deployment_result.rollout_finished_at,
+    )
 
     try:
         _run_prisma_migrations(

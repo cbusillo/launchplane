@@ -14,6 +14,7 @@ from control_plane.workflows.verireel_stable_deploy import (
     _execute_dokploy_deploy,
     execute_verireel_stable_deploy,
 )
+from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 
 
 class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
@@ -61,6 +62,15 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                 ),
             ), patch(
                 "control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy"
+            ), patch(
+                "control_plane.workflows.verireel_stable_deploy._verify_rollout",
+                return_value=VeriReelRolloutVerificationResult(
+                    status="pass",
+                    base_url="https://ver-testing.shinycomputers.com",
+                    health_urls=("https://ver-testing.shinycomputers.com/api/health",),
+                    started_at="2026-04-20T18:21:16Z",
+                    finished_at="2026-04-20T18:21:45Z",
+                ),
             ):
                 result = execute_verireel_stable_deploy(
                     control_plane_root=root,
@@ -75,7 +85,8 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(deployment.deploy.status, "pass")
             self.assertEqual(deployment.deploy.started_at, "2026-04-20T18:20:00Z")
             self.assertEqual(deployment.deploy.finished_at, "2026-04-20T18:21:15Z")
-            self.assertEqual(deployment.destination_health.status, "skipped")
+            self.assertEqual(deployment.destination_health.status, "pass")
+            self.assertEqual(result.rollout_status, "pass")
 
     def test_execute_writes_failed_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
