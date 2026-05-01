@@ -17,8 +17,8 @@ be treated as the final cross-product ingress boundary for Launchplane.
 - `deployments`: write and inspect deployment records.
 - `environments`: write, list, and resolve DB-backed runtime environment
   contracts.
-- `launchplane-previews`: inspect, mutate, render, ingest, and replay Launchplane preview
-  state.
+- `launchplane-previews`: inspect, mutate, render, ingest, and replay
+  Launchplane preview state.
 - `inventory`: inspect current environment inventory.
 - `promote`: record, resolve, and execute artifact-backed promotions.
 - `promotions`: write and inspect promotion records.
@@ -113,7 +113,9 @@ records with:
 
 ```bash
 uv run launchplane service render-authz-policy --policy-file ./bootstrap-policy.toml
-uv run launchplane service render-authz-policy --policy-file ./bootstrap-policy.toml --format b64
+uv run launchplane service render-authz-policy \
+  --policy-file ./bootstrap-policy.toml \
+  --format b64
 uv run launchplane authz-policies import-toml --policy-file ./bootstrap-policy.toml
 ```
 
@@ -139,8 +141,9 @@ ref suffix such as `.../preview-control-plane.yml@*`, because pull-request runs
 execute from branch-specific workflow refs rather than a fixed `main` ref.
 
 The Launchplane container entrypoint now fails closed unless one of
-`LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, or `LAUNCHPLANE_POLICY_FILE` is supplied.
-It also refuses to start from the checked-in `.example` policy path.
+`LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, or
+`LAUNCHPLANE_POLICY_FILE` is supplied. It also refuses to start from the
+checked-in `.example` policy path.
 
 ## Launchplane Service Deploy Posture
 
@@ -192,8 +195,8 @@ The Dokploy-hosted Launchplane target should consume `DOCKER_IMAGE_REFERENCE` fr
 its env so deploy automation can switch the service by immutable digest and
 roll back to the prior digest when verification fails.
 
-Before a real Launchplane deploy, run the sanitized preflight check against the live
-Dokploy target:
+Before a real Launchplane deploy, run the sanitized preflight check against the
+live Dokploy target:
 
 ```bash
 uv run launchplane service inspect-dokploy-target \
@@ -341,6 +344,12 @@ Current derived-state behavior:
   and source metadata. Use it from a live Launchplane context that already has
   current `LAUNCHPLANE_DATABASE_URL`; bundles with secrets also require
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+- `POST /v1/product-config/apply` exposes the same planner/writer through the
+  authenticated service API for operator UI use. Submit `mode: "dry-run"` to
+  preview with `product_config.plan`, then `mode: "apply"` with
+  `product_config.apply` after review. The service response is redacted and the
+  route fails closed when secret writes are requested without the Launchplane
+  master encryption key in the service runtime.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
 - `environments relabel` updates runtime-environment record source metadata
@@ -392,9 +401,9 @@ them available as managed runtime environment overlays.
   for the compose post-deploy update path.
 - The post-deploy overlay supports only `ODOO_DB_NAME`, `ODOO_FILESTORE_PATH`,
   and `ODOO_DATA_WORKFLOW_LOCK_FILE`.
-- When multiple healthcheck URLs are resolved for a lane, Launchplane treats them as
-  alternate verification surfaces and accepts the first `2xx` response instead
-  of requiring every URL to succeed.
+- When multiple healthcheck URLs are resolved for a lane, Launchplane treats
+  them as alternate verification surfaces and accepts the first `2xx` response
+  instead of requiring every URL to succeed.
 
 ## Odoo Instance Override Contracts
 
@@ -622,10 +631,10 @@ Use `release-tuples export-catalog --state-dir <state>` to render those minted
 state records as catalog TOML when an operator is ready to review and
 materialize a new tracked baseline.
 
-GitHub PR feedback uses one Launchplane-owned marker comment per PR. The comment is
-a review surface over durable Launchplane records: preview URL/state, manifest and
-baseline tuple, source inputs, artifact identity when present, health status,
-next action, and apply outcome.
+GitHub PR feedback uses one Launchplane-owned marker comment per PR. The
+comment is a review surface over durable Launchplane records: preview URL/state,
+manifest and baseline tuple, source inputs, artifact identity when present,
+health status, next action, and apply outcome.
 
 Launchplane treats product PRs as preview anchors. Companion, infra, and tooling
 repos should remain source inputs only unless a product explicitly maps them to

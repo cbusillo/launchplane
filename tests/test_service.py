@@ -16,7 +16,10 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord, authz_policy_sha256
+from control_plane.contracts.authz_policy_record import (
+    LaunchplaneAuthzPolicyRecord,
+    authz_policy_sha256,
+)
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -36,6 +39,7 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     PromotionRecord,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -201,6 +205,37 @@ def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, obj
         },
         "updated_at": "2026-04-30T21:30:00Z",
         "source": "test",
+    }
+
+
+def _sqlite_database_url(database_path: Path) -> str:
+    return f"sqlite+pysqlite:///{database_path}"
+
+
+def _product_config_payload() -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "mode": "dry-run",
+        "product": "sellyouroutboard",
+        "context": "sellyouroutboard-prod",
+        "instance": "prod",
+        "source_label": "product-config-api-test",
+        "runtime_env": {
+            "scope": "instance",
+            "env": {
+                "CONTACT_EMAIL_MODE": "smtp",
+                "SELLYOUROUTBOARD_SITE_URL": "https://www.sellyouroutboard.com",
+            },
+        },
+        "secrets": [
+            {
+                "name": "SMTP_PASSWORD",
+                "binding_key": "SMTP_PASSWORD",
+                "value": "smtp-secret-value",
+                "scope": "context_instance",
+                "description": "SMTP password",
+            }
+        ],
     }
 
 
@@ -702,7 +737,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_service_uses_db_backed_authz_policy_when_present(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'launchplane.sqlite3'}"
+            database_url = (
+                f"sqlite+pysqlite:///{Path(temporary_directory_name) / 'launchplane.sqlite3'}"
+            )
             db_policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -772,9 +809,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            shell_status, shell_headers, shell_body = _invoke_raw_app(
-                app, method="GET", path="/ui"
-            )
+            shell_status, shell_headers, shell_body = _invoke_raw_app(app, method="GET", path="/ui")
             asset_status, asset_headers, asset_body = _invoke_raw_app(
                 app, method="GET", path="/ui/assets/app.js"
             )
@@ -1020,6 +1055,302 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 method="POST",
                 path="/v1/product-profiles",
                 payload=_product_profile_payload(),
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_product_config_api_dry_run_returns_redacted_plan_without_writes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_product_config_payload(),
+                    headers={"Idempotency-Key": "product-config-dry-run"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                runtime_records = store.list_runtime_environment_records()
+                secret_records = store.list_secret_records()
+            finally:
+                store.close()
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("smtp-secret-value", response_text)
+        self.assertNotIn("https://www.sellyouroutboard.com", response_text)
+        self.assertEqual(runtime_records, ())
+        self.assertEqual(secret_records, ())
+
+    def test_product_config_api_apply_writes_runtime_and_managed_secret(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            request_payload = {**_product_config_payload(), "mode": "apply"}
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "product-config-apply"},
+                )
+                store = PostgresRecordStore(database_url=database_url)
+                store.ensure_schema()
+                try:
+                    runtime_records = store.list_runtime_environment_records()
+                    secret_records = store.list_secret_records()
+                    secret_binding = store.list_secret_bindings(limit=None)[0]
+                finally:
+                    store.close()
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("smtp-secret-value", response_text)
+        self.assertNotIn("https://www.sellyouroutboard.com", response_text)
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(
+            runtime_records[0],
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard-prod",
+                instance="prod",
+                env={
+                    "CONTACT_EMAIL_MODE": "smtp",
+                    "SELLYOUROUTBOARD_SITE_URL": "https://www.sellyouroutboard.com",
+                },
+                updated_at=runtime_records[0].updated_at,
+                source_label="product-config-api-test",
+            ),
+        )
+        self.assertEqual(len(secret_records), 1)
+        self.assertEqual(secret_records[0].name, "SMTP_PASSWORD")
+        self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
+
+    def test_product_config_api_rejects_missing_master_key_for_secret_bundle(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(os.environ, {}, clear=True):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_product_config_payload(),
+                )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "secret_configuration_required")
+
+    def test_product_config_api_rejects_secret_shaped_runtime_key(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            request_payload = _product_config_payload()
+            request_payload["secrets"] = []
+            request_payload["runtime_env"] = {"scope": "instance", "env": {"API_TOKEN": "nope"}}
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=request_payload,
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_product_config_api_apply_requires_apply_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            request_payload = {**_product_config_payload(), "mode": "apply"}
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-config/apply",
+                payload=request_payload,
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_product_config_api_rejects_unauthorized_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-config/apply",
+                payload=_product_config_payload(),
             )
 
         self.assertEqual(status_code, 403)
@@ -1335,9 +1666,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         },
                     },
                 )
-            records = FilesystemRecordStore(state_dir=state_dir).list_preview_inventory_scan_records(
-                context_name="sellyouroutboard-testing"
-            )
+            records = FilesystemRecordStore(
+                state_dir=state_dir
+            ).list_preview_inventory_scan_records(context_name="sellyouroutboard-testing")
 
         self.assertEqual(status_code, 202)
         self.assertEqual(
@@ -1456,7 +1787,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch(
                 "control_plane.service.evaluate_generic_web_preview_readiness",
-                return_value={"readiness_status": "blocked", "missing_template_env_keys": ["SMTP_HOST"]},
+                return_value={
+                    "readiness_status": "blocked",
+                    "missing_template_env_keys": ["SMTP_HOST"],
+                },
             ) as readiness:
                 status_code, payload = _invoke_app(
                     app,
@@ -1913,9 +2247,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "oauth_env": {
                                 "LAUNCHPLANE_GITHUB_CLIENT_ID": "client-id",
                                 "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
-                                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": (
-                                    "info@shinycomputers.com"
-                                ),
+                                "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": ("info@shinycomputers.com"),
                             },
                         },
                     },
@@ -3470,8 +3802,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "source": "preview-janitor",
                     "desired_state_id": "preview-desired-state-verireel-testing-20260429T192314Z",
                     "desired_previews": [
-                        {"preview_slug": "pr-42", "anchor_repo": "verireel", "anchor_pr_number": 42},
-                        {"preview_slug": "pr-43", "anchor_repo": "verireel", "anchor_pr_number": 43},
+                        {
+                            "preview_slug": "pr-42",
+                            "anchor_repo": "verireel",
+                            "anchor_pr_number": 42,
+                        },
+                        {
+                            "preview_slug": "pr-43",
+                            "anchor_repo": "verireel",
+                            "anchor_pr_number": 43,
+                        },
                     ],
                 },
             )
@@ -3788,7 +4128,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["status"], "accepted")
-        self.assertEqual(payload["records"]["preview_pr_feedback_id"], feedback_records[0].feedback_id)
+        self.assertEqual(
+            payload["records"]["preview_pr_feedback_id"], feedback_records[0].feedback_id
+        )
         self.assertEqual(payload["result"]["delivery_status"], "skipped")
         self.assertIn("Launchplane preview is ready", payload["result"]["comment_markdown"])
         self.assertIn("GITHUB_TOKEN", feedback_records[0].error_message)
@@ -4207,11 +4549,15 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ).list_preview_lifecycle_cleanup_records(context_name="verireel-testing")
 
         self.assertEqual(status_code, 202)
-        self.assertEqual(payload["records"]["preview_lifecycle_cleanup_id"], cleanup_records[0].cleanup_id)
+        self.assertEqual(
+            payload["records"]["preview_lifecycle_cleanup_id"], cleanup_records[0].cleanup_id
+        )
         self.assertEqual(payload["result"]["status"], "report_only")
         self.assertEqual(payload["result"]["planned_slugs"], ["pr-41"])
         self.assertEqual(cleanup_records[0].apply, False)
-        self.assertEqual(cleanup_records[0].plan_id, "preview-lifecycle-plan-verireel-testing-20260429T195838Z")
+        self.assertEqual(
+            cleanup_records[0].plan_id, "preview-lifecycle-plan-verireel-testing-20260429T195838Z"
+        )
 
     def test_preview_lifecycle_cleanup_endpoint_executes_and_records_destroyed_preview(
         self,
@@ -5738,7 +6084,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 202)
             self.assertEqual(payload["status"], "accepted")
-            self.assertEqual(payload["records"]["preview_id"], "preview-verireel-testing-verireel-pr-123")
+            self.assertEqual(
+                payload["records"]["preview_id"], "preview-verireel-testing-verireel-pr-123"
+            )
             self.assertEqual(
                 payload["records"]["generation_id"],
                 "preview-verireel-testing-verireel-pr-123-generation-0001",
@@ -6053,7 +6401,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 202)
             self.assertEqual(payload["status"], "accepted")
-            self.assertEqual(payload["records"]["preview_id"], "preview-verireel-testing-verireel-pr-123")
+            self.assertEqual(
+                payload["records"]["preview_id"], "preview-verireel-testing-verireel-pr-123"
+            )
             self.assertEqual(payload["records"]["transition"], "destroyed")
             self.assertEqual(payload["result"]["destroy_status"], "pass")
             self.assertEqual(payload["result"]["application_id"], "preview-app-123")

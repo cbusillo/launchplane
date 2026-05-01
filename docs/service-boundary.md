@@ -42,6 +42,8 @@ VeriReel product paths:
   - `GET /v1/product-profiles`
   - `GET /v1/product-profiles/{product}`
   - `POST /v1/product-profiles`
+- product config write route:
+  - `POST /v1/product-config/apply`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/preview-desired-state`
@@ -317,6 +319,17 @@ refresh/destroy flow.
 Product profiles are Launchplane-owned product/driver bindings. They are written
 through authenticated service ingress and stored in Launchplane records; product
 repos do not carry repo-local Launchplane lifecycle manifests.
+
+Product config writes use `POST /v1/product-config/apply`. The request carries
+`mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
+runtime values, and write-only managed secret values. Dry-run requires the
+`product_config.plan` action; apply requires `product_config.apply`. The route
+reuses the same planner/writer as `launchplane product-config apply`, returns
+only actions, keys, counts, actor/source metadata, and secret IDs, and fails
+closed when a secret bundle is submitted without
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime. Request
+bodies for this route must not be copied into logs, issues, docs, or workflow
+artifacts because they can contain plaintext secret values.
 
 Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
