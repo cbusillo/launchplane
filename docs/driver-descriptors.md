@@ -86,16 +86,25 @@ inspect JSONB payloads directly.
 
 ## Initial Drivers
 
-Generic web exposes base capabilities and the first common deploy action:
+Generic web exposes base capabilities and common stable-lane actions:
 
 - image deployment evidence
 - HTTP health checking
+- testing-to-prod promotion evidence
 - preview lifecycle and inventory read models
 - PR feedback ownership
 
 The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
 runtime target bindings from DB-backed Dokploy target records.
+
+The `prod_promotion` action routes to
+`POST /v1/drivers/generic-web/prod-promotion`. It promotes a generic-web
+testing image to prod using DB-backed product profile lanes, records source and
+destination health evidence, writes promotion/deployment linkage, and refreshes
+prod inventory after successful verified deploys. Product-specific drivers such
+as VeriReel or Odoo can wrap this common action when they need additional gates
+such as backups, migrations, rollout checks, or tenant-specific validation.
 
 The `preview_desired_state` action routes to
 `POST /v1/drivers/generic-web/preview-desired-state`. Product workflows provide

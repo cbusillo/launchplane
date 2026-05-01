@@ -78,6 +78,7 @@ from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
+from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 
 
 class _StubVerifier:
@@ -208,6 +209,21 @@ def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, obj
         "updated_at": "2026-04-30T21:30:00Z",
         "source": "test",
     }
+
+
+def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dict[str, object]:
+    payload = _product_profile_payload(product)
+    lanes = list(payload["lanes"])
+    lanes.append(
+        {
+            "instance": "prod",
+            "context": f"{product}-testing",
+            "base_url": "https://www.sellyouroutboard.com",
+            "health_url": "https://www.sellyouroutboard.com/api/health",
+        }
+    )
+    payload["lanes"] = tuple(lanes)
+    return payload
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -1787,6 +1803,152 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "schema_version": 1,
                         "product": "sellyouroutboard",
                         "instance": "testing",
+                        "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                        "source_git_ref": "abc123",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_generic_web_prod_promotion_route_executes_for_authorized_product_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_prod_promotion",
+                return_value=GenericWebProdPromotionResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    from_instance="testing",
+                    to_instance="prod",
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    promotion_record_id="promotion-syo-testing-to-prod",
+                    deployment_record_id="deployment-syo-prod",
+                    inventory_record_id="sellyouroutboard-testing-prod",
+                    promotion_status="pass",
+                    deployment_status="pass",
+                    backup_status="skipped",
+                    source_health_status="pass",
+                    destination_health_status="pass",
+                    target_name="syo-prod-app",
+                    target_type="application",
+                    target_id="app-123",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "promotion": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-prod-promotion-syo"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["promotion_record_id"], "promotion-syo-testing-to-prod")
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-prod")
+        self.assertEqual(payload["records"]["inventory_record_id"], "sellyouroutboard-testing-prod")
+        self.assertEqual(payload["result"]["source_health_status"], "pass")
+        self.assertEqual(payload["result"]["destination_health_status"], "pass")
+        execute_mock.assert_called_once()
+
+    def test_generic_web_prod_promotion_route_rejects_wrong_product_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["different-context"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "promotion": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
                         "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                         "source_git_ref": "abc123",
                     },

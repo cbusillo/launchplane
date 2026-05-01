@@ -66,8 +66,8 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             capability_id="image_deployable",
             label="Image deployable",
             description="Deploy immutable container images and record stable-lane deployment evidence.",
-            actions=("stable_deploy",),
-            panels=("lane_health", "deployment_evidence"),
+            actions=("stable_deploy", "prod_promotion"),
+            panels=("lane_health", "deployment_evidence", "promotion_evidence"),
         ),
         DriverCapabilityDescriptor(
             capability_id="health_checked",
@@ -105,6 +105,15 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             scope="instance",
             route_path="/v1/drivers/generic-web/deploy",
             writes_records=("deployment",),
+        ),
+        _action(
+            "prod_promotion",
+            "Promote testing to prod",
+            "Promote a generic-web testing image to prod and record promotion health evidence.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/generic-web/prod-promotion",
+            writes_records=("deployment", "promotion", "inventory"),
         ),
         _action(
             "preview_desired_state",
