@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 from pydantic import BaseModel
 from sqlalchemy import JSON, Index, Integer, String, create_engine, delete, desc, select
@@ -48,6 +48,7 @@ RecordModel = TypeVar("RecordModel", bound=BaseModel)
 ConnectionFactory = Callable[[], Any]
 PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
+RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 
 
 class Base(DeclarativeBase):
@@ -1416,7 +1417,8 @@ class PostgresRecordStore(HumanSessionStore):
         self,
         *,
         event: RuntimeEnvironmentDeleteEvent,
-    ) -> int:
+        expected_record: RuntimeEnvironmentRecord,
+    ) -> RuntimeEnvironmentDeleteStatus:
         statement = (
             select(LaunchplaneRuntimeEnvironmentRow)
             .where(
@@ -1425,11 +1427,18 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneRuntimeEnvironmentRow.instance == event.instance,
             )
             .limit(1)
+            .with_for_update()
         )
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
-                return 0
+                return "missing"
+            current_record = self._read_payload(
+                model_type=RuntimeEnvironmentRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return "changed"
             session.delete(row)
             session.add(
                 LaunchplaneRuntimeEnvironmentDeleteEventRow(
@@ -1442,7 +1451,7 @@ class PostgresRecordStore(HumanSessionStore):
                 )
             )
             session.commit()
-            return 1
+            return "deleted"
 
     def write_runtime_environment_delete_event(self, event: RuntimeEnvironmentDeleteEvent) -> None:
         self._write_row(

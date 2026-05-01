@@ -365,7 +365,9 @@ Current derived-state behavior:
   dry-run and apply responses include record identity, source label, update
   timestamp, key names, key count, actor, and delete-event metadata only. Apply
   refuses records that can affect a tracked Dokploy target unless
-  `--allow-tracked-target` is provided.
+  `--allow-tracked-target` is provided. Apply also fails closed if the target
+  record changes after the command reads it; re-run the command after reviewing
+  the current record.
 - `environments relabel` updates runtime-environment record source metadata
   without reading or printing plaintext values.
 - `environments list` shows DB-backed runtime-environment record metadata and

@@ -90,6 +90,7 @@ from control_plane.service_human_auth import (
 from control_plane.storage.factory import build_record_store, storage_backend_name
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
@@ -1132,6 +1133,13 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         and segments[5] == "secrets"
     ):
         return "secret.list", {"context": segments[2], "instance": segments[4]}
+    if (
+        len(segments) == 6
+        and segments[:2] == ["v1", "contexts"]
+        and segments[3] == "instances"
+        and segments[5] == "logs"
+    ):
+        return "target_logs.read", {"context": segments[2], "instance": segments[4]}
     if (
         len(segments) == 5
         and segments[:2] == ["v1", "contexts"]

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 import shlex
 import time
 from collections.abc import Callable, Mapping
@@ -23,6 +24,8 @@ from control_plane.storage.postgres import PostgresRecordStore
 DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS = 600
 DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS = 180
 DEFAULT_DOKPLOY_HEALTHCHECK_PATH = "/web/health"
+DEFAULT_DOKPLOY_LOG_LINE_COUNT = 200
+MAX_DOKPLOY_LOG_LINE_COUNT = 1000
 DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
 DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
@@ -51,6 +54,10 @@ POST_DEPLOY_UPDATE_ALLOWED_ENV_KEYS = {
 DEFAULT_DATA_WORKFLOW_LOCK_PATH = "/volumes/data/.data_workflow_in_progress"
 DEFAULT_ODOO_BACKUP_ROOT = "/volumes/data/backups/launchplane"
 ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
+_LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
+    r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
+)
+_BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
 
 
 type JsonPrimitive = str | int | float | bool | None
@@ -649,6 +656,68 @@ def fetch_dokploy_target_payload(
             f"Dokploy {target_type}.one returned an invalid response payload."
         )
     return payload_as_object
+
+
+def normalize_dokploy_log_line_count(line_count: int) -> int:
+    if line_count < 1:
+        raise click.ClickException("Dokploy log line count must be at least 1.")
+    if line_count > MAX_DOKPLOY_LOG_LINE_COUNT:
+        raise click.ClickException(
+            f"Dokploy log line count cannot exceed {MAX_DOKPLOY_LOG_LINE_COUNT}."
+        )
+    return line_count
+
+
+def redact_dokploy_log_line(raw_line: str) -> str:
+    redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", raw_line)
+    return _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
+
+
+def normalize_dokploy_log_payload(payload: JsonValue) -> tuple[str, ...]:
+    raw_lines: list[str] = []
+    if isinstance(payload, str):
+        raw_lines.extend(payload.splitlines())
+    elif isinstance(payload, list):
+        for item in payload:
+            if isinstance(item, str):
+                raw_lines.extend(item.splitlines())
+            elif isinstance(item, dict):
+                message = item.get("message") or item.get("log") or item.get("line")
+                if message is not None:
+                    raw_lines.extend(str(message).splitlines())
+    elif isinstance(payload, dict):
+        for key_name in ("logs", "log", "lines", "output", "raw"):
+            value = payload.get(key_name)
+            if isinstance(value, str):
+                raw_lines.extend(value.splitlines())
+                break
+            if isinstance(value, list):
+                raw_lines.extend(
+                    line for item in value for line in normalize_dokploy_log_payload(item)
+                )
+                break
+    return tuple(redact_dokploy_log_line(line) for line in raw_lines)
+
+
+def fetch_dokploy_application_logs(
+    *,
+    host: str,
+    token: str,
+    application_id: str,
+    line_count: int = DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+) -> tuple[str, ...]:
+    normalized_application_id = application_id.strip()
+    if not normalized_application_id:
+        raise click.ClickException("Dokploy application logs require an application id.")
+    normalized_line_count = normalize_dokploy_log_line_count(line_count)
+    payload = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/application.readLogs",
+        query={"applicationId": normalized_application_id, "tail": normalized_line_count},
+    )
+    lines = normalize_dokploy_log_payload(payload)
+    return lines[-normalized_line_count:]
 
 
 def parse_dokploy_env_text(raw_env_text: str) -> dict[str, str]:
