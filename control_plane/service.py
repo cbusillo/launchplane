@@ -2601,15 +2601,29 @@ def create_launchplane_service_app(
                                 },
                             },
                         )
-                    log_payload = build_tracked_target_logs_payload(
-                        record_store=record_store,
-                        control_plane_root=resolved_root,
-                        context_name=context_name,
-                        instance_name=instance_name,
-                        line_count=line_count,
-                        since=since,
-                        search=search,
-                    )
+                    try:
+                        log_payload = build_tracked_target_logs_payload(
+                            record_store=record_store,
+                            control_plane_root=resolved_root,
+                            context_name=context_name,
+                            instance_name=instance_name,
+                            line_count=line_count,
+                            since=since,
+                            search=search,
+                        )
+                    except ValueError as error:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "invalid_request",
+                                    "message": str(error),
+                                },
+                            },
+                        )
                     return _json_response(
                         start_response=start_response,
                         status_code=200,

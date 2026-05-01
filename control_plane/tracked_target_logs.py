@@ -28,14 +28,23 @@ def build_tracked_target_logs_payload(
     since: str = "all",
     search: str = "",
 ) -> dict[str, object]:
-    target_record = record_store.read_dokploy_target_record(
-        context_name=context_name,
-        instance_name=instance_name,
-    )
-    target_id_record = record_store.read_dokploy_target_id_record(
-        context_name=context_name,
-        instance_name=instance_name,
-    )
+    normalized_context = context_name.strip().lower()
+    normalized_instance = instance_name.strip().lower()
+    if not normalized_context or not normalized_instance:
+        raise ValueError("Tracked target logs require non-empty context and instance.")
+    try:
+        target_record = record_store.read_dokploy_target_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+        target_id_record = record_store.read_dokploy_target_id_record(
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+    except FileNotFoundError as error:
+        raise ValueError(
+            "Missing DB-backed tracked Dokploy target records for requested context/instance."
+        ) from error
     if target_record.target_type != "application":
         raise ValueError(
             "Tracked target logs currently support Dokploy application targets only. "
@@ -63,8 +72,8 @@ def build_tracked_target_logs_payload(
     app_name = str(target_payload.get("appName") or "").strip()
     server_id = str(target_payload.get("serverId") or "").strip()
     return {
-        "context": context_name,
-        "instance": instance_name,
+        "context": normalized_context,
+        "instance": normalized_instance,
         "target": {
             "target_id": target_id_record.target_id,
             "target_type": target_record.target_type,

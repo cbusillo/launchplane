@@ -183,9 +183,9 @@ target_name = "syo-testing-app"
                         "--database-url",
                         database_url,
                         "--context",
-                        "sellyouroutboard-testing",
+                        " SellyourOutboard-Testing ",
                         "--instance",
-                        "testing",
+                        " Testing ",
                         "--lines",
                         "2",
                     ],
@@ -193,11 +193,41 @@ target_name = "syo-testing-app"
 
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
+        self.assertEqual(payload["context"], "sellyouroutboard-testing")
+        self.assertEqual(payload["instance"], "testing")
         self.assertEqual(payload["target"]["target_id"], "app-123")
         self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
         self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
         self.assertEqual(payload["logs"]["lines"], ["started", "SMTP_PASSWORD=[redacted]"])
         self.assertNotIn("secret-token", result.output)
+
+    def test_environments_logs_reports_missing_records_without_traceback(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.close()
+
+            result = runner.invoke(
+                main,
+                [
+                    "environments",
+                    "logs",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "missing",
+                    "--instance",
+                    "testing",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Missing DB-backed tracked Dokploy target records", result.output)
+        self.assertNotIn("Traceback", result.output)
 
     def test_environments_logs_rejects_compose_targets(self) -> None:
         runner = CliRunner()
