@@ -292,6 +292,12 @@ repos submit thin preview outcome facts to `POST /v1/previews/pr-feedback`;
 Launchplane renders the review comment, upserts the anchored GitHub PR comment
 when its runtime token is available, and stores an append-only feedback record
 with the comment body, delivery action, comment URL, and any skip/failure reason.
+Workflows can be granted explicit `preview_pr_feedback.write`, or generic-web
+preview workflows can reuse their matching lifecycle grants: refresh-capable
+workflows may report ready/failed feedback, and destroy-capable workflows may
+report destroyed/cleanup-failed feedback. Unsupported/fork notices still require
+the explicit feedback grant because they are outside the normal refresh/destroy
+flow.
 
 ### Product profile endpoints
 
