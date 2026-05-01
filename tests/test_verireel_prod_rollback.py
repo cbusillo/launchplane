@@ -177,19 +177,19 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
 
         with (
             patch(
-                "control_plane.workflows.verireel_prod_promotion.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                "control_plane.workflows.verireel_rollout.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
                 return_value=source_of_truth,
             ),
             patch(
-                "control_plane.workflows.verireel_prod_promotion.control_plane_dokploy.find_dokploy_target_definition",
+                "control_plane.workflows.verireel_rollout.control_plane_dokploy.find_dokploy_target_definition",
                 return_value=target_definition,
             ) as find_target,
             patch(
-                "control_plane.workflows.verireel_prod_promotion.control_plane_runtime_environments.resolve_runtime_environment_values",
+                "control_plane.workflows.verireel_rollout.control_plane_runtime_environments.resolve_runtime_environment_values",
                 return_value={"VERIREEL_PROD_OPERATOR_BASE_URL": "https://ver-prod.shinycomputers.com"},
             ) as resolve_environment,
             patch(
-                "control_plane.workflows.verireel_prod_promotion.control_plane_dokploy.resolve_healthcheck_base_urls",
+                "control_plane.workflows.verireel_rollout.control_plane_dokploy.resolve_healthcheck_base_urls",
                 return_value=("https://ver-prod.shinycomputers.com",),
             ),
         ):

@@ -24,12 +24,26 @@ from control_plane.workflows.verireel_prod_promotion import (
     DEFAULT_ROLLOUT_INTERVAL_SECONDS,
     DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
     VeriReelRolloutVerificationResult,
-    _assert_rollout_pages,
-    _fetch_url_text,
     _read_backup_gate_record,
-    _resolve_rollout_base_urls,
-    _validate_health_payload,
 )
+from control_plane.workflows.verireel_rollout import (
+    assert_verireel_rollout_pages as _assert_rollout_pages,
+    fetch_url_text as _fetch_url_text,
+    resolve_verireel_rollout_base_urls,
+    validate_verireel_health_payload as _validate_health_payload,
+)
+
+
+def _resolve_rollout_base_urls(
+    *,
+    control_plane_root: Path,
+    request: "VeriReelProdRollbackRequest",
+) -> tuple[str, ...]:
+    return resolve_verireel_rollout_base_urls(
+        control_plane_root=control_plane_root,
+        context=request.context,
+        instance=request.to_instance,
+    )
 
 
 class VeriReelProdRollbackRequest(BaseModel):

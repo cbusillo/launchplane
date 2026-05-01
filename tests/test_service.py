@@ -66,6 +66,7 @@ from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotio
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 from control_plane.workflows.verireel_environment import VeriReelStableEnvironmentResult
+from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
@@ -2911,6 +2912,67 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload["result"]["primary_base_url"], "https://ver-testing.shinycomputers.com"
             )
             resolve_mock.assert_called_once()
+
+    def test_verireel_runtime_verification_driver_executes_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["verireel_stable_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_rollout_verification",
+                return_value=VeriReelRolloutVerificationResult(
+                    status="pass",
+                    base_url="https://ver-testing.shinycomputers.com",
+                    health_urls=("https://ver-testing.shinycomputers.com/api/health",),
+                    started_at="2026-05-01T12:00:00Z",
+                    finished_at="2026-05-01T12:00:05Z",
+                ),
+            ) as verify_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/runtime-verification",
+                    payload={
+                        "product": "verireel",
+                        "verification": {"context": "verireel", "instance": "testing"},
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["status"], "pass")
+            self.assertEqual(
+                payload["result"]["base_url"], "https://ver-testing.shinycomputers.com"
+            )
+            verify_mock.assert_called_once()
 
     def test_verireel_app_maintenance_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

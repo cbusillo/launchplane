@@ -30,7 +30,8 @@ Launchplane
   - driver descriptors and driver routes
   - provider credentials and managed secrets
   - preview/deploy/promotion/rollback orchestration
-  - health, readiness, inventory, cleanup, and feedback records
+- health, readiness, inventory, cleanup, and feedback records or driver
+  responses
   - PR feedback rendering and delivery
 ```
 
@@ -71,8 +72,9 @@ profile data.
 - Provider mutations: create/update/delete preview apps, deploy stable lanes,
   promote, rollback, capture backup gates, and cleanup stale runtime state.
 - Readiness checks before provider mutation.
-- Health checks when they are based on profile-owned health paths and expected
-  revisions or image references.
+- Health checks, public page readiness, and deployed build identity checks when
+  they are based on profile-owned health paths and expected revisions or image
+  references.
 - PR feedback records, markdown rendering, comment delivery, and stale feedback
   cleanup.
 - Promotion, rollback, deployment, preview, inventory, and cleanup records.
@@ -128,8 +130,9 @@ For an existing repo, classify each workflow and script before deleting code:
   reusable Launchplane GitHub Action/CLI.
 
 Start with low-risk deletions and documentation, then replace active workflow
-behavior in small slices. Do not remove active backup, promotion, rollback, or
-cleanup safety gates until Launchplane owns the equivalent behavior and tests.
+behavior in small slices. Do not remove active backup, promotion, rollback,
+runtime health, or cleanup safety gates until Launchplane owns the equivalent
+behavior and tests.
 
 ## New Repo Checklist
 

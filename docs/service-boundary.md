@@ -216,6 +216,7 @@ allowed product: verireel
 allowed contexts: verireel
 allowed actions:
   - verireel_testing_deploy.execute
+  - verireel_stable_environment.read
   - deployment.write
 ```
 
@@ -226,6 +227,7 @@ event_name: workflow_dispatch
 allowed product: verireel
 allowed contexts: verireel
 allowed actions:
+  - verireel_stable_environment.read
   - backup_gate.write
   - verireel_prod_deploy.execute
   - verireel_prod_promotion.execute
