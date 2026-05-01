@@ -2611,7 +2611,7 @@ def create_launchplane_service_app(
                             since=since,
                             search=search,
                         )
-                    except ValueError as error:
+                    except ValueError:
                         return _json_response(
                             start_response=start_response,
                             status_code=400,
@@ -2620,7 +2620,7 @@ def create_launchplane_service_app(
                                 "trace_id": request_trace_id,
                                 "error": {
                                     "code": "invalid_request",
-                                    "message": str(error),
+                                    "message": "Tracked target logs request failed validation.",
                                 },
                             },
                         )
