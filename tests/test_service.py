@@ -3612,6 +3612,179 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn("protected preview provisioning path", payload["result"]["comment_markdown"])
         self.assertEqual(payload["result"]["delivery_status"], "skipped")
 
+    def test_preview_pr_feedback_endpoint_accepts_generic_refresh_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/pull/19/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/pull/19/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "source": "preview-control-plane",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 19,
+                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/19",
+                    "status": "ready",
+                    "preview_url": "https://pr-19.syo-preview.shinycomputers.com",
+                },
+            )
+
+            feedback_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_pr_feedback_records(context_name="sellyouroutboard-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(feedback_records[0].status, "ready")
+
+    def test_preview_pr_feedback_endpoint_accepts_generic_destroy_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-cleanup.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_destroy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-cleanup.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "source": "preview-cleanup",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 19,
+                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/19",
+                    "status": "destroyed",
+                },
+            )
+
+            feedback_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_pr_feedback_records(context_name="sellyouroutboard-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(feedback_records[0].status, "destroyed")
+
+    def test_preview_pr_feedback_endpoint_keeps_unsupported_explicit(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/pull/19/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/pull/19/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "source": "preview-control-plane",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 19,
+                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/19",
+                    "status": "unsupported",
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_preview_pr_feedback_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

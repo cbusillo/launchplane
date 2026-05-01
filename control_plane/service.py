@@ -1485,6 +1485,40 @@ def _write_preview_pr_feedback_if_supported(
     return record.feedback_id
 
 
+def _allows_preview_pr_feedback_write(
+    *,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    product: str,
+    context: str,
+    status: PreviewPrFeedbackStatus,
+) -> bool:
+    if authz_policy.allows(
+        identity=identity,
+        action="preview_pr_feedback.write",
+        product=product,
+        context=context,
+    ):
+        return True
+
+    lifecycle_actions_by_status = {
+        "ready": ("preview_refresh.execute",),
+        "failed": ("preview_refresh.execute",),
+        "destroyed": ("preview_destroy.execute",),
+        "cleanup_failed": ("preview_destroy.execute",),
+        "cleared": ("preview_refresh.execute", "preview_destroy.execute"),
+    }
+    return any(
+        authz_policy.allows(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        )
+        for action in lifecycle_actions_by_status.get(status, ())
+    )
+
+
 def create_launchplane_service_app(
     *,
     state_dir: Path,
@@ -3460,11 +3494,12 @@ def create_launchplane_service_app(
                 result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == "/v1/previews/pr-feedback":
                 request = PreviewPrFeedbackEnvelope.model_validate(payload)
-                if not authz_policy.allows(
+                if not _allows_preview_pr_feedback_write(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action="preview_pr_feedback.write",
                     product=request.product,
                     context=request.context,
+                    status=request.status,
                 ):
                     return _json_response(
                         start_response=start_response,
