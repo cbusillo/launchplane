@@ -12,7 +12,7 @@ import secrets
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import Callable
+from typing import Callable, cast
 from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 
@@ -82,6 +82,7 @@ from control_plane.service_human_auth import (
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.factory import build_record_store, storage_backend_name
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
@@ -161,8 +162,10 @@ from control_plane.workflows.verireel_prod_rollback import (
 )
 from control_plane.workflows.verireel_preview_driver import (
     VeriReelPreviewDestroyRequest,
+    VeriReelPreviewDestroyResult,
     VeriReelPreviewInventoryRequest,
     VeriReelPreviewRefreshRequest,
+    VeriReelPreviewRefreshResult,
     execute_verireel_preview_destroy,
     execute_verireel_preview_inventory,
     execute_verireel_preview_refresh,
@@ -1485,6 +1488,108 @@ def _write_preview_pr_feedback_if_supported(
     return record.feedback_id
 
 
+def _repo_token(value: str) -> str:
+    normalized = "".join(
+        character if character.isalnum() else "-" for character in value.strip().lower()
+    ).strip("-")
+    while "--" in normalized:
+        normalized = normalized.replace("--", "-")
+    if not normalized:
+        raise ValueError("repository token is required")
+    return normalized
+
+
+def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshRequest) -> str:
+    normalized_sha = request.anchor_head_sha.strip().lower()
+    short_sha = normalized_sha[:7]
+    return (
+        f"{_repo_token(request.anchor_repo)}-preview-manifest-"
+        f"{request.preview_slug.strip()}-{short_sha}"
+    )
+
+
+def _apply_verireel_preview_refresh_records(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    request: VeriReelPreviewRefreshRequest,
+    driver_result: VeriReelPreviewRefreshResult,
+) -> dict[str, object]:
+    requested_at = driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
+    finished_at = driver_result.refresh_finished_at.strip() or requested_at
+    preview_url = driver_result.preview_url.strip() or request.preview_url.strip()
+    refresh_passed = driver_result.refresh_status == "pass"
+    failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
+    preview_request = PreviewMutationRequest(
+        context=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+        anchor_pr_url=request.anchor_pr_url,
+        canonical_url=preview_url,
+        state="pending" if refresh_passed else "failed",
+        created_at=requested_at,
+        updated_at=finished_at,
+        eligible_at=requested_at,
+    )
+    generation_request = PreviewGenerationMutationRequest(
+        context=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+        anchor_pr_url=request.anchor_pr_url,
+        anchor_head_sha=request.anchor_head_sha,
+        state="verifying" if refresh_passed else "failed",
+        requested_reason="external_preview_refresh",
+        requested_at=requested_at,
+        started_at=requested_at,
+        finished_at="" if refresh_passed else finished_at,
+        failed_at="" if refresh_passed else finished_at,
+        resolved_manifest_fingerprint=_verireel_preview_manifest_fingerprint(request),
+        artifact_id=request.image_reference,
+        deploy_status="pass" if refresh_passed else "fail",
+        verify_status="pending" if refresh_passed else "skipped",
+        overall_health_status="pending" if refresh_passed else "fail",
+        failure_stage="" if refresh_passed else "provision",
+        failure_summary="" if refresh_passed else failure_summary,
+    )
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    return apply_launchplane_generation_evidence(
+        control_plane_root_path=control_plane_root_path,
+        record_store=typed_record_store,
+        preview_request=preview_request,
+        generation_request=generation_request,
+    )
+
+
+def _apply_verireel_preview_destroy_records(
+    *,
+    record_store: object,
+    request: VeriReelPreviewDestroyRequest,
+    driver_result: VeriReelPreviewDestroyResult,
+) -> dict[str, object]:
+    if driver_result.destroy_status != "pass":
+        return {"transition": "destroy_failed"}
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    try:
+        return apply_launchplane_destroy_preview(
+            record_store=typed_record_store,
+            request=PreviewDestroyMutationRequest(
+                context=request.context,
+                anchor_repo=request.anchor_repo,
+                anchor_pr_number=request.anchor_pr_number,
+                destroyed_at=(
+                    driver_result.destroy_finished_at.strip()
+                    or driver_result.destroy_started_at.strip()
+                    or _utc_now_timestamp()
+                ),
+                destroy_reason=request.destroy_reason,
+            ),
+        )
+    except click.ClickException as error:
+        if str(error).startswith("No Launchplane preview found"):
+            return {"transition": "destroyed_missing_preview"}
+        raise
+
+
 def _allows_preview_pr_feedback_write(
     *,
     authz_policy: LaunchplaneAuthzPolicy,
@@ -2251,7 +2356,8 @@ def create_launchplane_service_app(
             request_idempotency_key = _idempotency_key(environ)
             request_scope = _idempotency_scope(identity)
             request_fingerprint = _request_fingerprint(payload)
-            driver_result = None
+            driver_result: BaseModel | dict[str, object] | None = None
+            result: dict[str, object] = {}
             if path == "/v1/evidence/deployments":
                 request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -3205,7 +3311,12 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     request=request.refresh,
                 )
-                result = {}
+                result = _apply_verireel_preview_refresh_records(
+                    control_plane_root_path=resolved_root,
+                    record_store=record_store,
+                    request=request.refresh,
+                    driver_result=driver_result,
+                )
             elif path == "/v1/drivers/verireel/preview-inventory":
                 request = VeriReelPreviewInventoryEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -3278,7 +3389,11 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     request=request.destroy,
                 )
-                result = {}
+                result = _apply_verireel_preview_destroy_records(
+                    record_store=record_store,
+                    request=request.destroy,
+                    driver_result=driver_result,
+                )
             elif path == "/v1/product-profiles":
                 request = LaunchplaneProductProfileRecord.model_validate(payload)
                 if not authz_policy.allows(
