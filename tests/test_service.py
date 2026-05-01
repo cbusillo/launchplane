@@ -1232,6 +1232,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 503)
         self.assertEqual(payload["error"]["code"], "secret_configuration_required")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Launchplane service is missing required secret write configuration.",
+        )
+        self.assertNotIn("LAUNCHPLANE_MASTER_ENCRYPTION_KEY", json.dumps(payload))
 
     def test_product_config_api_rejects_secret_shaped_runtime_key(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1278,6 +1283,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+        self.assertNotIn("API_TOKEN", json.dumps(payload))
 
     def test_product_config_api_apply_requires_apply_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1355,6 +1362,140 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_product_config_api_rejects_runtime_env_target_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            request_payload = _product_config_payload()
+            runtime_env = dict(request_payload["runtime_env"])
+            runtime_env["context"] = "sellyouroutboard-testing"
+            request_payload["runtime_env"] = runtime_env
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-config/apply",
+                payload=request_payload,
+            )
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+        self.assertNotIn("sellyouroutboard-testing", response_text)
+
+    def test_product_config_api_rejects_secret_scope_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            request_payload = _product_config_payload()
+            request_payload["secrets"] = [{**request_payload["secrets"][0], "scope": "global"}]
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-config/apply",
+                payload=request_payload,
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+
+    def test_product_config_api_rejects_secret_target_override(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            request_payload = _product_config_payload()
+            request_payload["secrets"] = [
+                {
+                    **request_payload["secrets"][0],
+                    "context": "sellyouroutboard-testing",
+                }
+            ]
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-config/apply",
+                payload=request_payload,
+            )
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        self.assertEqual(payload["error"]["message"], "Product config request failed validation.")
+        self.assertNotIn("sellyouroutboard-testing", response_text)
 
     def test_generic_web_deploy_route_uses_profile_lane_for_authorization(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

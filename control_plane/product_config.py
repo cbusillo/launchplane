@@ -24,6 +24,10 @@ _VALID_SECRET_SCOPES: tuple[SecretScope, ...] = ("global", "context", "context_i
 class ProductConfigError(ValueError):
     """Operator-facing product config validation or planning failure."""
 
+    def __init__(self, message: str, *, code: str = "invalid_request") -> None:
+        super().__init__(message)
+        self.code = code
+
 
 def load_product_config_apply_payload(input_file: Path) -> dict[str, object]:
     try:
@@ -220,13 +224,25 @@ def _product_config_runtime_input(
         }
     runtime_context = str(runtime_payload.get("context", context_name) or "").strip()
     runtime_instance = str(runtime_payload.get("instance", instance_name) or "").strip()
+    expected_scope = _default_runtime_scope(context_name=context_name, instance_name=instance_name)
     scope = str(
         runtime_payload.get(
             "scope",
-            _default_runtime_scope(context_name=runtime_context, instance_name=runtime_instance),
+            expected_scope,
         )
         or ""
     ).strip()
+    if scope != expected_scope:
+        raise ProductConfigError(
+            "Product config runtime_env scope must match the top-level target."
+        )
+    _validate_product_config_target_alignment(
+        target_kind="runtime_env",
+        context_name=runtime_context,
+        instance_name=runtime_instance,
+        expected_context=context_name,
+        expected_instance=instance_name,
+    )
     return {
         "scope": scope,
         "context": runtime_context,
@@ -278,10 +294,13 @@ def _product_config_secret_inputs(
             raise ProductConfigError(f"Product config secret #{index} requires a non-empty value.")
         secret_context = str(raw_secret.get("context", context_name) or "").strip()
         secret_instance = str(raw_secret.get("instance", instance_name) or "").strip()
+        expected_scope = _default_secret_scope(
+            context_name=context_name, instance_name=instance_name
+        )
         scope = str(
             raw_secret.get(
                 "scope",
-                _default_secret_scope(context_name=secret_context, instance_name=secret_instance),
+                expected_scope,
             )
             or ""
         ).strip()
@@ -290,6 +309,17 @@ def _product_config_secret_inputs(
             context_name=secret_context,
             instance_name=secret_instance,
             index=index,
+        )
+        if validated_scope != expected_scope:
+            raise ProductConfigError(
+                f"Product config secret #{index} scope must match the top-level target."
+            )
+        _validate_product_config_target_alignment(
+            target_kind=f"secret #{index}",
+            context_name=secret_context,
+            instance_name=secret_instance,
+            expected_context=context_name,
+            expected_instance=instance_name,
         )
         integration = str(
             raw_secret.get(
@@ -346,13 +376,28 @@ def _validate_product_config_secret_scope_route(
     return "context_instance"
 
 
+def _validate_product_config_target_alignment(
+    *,
+    target_kind: str,
+    context_name: str,
+    instance_name: str,
+    expected_context: str,
+    expected_instance: str,
+) -> None:
+    if context_name != expected_context or instance_name != expected_instance:
+        raise ProductConfigError(
+            f"Product config {target_kind} target must match the top-level target."
+        )
+
+
 def _require_product_config_master_key_if_needed(secrets: tuple[dict[str, object], ...]) -> None:
     if not secrets:
         return
     if not any(os.environ.get(key, "").strip() for key in MASTER_ENCRYPTION_KEY_ENV_KEYS):
         expected_keys = " or ".join(MASTER_ENCRYPTION_KEY_ENV_KEYS)
         raise ProductConfigError(
-            f"Product config secrets require {expected_keys} in the trusted Launchplane context."
+            f"Product config secrets require {expected_keys} in the trusted Launchplane context.",
+            code="secret_configuration_required",
         )
 
 

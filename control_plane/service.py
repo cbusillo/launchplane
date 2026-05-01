@@ -2828,12 +2828,11 @@ def create_launchplane_service_app(
                         source_label=request.source_label,
                     )
                 except control_plane_product_config.ProductConfigError as error:
-                    status_code = 400
-                    error_code = "invalid_request"
+                    error_code = error.code
                     error_message = "Product config request failed validation."
-                    if "LAUNCHPLANE_MASTER_ENCRYPTION_KEY" in str(error):
+                    status_code = 400
+                    if error_code == "secret_configuration_required":
                         status_code = 503
-                        error_code = "secret_configuration_required"
                         error_message = (
                             "Launchplane service is missing required secret write configuration."
                         )

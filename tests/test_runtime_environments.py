@@ -814,7 +814,7 @@ ODOO_DB_PASSWORD = "file-secret"
             finally:
                 store.close()
 
-    def test_product_config_apply_defaults_runtime_scope_from_nested_route(self) -> None:
+    def test_product_config_apply_rejects_runtime_route_that_differs_from_top_level(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -824,8 +824,10 @@ ODOO_DB_PASSWORD = "file-secret"
                     {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
                         "runtime_env": {
-                            "context": "sellyouroutboard",
+                            "context": "other-context",
                             "instance": "prod",
                             "env": {"CONTACT_EMAIL_MODE": "smtp"},
                         },
@@ -843,27 +845,20 @@ ODOO_DB_PASSWORD = "file-secret"
                     database_url,
                     "--input-file",
                     str(input_file),
-                    "--apply",
+                    "--dry-run",
                 ],
             )
 
-            self.assertEqual(result.exit_code, 0, result.output)
-            payload = json.loads(result.output)
-            self.assertEqual(payload["runtime_environment"]["scope"], "instance")
-            self.assertEqual(payload["runtime_environment"]["context"], "sellyouroutboard")
-            self.assertEqual(payload["runtime_environment"]["instance"], "prod")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("runtime_env target must match the top-level target", result.output)
 
             store = PostgresRecordStore(database_url=database_url)
             try:
-                runtime_records = store.list_runtime_environment_records()
-                self.assertEqual(len(runtime_records), 1)
-                self.assertEqual(runtime_records[0].scope, "instance")
-                self.assertEqual(runtime_records[0].context, "sellyouroutboard")
-                self.assertEqual(runtime_records[0].instance, "prod")
+                self.assertEqual(store.list_runtime_environment_records(), ())
             finally:
                 store.close()
 
-    def test_product_config_apply_defaults_secret_scope_from_per_secret_route(self) -> None:
+    def test_product_config_apply_rejects_secret_route_that_differs_from_top_level(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -873,13 +868,16 @@ ODOO_DB_PASSWORD = "file-secret"
                     {
                         "schema_version": 1,
                         "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
                         "runtime_env": {},
                         "secrets": [
                             {
+                                "scope": "context_instance",
                                 "name": "smtp-password",
                                 "binding_key": "SMTP_PASSWORD",
                                 "value": "smtp-secret-value",
-                                "context": "sellyouroutboard",
+                                "context": "other-context",
                                 "instance": "prod",
                             }
                         ],
@@ -902,15 +900,19 @@ ODOO_DB_PASSWORD = "file-secret"
                         database_url,
                         "--input-file",
                         str(input_file),
-                        "--dry-run",
+                        "--apply",
                     ],
                 )
 
-            self.assertEqual(result.exit_code, 0, result.output)
-            payload = json.loads(result.output)
-            self.assertEqual(payload["secrets"][0]["scope"], "context_instance")
-            self.assertEqual(payload["secrets"][0]["context"], "sellyouroutboard")
-            self.assertEqual(payload["secrets"][0]["instance"], "prod")
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("secret #1 target must match the top-level target", result.output)
+            self.assertNotIn("smtp-secret-value", result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                self.assertEqual(store.list_secret_records(), ())
+            finally:
+                store.close()
 
     def test_product_config_apply_rejects_invalid_secret_scope_before_writes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

@@ -344,16 +344,17 @@ Current derived-state behavior:
   and source metadata. Use it from a live Launchplane context that already has
   current `LAUNCHPLANE_DATABASE_URL`; bundles with secrets also require
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Runtime and secret scopes default from
-  the effective route they will write: top-level `context`/`instance` unless the
-  nested `runtime_env` object or an individual secret supplies its own route.
-  Dry-run validates secret scope/route compatibility before reporting a plan, so
-  apply does not discover invalid secret scopes after writing earlier secrets.
+  the top-level `context`/`instance`; nested `runtime_env` and secret routes must
+  match that top-level target. Dry-run validates secret scope/route
+  compatibility before reporting a plan, so apply does not discover invalid
+  secret scopes after writing earlier secrets.
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
   authenticated service API for operator UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
   `product_config.apply` after review. The service response is redacted and the
-  route fails closed when secret writes are requested without the Launchplane
-  master encryption key in the service runtime.
+  route rejects nested runtime or secret targets that differ from the authorized
+  top-level context/instance. It fails closed when secret writes are requested
+  without the Launchplane master encryption key in the service runtime.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
 - `environments relabel` updates runtime-environment record source metadata
@@ -392,11 +393,10 @@ Example product config bundle shape:
 ```
 
 `runtime_env` values are non-secret scalar values. `secrets` default to the
-`runtime_environment` integration and the current or per-secret
-context/instance, which makes them available as managed runtime environment
-overlays. Secret scope routes must be compatible: `global` has no context or
-instance, `context` has context only, and `context_instance` has both context and
-instance.
+`runtime_environment` integration and the top-level context/instance, which
+makes them available as managed runtime environment overlays. Secret scope
+routes must be compatible: `global` has no context or instance, `context` has
+context only, and `context_instance` has both context and instance.
 
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
