@@ -3916,6 +3916,68 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["status"], "accepted")
         self.assertEqual(feedback_records[0].status, "ready")
 
+    def test_preview_pr_feedback_endpoint_accepts_pending_refresh_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-fork-notice.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request_target"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-fork-notice.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="pull_request_target",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "source": "preview-fork-notice",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "anchor_repo": "sellyouroutboard",
+                    "anchor_pr_number": 19,
+                    "anchor_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/19",
+                    "status": "pending",
+                    "run_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/123",
+                },
+            )
+
+            feedback_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_pr_feedback_records(context_name="sellyouroutboard-testing")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(feedback_records[0].status, "pending")
+        self.assertIn("preview is waiting", payload["result"]["comment_markdown"])
+        self.assertIn("prerequisites are still in flight", payload["result"]["comment_markdown"])
+
     def test_preview_pr_feedback_endpoint_accepts_generic_destroy_grant(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

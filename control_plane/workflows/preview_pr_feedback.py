@@ -37,7 +37,14 @@ def _render_preview_pr_feedback_markdown(
     failure_summary: str,
 ) -> str:
     lines = [marker]
-    if status == "ready":
+    if status == "pending":
+        lines.extend(
+            [
+                f"Launchplane preview is waiting for PR #{anchor_pr_number}.",
+                "",
+            ]
+        )
+    elif status == "ready":
         lines.extend(
             [
                 f"Launchplane preview is ready for PR #{anchor_pr_number}.",
@@ -92,7 +99,15 @@ def _render_preview_pr_feedback_markdown(
     if failure_summary:
         lines.append(f"- Failure summary: {failure_summary}")
 
-    if status == "ready":
+    if status == "pending":
+        lines.extend(
+            [
+                "",
+                "Preview prerequisites are still in flight. Launchplane will replace this note "
+                "once the preview is ready or an actual preview failure is known.",
+            ]
+        )
+    elif status == "ready":
         lines.extend(
             [
                 "",

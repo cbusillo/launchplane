@@ -1878,6 +1878,7 @@ def _allows_preview_pr_feedback_write(
         return True
 
     lifecycle_actions_by_status = {
+        "pending": ("preview_refresh.execute",),
         "ready": ("preview_refresh.execute",),
         "failed": ("preview_refresh.execute",),
         "destroyed": ("preview_destroy.execute",),

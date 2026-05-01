@@ -529,8 +529,11 @@ report-only and destructive provider cleanup still requires explicit
 `apply=true` from an authorized GitHub Actions workflow. PR feedback goes
 through `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the
 anchored PR comment when runtime GitHub credentials are available, then records
-delivery status. Product repos remain thin adapters for labels, artifact build
-facts, and product-specific health/config hints.
+delivery status. Refresh-capable workflows can publish neutral pending feedback
+before preview publish/provision/verify outcomes are known, then replace it with
+ready or failed feedback after the actual result. Product repos remain thin
+adapters for labels, artifact build facts, and product-specific health/config
+hints.
 
 ### VeriReel Preview Evidence Handoff
 
