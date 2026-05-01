@@ -416,11 +416,17 @@ read-model contract documented in [driver-descriptors.md](driver-descriptors.md)
 - `GET /v1/drivers/{driver_id}`
 - `GET /v1/contexts/{context}/driver-view`
 - `GET /v1/contexts/{context}/instances/{instance}/driver-view`
+- `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200`
 
 They use action `driver.read`. Discovery authorizes against context
 `launchplane`; context and instance views authorize against the requested
 context. These routes expose Launchplane capabilities and repository-backed read
 state, not runtime-provider primitives.
+
+The logs route is the exception to the `driver.read` action because it reads live
+provider output. It uses action `target_logs.read`, resolves DB-backed tracked
+target records by context/instance, supports bounded Dokploy `application` logs,
+and redacts likely secret values before returning lines.
 
 The preview driver cut stays intentionally narrow but keeps topology in
 Launchplane: Launchplane owns preview URL derivation from the

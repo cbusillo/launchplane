@@ -76,6 +76,147 @@ def _seed_dokploy_target_records(
 
 
 class DokployConfigTests(unittest.TestCase):
+    def test_application_log_payload_normalization_redacts_likely_secrets(self) -> None:
+        lines = control_plane_dokploy.normalize_dokploy_log_payload(
+            {
+                "logs": [
+                    "started",
+                    "RESEND_API_KEY=re_123 Bearer abc.def SMTP_PASSWORD=smtp-secret",
+                ]
+            }
+        )
+
+        self.assertEqual(lines[0], "started")
+        self.assertIn("RESEND_API_KEY=[redacted]", lines[1])
+        self.assertIn("Bearer [redacted]", lines[1])
+        self.assertIn("SMTP_PASSWORD=[redacted]", lines[1])
+        self.assertNotIn("re_123", lines[1])
+        self.assertNotIn("smtp-secret", lines[1])
+
+    def test_fetch_application_logs_calls_dokploy_read_logs_endpoint(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        with patch(
+            "control_plane.dokploy.dokploy_request",
+            side_effect=lambda **kwargs: (
+                requests.append(kwargs) or {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
+            ),
+        ):
+            lines = control_plane_dokploy.fetch_dokploy_application_logs(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                application_id="app-123",
+                line_count=2,
+            )
+
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(requests[0]["path"], "/api/application.readLogs")
+        self.assertEqual(
+            requests[0]["query"], {"applicationId": "app-123", "tail": 2, "since": "all"}
+        )
+        self.assertEqual(lines, ("two", "THREE_TOKEN=[redacted]"))
+
+    def test_environments_logs_resolves_tracked_application_and_redacts_output(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "sellyouroutboard-testing"
+instance = "testing"
+target_id = "app-123"
+target_type = "application"
+target_name = "syo-testing-app"
+""",
+            )
+            store.close()
+
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    return_value=("started", "SMTP_PASSWORD=[redacted]"),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "logs",
+                        "--database-url",
+                        database_url,
+                        "--context",
+                        "sellyouroutboard-testing",
+                        "--instance",
+                        "testing",
+                        "--lines",
+                        "2",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["target"]["target_id"], "app-123")
+        self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
+        self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
+        self.assertEqual(payload["logs"]["lines"], ["started", "SMTP_PASSWORD=[redacted]"])
+        self.assertNotIn("secret-token", result.output)
+
+    def test_environments_logs_rejects_compose_targets(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            _seed_dokploy_target_records(
+                store=store,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "compose-123"
+target_type = "compose"
+target_name = "opw-testing"
+""",
+            )
+            store.close()
+
+            result = runner.invoke(
+                main,
+                [
+                    "environments",
+                    "logs",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("application targets only", result.output)
+
     def test_update_application_env_includes_empty_build_fields_when_missing(self) -> None:
         requests: list[dict[str, object]] = []
 

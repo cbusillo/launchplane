@@ -14,6 +14,10 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane.cli import main
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentDeleteEvent,
+    RuntimeEnvironmentRecord,
+)
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -474,6 +478,55 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertEqual(delete_events[0].actor, "operator@example.com")
         self.assertEqual(delete_events[0].env_keys, ("TAWK_PROPERTY_ID", "TAWK_WIDGET_ID"))
 
+    def test_environments_delete_record_apply_refuses_changed_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={},
+                    contexts={
+                        "sellyouroutboard": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "prod": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"TAWK_WIDGET_ID": "widget-123"}
+                                )
+                            },
+                        )
+                    },
+                ),
+                source_label="operator:mistake",
+            )
+
+            with patch.object(
+                PostgresRecordStore,
+                "delete_runtime_environment_record_with_event",
+                return_value="changed",
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "environments",
+                        "delete-record",
+                        "--database-url",
+                        database_url,
+                        "--scope",
+                        "instance",
+                        "--context",
+                        "sellyouroutboard",
+                        "--instance",
+                        "prod",
+                        "--apply",
+                    ],
+                )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("changed before delete could complete", result.output)
+
     def test_environments_delete_record_appends_audit_events_for_repeated_delete_shape(
         self,
     ) -> None:
@@ -534,6 +587,63 @@ class RuntimeEnvironmentTests(unittest.TestCase):
 
         self.assertEqual(len(delete_events), 2)
         self.assertNotEqual(delete_events[0].event_id, delete_events[1].event_id)
+
+    def test_delete_runtime_environment_record_refuses_changed_snapshot(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            expected_record = RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard",
+                instance="prod",
+                env={"TAWK_WIDGET_ID": "widget-123"},
+                updated_at="2026-04-22T00:00:00Z",
+                source_label="operator:mistake",
+            )
+            changed_record = RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard",
+                instance="prod",
+                env={"TAWK_PROPERTY_ID": "property-123"},
+                updated_at="2026-04-22T00:01:00Z",
+                source_label="operator:replacement",
+            )
+            stale_delete_event = RuntimeEnvironmentDeleteEvent(
+                event_id="runtime-env-delete-test",
+                recorded_at="2026-04-22T00:02:00Z",
+                actor="operator@example.com",
+                scope=expected_record.scope,
+                context=expected_record.context,
+                instance=expected_record.instance,
+                source_label=expected_record.source_label,
+                env_keys=tuple(sorted(expected_record.env.keys())),
+                env_value_count=len(expected_record.env),
+                detail="deleted by launchplane environments delete-record",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(expected_record)
+                store.write_runtime_environment_record(changed_record)
+
+                delete_status = store.delete_runtime_environment_record_with_event(
+                    event=stale_delete_event,
+                    expected_record=expected_record,
+                )
+
+                remaining_records = store.list_runtime_environment_records(
+                    scope="instance",
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+                delete_events = store.list_runtime_environment_delete_events()
+            finally:
+                store.close()
+
+        self.assertEqual(delete_status, "changed")
+        self.assertEqual(remaining_records, (changed_record,))
+        self.assertEqual(delete_events, ())
 
     def test_environments_delete_record_refuses_tracked_target_without_allow_flag(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

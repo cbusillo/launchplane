@@ -330,6 +330,15 @@ Current derived-state behavior:
   target-id records in steady state.
 - Dokploy source loading fails closed when target ids are missing, duplicate
   routes are present, or the tracked target records omit a required target id.
+- `environments logs --context <context> --instance <instance> --lines <n>`
+  resolves the DB-backed tracked Dokploy target and target id before fetching
+  bounded application logs. The first cut supports Dokploy `application`
+  targets, includes route/target/app/server metadata, accepts optional
+  `--since` and `--search`, and redacts likely secret values from returned log
+  lines.
+- `GET /v1/contexts/{context}/instances/{instance}/logs?lines=200` exposes the
+  same tracked-target log reader through the authenticated service API using
+  action `target_logs.read`.
 
 ## Runtime Environment Contracts
 
@@ -365,7 +374,9 @@ Current derived-state behavior:
   dry-run and apply responses include record identity, source label, update
   timestamp, key names, key count, actor, and delete-event metadata only. Apply
   refuses records that can affect a tracked Dokploy target unless
-  `--allow-tracked-target` is provided.
+  `--allow-tracked-target` is provided. Apply also fails closed if the target
+  record changes after the command reads it; re-run the command after reviewing
+  the current record.
 - `environments relabel` updates runtime-environment record source metadata
   without reading or printing plaintext values.
 - `environments list` shows DB-backed runtime-environment record metadata and
