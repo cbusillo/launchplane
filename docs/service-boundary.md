@@ -482,6 +482,11 @@ retries do not collide. The regular cleanup workflow uses
 - VeriReel prod promotion driver:
   `verireel-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>:<backup_record_id>:<promotion_record_id>:<expected_build_revision>:<expected_build_tag>`
 
+The VeriReel prod-promotion request may include the primitive testing-lane
+source health status. Launchplane normalizes that status and writes it into the
+driver-owned promotion record; product workflows should not post a second
+rendered promotion evidence payload for fields the driver can derive.
+
 Recommended first success shape:
 
 ```json

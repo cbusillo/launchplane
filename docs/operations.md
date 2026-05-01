@@ -241,7 +241,10 @@ Current derived-state behavior:
   `POST /v1/drivers/verireel/prod-deploy` trigger the shared testing and prod
   deploys, `POST /v1/drivers/verireel/prod-backup-gate` captures the prod
   backup gate and writes the backup-gate record, and the promotion / rollback
-  drivers own the remaining stable-lane execution path. VeriReel maintenance
+  drivers own the remaining stable-lane execution path. The prod-promotion
+  driver writes the promotion record from the backup gate, deploy result,
+  migration result, destination health check, and primitive testing-lane health
+  status sent by the product workflow. VeriReel maintenance
   operations that need Dokploy authority, such as testing migrations, preview
   owner-admin verification helpers, reset-testing, and preview inventory, also
   flow through Launchplane driver routes instead of product-repo workflow
