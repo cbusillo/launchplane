@@ -87,6 +87,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_record_store, resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.service_auth import load_authz_policy
+from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.workflows.launchplane import (
     adapt_github_webhook_pull_request_event,
     apply_generation_failed_transition,
@@ -11887,10 +11888,18 @@ def environments_delete_record(
             )
         event = _build_runtime_environment_delete_event(record=target_record, actor=actor)
         if apply_changes:
-            deleted_count = postgres_store.delete_runtime_environment_record_with_event(event=event)
-            if deleted_count != 1:
+            delete_status = postgres_store.delete_runtime_environment_record_with_event(
+                event=event,
+                expected_record=target_record,
+            )
+            if delete_status == "missing":
                 raise click.ClickException(
                     "Runtime environment record disappeared before delete could complete."
+                )
+            if delete_status == "changed":
+                raise click.ClickException(
+                    "Runtime environment record changed before delete could complete; "
+                    "re-run delete-record after reviewing the current record."
                 )
     finally:
         postgres_store.close()
@@ -12020,6 +12029,58 @@ def environments_show_live_target(context_name: str, instance_name: str) -> None
         instance_name=instance_name,
     )
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@environments.command("logs")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--lines",
+    "line_count",
+    type=int,
+    default=control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT,
+    show_default=True,
+)
+@click.option("--since", default="all", show_default=True)
+@click.option("--search", default="", show_default=False)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
+)
+def environments_logs(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    line_count: int,
+    since: str,
+    search: str,
+    control_plane_root: Path | None,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        try:
+            payload = build_tracked_target_logs_payload(
+                record_store=postgres_store,
+                control_plane_root=control_plane_root or _control_plane_root(),
+                context_name=context_name.strip(),
+                instance_name=instance_name.strip(),
+                line_count=line_count,
+                since=since,
+                search=search,
+            )
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps({"status": "ok", **payload}, indent=2, sort_keys=True))
 
 
 @main.group("dokploy-targets")

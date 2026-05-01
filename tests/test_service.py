@@ -22,6 +22,8 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -212,6 +214,41 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
+def _seed_tracked_target_records(
+    *,
+    database_url: str,
+    context: str,
+    instance: str,
+    target_id: str,
+    target_type: Literal["compose", "application"],
+    target_name: str,
+) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_dokploy_target_record(
+            DokployTargetRecord(
+                context=context,
+                instance=instance,
+                target_type=target_type,
+                target_name=target_name,
+                updated_at="2026-05-01T00:00:00Z",
+                source_label="test",
+            )
+        )
+        store.write_dokploy_target_id_record(
+            DokployTargetIdRecord(
+                context=context,
+                instance=instance,
+                target_id=target_id,
+                updated_at="2026-05-01T00:00:00Z",
+                source_label="test",
+            )
+        )
+    finally:
+        store.close()
+
+
 def _product_config_payload() -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -244,6 +281,7 @@ def _invoke_app(
     *,
     method: str,
     path: str,
+    query_string: str = "",
     payload: dict[str, object] | None = None,
     authorization: str = "Bearer valid-token",
     headers: dict[str, str] | None = None,
@@ -252,6 +290,7 @@ def _invoke_app(
     environ = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
+        "QUERY_STRING": query_string,
         "CONTENT_LENGTH": str(len(body_bytes)),
         "wsgi.input": io.BytesIO(body_bytes),
         "HTTP_AUTHORIZATION": authorization,
@@ -964,6 +1003,156 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 404)
         self.assertEqual(payload["error"]["code"], "not_found")
+
+    def test_tracked_target_logs_endpoint_returns_redacted_application_logs(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["target_logs.read"],
+                        }
+                    ]
+                }
+            )
+            with (
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "secret-token"),
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={"appName": "syo-testing-gfbiqh", "serverId": "server-1"},
+                ),
+                patch(
+                    "control_plane.tracked_target_logs.control_plane_dokploy.fetch_dokploy_application_logs",
+                    return_value=("ok", "RESEND_API_KEY=[redacted]"),
+                ) as logs_mock,
+            ):
+                app = create_launchplane_service_app(
+                    state_dir=root / "state",
+                    verifier=_StubVerifier(_identity()),
+                    authz_policy=policy,
+                    control_plane_root_path=root,
+                    database_url=database_url,
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
+                    query_string="lines=2&since=5m&search=contact",
+                )
+
+        self.assertEqual(status_code, 200)
+        logs_mock.assert_called_once_with(
+            host="https://dokploy.example.com",
+            token="secret-token",
+            application_id="app-123",
+            line_count=2,
+            since="5m",
+            search="contact",
+        )
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["target"]["target_name"], "syo-testing-app")
+        self.assertEqual(payload["target"]["app_name"], "syo-testing-gfbiqh")
+        self.assertEqual(payload["request"], {"line_count": 2, "since": "5m", "search": "contact"})
+        self.assertEqual(payload["logs"]["lines"], ["ok", "RESEND_API_KEY=[redacted]"])
+        self.assertNotIn("secret-token", json.dumps(payload))
+
+    def test_tracked_target_logs_endpoint_requires_authz_action(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-testing",
+                instance="testing",
+                target_id="app-123",
+                target_type="application",
+                target_name="syo-testing-app",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_tracked_target_logs_endpoint_requires_db_backed_storage(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["target_logs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/sellyouroutboard-testing/instances/testing/logs",
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "database_required")
 
     def test_product_profile_endpoints_round_trip_authorized_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
