@@ -270,6 +270,14 @@ Current derived-state behavior:
   values, override inputs, and managed secrets from DB-backed Launchplane
   records; tenant workflows should only send thin OIDC-authenticated requests
   and record returned IDs.
+- Generic web products can use the common
+  `POST /v1/drivers/generic-web/prod-promotion` route for testing-to-prod image
+  promotion when product-specific gates are not needed. The route resolves
+  product profile lanes, deploys the submitted image to the prod lane, records
+  source and destination health evidence, writes promotion/deployment linkage,
+  and refreshes prod inventory after a verified deploy. Product-specific
+  drivers can wrap this base path with stricter backup, migration, rollout, or
+  tenant checks instead of reimplementing the shared promotion record flow.
 
 ## Core Rules
 

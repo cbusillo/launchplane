@@ -380,6 +380,7 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
+- `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/...`
 
 The first explicit driver routes now in service are:
@@ -390,6 +391,7 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/odoo/prod-backup-gate`
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
+- `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/testing-deploy`
 - `POST /v1/drivers/verireel/testing-verification`
 - `POST /v1/drivers/verireel/stable-environment`
@@ -497,6 +499,8 @@ retries do not collide. The regular cleanup workflow uses
 - testing deployment evidence: `testing-deployment:<product>:<context>:<instance>:<record_id>`
 - prod deployment evidence: `prod-deployment:<product>:<context>:<instance>:<record_id>`
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
+- generic-web prod promotion driver:
+  `generic-web-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>`
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel testing verification driver:
