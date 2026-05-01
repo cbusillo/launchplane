@@ -136,3 +136,8 @@ When product-specific smoke checks still run in the product repo, keep the
 follow-up contract thin: the repo reports the primitive result facts, and the
 driver translates them into Launchplane records. Do not leave rendered evidence
 payload construction in the product repo.
+
+For example, VeriReel preview refresh writes the initial preview generation from
+the provider result, then the product repo reports only the product smoke result
+to `/v1/drivers/verireel/preview-verification`. Launchplane updates the latest
+preview generation to `ready` or `failed` and owns the durable record shape.

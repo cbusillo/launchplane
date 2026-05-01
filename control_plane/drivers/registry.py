@@ -377,6 +377,15 @@ VERIREEL_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/verireel/preview-destroy",
             writes_records=("preview", "preview_generation"),
         ),
+        _action(
+            "preview_verification",
+            "Record preview verification",
+            "Record VeriReel product smoke verification for the latest preview generation.",
+            safety="safe_write",
+            scope="preview",
+            route_path="/v1/drivers/verireel/preview-verification",
+            writes_records=("preview", "preview_generation"),
+        ),
     ),
     setting_groups=(
         DriverSettingGroupDescriptor(
