@@ -114,6 +114,7 @@ from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     build_preview_pr_feedback_record,
 )
+from control_plane.workflows.launchplane import find_preview_record
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceRequest,
     OdooArtifactPublishInputsRequest,
@@ -696,6 +697,44 @@ class VeriReelPreviewDestroyEnvelope(BaseModel):
     def _validate_alignment(self) -> "VeriReelPreviewDestroyEnvelope":
         if self.product.strip() != "verireel":
             raise ValueError("VeriReel preview destroy requires product 'verireel'.")
+        return self
+
+
+class VeriReelPreviewVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str = "verireel-testing"
+    anchor_repo: str = "verireel"
+    anchor_pr_number: int = Field(ge=1)
+    verification_status: str
+    verified_at: str
+    failure_summary: str = ""
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "VeriReelPreviewVerificationRequest":
+        if self.context != "verireel-testing":
+            raise ValueError("VeriReel preview verification requires context 'verireel-testing'.")
+        if self.anchor_repo != "verireel":
+            raise ValueError("VeriReel preview verification requires anchor_repo 'verireel'.")
+        if self.verification_status.strip() not in {"pass", "fail"}:
+            raise ValueError("VeriReel preview verification status must be 'pass' or 'fail'.")
+        if not self.verified_at.strip():
+            raise ValueError("VeriReel preview verification requires verified_at.")
+        return self
+
+
+class VeriReelPreviewVerificationEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    verification: VeriReelPreviewVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelPreviewVerificationEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel preview verification requires product 'verireel'.")
         return self
 
 
@@ -1590,6 +1629,75 @@ def _apply_verireel_preview_destroy_records(
         raise
 
 
+def _apply_verireel_preview_verification_records(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    request: VeriReelPreviewVerificationRequest,
+) -> dict[str, object]:
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    preview = find_preview_record(
+        record_store=typed_record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    if preview is None:
+        raise click.ClickException(
+            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
+        )
+    generation_id = preview.latest_generation_id or preview.active_generation_id
+    if not generation_id:
+        raise click.ClickException(
+            f"No Launchplane preview generation found for {preview.preview_id}."
+        )
+    generation = typed_record_store.read_preview_generation_record(generation_id)
+    verified_at = request.verified_at.strip()
+    verification_passed = request.verification_status.strip() == "pass"
+    failure_summary = request.failure_summary.strip() or "Preview E2E verification failed."
+    return apply_launchplane_generation_evidence(
+        control_plane_root_path=control_plane_root_path,
+        record_store=typed_record_store,
+        preview_request=PreviewMutationRequest(
+            context=preview.context,
+            anchor_repo=preview.anchor_repo,
+            anchor_pr_number=preview.anchor_pr_number,
+            anchor_pr_url=preview.anchor_pr_url,
+            canonical_url=preview.canonical_url,
+            state="active" if verification_passed else "failed",
+            created_at=preview.created_at,
+            updated_at=verified_at,
+            eligible_at=preview.eligible_at,
+        ),
+        generation_request=PreviewGenerationMutationRequest(
+            context=preview.context,
+            anchor_repo=preview.anchor_repo,
+            anchor_pr_number=preview.anchor_pr_number,
+            anchor_pr_url=preview.anchor_pr_url,
+            anchor_head_sha=generation.anchor_summary.head_sha,
+            sequence=generation.sequence,
+            generation_id=generation.generation_id,
+            state="ready" if verification_passed else "failed",
+            requested_reason=generation.requested_reason,
+            requested_at=generation.requested_at,
+            started_at=generation.started_at,
+            ready_at=verified_at if verification_passed else "",
+            finished_at=verified_at,
+            failed_at="" if verification_passed else verified_at,
+            resolved_manifest_fingerprint=generation.resolved_manifest_fingerprint,
+            artifact_id=generation.artifact_id,
+            baseline_release_tuple_id=generation.baseline_release_tuple_id,
+            source_map=generation.source_map,
+            companion_summaries=generation.companion_summaries,
+            deploy_status=generation.deploy_status,
+            verify_status="pass" if verification_passed else "fail",
+            overall_health_status="pass" if verification_passed else "fail",
+            failure_stage="" if verification_passed else "verify",
+            failure_summary="" if verification_passed else failure_summary,
+        ),
+    )
+
+
 def _allows_preview_pr_feedback_write(
     *,
     authz_policy: LaunchplaneAuthzPolicy,
@@ -1692,6 +1800,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/preview-refresh",
         "/v1/drivers/verireel/preview-inventory",
         "/v1/drivers/verireel/preview-destroy",
+        "/v1/drivers/verireel/preview-verification",
         "/v1/drivers/verireel/testing-deploy",
         "/v1/drivers/verireel/stable-environment",
         "/v1/drivers/verireel/app-maintenance",
@@ -3393,6 +3502,45 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=request.destroy,
                     driver_result=driver_result,
+                )
+            elif path == "/v1/drivers/verireel/preview-verification":
+                request = VeriReelPreviewVerificationEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="preview_generation.write",
+                    product=request.product,
+                    context=request.verification.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write VeriReel preview verification"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = _apply_verireel_preview_verification_records(
+                    control_plane_root_path=resolved_root,
+                    record_store=record_store,
+                    request=request.verification,
                 )
             elif path == "/v1/product-profiles":
                 request = LaunchplaneProductProfileRecord.model_validate(payload)

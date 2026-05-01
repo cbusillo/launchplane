@@ -5569,6 +5569,101 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(generation.failure_stage, "provision")
             self.assertEqual(generation.failure_summary, "Dokploy update failed.")
 
+    def test_verireel_preview_verification_driver_marks_latest_generation_ready(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    context="verireel-testing",
+                    anchor_repo="verireel",
+                    anchor_pr_number=123,
+                    anchor_pr_url="https://github.com/every/verireel/pull/123",
+                    preview_label="preview",
+                    canonical_url="https://pr-123.ver-preview.shinycomputers.com",
+                    state="pending",
+                    created_at="2026-04-21T01:30:00Z",
+                    updated_at="2026-04-21T01:34:00Z",
+                    eligible_at="2026-04-21T01:30:00Z",
+                    active_generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    latest_generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    latest_manifest_fingerprint="verireel-preview-manifest-pr-123-6b3c9d7",
+                )
+            )
+            store.write_preview_generation_record(
+                PreviewGenerationRecord(
+                    generation_id="preview-verireel-testing-verireel-pr-123-generation-0001",
+                    preview_id="preview-verireel-testing-verireel-pr-123",
+                    sequence=1,
+                    state="verifying",
+                    requested_reason="external_preview_refresh",
+                    requested_at="2026-04-21T01:30:00Z",
+                    started_at="2026-04-21T01:30:00Z",
+                    resolved_manifest_fingerprint="verireel-preview-manifest-pr-123-6b3c9d7",
+                    artifact_id="ghcr.io/every/verireel-app:pr-123-sha-6b3c9d7",
+                    anchor_summary=PreviewPullRequestSummary(
+                        repo="verireel",
+                        pr_number=123,
+                        head_sha="6b3c9d7e8f901234567890abcdef1234567890ab",
+                        pr_url="https://github.com/every/verireel/pull/123",
+                    ),
+                    deploy_status="pass",
+                    verify_status="pending",
+                    overall_health_status="pending",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["preview_generation.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/preview-verification",
+                payload={
+                    "product": "verireel",
+                    "verification": {
+                        "anchor_pr_number": 123,
+                        "verification_status": "pass",
+                        "verified_at": "2026-04-21T01:38:00Z",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["records"]["transition"], "ready")
+            preview = store.read_preview_record("preview-verireel-testing-verireel-pr-123")
+            generation = store.read_preview_generation_record(
+                "preview-verireel-testing-verireel-pr-123-generation-0001"
+            )
+            self.assertEqual(preview.state, "active")
+            self.assertEqual(preview.serving_generation_id, generation.generation_id)
+            self.assertEqual(generation.state, "ready")
+            self.assertEqual(generation.verify_status, "pass")
+            self.assertEqual(generation.overall_health_status, "pass")
+            self.assertEqual(generation.ready_at, "2026-04-21T01:38:00Z")
+
     def test_verireel_preview_destroy_driver_executes_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
