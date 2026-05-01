@@ -70,7 +70,10 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentDeleteEvent,
+    RuntimeEnvironmentRecord,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.launchplane_mutations import (
@@ -8657,6 +8660,114 @@ def _build_runtime_environment_record_for_relabel(
     )
 
 
+def _runtime_environment_delete_actor(actor: str) -> str:
+    return (
+        actor.strip()
+        or os.environ.get("GITHUB_ACTOR", "").strip()
+        or os.environ.get("USER", "").strip()
+        or os.environ.get("LOGNAME", "").strip()
+        or "unknown"
+    )
+
+
+def _runtime_environment_delete_event_id(
+    *,
+    record: RuntimeEnvironmentRecord,
+    actor: str,
+    recorded_at: str,
+    nonce: str,
+) -> str:
+    key_digest_input = "\n".join(
+        (
+            record.scope,
+            record.context,
+            record.instance,
+            record.updated_at,
+            record.source_label,
+            actor,
+            recorded_at,
+            nonce,
+            *sorted(record.env.keys()),
+        )
+    )
+    digest = hashlib.sha256(key_digest_input.encode("utf-8")).hexdigest()[:16]
+    return f"runtime-env-delete-{digest}"
+
+
+def _build_runtime_environment_delete_event(
+    *,
+    record: RuntimeEnvironmentRecord,
+    actor: str,
+) -> RuntimeEnvironmentDeleteEvent:
+    recorded_at = utc_now_timestamp()
+    normalized_actor = _runtime_environment_delete_actor(actor)
+    env_keys = tuple(sorted(record.env.keys()))
+    return RuntimeEnvironmentDeleteEvent(
+        event_id=_runtime_environment_delete_event_id(
+            record=record,
+            actor=normalized_actor,
+            recorded_at=recorded_at,
+            nonce=str(time.time_ns()),
+        ),
+        recorded_at=recorded_at,
+        actor=normalized_actor,
+        scope=record.scope,
+        context=record.context,
+        instance=record.instance,
+        source_label=record.source_label,
+        env_keys=env_keys,
+        env_value_count=len(env_keys),
+        detail="deleted by launchplane environments delete-record",
+    )
+
+
+def _summarize_runtime_environment_delete_event(
+    event: RuntimeEnvironmentDeleteEvent,
+) -> dict[str, object]:
+    return {
+        "event_id": event.event_id,
+        "event_type": event.event_type,
+        "recorded_at": event.recorded_at,
+        "actor": event.actor,
+        "scope": event.scope,
+        "context": event.context,
+        "instance": event.instance,
+        "source_label": event.source_label,
+        "env_keys": list(event.env_keys),
+        "env_value_count": event.env_value_count,
+        "detail": event.detail,
+    }
+
+
+def _protected_runtime_environment_delete_targets(
+    *,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    target_records: tuple[DokployTargetRecord, ...],
+) -> tuple[dict[str, object], ...]:
+    protected_targets: list[dict[str, object]] = []
+    for target_record in target_records:
+        if scope == "context" and target_record.context != context_name:
+            continue
+        if scope == "instance" and (
+            target_record.context != context_name or target_record.instance != instance_name
+        ):
+            continue
+        protected_targets.append(
+            {
+                "context": target_record.context,
+                "instance": target_record.instance,
+                "target_name": target_record.target_name,
+                "target_type": target_record.target_type,
+                "source_label": target_record.source_label,
+            }
+        )
+    return tuple(
+        sorted(protected_targets, key=lambda item: (str(item["context"]), str(item["instance"])))
+    )
+
+
 def _summarize_odoo_instance_override_record(
     record: OdooInstanceOverrideRecord,
 ) -> dict[str, object]:
@@ -11705,6 +11816,97 @@ def environments_unset(
                 "record": _summarize_runtime_environment_record(record),
                 "removed_keys": removed_keys,
                 "missing_keys": missing_keys,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@environments.command("delete-record")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane runtime-environment records.",
+)
+@click.option("--scope", type=click.Choice(["global", "context", "instance"]), required=True)
+@click.option("--context", "context_name", default="")
+@click.option("--instance", "instance_name", default="")
+@click.option("--actor", default="", show_default=False)
+@click.option("--allow-tracked-target", is_flag=True, default=False)
+@click.option("--dry-run", "dry_run", is_flag=True, default=False)
+@click.option("--apply", "apply_changes", is_flag=True, default=False)
+def environments_delete_record(
+    database_url: str,
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    actor: str,
+    allow_tracked_target: bool,
+    dry_run: bool,
+    apply_changes: bool,
+) -> None:
+    if dry_run == apply_changes:
+        raise click.ClickException("Choose exactly one of --dry-run or --apply.")
+    normalized_context = context_name.strip()
+    normalized_instance = instance_name.strip()
+    _validate_runtime_environment_scope_route(
+        scope=scope,
+        context_name=normalized_context,
+        instance_name=normalized_instance,
+    )
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        target_record = _find_runtime_environment_record(
+            existing_records=postgres_store.list_runtime_environment_records(),
+            scope=scope,
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+        )
+        if target_record is None:
+            raise click.ClickException(
+                "Missing DB-backed runtime environment record for the requested scope."
+            )
+        protected_targets = _protected_runtime_environment_delete_targets(
+            scope=scope,
+            context_name=normalized_context,
+            instance_name=normalized_instance,
+            target_records=postgres_store.list_dokploy_target_records(),
+        )
+        if apply_changes and protected_targets and not allow_tracked_target:
+            routes = ", ".join(
+                f"{target['context']}/{target['instance']}" for target in protected_targets
+            )
+            raise click.ClickException(
+                "Refusing to delete a runtime environment record that can affect tracked "
+                f"Dokploy target(s): {routes}. Re-run with --allow-tracked-target only "
+                "after confirming the tracked live target should lose this record."
+            )
+        event = _build_runtime_environment_delete_event(record=target_record, actor=actor)
+        if apply_changes:
+            deleted_count = postgres_store.delete_runtime_environment_record_with_event(event=event)
+            if deleted_count != 1:
+                raise click.ClickException(
+                    "Runtime environment record disappeared before delete could complete."
+                )
+    finally:
+        postgres_store.close()
+
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok" if apply_changes else "dry_run",
+                "action": "delete_runtime_environment_record",
+                "record": _summarize_runtime_environment_record(target_record),
+                "event": _summarize_runtime_environment_delete_event(event),
+                "protected_tracked_targets": protected_targets,
+                "requires_allow_tracked_target": bool(
+                    protected_targets and not allow_tracked_target
+                ),
+                "deleted": apply_changes,
             },
             indent=2,
             sort_keys=True,
