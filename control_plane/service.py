@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 from jwt import InvalidTokenError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import product_config as control_plane_product_config
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -88,6 +89,7 @@ from control_plane.service_human_auth import (
 )
 from control_plane.storage.factory import build_record_store, storage_backend_name
 from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
@@ -615,7 +617,9 @@ class VeriReelTestingVerificationRequest(BaseModel):
     verification_status: ReleaseStatus
     owner_routes_status: ReleaseStatus
 
-    @field_validator("migration_status", "verification_status", "owner_routes_status", mode="before")
+    @field_validator(
+        "migration_status", "verification_status", "owner_routes_status", mode="before"
+    )
     @classmethod
     def _normalize_status(cls, value: object) -> ReleaseStatus:
         return _normalize_release_status(value, label="Testing verification status")
@@ -895,6 +899,52 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         return self
 
 
+class ProductConfigApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    mode: str
+    product: str
+    context: str = ""
+    instance: str = ""
+    source_label: str = "product-config-api"
+    runtime_env: dict[str, object] | None = None
+    runtime_environment: dict[str, object] | None = None
+    secrets: list[dict[str, object]] = Field(default_factory=list)
+
+    @field_validator("mode")
+    @classmethod
+    def _validate_mode(cls, value: str) -> str:
+        normalized_value = value.strip().lower()
+        if normalized_value not in {"dry-run", "apply"}:
+            raise ValueError("Product config mode must be 'dry-run' or 'apply'.")
+        return normalized_value
+
+    @model_validator(mode="after")
+    def _validate_product(self) -> "ProductConfigApplyEnvelope":
+        self.product = self.product.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        self.source_label = self.source_label.strip() or "product-config-api"
+        if not self.product:
+            raise ValueError("Product config apply requires product.")
+        return self
+
+    def product_config_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "schema_version": self.schema_version,
+            "product": self.product,
+            "context": self.context,
+            "instance": self.instance,
+            "secrets": self.secrets,
+        }
+        if self.runtime_env is not None:
+            payload["runtime_env"] = self.runtime_env
+        if self.runtime_environment is not None:
+            payload["runtime_environment"] = self.runtime_environment
+        return payload
+
+
 def _json_response(
     *,
     start_response: Callable[[str, list[tuple[str, str]]], None],
@@ -1124,7 +1174,17 @@ def _idempotency_key(environ: dict[str, object]) -> str:
     return str(environ.get("HTTP_IDEMPOTENCY_KEY", "")).strip()
 
 
-def _idempotency_scope(identity) -> str:
+def _identity_actor(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return f"github:{identity.login}"
+    return (
+        f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
+    )
+
+
+def _idempotency_scope(identity: LaunchplaneIdentity) -> str:
+    if isinstance(identity, GitHubHumanIdentity):
+        return "|".join(("github-human", identity.login, str(identity.github_id)))
     workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
     return "|".join(
         (
@@ -1631,7 +1691,9 @@ def _apply_verireel_preview_refresh_records(
     request: VeriReelPreviewRefreshRequest,
     driver_result: VeriReelPreviewRefreshResult,
 ) -> dict[str, object]:
-    requested_at = driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
+    requested_at = (
+        driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
+    )
     finished_at = driver_result.refresh_finished_at.strip() or requested_at
     preview_url = driver_result.preview_url.strip() or request.preview_url.strip()
     refresh_passed = driver_result.refresh_status == "pass"
@@ -1819,9 +1881,7 @@ def _apply_verireel_testing_verification_records(
 ) -> dict[str, str]:
     typed_record_store = cast(FilesystemRecordStore, record_store)
     try:
-        deployment_record = typed_record_store.read_deployment_record(
-            request.deployment_record_id
-        )
+        deployment_record = typed_record_store.read_deployment_record(request.deployment_record_id)
     except FileNotFoundError as exc:
         raise click.ClickException(
             f"No Launchplane deployment record found for {request.deployment_record_id}."
@@ -1941,6 +2001,7 @@ def create_launchplane_service_app(
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
+        "/v1/product-config/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -2062,7 +2123,9 @@ def create_launchplane_service_app(
                     },
                 )
             except Exception:  # noqa: BLE001
-                _LOGGER.exception("GitHub OAuth callback failed", extra={"trace_id": request_trace_id})
+                _LOGGER.exception(
+                    "GitHub OAuth callback failed", extra={"trace_id": request_trace_id}
+                )
                 return _json_response(
                     start_response=start_response,
                     status_code=400,
@@ -2706,6 +2769,82 @@ def create_launchplane_service_app(
                     return idempotent_response
                 record_store.write_backup_gate_record(request.backup_gate)
                 result = {"backup_gate_record_id": request.backup_gate.record_id}
+            elif path == "/v1/product-config/apply":
+                request = ProductConfigApplyEnvelope.model_validate(payload)
+                action = (
+                    "product_config.apply" if request.mode == "apply" else "product_config.plan"
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action=action,
+                    product=request.product,
+                    context=request.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot plan or apply product config for the"
+                                    " requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Product config apply requires DB-backed Launchplane storage.",
+                            },
+                        },
+                    )
+                try:
+                    driver_result = control_plane_product_config.apply_product_config_bundle(
+                        record_store=record_store,
+                        payload=request.product_config_payload(),
+                        mode=cast(control_plane_product_config.ProductConfigMode, request.mode),
+                        actor=_identity_actor(identity),
+                        source_label=request.source_label,
+                    )
+                except control_plane_product_config.ProductConfigError as error:
+                    status_code = 400
+                    error_code = "invalid_request"
+                    if "LAUNCHPLANE_MASTER_ENCRYPTION_KEY" in str(error):
+                        status_code = 503
+                        error_code = "secret_configuration_required"
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=status_code,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": error_code,
+                                "message": str(error),
+                            },
+                        },
+                    )
             elif path == "/v1/drivers/launchplane/self-deploy":
                 request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
@@ -3373,7 +3512,7 @@ def create_launchplane_service_app(
                                 ),
                             },
                         },
-                )
+                    )
                 driver_result = resolve_verireel_stable_environment(
                     control_plane_root=resolved_root,
                     request=request.environment,
@@ -4206,7 +4345,9 @@ def create_launchplane_service_app(
                 },
             )
         except Exception:  # noqa: BLE001
-            _LOGGER.exception("Unexpected Launchplane service error", extra={"trace_id": request_trace_id})
+            _LOGGER.exception(
+                "Unexpected Launchplane service error", extra={"trace_id": request_trace_id}
+            )
             return _json_response(
                 start_response=start_response,
                 status_code=500,
