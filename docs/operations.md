@@ -355,6 +355,9 @@ Current derived-state behavior:
   route rejects nested runtime or secret targets that differ from the authorized
   top-level context/instance. It fails closed when secret writes are requested
   without the Launchplane master encryption key in the service runtime.
+- The operator UI uses the same service route. It requires a successful dry-run
+  result before enabling apply, clears rendered secret input values after each
+  submit, and shows only key/action/count metadata from Launchplane responses.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
 - `environments relabel` updates runtime-environment record source metadata
