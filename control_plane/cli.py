@@ -8490,6 +8490,266 @@ def _build_runtime_environment_record_for_relabel(
     )
 
 
+def _load_product_config_apply_payload(input_file: Path) -> dict[str, object]:
+    try:
+        payload = json.loads(input_file.read_text(encoding="utf-8"))
+    except FileNotFoundError as error:
+        raise click.ClickException(f"Product config input file {input_file} was not found.") from error
+    except JSONDecodeError as error:
+        raise click.ClickException(
+            f"Product config input file {input_file} is not valid JSON: {error}"
+        ) from error
+    if not isinstance(payload, dict):
+        raise click.ClickException("Product config input file must contain a JSON object.")
+    schema_version = payload.get("schema_version", 1)
+    if schema_version != 1:
+        raise click.ClickException("Product config input schema_version must be 1.")
+    return payload
+
+
+def _product_config_required_text(
+    payload: dict[str, object], key: str, *, default: str = ""
+) -> str:
+    value = str(payload.get(key, default) or "").strip()
+    if not value:
+        raise click.ClickException(f"Product config input requires {key!r}.")
+    return value
+
+
+def _product_config_optional_text(payload: dict[str, object], key: str) -> str:
+    return str(payload.get(key, "") or "").strip()
+
+
+def _default_runtime_scope(*, context_name: str, instance_name: str) -> str:
+    if instance_name:
+        return "instance"
+    if context_name:
+        return "context"
+    return "global"
+
+
+def _default_secret_scope(*, context_name: str, instance_name: str) -> str:
+    if instance_name:
+        return "context_instance"
+    if context_name:
+        return "context"
+    return "global"
+
+
+def _product_config_runtime_input(
+    payload: dict[str, object], *, context_name: str, instance_name: str
+) -> dict[str, object]:
+    runtime_payload = payload.get("runtime_env", payload.get("runtime_environment", {}))
+    if runtime_payload is None:
+        return {"scope": _default_runtime_scope(context_name=context_name, instance_name=instance_name), "env": {}}
+    if not isinstance(runtime_payload, dict):
+        raise click.ClickException("Product config runtime_env must be a JSON object.")
+    if "env" in runtime_payload:
+        raw_env = runtime_payload.get("env")
+        if raw_env is None:
+            raw_env = {}
+        if not isinstance(raw_env, dict):
+            raise click.ClickException("Product config runtime_env.env must be a JSON object.")
+    else:
+        raw_env = {
+            key: value
+            for key, value in runtime_payload.items()
+            if key not in {"scope", "context", "instance"}
+        }
+    scope = str(
+        runtime_payload.get(
+            "scope", _default_runtime_scope(context_name=context_name, instance_name=instance_name)
+        )
+        or ""
+    ).strip()
+    return {
+        "scope": scope,
+        "context": str(runtime_payload.get("context", context_name) or "").strip(),
+        "instance": str(runtime_payload.get("instance", instance_name) or "").strip(),
+        "env": raw_env,
+    }
+
+
+def _normalize_product_config_runtime_env(raw_env: dict[object, object]) -> dict[str, object]:
+    env: dict[str, object] = {}
+    for raw_key, raw_value in raw_env.items():
+        if not isinstance(raw_key, str):
+            raise click.ClickException("Product config runtime env keys must be strings.")
+        key_name = _normalize_runtime_environment_key(raw_key)
+        if _runtime_environment_key_requires_secret_store(key_name):
+            raise click.ClickException(
+                f"Runtime environment key {key_name!r} must be written as a managed secret."
+            )
+        if not isinstance(raw_value, (str, int, float, bool)):
+            raise click.ClickException(
+                f"Product config runtime env value for {key_name!r} must be a scalar."
+            )
+        env[key_name] = raw_value
+    return env
+
+
+def _product_config_secret_inputs(
+    payload: dict[str, object], *, context_name: str, instance_name: str
+) -> tuple[dict[str, object], ...]:
+    raw_secrets = payload.get("secrets", ())
+    if raw_secrets is None:
+        return ()
+    if not isinstance(raw_secrets, list):
+        raise click.ClickException("Product config secrets must be a JSON array.")
+    normalized: list[dict[str, object]] = []
+    for index, raw_secret in enumerate(raw_secrets, start=1):
+        if not isinstance(raw_secret, dict):
+            raise click.ClickException(f"Product config secret #{index} must be a JSON object.")
+        binding_key = str(raw_secret.get("binding_key", raw_secret.get("name", "")) or "").strip()
+        name = str(raw_secret.get("name", binding_key) or "").strip()
+        plaintext_value = raw_secret.get("value")
+        if not binding_key:
+            raise click.ClickException(f"Product config secret #{index} requires binding_key.")
+        if not name:
+            raise click.ClickException(f"Product config secret #{index} requires name.")
+        if not isinstance(plaintext_value, str) or not plaintext_value.strip():
+            raise click.ClickException(f"Product config secret #{index} requires a non-empty value.")
+        normalized.append(
+            {
+                "scope": str(
+                    raw_secret.get(
+                        "scope",
+                        _default_secret_scope(context_name=context_name, instance_name=instance_name),
+                    )
+                    or ""
+                ).strip(),
+                "integration": str(
+                    raw_secret.get(
+                        "integration",
+                        control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    )
+                    or ""
+                ).strip(),
+                "name": name,
+                "binding_key": binding_key,
+                "value": plaintext_value,
+                "context": str(raw_secret.get("context", context_name) or "").strip(),
+                "instance": str(raw_secret.get("instance", instance_name) or "").strip(),
+                "description": str(raw_secret.get("description", "") or "").strip(),
+            }
+        )
+    return tuple(normalized)
+
+
+def _require_product_config_master_key_if_needed(secrets: tuple[dict[str, object], ...]) -> None:
+    if not secrets:
+        return
+    if not any(os.environ.get(key, "").strip() for key in _MASTER_ENCRYPTION_KEY_ENV_KEYS):
+        expected_keys = " or ".join(_MASTER_ENCRYPTION_KEY_ENV_KEYS)
+        raise click.ClickException(
+            f"Product config secrets require {expected_keys} in the trusted Launchplane context."
+        )
+
+
+def _product_config_secret_current_action(
+    *, record_store: PostgresRecordStore, secret: dict[str, object]
+) -> tuple[str, str]:
+    existing_record = record_store.find_secret_record(
+        scope=str(secret["scope"]),
+        integration=str(secret["integration"]),
+        name=str(secret["name"]),
+        context=str(secret["context"]),
+        instance=str(secret["instance"]),
+    )
+    if existing_record is None:
+        return "created", ""
+    current_version = record_store.read_secret_version(existing_record.current_version_id)
+    if control_plane_secrets._decrypt_secret_value(current_version.ciphertext) == str(secret["value"]):
+        return "unchanged", existing_record.secret_id
+    return "rotated", existing_record.secret_id
+
+
+def _summarize_product_config_secret_input(
+    *, action: str, secret: dict[str, object], secret_id: str = ""
+) -> dict[str, object]:
+    summary = {
+        "action": action,
+        "scope": secret["scope"],
+        "integration": secret["integration"],
+        "name": secret["name"],
+        "binding_key": secret["binding_key"],
+        "context": secret["context"],
+        "instance": secret["instance"],
+    }
+    if secret_id:
+        summary["secret_id"] = secret_id
+    return summary
+
+
+def _plan_product_config_runtime_environment(
+    *,
+    existing_records: tuple[RuntimeEnvironmentRecord, ...],
+    scope: str,
+    context_name: str,
+    instance_name: str,
+    env: dict[str, object],
+    source_label: str,
+) -> tuple[RuntimeEnvironmentRecord | None, dict[str, object]]:
+    _validate_runtime_environment_scope_route(
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    target_record = _find_runtime_environment_record(
+        existing_records=existing_records,
+        scope=scope,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    if not env:
+        return (
+            None,
+            {
+                "action": "skipped",
+                "scope": scope,
+                "context": context_name,
+                "instance": instance_name,
+                "keys": [],
+                "changed_keys": [],
+                "unchanged_keys": [],
+                "env_value_count_after": len(target_record.env) if target_record is not None else 0,
+            },
+        )
+    current_values = dict(target_record.env) if target_record is not None else {}
+    changed_keys = sorted(
+        key_name
+        for key_name, value in env.items()
+        if key_name not in current_values or str(current_values[key_name]) != str(value)
+    )
+    unchanged_keys = sorted(key_name for key_name in env if key_name not in changed_keys)
+    action = "created" if target_record is None else "updated"
+    if not changed_keys:
+        action = "unchanged"
+    planned_values = dict(current_values)
+    planned_values.update(env)
+    planned_record = RuntimeEnvironmentRecord(
+        scope=scope,
+        context=context_name,
+        instance=instance_name,
+        env=planned_values,
+        updated_at=utc_now_timestamp(),
+        source_label=source_label.strip() or "product-config-apply",
+    )
+    return (
+        planned_record,
+        {
+            "action": action,
+            "scope": scope,
+            "context": context_name,
+            "instance": instance_name,
+            "keys": sorted(env),
+            "changed_keys": changed_keys,
+            "unchanged_keys": unchanged_keys,
+            "env_value_count_after": len(planned_values),
+        },
+    )
+
+
 def _summarize_odoo_instance_override_record(
     record: OdooInstanceOverrideRecord,
 ) -> dict[str, object]:
@@ -9051,6 +9311,132 @@ def storage() -> None:
 @main.group()
 def secrets() -> None:
     """Launchplane managed secret commands."""
+
+
+@main.group("product-config")
+def product_config() -> None:
+    """Trusted product runtime config apply commands."""
+
+
+@product_config.command("apply")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string from a trusted Launchplane context.",
+)
+@click.option(
+    "--input-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Operator-approved JSON bundle containing runtime_env and secrets.",
+)
+@click.option("--actor", default="cli", show_default=True)
+@click.option("--source-label", default="product-config-apply", show_default=True)
+@click.option("--dry-run", "dry_run", is_flag=True, default=False)
+@click.option("--apply", "apply_changes", is_flag=True, default=False)
+def product_config_apply(
+    database_url: str,
+    input_file: Path,
+    actor: str,
+    source_label: str,
+    dry_run: bool,
+    apply_changes: bool,
+) -> None:
+    if dry_run == apply_changes:
+        raise click.ClickException("Choose exactly one of --dry-run or --apply.")
+
+    payload = _load_product_config_apply_payload(input_file)
+    product = _product_config_required_text(payload, "product")
+    context_name = _product_config_optional_text(payload, "context")
+    instance_name = _product_config_optional_text(payload, "instance")
+    runtime_input = _product_config_runtime_input(
+        payload,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    runtime_env = _normalize_product_config_runtime_env(runtime_input["env"])  # type: ignore[arg-type]
+    secrets = _product_config_secret_inputs(
+        payload,
+        context_name=context_name,
+        instance_name=instance_name,
+    )
+    _require_product_config_master_key_if_needed(secrets)
+
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        runtime_record, runtime_summary = _plan_product_config_runtime_environment(
+            existing_records=postgres_store.list_runtime_environment_records(),
+            scope=str(runtime_input["scope"]),
+            context_name=str(runtime_input["context"]),
+            instance_name=str(runtime_input["instance"]),
+            env=runtime_env,
+            source_label=source_label,
+        )
+        secret_summaries: list[dict[str, object]] = []
+        for secret in secrets:
+            planned_action, existing_secret_id = _product_config_secret_current_action(
+                record_store=postgres_store,
+                secret=secret,
+            )
+            if apply_changes:
+                result = control_plane_secrets.write_secret_value(
+                    record_store=postgres_store,
+                    scope=str(secret["scope"]),
+                    integration=str(secret["integration"]),
+                    name=str(secret["name"]),
+                    plaintext_value=str(secret["value"]),
+                    binding_key=str(secret["binding_key"]),
+                    context_name=str(secret["context"]),
+                    instance_name=str(secret["instance"]),
+                    description=str(secret["description"]),
+                    actor=actor,
+                    source_label=source_label,
+                )
+                secret_summaries.append(
+                    _summarize_product_config_secret_input(
+                        action=str(result["action"]),
+                        secret=secret,
+                        secret_id=str(result["secret_id"]),
+                    )
+                )
+                continue
+            secret_summaries.append(
+                _summarize_product_config_secret_input(
+                    action=planned_action,
+                    secret=secret,
+                    secret_id=existing_secret_id,
+                )
+            )
+        if apply_changes and runtime_record is not None and runtime_summary["action"] != "unchanged":
+            postgres_store.write_runtime_environment_record(runtime_record)
+            runtime_summary = {
+                **runtime_summary,
+                "record": _summarize_runtime_environment_record(runtime_record),
+            }
+    finally:
+        postgres_store.close()
+
+    changed_secret_count = sum(
+        1 for item in secret_summaries if item["action"] in {"created", "rotated"}
+    )
+    payload = {
+        "status": "ok",
+        "mode": "apply" if apply_changes else "dry-run",
+        "product": product,
+        "context": context_name,
+        "instance": instance_name,
+        "actor": actor,
+        "source_label": source_label,
+        "runtime_environment": runtime_summary,
+        "secrets": secret_summaries,
+        "summary": {
+            "runtime_changed_key_count": len(runtime_summary.get("changed_keys", [])),
+            "secret_change_count": changed_secret_count,
+        },
+    }
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @storage.command("import-core-records")
