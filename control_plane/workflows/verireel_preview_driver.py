@@ -493,6 +493,7 @@ def _configure_application(
     application_id = str(application.get("applicationId") or "").strip()
     if not application_id:
         raise click.ClickException("Preview application payload is missing applicationId.")
+    endpoint_spec = template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
     control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -504,7 +505,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": template_application.get("endpointSpecSwarm"),
+            "endpointSpecSwarm": endpoint_spec,
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),
