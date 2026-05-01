@@ -63,6 +63,11 @@ should stabilize before Launchplane adds writable driver metadata. Product and
 lane configuration still belongs in DB-backed Launchplane records, not in
 repo-local Launchplane TOML manifests.
 
+For guidance on adding a new driver type or product-specific driver, see
+[driver-development.md](driver-development.md). For the expected shape of a
+product repo that calls a driver, see
+[product-repo-contract.md](product-repo-contract.md).
+
 ## Read Endpoints
 
 All endpoints are authenticated and use action `driver.read`.

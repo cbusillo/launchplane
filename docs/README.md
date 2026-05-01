@@ -9,8 +9,14 @@ Use these docs as the source of truth for `launchplane`.
   and the fallback-removal target.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
   OIDC trust, and first API contracts.
+- [new-product-repo.md](new-product-repo.md) — checklist for building a new
+  website or service repo operated by Launchplane.
+- [product-repo-contract.md](product-repo-contract.md) — thin product repo
+  approval gate and new website repo checklist.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
+- [driver-development.md](driver-development.md) — when and how to add a new
+  Launchplane driver type or product driver.
 - [compatibility-retirement.md](compatibility-retirement.md) — checkpoints for
   deleting or demoting local CLI/file-backed compatibility surfaces.
 - [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
