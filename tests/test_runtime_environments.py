@@ -814,6 +814,166 @@ ODOO_DB_PASSWORD = "file-secret"
             finally:
                 store.close()
 
+    def test_product_config_apply_rejects_runtime_route_that_differs_from_top_level(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                        "runtime_env": {
+                            "context": "other-context",
+                            "instance": "prod",
+                            "env": {"CONTACT_EMAIL_MODE": "smtp"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "product-config",
+                    "apply",
+                    "--database-url",
+                    database_url,
+                    "--input-file",
+                    str(input_file),
+                    "--dry-run",
+                ],
+            )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("runtime_env target must match the top-level target", result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                self.assertEqual(store.list_runtime_environment_records(), ())
+            finally:
+                store.close()
+
+    def test_product_config_apply_rejects_secret_route_that_differs_from_top_level(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                        "runtime_env": {},
+                        "secrets": [
+                            {
+                                "scope": "context_instance",
+                                "name": "smtp-password",
+                                "binding_key": "SMTP_PASSWORD",
+                                "value": "smtp-secret-value",
+                                "context": "other-context",
+                                "instance": "prod",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--database-url",
+                        database_url,
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("secret #1 target must match the top-level target", result.output)
+            self.assertNotIn("smtp-secret-value", result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                self.assertEqual(store.list_secret_records(), ())
+            finally:
+                store.close()
+
+    def test_product_config_apply_rejects_invalid_secret_scope_before_writes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "runtime_env": {},
+                        "secrets": [
+                            {
+                                "scope": "global",
+                                "name": "valid-secret",
+                                "binding_key": "VALID_SECRET",
+                                "value": "first-secret-value",
+                            },
+                            {
+                                "scope": "not-a-scope",
+                                "name": "invalid-secret",
+                                "binding_key": "INVALID_SECRET",
+                                "value": "second-secret-value",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--database-url",
+                        database_url,
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("unsupported scope 'not-a-scope'", result.output)
+            self.assertNotIn("first-secret-value", result.output)
+            self.assertNotIn("second-secret-value", result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                self.assertEqual(store.list_secret_records(), ())
+                self.assertEqual(store.list_secret_bindings(limit=None), ())
+            finally:
+                store.close()
+
     def test_product_config_apply_requires_master_key_for_secrets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)

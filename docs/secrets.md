@@ -93,7 +93,9 @@ title: Secrets
   values or writing records. `--apply` writes non-secret runtime keys and
   managed secret values through the same DB-backed stores. Run this command only
   from a trusted Launchplane context with current `LAUNCHPLANE_DATABASE_URL` and,
-  when secrets are present, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+  when secrets are present, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Dry-run and
+  apply both reject invalid secret scopes or scope/context/instance mismatches
+  before any managed secret write starts.
 - `uv run launchplane environments unset --scope <scope> --key KEY` removes
   stale keys from DB-backed runtime-environment records without reading or
   printing plaintext values.
