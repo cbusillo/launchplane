@@ -183,6 +183,18 @@ def _github_oauth_config() -> GitHubOAuthConfig:
     )
 
 
+def _signed_in_cookie(app) -> str:
+    _, login_headers, _ = _invoke_raw_app(app, method="GET", path="/auth/github/login")
+    state = parse_qs(urlparse(login_headers["Location"]).query)["state"][0]
+    _, callback_headers, _ = _invoke_raw_app(
+        app,
+        method="GET",
+        path="/auth/github/callback",
+        query_string=f"code=github-code&state={state}",
+    )
+    return callback_headers["Set-Cookie"]
+
+
 def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, object]:
     return {
         "schema_version": 1,
@@ -1957,6 +1969,179 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_human_session_can_dry_run_generic_web_prod_promotion(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            with patch(
+                "control_plane.service.execute_generic_web_prod_promotion",
+                return_value=GenericWebProdPromotionResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    from_instance="testing",
+                    to_instance="prod",
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    promotion_record_id="promotion-syo-testing-to-prod",
+                    deployment_record_id="",
+                    inventory_record_id="",
+                    promotion_status="pending",
+                    deployment_status="skipped",
+                    backup_status="skipped",
+                    source_health_status="pending",
+                    destination_health_status="pending",
+                    dry_run=True,
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "promotion": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                            "dry_run": True,
+                        },
+                    },
+                    authorization="",
+                    headers={"Cookie": cookie},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["result"]["dry_run"])
+        self.assertEqual(payload["result"]["deployment_status"], "skipped")
+        self.assertEqual(payload["records"]["deployment_record_id"], "")
+        self.assertEqual(payload["records"]["inventory_record_id"], "")
+        execute_mock.assert_called_once()
+
+    def test_human_session_cannot_live_execute_generic_web_prod_promotion(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "promotion": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                        "source_git_ref": "abc123",
+                        "dry_run": False,
+                    },
+                },
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_generic_web_product_profile_appears_in_driver_view(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/sellyouroutboard-testing/instances/prod/driver-view",
+            )
+
+        self.assertEqual(status_code, 200)
+        driver = payload["view"]["drivers"][0]
+        self.assertEqual(driver["driver_id"], "sellyouroutboard")
+        self.assertEqual(driver["descriptor"]["base_driver_id"], "generic-web")
+        self.assertEqual(driver["descriptor"]["product"], "sellyouroutboard")
+        self.assertEqual(driver["available_actions"][1]["route_path"], "/v1/drivers/generic-web/prod-promotion")
 
     def test_generic_web_preview_desired_state_route_uses_profile_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

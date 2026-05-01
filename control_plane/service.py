@@ -2283,10 +2283,17 @@ def create_launchplane_service_app(
                     session_manager=session_manager,
                 )
             else:
-                token = _bearer_token(environ)
-                identity = verifier.verify(token)
-                if not isinstance(identity, GitHubActionsIdentity):
-                    raise PermissionError("Mutation routes require GitHub Actions OIDC.")
+                if path == "/v1/drivers/generic-web/prod-promotion":
+                    identity = _read_identity(
+                        environ=environ,
+                        verifier=verifier,
+                        session_manager=session_manager,
+                    )
+                else:
+                    token = _bearer_token(environ)
+                    identity = verifier.verify(token)
+                    if not isinstance(identity, GitHubActionsIdentity):
+                        raise PermissionError("Mutation routes require GitHub Actions OIDC.")
             if method == "GET":
                 assert read_route is not None
                 action, params = read_route
@@ -3028,6 +3035,19 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=request.promotion,
                 )
+                if isinstance(identity, GitHubHumanIdentity) and not request.promotion.dry_run:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Launchplane UI can only dry-run generic-web prod promotions.",
+                            },
+                        },
+                    )
                 if not authz_policy.allows(
                     identity=identity,
                     action="generic_web_prod_promotion.execute",
@@ -3074,6 +3094,8 @@ def create_launchplane_service_app(
                     "deployment_status": driver_result.deployment_status,
                     "source_health_status": driver_result.source_health_status,
                     "destination_health_status": driver_result.destination_health_status,
+                    "backup_status": driver_result.backup_status,
+                    "dry_run": driver_result.dry_run,
                 }
             elif path == "/v1/drivers/generic-web/preview-desired-state":
                 request = GenericWebPreviewDesiredStateEnvelope.model_validate(payload)

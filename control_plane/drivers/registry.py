@@ -15,6 +15,7 @@ from control_plane.contracts.driver_descriptor import (
     DriverSettingGroupDescriptor,
     DriverView,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 
@@ -452,6 +453,52 @@ def _driver_matches_context(*, descriptor: DriverDescriptor, context_name: str) 
     return any(fnmatchcase(normalized_context, pattern) for pattern in descriptor.context_patterns)
 
 
+def _product_profile_lanes(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
+    contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
+    if profile.preview.enabled and profile.preview.context.strip():
+        contexts.add(profile.preview.context.strip())
+    return tuple(sorted(contexts))
+
+
+def _product_profile_matches_context(
+    *, profile: LaunchplaneProductProfileRecord, context_name: str
+) -> bool:
+    normalized_context = context_name.strip()
+    return normalized_context in _product_profile_lanes(profile)
+
+
+def _descriptor_for_product_profile(
+    *, descriptor: DriverDescriptor, profile: LaunchplaneProductProfileRecord
+) -> DriverDescriptor:
+    return descriptor.model_copy(
+        update={
+            "driver_id": profile.product,
+            "base_driver_id": descriptor.driver_id,
+            "label": profile.display_name,
+            "product": profile.product,
+            "description": f"{profile.display_name} generic-web lifecycle.",
+            "context_patterns": _product_profile_lanes(profile),
+        }
+    )
+
+
+def _product_profile_descriptors(
+    *, record_store: object, descriptor: DriverDescriptor, context_name: str
+) -> tuple[DriverDescriptor, ...]:
+    list_profiles = getattr(record_store, "list_product_profile_records", None)
+    if not callable(list_profiles):
+        return ()
+    try:
+        profiles = list_profiles(driver_id=descriptor.driver_id)
+    except FileNotFoundError:
+        return ()
+    return tuple(
+        _descriptor_for_product_profile(descriptor=descriptor, profile=profile)
+        for profile in profiles
+        if _product_profile_matches_context(profile=profile, context_name=context_name)
+    )
+
+
 def _optional_call(method: Any, **kwargs: object) -> object | None:
     try:
         return method(**kwargs)
@@ -736,34 +783,44 @@ def build_driver_context_view(
 ) -> DriverContextView:
     drivers: list[DriverView] = []
     for descriptor in _DESCRIPTORS:
-        if not _driver_matches_context(descriptor=descriptor, context_name=context_name):
-            continue
-        lane_summary = _read_lane_summary(
-            record_store=record_store,
-            context_name=context_name,
-            instance_name=instance_name,
-        )
-        preview_summaries = ()
-        if _driver_exposes_preview_inventory(descriptor):
-            preview_summaries = _list_preview_summaries(
+        matched_descriptors: tuple[DriverDescriptor, ...]
+        if _driver_matches_context(descriptor=descriptor, context_name=context_name):
+            matched_descriptors = (descriptor,)
+        else:
+            matched_descriptors = _product_profile_descriptors(
                 record_store=record_store,
-                context_name=context_name,
-            )
-        preview_inventory_provenance = None
-        if _driver_exposes_preview_inventory(descriptor):
-            preview_inventory_provenance = _preview_inventory_provenance(
-                record_store=record_store,
-                context_name=context_name,
-                preview_summaries=preview_summaries,
-            )
-        drivers.append(
-            DriverView(
-                driver_id=descriptor.driver_id,
                 descriptor=descriptor,
-                available_actions=descriptor.actions,
-                lane_summary=lane_summary,
-                preview_summaries=preview_summaries,
-                preview_inventory_provenance=preview_inventory_provenance,
+                context_name=context_name,
             )
-        )
+        if not matched_descriptors:
+            continue
+        for matched_descriptor in matched_descriptors:
+            lane_summary = _read_lane_summary(
+                record_store=record_store,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+            preview_summaries: tuple[LaunchplanePreviewSummary, ...] = ()
+            if _driver_exposes_preview_inventory(matched_descriptor):
+                preview_summaries = _list_preview_summaries(
+                    record_store=record_store,
+                    context_name=context_name,
+                )
+            preview_inventory_provenance = None
+            if _driver_exposes_preview_inventory(matched_descriptor):
+                preview_inventory_provenance = _preview_inventory_provenance(
+                    record_store=record_store,
+                    context_name=context_name,
+                    preview_summaries=preview_summaries,
+                )
+            drivers.append(
+                DriverView(
+                    driver_id=matched_descriptor.driver_id,
+                    descriptor=matched_descriptor,
+                    available_actions=matched_descriptor.actions,
+                    lane_summary=lane_summary,
+                    preview_summaries=preview_summaries,
+                    preview_inventory_provenance=preview_inventory_provenance,
+                )
+            )
     return DriverContextView(context=context_name, instance=instance_name, drivers=tuple(drivers))

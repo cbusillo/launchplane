@@ -19,12 +19,22 @@ import {
   ShieldAlert,
   ShieldCheck,
   Sun,
+  Send,
   TerminalSquare,
   Trash2,
-  XCircle
+  XCircle,
 } from "lucide-react";
 import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
-import { LaunchplaneApiError, applyProductConfig, listDrivers, logout, readAuthSession, readDriverView } from "./api";
+import {
+  LaunchplaneApiError,
+  applyProductConfig,
+  dryRunGenericWebProdPromotion,
+  listDrivers,
+  listProductProfiles,
+  logout,
+  readAuthSession,
+  readDriverView,
+} from "./api";
 import type {
   AuthIdentity,
   DataProvenance,
@@ -32,15 +42,18 @@ import type {
   DriverContextView,
   DriverDescriptor,
   DriverView,
+  GenericWebProdPromotionPayload,
+  GenericWebProdPromotionRequest,
   LaneSummary,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductProfileRecord,
   ProductConfigRuntimeScope,
   ProductConfigSecretScope,
   PreviewSummary,
   Safety,
   Status,
-  FreshnessStatus
+  FreshnessStatus,
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -96,30 +109,50 @@ type SecretConfigRow = {
 
 const THEME_STORAGE_KEY = "launchplane.theme";
 const DEFAULT_CHOICES: DriverChoice[] = [
+  {
+    driverId: "sellyouroutboard",
+    context: "sellyouroutboard-testing",
+    label: "Sell Your Outboard",
+  },
   { driverId: "verireel", context: "verireel", label: "VeriReel" },
-  { driverId: "odoo", context: "opw", label: "Odoo" }
+  { driverId: "odoo", context: "opw", label: "Odoo" },
 ];
 const FIXTURE_ACTIONS: DriverActionDescriptor[] = [
   {
     action_id: "prod_backup_gate",
     label: "Capture prod backup gate",
-    description: "Capture concrete backup evidence before a prod-changing action.",
+    description:
+      "Capture concrete backup evidence before a prod-changing action.",
     safety: "safe_write",
     scope: "instance",
     method: "POST",
     route_path: "/v1/drivers/verireel/prod-backup-gate",
-    writes_records: ["backup_gate"]
+    writes_records: ["backup_gate"],
   },
   {
     action_id: "prod_promotion",
     label: "Promote testing to prod",
-    description: "Promote a stored testing artifact to prod after backup-gate evidence passes.",
+    description:
+      "Promote a stored testing artifact to prod after backup-gate evidence passes.",
     safety: "mutation",
     scope: "instance",
     method: "POST",
     route_path: "/v1/drivers/verireel/prod-promotion",
-    writes_records: ["deployment", "promotion", "inventory", "release_tuple"]
-  }
+    writes_records: ["deployment", "promotion", "inventory", "release_tuple"],
+  },
+];
+const FIXTURE_GENERIC_WEB_ACTIONS: DriverActionDescriptor[] = [
+  {
+    action_id: "prod_promotion",
+    label: "Promote testing to prod",
+    description:
+      "Promote a generic-web testing image to prod and record promotion health evidence.",
+    safety: "mutation",
+    scope: "instance",
+    method: "POST",
+    route_path: "/v1/drivers/generic-web/prod-promotion",
+    writes_records: ["deployment", "promotion", "inventory"],
+  },
 ];
 const FIXTURE_VERIREEL_DRIVER: DriverDescriptor = {
   schema_version: 1,
@@ -136,11 +169,11 @@ const FIXTURE_VERIREEL_DRIVER: DriverDescriptor = {
       label: "Preview lifecycle",
       description: "Preview lifecycle fixture.",
       actions: [],
-      panels: ["preview_inventory"]
-    }
+      panels: ["preview_inventory"],
+    },
   ],
   actions: FIXTURE_ACTIONS,
-  setting_groups: []
+  setting_groups: [],
 };
 const FIXTURE_ODOO_DRIVER: DriverDescriptor = {
   ...FIXTURE_VERIREEL_DRIVER,
@@ -149,27 +182,41 @@ const FIXTURE_ODOO_DRIVER: DriverDescriptor = {
   label: "Odoo",
   product: "odoo",
   capabilities: [],
-  actions: []
+  actions: [],
 };
 
 export function App() {
-  const showFixtureGallery = import.meta.env.DEV && new URLSearchParams(window.location.search).get("fixtures") === "1";
+  const showFixtureGallery =
+    import.meta.env.DEV &&
+    new URLSearchParams(window.location.search).get("fixtures") === "1";
   const [theme, setTheme] = useState<Theme>(() => {
-    return window.sessionStorage.getItem(THEME_STORAGE_KEY) === "light" ? "light" : "dark";
+    return window.sessionStorage.getItem(THEME_STORAGE_KEY) === "light"
+      ? "light"
+      : "dark";
   });
   const [authStatus, setAuthStatus] = useState<AuthStatus>("checking");
   const [identity, setIdentity] = useState<AuthIdentity | null>(null);
   const [drivers, setDrivers] = useState<DriverDescriptor[]>([]);
+  const [productProfiles, setProductProfiles] = useState<
+    ProductProfileRecord[]
+  >([]);
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
-  const [testingView, setTestingView] = useState<DriverContextView | null>(null);
-  const [previewView, setPreviewView] = useState<DriverContextView | null>(null);
+  const [testingView, setTestingView] = useState<DriverContextView | null>(
+    null,
+  );
+  const [previewView, setPreviewView] = useState<DriverContextView | null>(
+    null,
+  );
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
   const [traceId, setTraceId] = useState<string>("");
   const [refreshKey, setRefreshKey] = useState(0);
-  const [reviewAction, setReviewAction] = useState<DriverActionDescriptor | null>(null);
-  const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(null);
+  const [reviewAction, setReviewAction] =
+    useState<DriverActionDescriptor | null>(null);
+  const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(
+    null,
+  );
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -193,7 +240,10 @@ export function App() {
         }
         setIdentity(null);
         setAuthStatus("signed_out");
-        if (apiError instanceof LaunchplaneApiError && apiError.statusCode !== 401) {
+        if (
+          apiError instanceof LaunchplaneApiError &&
+          apiError.statusCode !== 401
+        ) {
           setError(apiError.message);
           setTraceId(apiError.traceId);
         }
@@ -206,6 +256,7 @@ export function App() {
   useEffect(() => {
     if (authStatus !== "signed_in") {
       setDrivers([]);
+      setProductProfiles([]);
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -223,17 +274,32 @@ export function App() {
       readDriverView(selected.context, "testing"),
       selected.driverId === "verireel"
         ? readDriverView("verireel-testing", "")
-        : Promise.resolve(null)
+        : Promise.resolve(null),
+      listProductProfiles("generic-web").catch(() => ({
+        status: "ok" as const,
+        trace_id: "",
+        driver_id: "generic-web",
+        profiles: [],
+      })),
     ])
-      .then(([driverPayload, prodPayload, testingPayload, previewPayload]) => {
-        if (controller.signal.aborted) {
-          return;
-        }
-        setDrivers(driverPayload.drivers);
-        setProdView(prodPayload.view);
-        setTestingView(testingPayload.view);
-        setPreviewView(previewPayload?.view ?? null);
-      })
+      .then(
+        ([
+          driverPayload,
+          prodPayload,
+          testingPayload,
+          previewPayload,
+          profilePayload,
+        ]) => {
+          if (controller.signal.aborted) {
+            return;
+          }
+          setDrivers(driverPayload.drivers);
+          setProductProfiles(profilePayload.profiles);
+          setProdView(prodPayload.view);
+          setTestingView(testingPayload.view);
+          setPreviewView(previewPayload?.view ?? null);
+        },
+      )
       .catch((apiError: unknown) => {
         if (controller.signal.aborted) {
           return;
@@ -267,22 +333,58 @@ export function App() {
       return stableContexts.map((context) => ({
         driverId: driver.driver_id,
         context,
-        label: driver.label
+        label: driver.label,
       }));
     });
-  }, [drivers]);
+    const profileChoices = productProfiles.flatMap((profile) => {
+      const contexts = new Set(
+        profile.lanes.map((lane) => lane.context).filter(Boolean),
+      );
+      return [...contexts].map((context) => ({
+        driverId: profile.product,
+        context,
+        label: profile.display_name || profile.product,
+      }));
+    });
+    const merged = [...profileChoices, ...DEFAULT_CHOICES];
+    const seen = new Set<string>();
+    return merged.filter((choice) => {
+      const key = `${choice.driverId}:${choice.context}`;
+      if (seen.has(key)) {
+        return false;
+      }
+      seen.add(key);
+      return true;
+    });
+  }, [drivers, productProfiles]);
 
-  const currentDriver = drivers.find((driver) => driver.driver_id === selected.driverId);
+  const currentDriver = drivers.find(
+    (driver) => driver.driver_id === selected.driverId,
+  );
   const prodDriverView = findDriverView(prodView, selected.driverId);
   const testingDriverView = findDriverView(testingView, selected.driverId);
   const previewDriverView = findDriverView(previewView, selected.driverId);
+  const selectedDriver =
+    prodDriverView?.descriptor ??
+    testingDriverView?.descriptor ??
+    currentDriver;
 
   const actions = useMemo(() => {
-    return currentDriver?.actions ?? prodDriverView?.available_actions ?? testingDriverView?.available_actions ?? [];
-  }, [currentDriver, prodDriverView, testingDriverView]);
+    return (
+      selectedDriver?.actions ??
+      prodDriverView?.available_actions ??
+      testingDriverView?.available_actions ??
+      []
+    );
+  }, [selectedDriver, prodDriverView, testingDriverView]);
   const promotionDecision = useMemo(
-    () => buildPromotionDecision(prodDriverView?.lane_summary ?? null, testingDriverView?.lane_summary ?? null),
-    [prodDriverView, testingDriverView]
+    () =>
+      buildPromotionDecision(
+        prodDriverView?.lane_summary ?? null,
+        testingDriverView?.lane_summary ?? null,
+        { requireProdBackup: requiresProdBackup(actions) },
+      ),
+    [actions, prodDriverView, testingDriverView],
   );
   const nextAction = pickNextAction(actions, promotionDecision.verdict);
 
@@ -291,6 +393,7 @@ export function App() {
       setIdentity(null);
       setAuthStatus("signed_out");
       setDrivers([]);
+      setProductProfiles([]);
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -319,7 +422,13 @@ export function App() {
           )
         ) : (
           <>
-            {error ? <ApiErrorPanel message={error} traceId={traceId} onClearToken={signOut} /> : null}
+            {error ? (
+              <ApiErrorPanel
+                message={error}
+                traceId={traceId}
+                onClearToken={signOut}
+              />
+            ) : null}
             <section className="lane-grid" aria-busy={loading}>
               <LanePanel
                 title="Prod"
@@ -331,6 +440,8 @@ export function App() {
                 prod={prodDriverView?.lane_summary ?? null}
                 testing={testingDriverView?.lane_summary ?? null}
                 actions={actions}
+                product={selectedDriver?.product ?? selected.driverId}
+                context={selected.context}
                 decision={promotionDecision}
                 loading={loading}
                 onAction={setReviewAction}
@@ -343,22 +454,32 @@ export function App() {
               />
             </section>
             <ProductConfigPanel
-              productDefault={currentDriver?.product ?? selected.driverId}
+              productDefault={selectedDriver?.product ?? selected.driverId}
               contextDefault={selected.context}
               instanceDefault="prod"
               disabled={loading}
             />
             <section className="work-grid">
               <PreviewInventory
-                driver={currentDriver ?? null}
+                driver={selectedDriver ?? null}
                 previews={previewDriverView?.preview_summaries ?? []}
-                inventoryProvenance={previewDriverView?.preview_inventory_provenance ?? null}
+                inventoryProvenance={
+                  previewDriverView?.preview_inventory_provenance ?? null
+                }
                 loading={loading}
               />
-              <ActionList actions={actions} nextAction={nextAction} loading={loading} onAction={setReviewAction} />
+              <ActionList
+                actions={actions}
+                nextAction={nextAction}
+                loading={loading}
+                onAction={setReviewAction}
+              />
             </section>
             <section className="work-grid work-grid-evidence">
-              <SecretBindingList driver={currentDriver ?? null} lane={prodDriverView?.lane_summary ?? null} />
+              <SecretBindingList
+                driver={selectedDriver ?? null}
+                lane={prodDriverView?.lane_summary ?? null}
+              />
               <EvidenceTimeline
                 prod={prodDriverView?.lane_summary ?? null}
                 testing={testingDriverView?.lane_summary ?? null}
@@ -369,8 +490,14 @@ export function App() {
           </>
         )}
       </main>
-      <ActionReviewDialog action={reviewAction} onClose={() => setReviewAction(null)} />
-      <EvidenceDetailDrawer evidence={selectedEvidence} onClose={() => setSelectedEvidence(null)} />
+      <ActionReviewDialog
+        action={reviewAction}
+        onClose={() => setReviewAction(null)}
+      />
+      <EvidenceDetailDrawer
+        evidence={selectedEvidence}
+        onClose={() => setSelectedEvidence(null)}
+      />
     </div>
   );
 }
@@ -384,7 +511,7 @@ function Header({
   loading,
   identity,
   onLogout,
-  onRefresh
+  onRefresh,
 }: {
   choices: DriverChoice[];
   selected: DriverChoice;
@@ -427,14 +554,20 @@ function Header({
             aria-label="Launchplane context"
             value={selectedValue}
             onChange={(event) => {
-              const choice = choices.find((item) => `${item.driverId}:${item.context}` === event.target.value);
+              const choice = choices.find(
+                (item) =>
+                  `${item.driverId}:${item.context}` === event.target.value,
+              );
               if (choice) {
                 onSelect(choice);
               }
             }}
           >
             {choices.map((choice) => (
-              <option key={`${choice.driverId}:${choice.context}`} value={`${choice.driverId}:${choice.context}`}>
+              <option
+                key={`${choice.driverId}:${choice.context}`}
+                value={`${choice.driverId}:${choice.context}`}
+              >
                 {choice.label} / {choice.context}
               </option>
             ))}
@@ -445,10 +578,16 @@ function Header({
           className="icon-button"
           type="button"
           title="Refresh"
-          aria-label={loading ? "Refreshing Launchplane view" : "Refresh Launchplane view"}
+          aria-label={
+            loading ? "Refreshing Launchplane view" : "Refresh Launchplane view"
+          }
           onClick={onRefresh}
         >
-          {loading ? <Loader2 className="spin" size={16} /> : <RefreshCw size={16} />}
+          {loading ? (
+            <Loader2 className="spin" size={16} />
+          ) : (
+            <RefreshCw size={16} />
+          )}
         </button>
         {identity ? (
           <button
@@ -465,7 +604,9 @@ function Header({
           className="icon-button"
           type="button"
           title={theme === "dark" ? "Use light mode" : "Use dark mode"}
-          aria-label={theme === "dark" ? "Switch to light mode" : "Switch to dark mode"}
+          aria-label={
+            theme === "dark" ? "Switch to light mode" : "Switch to dark mode"
+          }
           onClick={() => onThemeChange(theme === "dark" ? "light" : "dark")}
         >
           {theme === "dark" ? <Sun size={16} /> : <Moon size={16} />}
@@ -497,8 +638,16 @@ function AuthPanel({ checking }: { checking: boolean }) {
         <ShieldCheck size={22} aria-hidden="true" />
       </div>
       <div className="auth-form">
-        <a className="button button-primary" href={loginHref} aria-disabled={checking}>
-          {checking ? <Loader2 className="spin" size={15} /> : <KeyRound size={15} />}
+        <a
+          className="button button-primary"
+          href={loginHref}
+          aria-disabled={checking}
+        >
+          {checking ? (
+            <Loader2 className="spin" size={15} />
+          ) : (
+            <KeyRound size={15} />
+          )}
           <span>{checking ? "Checking session" : "Sign in with GitHub"}</span>
         </a>
       </div>
@@ -509,7 +658,7 @@ function AuthPanel({ checking }: { checking: boolean }) {
 function ApiErrorPanel({
   message,
   traceId,
-  onClearToken
+  onClearToken,
 }: {
   message: string;
   traceId: string;
@@ -534,24 +683,33 @@ function ProductConfigPanel({
   contextDefault,
   instanceDefault,
   disabled,
-  applyConfig = applyProductConfig
+  applyConfig = applyProductConfig,
 }: {
   productDefault: string;
   contextDefault: string;
   instanceDefault: string;
   disabled: boolean;
-  applyConfig?: (payload: ProductConfigApplyRequest) => Promise<ProductConfigApplyPayload>;
+  applyConfig?: (
+    payload: ProductConfigApplyRequest,
+  ) => Promise<ProductConfigApplyPayload>;
 }) {
   const [product, setProduct] = useState(productDefault);
   const [contextName, setContextName] = useState(contextDefault);
   const [instanceName, setInstanceName] = useState(instanceDefault);
   const [sourceLabel, setSourceLabel] = useState("product-config-ui");
-  const [runtimeRows, setRuntimeRows] = useState<RuntimeConfigRow[]>(() => [newRuntimeConfigRow()]);
-  const [secretRows, setSecretRows] = useState<SecretConfigRow[]>(() => [newSecretConfigRow()]);
+  const [runtimeRows, setRuntimeRows] = useState<RuntimeConfigRow[]>(() => [
+    newRuntimeConfigRow(),
+  ]);
+  const [secretRows, setSecretRows] = useState<SecretConfigRow[]>(() => [
+    newSecretConfigRow(),
+  ]);
   const [result, setResult] = useState<ProductConfigApplyPayload | null>(null);
-  const [pendingApplyPayload, setPendingApplyPayload] = useState<ProductConfigApplyRequest | null>(null);
+  const [pendingApplyPayload, setPendingApplyPayload] =
+    useState<ProductConfigApplyRequest | null>(null);
   const [reviewed, setReviewed] = useState(false);
-  const [submitting, setSubmitting] = useState<ProductConfigApplyRequest["mode"] | null>(null);
+  const [submitting, setSubmitting] = useState<
+    ProductConfigApplyRequest["mode"] | null
+  >(null);
   const [panelError, setPanelError] = useState("");
   const [traceId, setTraceId] = useState("");
   const requestSequence = useRef(0);
@@ -566,15 +724,28 @@ function ProductConfigPanel({
   const runtimeScope = runtimeScopeForTarget(contextName, instanceName);
   const secretScope = secretScopeForTarget(contextName, instanceName);
   const runtimeInputCount = runtimeRows.filter((row) => row.key.trim()).length;
-  const completeSecretRows = secretRows.filter((row) => row.name.trim() && row.bindingKey.trim() && row.value.trim());
+  const completeSecretRows = secretRows.filter(
+    (row) => row.name.trim() && row.bindingKey.trim() && row.value.trim(),
+  );
   const partialSecretRows = secretRows.filter((row) => {
-    const filledFields = [row.name, row.bindingKey, row.value].filter((value) => value.trim()).length;
+    const filledFields = [row.name, row.bindingKey, row.value].filter((value) =>
+      value.trim(),
+    ).length;
     return filledFields > 0 && filledFields < 3;
   });
-  const showPartialSecretWarning = partialSecretRows.length > 0 && !result && !panelError && !submitting;
+  const showPartialSecretWarning =
+    partialSecretRows.length > 0 && !result && !panelError && !submitting;
   const hasConfigInput = runtimeInputCount > 0 || completeSecretRows.length > 0;
-  const canDryRun = Boolean(product.trim() && hasConfigInput && partialSecretRows.length === 0 && !disabled && !submitting);
-  const canApply = Boolean(pendingApplyPayload && reviewed && !disabled && !submitting);
+  const canDryRun = Boolean(
+    product.trim() &&
+    hasConfigInput &&
+    partialSecretRows.length === 0 &&
+    !disabled &&
+    !submitting,
+  );
+  const canApply = Boolean(
+    pendingApplyPayload && reviewed && !disabled && !submitting,
+  );
 
   function clearReviewState() {
     requestSequence.current += 1;
@@ -592,12 +763,16 @@ function ProductConfigPanel({
 
   function updateRuntimeRow(rowId: string, patch: Partial<RuntimeConfigRow>) {
     clearReviewState();
-    setRuntimeRows((rows) => rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
+    setRuntimeRows((rows) =>
+      rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)),
+    );
   }
 
   function updateSecretRow(rowId: string, patch: Partial<SecretConfigRow>) {
     clearReviewState();
-    setSecretRows((rows) => rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)));
+    setSecretRows((rows) =>
+      rows.map((row) => (row.id === rowId ? { ...row, ...patch } : row)),
+    );
   }
 
   function addRuntimeRow() {
@@ -620,14 +795,19 @@ function ProductConfigPanel({
     setSecretRows((rows) => rows.filter((row) => row.id !== rowId));
   }
 
-  function buildPayload(mode: ProductConfigApplyRequest["mode"]): ProductConfigApplyRequest {
-    const runtimeEnv = runtimeRows.reduce<Record<string, string>>((env, row) => {
-      const key = row.key.trim();
-      if (key) {
-        env[key] = row.value;
-      }
-      return env;
-    }, {});
+  function buildPayload(
+    mode: ProductConfigApplyRequest["mode"],
+  ): ProductConfigApplyRequest {
+    const runtimeEnv = runtimeRows.reduce<Record<string, string>>(
+      (env, row) => {
+        const key = row.key.trim();
+        if (key) {
+          env[key] = row.value;
+        }
+        return env;
+      },
+      {},
+    );
     const secrets = completeSecretRows.map((row) => ({
       scope: secretScope,
       context: contextName.trim(),
@@ -635,7 +815,7 @@ function ProductConfigPanel({
       name: row.name.trim(),
       binding_key: row.bindingKey.trim(),
       value: row.value,
-      description: row.description.trim()
+      description: row.description.trim(),
     }));
     const payload: ProductConfigApplyRequest = {
       schema_version: 1,
@@ -643,14 +823,14 @@ function ProductConfigPanel({
       product: product.trim(),
       context: contextName.trim(),
       instance: instanceName.trim(),
-      source_label: sourceLabel.trim() || "product-config-ui"
+      source_label: sourceLabel.trim() || "product-config-ui",
     };
     if (Object.keys(runtimeEnv).length) {
       payload.runtime_env = {
         scope: runtimeScope,
         context: contextName.trim(),
         instance: instanceName.trim(),
-        env: runtimeEnv
+        env: runtimeEnv,
       };
     }
     if (secrets.length) {
@@ -741,24 +921,62 @@ function ProductConfigPanel({
       <PanelHead
         eyebrow="runtime authority"
         title="Product config"
-        right={<StatusPill status={result?.mode === "apply" ? "pass" : pendingApplyPayload ? "pending" : "unknown"} />}
+        right={
+          <StatusPill
+            status={
+              result?.mode === "apply"
+                ? "pass"
+                : pendingApplyPayload
+                  ? "pending"
+                  : "unknown"
+            }
+          />
+        }
       />
       <div className="config-target-grid">
         <label className="config-label">
           <span>Product</span>
-          <input value={product} onChange={(event) => { clearReviewState(); setProduct(event.target.value); }} spellCheck={false} />
+          <input
+            value={product}
+            onChange={(event) => {
+              clearReviewState();
+              setProduct(event.target.value);
+            }}
+            spellCheck={false}
+          />
         </label>
         <label className="config-label">
           <span>Context</span>
-          <input value={contextName} onChange={(event) => { clearReviewState(); setContextName(event.target.value); }} spellCheck={false} />
+          <input
+            value={contextName}
+            onChange={(event) => {
+              clearReviewState();
+              setContextName(event.target.value);
+            }}
+            spellCheck={false}
+          />
         </label>
         <label className="config-label">
           <span>Instance</span>
-          <input value={instanceName} onChange={(event) => { clearReviewState(); setInstanceName(event.target.value); }} spellCheck={false} />
+          <input
+            value={instanceName}
+            onChange={(event) => {
+              clearReviewState();
+              setInstanceName(event.target.value);
+            }}
+            spellCheck={false}
+          />
         </label>
         <label className="config-label">
           <span>Source</span>
-          <input value={sourceLabel} onChange={(event) => { clearReviewState(); setSourceLabel(event.target.value); }} spellCheck={false} />
+          <input
+            value={sourceLabel}
+            onChange={(event) => {
+              clearReviewState();
+              setSourceLabel(event.target.value);
+            }}
+            spellCheck={false}
+          />
         </label>
       </div>
       <div className="config-edit-grid">
@@ -768,16 +986,45 @@ function ProductConfigPanel({
               <p className="eyebrow">runtime env</p>
               <strong>{runtimeScope}</strong>
             </div>
-            <button className="icon-button" type="button" title="Add runtime key" aria-label="Add runtime key" onClick={addRuntimeRow}>
+            <button
+              className="icon-button"
+              type="button"
+              title="Add runtime key"
+              aria-label="Add runtime key"
+              onClick={addRuntimeRow}
+            >
               <Plus size={15} />
             </button>
           </div>
           <div className="config-row-list">
             {runtimeRows.map((row) => (
               <div className="config-row config-row-runtime" key={row.id}>
-                <input aria-label="Runtime key" placeholder="KEY" value={row.key} onChange={(event) => updateRuntimeRow(row.id, { key: event.target.value })} spellCheck={false} />
-                <input aria-label="Runtime value" placeholder="value" value={row.value} onChange={(event) => updateRuntimeRow(row.id, { value: event.target.value })} spellCheck={false} />
-                <button className="icon-button" type="button" title="Remove runtime key" aria-label="Remove runtime key" disabled={runtimeRows.length === 1} onClick={() => removeRuntimeRow(row.id)}>
+                <input
+                  aria-label="Runtime key"
+                  placeholder="KEY"
+                  value={row.key}
+                  onChange={(event) =>
+                    updateRuntimeRow(row.id, { key: event.target.value })
+                  }
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Runtime value"
+                  placeholder="value"
+                  value={row.value}
+                  onChange={(event) =>
+                    updateRuntimeRow(row.id, { value: event.target.value })
+                  }
+                  spellCheck={false}
+                />
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Remove runtime key"
+                  aria-label="Remove runtime key"
+                  disabled={runtimeRows.length === 1}
+                  onClick={() => removeRuntimeRow(row.id)}
+                >
                   <Trash2 size={15} />
                 </button>
               </div>
@@ -790,18 +1037,68 @@ function ProductConfigPanel({
               <p className="eyebrow">managed secrets</p>
               <strong>{secretScope}</strong>
             </div>
-            <button className="icon-button" type="button" title="Add secret" aria-label="Add secret" onClick={addSecretRow}>
+            <button
+              className="icon-button"
+              type="button"
+              title="Add secret"
+              aria-label="Add secret"
+              onClick={addSecretRow}
+            >
               <Plus size={15} />
             </button>
           </div>
           <div className="config-row-list">
             {secretRows.map((row) => (
               <div className="config-row config-row-secret" key={row.id}>
-                <input aria-label="Secret name" placeholder="SECRET_NAME" value={row.name} onChange={(event) => updateSecretRow(row.id, { name: event.target.value, bindingKey: row.bindingKey || event.target.value })} spellCheck={false} />
-                <input aria-label="Secret binding key" placeholder="BINDING_KEY" value={row.bindingKey} onChange={(event) => updateSecretRow(row.id, { bindingKey: event.target.value })} spellCheck={false} />
-                <input aria-label="Secret value" placeholder="value" type="password" value={row.value} onChange={(event) => updateSecretRow(row.id, { value: event.target.value })} autoComplete="off" spellCheck={false} />
-                <input aria-label="Secret description" placeholder="description" value={row.description} onChange={(event) => updateSecretRow(row.id, { description: event.target.value })} spellCheck={false} />
-                <button className="icon-button" type="button" title="Remove secret" aria-label="Remove secret" disabled={secretRows.length === 1} onClick={() => removeSecretRow(row.id)}>
+                <input
+                  aria-label="Secret name"
+                  placeholder="SECRET_NAME"
+                  value={row.name}
+                  onChange={(event) =>
+                    updateSecretRow(row.id, {
+                      name: event.target.value,
+                      bindingKey: row.bindingKey || event.target.value,
+                    })
+                  }
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Secret binding key"
+                  placeholder="BINDING_KEY"
+                  value={row.bindingKey}
+                  onChange={(event) =>
+                    updateSecretRow(row.id, { bindingKey: event.target.value })
+                  }
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Secret value"
+                  placeholder="value"
+                  type="password"
+                  value={row.value}
+                  onChange={(event) =>
+                    updateSecretRow(row.id, { value: event.target.value })
+                  }
+                  autoComplete="off"
+                  spellCheck={false}
+                />
+                <input
+                  aria-label="Secret description"
+                  placeholder="description"
+                  value={row.description}
+                  onChange={(event) =>
+                    updateSecretRow(row.id, { description: event.target.value })
+                  }
+                  spellCheck={false}
+                />
+                <button
+                  className="icon-button"
+                  type="button"
+                  title="Remove secret"
+                  aria-label="Remove secret"
+                  disabled={secretRows.length === 1}
+                  onClick={() => removeSecretRow(row.id)}
+                >
                   <Trash2 size={15} />
                 </button>
               </div>
@@ -824,16 +1121,39 @@ function ProductConfigPanel({
       ) : null}
       {result ? <ProductConfigResult result={result} /> : null}
       <div className="config-actions">
-        <button className="button" type="button" disabled={!canDryRun} onClick={runDryRun}>
-          {submitting === "dry-run" ? <Loader2 className="spin" size={15} /> : <Play size={15} />}
+        <button
+          className="button"
+          type="button"
+          disabled={!canDryRun}
+          onClick={runDryRun}
+        >
+          {submitting === "dry-run" ? (
+            <Loader2 className="spin" size={15} />
+          ) : (
+            <Play size={15} />
+          )}
           <span>Dry run</span>
         </button>
         <label className="config-review-check">
-          <input type="checkbox" checked={reviewed} disabled={!pendingApplyPayload || Boolean(submitting)} onChange={(event) => setReviewed(event.target.checked)} />
+          <input
+            type="checkbox"
+            checked={reviewed}
+            disabled={!pendingApplyPayload || Boolean(submitting)}
+            onChange={(event) => setReviewed(event.target.checked)}
+          />
           <span>Reviewed dry run</span>
         </label>
-        <button className="button button-primary" type="button" disabled={!canApply} onClick={runApply}>
-          {submitting === "apply" ? <Loader2 className="spin" size={15} /> : <Save size={15} />}
+        <button
+          className="button button-primary"
+          type="button"
+          disabled={!canApply}
+          onClick={runApply}
+        >
+          {submitting === "apply" ? (
+            <Loader2 className="spin" size={15} />
+          ) : (
+            <Save size={15} />
+          )}
           <span>Apply</span>
         </button>
       </div>
@@ -841,15 +1161,31 @@ function ProductConfigPanel({
   );
 }
 
-function ProductConfigResult({ result }: { result: ProductConfigApplyPayload }) {
+function ProductConfigResult({
+  result,
+}: {
+  result: ProductConfigApplyPayload;
+}) {
   const runtime = result.runtime_environment;
   return (
     <div className="config-result" aria-live="polite">
       <div className="config-result-summary">
-        <KeyValue label="Mode" value={result.mode} status={result.mode === "apply" ? "pass" : "pending"} />
+        <KeyValue
+          label="Mode"
+          value={result.mode}
+          status={result.mode === "apply" ? "pass" : "pending"}
+        />
         <KeyValue label="Actor" value={result.actor} mono />
-        <KeyValue label="Runtime" value={`${runtime.action} / ${result.summary.runtime_changed_key_count} changed`} status={runtime.action === "unchanged" ? "unknown" : "pass"} />
-        <KeyValue label="Secrets" value={`${result.summary.secret_change_count} changed`} status={result.summary.secret_change_count ? "pass" : "unknown"} />
+        <KeyValue
+          label="Runtime"
+          value={`${runtime.action} / ${result.summary.runtime_changed_key_count} changed`}
+          status={runtime.action === "unchanged" ? "unknown" : "pass"}
+        />
+        <KeyValue
+          label="Secrets"
+          value={`${result.summary.secret_change_count} changed`}
+          status={result.summary.secret_change_count ? "pass" : "unknown"}
+        />
       </div>
       <div className="config-result-list">
         {runtime.keys.length ? (
@@ -859,9 +1195,14 @@ function ProductConfigResult({ result }: { result: ProductConfigApplyPayload }) 
           </div>
         ) : null}
         {result.secrets.map((secret) => (
-          <div className="config-result-row" key={`${secret.secret_id}:${secret.binding_key}`}>
+          <div
+            className="config-result-row"
+            key={`${secret.secret_id}:${secret.binding_key}`}
+          >
             <strong>{secret.binding_key}</strong>
-            <code>{secret.action} / {secret.secret_id}</code>
+            <code>
+              {secret.action} / {secret.secret_id}
+            </code>
           </div>
         ))}
       </div>
@@ -874,14 +1215,23 @@ function newRuntimeConfigRow(): RuntimeConfigRow {
 }
 
 function newSecretConfigRow(): SecretConfigRow {
-  return { id: clientId(), name: "", bindingKey: "", value: "", description: "" };
+  return {
+    id: clientId(),
+    name: "",
+    bindingKey: "",
+    value: "",
+    description: "",
+  };
 }
 
 function clientId(): string {
   return window.crypto.randomUUID?.() ?? Math.random().toString(36).slice(2);
 }
 
-function runtimeScopeForTarget(contextName: string, instanceName: string): ProductConfigRuntimeScope {
+function runtimeScopeForTarget(
+  contextName: string,
+  instanceName: string,
+): ProductConfigRuntimeScope {
   if (contextName.trim() && instanceName.trim()) {
     return "instance";
   }
@@ -891,7 +1241,10 @@ function runtimeScopeForTarget(contextName: string, instanceName: string): Produ
   return "global";
 }
 
-function secretScopeForTarget(contextName: string, instanceName: string): ProductConfigSecretScope {
+function secretScopeForTarget(
+  contextName: string,
+  instanceName: string,
+): ProductConfigSecretScope {
   if (contextName.trim() && instanceName.trim()) {
     return "context_instance";
   }
@@ -905,7 +1258,7 @@ function LanePanel({
   title,
   laneKind,
   lane,
-  loading
+  loading,
 }: {
   title: string;
   laneKind: "prod" | "testing";
@@ -913,12 +1266,24 @@ function LanePanel({
   loading: boolean;
 }) {
   const artifact = artifactFromLane(lane);
-  const deployStatus = lane?.latest_deployment?.deploy.status ?? lane?.inventory?.deploy.status ?? "unknown";
-  const healthStatus = lane?.inventory?.destination_health.status ?? lane?.latest_deployment?.destination_health.status ?? "unknown";
+  const deployStatus =
+    lane?.latest_deployment?.deploy.status ??
+    lane?.inventory?.deploy.status ??
+    "unknown";
+  const healthStatus =
+    lane?.inventory?.destination_health.status ??
+    lane?.latest_deployment?.destination_health.status ??
+    "unknown";
   const backupStatus = lane?.latest_backup_gate?.status ?? "unknown";
   const settingsStatus = lane?.odoo_instance_override ? "pass" : "unknown";
-  const updatedAt = lane?.inventory?.updated_at ?? lane?.latest_deployment?.deploy.finished_at ?? "";
-  const targetName = lane?.latest_deployment?.deploy.target_name ?? lane?.inventory?.deploy.target_name ?? "";
+  const updatedAt =
+    lane?.inventory?.updated_at ??
+    lane?.latest_deployment?.deploy.finished_at ??
+    "";
+  const targetName =
+    lane?.latest_deployment?.deploy.target_name ??
+    lane?.inventory?.deploy.target_name ??
+    "";
   const releaseIdentity = releaseIdentityFromLane(lane);
 
   return (
@@ -926,32 +1291,82 @@ function LanePanel({
       <PanelHead
         eyebrow="environment lane"
         title={title}
-        right={(
+        right={
           <div className="panel-badges">
             <TrustBadge provenance={lane?.provenance ?? null} />
             <StatusPill status={worstStatus([deployStatus, healthStatus])} />
           </div>
-        )}
+        }
       />
       {loading ? (
         <SkeletonRows />
       ) : (
         <div className="lane-body">
           <div className="lane-release">
-            <span className={`lane-chip lane-chip-${laneKind}`}>{laneKind}</span>
+            <span className={`lane-chip lane-chip-${laneKind}`}>
+              {laneKind}
+            </span>
             <code>{releaseIdentity || "release unknown"}</code>
           </div>
           <div className="lane-metrics">
-            <MetricTile label="Deploy" status={deployStatus} value={labelForStatus(deployStatus)} />
-            <MetricTile label="Health" status={healthStatus} value={labelForStatus(healthStatus)} />
-            <MetricTile label="Backup" status={backupStatus} value={labelForStatus(backupStatus)} />
-            <MetricTile label="Settings" status={settingsStatus} value={labelForStatus(settingsStatus)} />
+            <MetricTile
+              label="Deploy"
+              status={deployStatus}
+              value={labelForStatus(deployStatus)}
+            />
+            <MetricTile
+              label="Health"
+              status={healthStatus}
+              value={labelForStatus(healthStatus)}
+            />
+            <MetricTile
+              label="Backup"
+              status={backupStatus}
+              value={labelForStatus(backupStatus)}
+            />
+            <MetricTile
+              label="Settings"
+              status={settingsStatus}
+              value={labelForStatus(settingsStatus)}
+            />
           </div>
           <KeyValue label="Artifact" value={artifact} mono muted={!artifact} />
-          <KeyValue label="Target" value={targetName} mono muted={!targetName} />
-          <KeyValue label="Source" value={shorten(lane?.inventory?.source_git_ref ?? lane?.latest_deployment?.source_git_ref ?? "")} mono />
-          <KeyValue label="Deployment" value={lane?.latest_deployment?.record_id ?? lane?.inventory?.deployment_record_id ?? ""} mono />
-          <KeyValue label="Promotion" value={lane?.latest_promotion?.record_id ?? lane?.inventory?.promotion_record_id ?? ""} mono muted={!lane?.latest_promotion && !lane?.inventory?.promotion_record_id} />
+          <KeyValue
+            label="Target"
+            value={targetName}
+            mono
+            muted={!targetName}
+          />
+          <KeyValue
+            label="Source"
+            value={shorten(
+              lane?.inventory?.source_git_ref ??
+                lane?.latest_deployment?.source_git_ref ??
+                "",
+            )}
+            mono
+          />
+          <KeyValue
+            label="Deployment"
+            value={
+              lane?.latest_deployment?.record_id ??
+              lane?.inventory?.deployment_record_id ??
+              ""
+            }
+            mono
+          />
+          <KeyValue
+            label="Promotion"
+            value={
+              lane?.latest_promotion?.record_id ??
+              lane?.inventory?.promotion_record_id ??
+              ""
+            }
+            mono
+            muted={
+              !lane?.latest_promotion && !lane?.inventory?.promotion_record_id
+            }
+          />
           <KeyValue label="Updated" value={formatTime(updatedAt)} mono />
           <EvidenceStrip lane={lane} laneKind={laneKind} />
         </div>
@@ -964,36 +1379,116 @@ function PromotionBridge({
   prod,
   testing,
   actions,
+  product,
+  context,
   decision,
   loading,
-  onAction
+  onAction,
+  dryRunPromotion = dryRunGenericWebProdPromotion,
 }: {
   prod: LaneSummary | null;
   testing: LaneSummary | null;
   actions: DriverActionDescriptor[];
+  product: string;
+  context: string;
   decision: PromotionDecision;
   loading: boolean;
   onAction: (action: DriverActionDescriptor) => void;
+  dryRunPromotion?: (
+    payload: GenericWebProdPromotionRequest,
+  ) => Promise<GenericWebProdPromotionPayload>;
 }) {
   const primaryAction = pickNextAction(actions, decision.verdict);
-  const verdictLabel = decision.verdict === "ready"
-    ? "Ready to promote"
-    : decision.verdict === "blocked"
-      ? "Promotion blocked"
-      : "Evidence pending";
+  const [dryRunResult, setDryRunResult] =
+    useState<GenericWebProdPromotionPayload | null>(null);
+  const [dryRunError, setDryRunError] = useState("");
+  const [dryRunTraceId, setDryRunTraceId] = useState("");
+  const [submittingDryRun, setSubmittingDryRun] = useState(false);
+  const testingArtifact = artifactFromLane(testing);
+  const testingSourceRef = sourceRefFromLane(testing);
+  const supportsGenericWebPromotion =
+    primaryAction?.route_path === "/v1/drivers/generic-web/prod-promotion";
+  const canDryRun = Boolean(
+    supportsGenericWebPromotion &&
+    decision.verdict === "ready" &&
+    testingArtifact &&
+    testingSourceRef &&
+    product.trim() &&
+    context.trim() &&
+    !loading &&
+    !submittingDryRun,
+  );
+  const verdictLabel =
+    decision.verdict === "ready"
+      ? "Ready to promote"
+      : decision.verdict === "blocked"
+        ? "Promotion blocked"
+        : "Evidence pending";
+
+  useEffect(() => {
+    setDryRunResult(null);
+    setDryRunError("");
+    setDryRunTraceId("");
+  }, [product, context, testingArtifact, testingSourceRef]);
+
+  function runPromotionDryRun() {
+    if (!canDryRun) {
+      return;
+    }
+    setSubmittingDryRun(true);
+    setDryRunError("");
+    setDryRunTraceId("");
+    const request: GenericWebProdPromotionRequest = {
+      schema_version: 1,
+      product: product.trim(),
+      promotion: {
+        schema_version: 1,
+        product: product.trim(),
+        artifact_id: testingArtifact,
+        source_git_ref: testingSourceRef,
+        from_instance: "testing",
+        to_instance: "prod",
+        timeout_seconds: 300,
+        health_timeout_seconds: 120,
+        dry_run: true,
+      },
+    };
+    dryRunPromotion(request)
+      .then((payload) => setDryRunResult(payload))
+      .catch((apiError: unknown) => {
+        if (apiError instanceof LaunchplaneApiError) {
+          setDryRunError(apiError.message);
+          setDryRunTraceId(apiError.traceId);
+        } else if (apiError instanceof Error) {
+          setDryRunError(apiError.message);
+        } else {
+          setDryRunError("Promotion dry run failed.");
+        }
+      })
+      .finally(() => setSubmittingDryRun(false));
+  }
 
   return (
     <section className={`panel promotion-bridge verdict-${decision.verdict}`}>
-      <PanelHead eyebrow="promotion decision" title="Testing to prod" right={<StatusPill status={decision.verdict} />} />
+      <PanelHead
+        eyebrow="promotion decision"
+        title="Testing to prod"
+        right={<StatusPill status={decision.verdict} />}
+      />
       {loading ? (
         <SkeletonRows />
       ) : (
         <>
           <div className="bridge-verdict">
             <span>{verdictLabel}</span>
-            <strong>{decision.blockingEvidence || decision.latestEvidence}</strong>
+            <strong>
+              {decision.blockingEvidence || decision.latestEvidence}
+            </strong>
           </div>
-          <div className="bridge-direction" aria-label="Promotion artifact delta">
+          <div
+            className="bridge-direction"
+            aria-label="Promotion artifact delta"
+          >
             <div>
               <span className="lane-chip lane-chip-testing">testing</span>
               <code>{decision.testingArtifact || "unknown candidate"}</code>
@@ -1017,17 +1512,49 @@ function PromotionBridge({
             ))}
           </div>
           {primaryAction ? (
-            <button
-              className="button button-primary bridge-action"
-              type="button"
-              data-safety={primaryAction.safety}
-              aria-label={`Review ${primaryAction.label}`}
-              disabled={decision.verdict !== "ready" && primaryAction.safety === "mutation"}
-              onClick={() => onAction(primaryAction)}
-            >
-              <TerminalSquare size={16} />
-              <span>{primaryAction.label}</span>
-            </button>
+            <div className="bridge-action-stack">
+              {supportsGenericWebPromotion ? (
+                <button
+                  className="button button-primary bridge-action"
+                  type="button"
+                  data-safety="safe_write"
+                  aria-label="Dry run generic-web prod promotion"
+                  disabled={!canDryRun}
+                  onClick={runPromotionDryRun}
+                >
+                  {submittingDryRun ? (
+                    <Loader2 className="spin" size={16} />
+                  ) : (
+                    <Send size={16} />
+                  )}
+                  <span>Dry run promotion</span>
+                </button>
+              ) : (
+                <button
+                  className="button button-primary bridge-action"
+                  type="button"
+                  data-safety={primaryAction.safety}
+                  aria-label={`Review ${primaryAction.label}`}
+                  disabled={
+                    decision.verdict !== "ready" &&
+                    primaryAction.safety === "mutation"
+                  }
+                  onClick={() => onAction(primaryAction)}
+                >
+                  <TerminalSquare size={16} />
+                  <span>{primaryAction.label}</span>
+                </button>
+              )}
+              {dryRunError ? (
+                <InlinePanelError
+                  message={dryRunError}
+                  traceId={dryRunTraceId}
+                />
+              ) : null}
+              {dryRunResult ? (
+                <PromotionDryRunResult payload={dryRunResult} />
+              ) : null}
+            </div>
           ) : null}
         </>
       )}
@@ -1035,11 +1562,79 @@ function PromotionBridge({
   );
 }
 
+function InlinePanelError({
+  message,
+  traceId,
+}: {
+  message: string;
+  traceId: string;
+}) {
+  return (
+    <div className="config-inline-alert bridge-inline-alert" role="alert">
+      <AlertTriangle size={15} aria-hidden="true" />
+      <span>{message}</span>
+      {traceId ? <code>{traceId}</code> : null}
+    </div>
+  );
+}
+
+function PromotionDryRunResult({
+  payload,
+}: {
+  payload: GenericWebProdPromotionPayload;
+}) {
+  const result = payload.result;
+  return (
+    <div className="config-result bridge-dry-run-result" aria-live="polite">
+      <div className="config-result-summary">
+        <KeyValue
+          label="Mode"
+          value={result.dry_run ? "dry-run" : "unknown"}
+          status="pending"
+        />
+        <KeyValue
+          label="Promotion"
+          value={labelForStatus(result.promotion_status)}
+          status={result.promotion_status}
+        />
+        <KeyValue
+          label="Deploy"
+          value={labelForStatus(result.deployment_status)}
+          status={result.deployment_status}
+        />
+        <KeyValue
+          label="Health"
+          value={labelForStatus(result.destination_health_status)}
+          status={result.destination_health_status}
+        />
+      </div>
+      <div className="config-result-list">
+        <div className="config-result-row">
+          <strong>Promotion record</strong>
+          <code>{result.promotion_record_id || "pending dry-run record"}</code>
+        </div>
+        <div className="config-result-row">
+          <strong>Record writes</strong>
+          <code>
+            {result.deployment_record_id || result.inventory_record_id
+              ? "unexpected write candidate"
+              : "none"}
+          </code>
+        </div>
+        <div className="config-result-row">
+          <strong>Trace</strong>
+          <code>{payload.trace_id}</code>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function PreviewInventory({
   driver,
   previews,
   inventoryProvenance,
-  loading
+  loading,
 }: {
   driver: DriverDescriptor | null;
   previews: PreviewSummary[];
@@ -1051,8 +1646,10 @@ function PreviewInventory({
   const latestPreview = previews
     .slice()
     .sort((left, right) => {
-      const leftTime = left.latest_generation?.finished_at ?? left.preview.updated_at;
-      const rightTime = right.latest_generation?.finished_at ?? right.preview.updated_at;
+      const leftTime =
+        left.latest_generation?.finished_at ?? left.preview.updated_at;
+      const rightTime =
+        right.latest_generation?.finished_at ?? right.preview.updated_at;
       return rightTime.localeCompare(leftTime);
     })
     .at(0);
@@ -1062,30 +1659,48 @@ function PreviewInventory({
       <PanelHead
         eyebrow="preview lane"
         title={exposesPreviews ? "Preview inventory" : "Previews not exposed"}
-        right={(
+        right={
           <div className="panel-badges">
-            <TrustBadge provenance={previewInventoryProvenance(exposesPreviews, latestPreview, inventoryProvenance)} />
-            {exposesPreviews ? <span className="count-chip">{previews.length} active</span> : null}
+            <TrustBadge
+              provenance={previewInventoryProvenance(
+                exposesPreviews,
+                latestPreview,
+                inventoryProvenance,
+              )}
+            />
+            {exposesPreviews ? (
+              <span className="count-chip">{previews.length} active</span>
+            ) : null}
           </div>
-        )}
+        }
       />
       {loading ? (
         <SkeletonRows />
       ) : !exposesPreviews ? (
-        <StateBlock icon={<Eye size={18} />} title="Driver does not expose preview lifecycle" />
+        <StateBlock
+          icon={<Eye size={18} />}
+          title="Driver does not expose preview lifecycle"
+        />
       ) : previews.length === 0 ? (
         <StateBlock icon={<Archive size={18} />} title="No active previews" />
       ) : (
         <div className="preview-list">
           {previews.map((summary) => {
-            const health = summary.latest_generation?.overall_health_status ?? "unknown";
+            const health =
+              summary.latest_generation?.overall_health_status ?? "unknown";
             return (
               <article className="preview-row" key={summary.preview.preview_id}>
                 <div>
                   <strong>{summary.preview.preview_label}</strong>
-                  <a href={summary.preview.anchor_pr_url}>{summary.preview.anchor_repo}#{summary.preview.anchor_pr_number}</a>
+                  <a href={summary.preview.anchor_pr_url}>
+                    {summary.preview.anchor_repo}#
+                    {summary.preview.anchor_pr_number}
+                  </a>
                 </div>
-                <code>{summary.latest_generation?.artifact_id ?? summary.preview.preview_id}</code>
+                <code>
+                  {summary.latest_generation?.artifact_id ??
+                    summary.preview.preview_id}
+                </code>
                 <div className="preview-status-stack">
                   <TrustBadge provenance={summary.provenance} compact />
                   <StatusPill status={health} />
@@ -1104,7 +1719,14 @@ function PreviewInventory({
         />
         <KeyValue
           label="Latest"
-          value={latestPreview ? formatTime(latestPreview.latest_generation?.finished_at ?? latestPreview.preview.updated_at) : "unknown"}
+          value={
+            latestPreview
+              ? formatTime(
+                  latestPreview.latest_generation?.finished_at ??
+                    latestPreview.preview.updated_at,
+                )
+              : "unknown"
+          }
           mono
           muted={!latestPreview}
         />
@@ -1114,13 +1736,28 @@ function PreviewInventory({
 }
 
 function previewInventoryCapabilityId(driver: DriverDescriptor | null): string {
-  const previewCapabilityIds = new Set(["previewable", "preview_inventory_managed", "preview_lifecycle"]);
-  return driver?.capabilities.find((capability) => {
-    return previewCapabilityIds.has(capability.capability_id) || capability.panels.includes("preview_inventory");
-  })?.capability_id ?? "";
+  const previewCapabilityIds = new Set([
+    "previewable",
+    "preview_inventory_managed",
+    "preview_lifecycle",
+  ]);
+  return (
+    driver?.capabilities.find((capability) => {
+      return (
+        previewCapabilityIds.has(capability.capability_id) ||
+        capability.panels.includes("preview_inventory")
+      );
+    })?.capability_id ?? ""
+  );
 }
 
-function TrustBadge({ provenance, compact = false }: { provenance: DataProvenance | null; compact?: boolean }) {
+function TrustBadge({
+  provenance,
+  compact = false,
+}: {
+  provenance: DataProvenance | null;
+  compact?: boolean;
+}) {
   const status = provenance?.freshness_status ?? "missing";
   return (
     <span
@@ -1137,7 +1774,7 @@ function TrustBadge({ provenance, compact = false }: { provenance: DataProvenanc
 function previewInventoryProvenance(
   exposesPreviews: boolean,
   latestPreview: PreviewSummary | undefined,
-  inventoryProvenance: DataProvenance | null
+  inventoryProvenance: DataProvenance | null,
 ): DataProvenance {
   if (!exposesPreviews) {
     return {
@@ -1147,7 +1784,7 @@ function previewInventoryProvenance(
       refreshed_at: "",
       freshness_status: "unsupported",
       stale_after: "",
-      detail: "Driver does not expose preview lifecycle."
+      detail: "Driver does not expose preview lifecycle.",
     };
   }
   if (inventoryProvenance) {
@@ -1161,7 +1798,8 @@ function previewInventoryProvenance(
       refreshed_at: "",
       freshness_status: "missing",
       stale_after: "",
-      detail: "Launchplane has not recorded active preview inventory for this context."
+      detail:
+        "Launchplane has not recorded active preview inventory for this context.",
     };
   }
   return latestPreview.provenance;
@@ -1217,7 +1855,7 @@ function ActionList({
   actions,
   nextAction,
   loading,
-  onAction
+  onAction,
 }: {
   actions: DriverActionDescriptor[];
   nextAction?: DriverActionDescriptor;
@@ -1245,11 +1883,15 @@ function ActionList({
                 <strong>{nextAction.label}</strong>
               </span>
               <em>{nextAction.description}</em>
-              <code>{nextAction.method} {nextAction.route_path}</code>
+              <code>
+                {nextAction.method} {nextAction.route_path}
+              </code>
             </button>
           ) : null}
           {groups.map((safety) => {
-            const groupedActions = actions.filter((action) => action.safety === safety);
+            const groupedActions = actions.filter(
+              (action) => action.safety === safety,
+            );
             if (!groupedActions.length) {
               return null;
             }
@@ -1281,23 +1923,38 @@ function ActionList({
   );
 }
 
-function SecretBindingList({ driver, lane }: { driver: DriverDescriptor | null; lane: LaneSummary | null }) {
-  const bindingHints = driver?.setting_groups.flatMap((group) => {
-    return group.secret_bindings.map((binding) => ({ group, binding }));
-  }) ?? [];
+function SecretBindingList({
+  driver,
+  lane,
+}: {
+  driver: DriverDescriptor | null;
+  lane: LaneSummary | null;
+}) {
+  const bindingHints =
+    driver?.setting_groups.flatMap((group) => {
+      return group.secret_bindings.map((binding) => ({ group, binding }));
+    }) ?? [];
   const actualBindings = lane?.secret_bindings ?? [];
 
   return (
     <section className="panel">
-      <PanelHead eyebrow="managed secrets" title="Bindings" right={<KeyRound size={17} aria-hidden="true" />} />
+      <PanelHead
+        eyebrow="managed secrets"
+        title="Bindings"
+        right={<KeyRound size={17} aria-hidden="true" />}
+      />
       {actualBindings.length ? (
         <div className="secret-list">
           {actualBindings.map((binding) => (
             <div className="secret-row" key={binding.binding_id}>
-              <span className="lane-chip lane-chip-prod">{binding.instance || binding.context || "global"}</span>
+              <span className="lane-chip lane-chip-prod">
+                {binding.instance || binding.context || "global"}
+              </span>
               <strong>{binding.binding_key}</strong>
               <span>{binding.integration}</span>
-              <StatusPill status={binding.status === "configured" ? "pass" : "blocked"} />
+              <StatusPill
+                status={binding.status === "configured" ? "pass" : "blocked"}
+              />
             </div>
           ))}
         </div>
@@ -1311,7 +1968,12 @@ function SecretBindingList({ driver, lane }: { driver: DriverDescriptor | null; 
               <StatusPill status="unknown" />
             </div>
           ))}
-          {!bindingHints.length ? <StateBlock icon={<KeyRound size={18} />} title="No binding metadata" /> : null}
+          {!bindingHints.length ? (
+            <StateBlock
+              icon={<KeyRound size={18} />}
+              title="No binding metadata"
+            />
+          ) : null}
         </div>
       )}
     </section>
@@ -1322,7 +1984,7 @@ function EvidenceTimeline({
   prod,
   testing,
   previews,
-  onSelect
+  onSelect,
 }: {
   prod: LaneSummary | null;
   testing: LaneSummary | null;
@@ -1332,7 +1994,11 @@ function EvidenceTimeline({
   const rows = buildEvidenceRows(prod, testing, previews);
   return (
     <section className="panel">
-      <PanelHead eyebrow="evidence" title="Timeline" right={<Database size={17} aria-hidden="true" />} />
+      <PanelHead
+        eyebrow="evidence"
+        title="Timeline"
+        right={<Database size={17} aria-hidden="true" />}
+      />
       <div className="evidence-list">
         {rows.length ? (
           rows.map((row) => (
@@ -1346,7 +2012,9 @@ function EvidenceTimeline({
               <StatusIcon status={row.status} />
               <div>
                 <strong>
-                  <span className={`lane-chip lane-chip-${row.lane}`}>{row.lane}</span>
+                  <span className={`lane-chip lane-chip-${row.lane}`}>
+                    {row.lane}
+                  </span>
                   {row.title}
                 </strong>
                 <span>{row.detail}</span>
@@ -1366,7 +2034,13 @@ function EvidenceTimeline({
   );
 }
 
-function EvidenceDetailDrawer({ evidence, onClose }: { evidence: EvidenceRow | null; onClose: () => void }) {
+function EvidenceDetailDrawer({
+  evidence,
+  onClose,
+}: {
+  evidence: EvidenceRow | null;
+  onClose: () => void;
+}) {
   useEffect(() => {
     if (!evidence) {
       return undefined;
@@ -1398,17 +2072,26 @@ function EvidenceDetailDrawer({ evidence, onClose }: { evidence: EvidenceRow | n
             <p className="eyebrow">evidence detail</p>
             <h2 id="evidence-drawer-title">{evidence.title}</h2>
           </div>
-          <button className="icon-button" type="button" aria-label="Close evidence detail" onClick={onClose}>
+          <button
+            className="icon-button"
+            type="button"
+            aria-label="Close evidence detail"
+            onClick={onClose}
+          >
             <XCircle size={15} aria-hidden="true" />
           </button>
         </div>
         <div className="drawer-meta">
-          <span className={`lane-chip lane-chip-${evidence.lane}`}>{evidence.lane}</span>
+          <span className={`lane-chip lane-chip-${evidence.lane}`}>
+            {evidence.lane}
+          </span>
           <StatusPill status={evidence.status} />
           <code>{evidence.kind}</code>
           <code>{formatTime(evidence.time)}</code>
         </div>
-        <p className="drawer-summary">{evidence.detail || "No detail recorded for this evidence row."}</p>
+        <p className="drawer-summary">
+          {evidence.detail || "No detail recorded for this evidence row."}
+        </p>
         <div className="drawer-facts">
           {evidence.facts.map((fact) => (
             <KeyValue
@@ -1425,30 +2108,106 @@ function EvidenceDetailDrawer({ evidence, onClose }: { evidence: EvidenceRow | n
   );
 }
 
-function StateFixtureGallery({ actions }: { actions: DriverActionDescriptor[] }) {
-  const readyProd = fixtureLane({ instance: "prod", artifact: "ghcr.io/every/verireel@sha256:11112222", deployStatus: "pass", healthStatus: "pass", backupStatus: "pass" });
-  const readyTesting = fixtureLane({ instance: "testing", artifact: "ghcr.io/every/verireel@sha256:aa55cc77", deployStatus: "pass", healthStatus: "pass" });
-  const missingBackupProd = fixtureLane({ instance: "prod", artifact: "ghcr.io/every/verireel@sha256:11112222", deployStatus: "pass", healthStatus: "pass" });
-  const failedTesting = fixtureLane({ instance: "testing", artifact: "ghcr.io/every/verireel@sha256:fail0001", deployStatus: "fail", healthStatus: "fail" });
+function StateFixtureGallery({
+  actions,
+}: {
+  actions: DriverActionDescriptor[];
+}) {
+  const readyProd = fixtureLane({
+    instance: "prod",
+    artifact: "ghcr.io/every/verireel@sha256:11112222",
+    deployStatus: "pass",
+    healthStatus: "pass",
+    backupStatus: "pass",
+  });
+  const readyTesting = fixtureLane({
+    instance: "testing",
+    artifact: "ghcr.io/every/verireel@sha256:aa55cc77",
+    deployStatus: "pass",
+    healthStatus: "pass",
+  });
+  const missingBackupProd = fixtureLane({
+    instance: "prod",
+    artifact: "ghcr.io/every/verireel@sha256:11112222",
+    deployStatus: "pass",
+    healthStatus: "pass",
+  });
+  const failedTesting = fixtureLane({
+    instance: "testing",
+    artifact: "ghcr.io/every/verireel@sha256:fail0001",
+    deployStatus: "fail",
+    healthStatus: "fail",
+  });
 
   return (
     <section className="fixture-gallery">
-      <PanelHead eyebrow="development fixtures" title="Operator state coverage" />
+      <PanelHead
+        eyebrow="development fixtures"
+        title="Operator state coverage"
+      />
       <div className="fixture-grid">
         <div className="fixture-card">
-          <PromotionBridge prod={missingBackupProd} testing={readyTesting} actions={actions} decision={buildPromotionDecision(missingBackupProd, readyTesting)} loading={false} onAction={() => undefined} />
+          <PromotionBridge
+            prod={missingBackupProd}
+            testing={readyTesting}
+            actions={actions}
+            product="verireel"
+            context="verireel"
+            decision={buildPromotionDecision(missingBackupProd, readyTesting)}
+            loading={false}
+            onAction={() => undefined}
+          />
         </div>
         <div className="fixture-card">
-          <PromotionBridge prod={readyProd} testing={failedTesting} actions={actions} decision={buildPromotionDecision(readyProd, failedTesting)} loading={false} onAction={() => undefined} />
+          <PromotionBridge
+            prod={readyProd}
+            testing={failedTesting}
+            actions={actions}
+            product="verireel"
+            context="verireel"
+            decision={buildPromotionDecision(readyProd, failedTesting)}
+            loading={false}
+            onAction={() => undefined}
+          />
         </div>
         <div className="fixture-card">
-          <LanePanel title="Failed testing lane" laneKind="testing" lane={failedTesting} loading={false} />
+          <PromotionBridge
+            prod={missingBackupProd}
+            testing={readyTesting}
+            actions={FIXTURE_GENERIC_WEB_ACTIONS}
+            product="sellyouroutboard"
+            context="sellyouroutboard-testing"
+            decision={buildPromotionDecision(missingBackupProd, readyTesting, {
+              requireProdBackup: false,
+            })}
+            loading={false}
+            onAction={() => undefined}
+            dryRunPromotion={fixtureGenericWebPromotionDryRun}
+          />
         </div>
         <div className="fixture-card">
-          <PreviewInventory driver={FIXTURE_VERIREEL_DRIVER} previews={[]} inventoryProvenance={null} loading={false} />
+          <LanePanel
+            title="Failed testing lane"
+            laneKind="testing"
+            lane={failedTesting}
+            loading={false}
+          />
         </div>
         <div className="fixture-card">
-          <PreviewInventory driver={FIXTURE_ODOO_DRIVER} previews={[]} inventoryProvenance={null} loading={false} />
+          <PreviewInventory
+            driver={FIXTURE_VERIREEL_DRIVER}
+            previews={[]}
+            inventoryProvenance={null}
+            loading={false}
+          />
+        </div>
+        <div className="fixture-card">
+          <PreviewInventory
+            driver={FIXTURE_ODOO_DRIVER}
+            previews={[]}
+            inventoryProvenance={null}
+            loading={false}
+          />
         </div>
       </div>
       <div className="fixture-wide">
@@ -1464,7 +2223,29 @@ function StateFixtureGallery({ actions }: { actions: DriverActionDescriptor[] })
   );
 }
 
-function fixtureProductConfigApply(payload: ProductConfigApplyRequest): Promise<ProductConfigApplyPayload> {
+function fixtureGenericWebPromotionDryRun(): Promise<GenericWebProdPromotionPayload> {
+  return Promise.resolve({
+    status: "accepted",
+    trace_id: "fixture-trace-generic-web-promote",
+    records: {},
+    result: {
+      promotion_record_id: "",
+      deployment_record_id: "",
+      backup_record_id: "",
+      inventory_record_id: "",
+      promotion_status: "pending",
+      deployment_status: "skipped",
+      source_health_status: "pass",
+      destination_health_status: "skipped",
+      backup_status: "skipped",
+      dry_run: true,
+    },
+  });
+}
+
+function fixtureProductConfigApply(
+  payload: ProductConfigApplyRequest,
+): Promise<ProductConfigApplyPayload> {
   const runtimeKeys = Object.keys(payload.runtime_env?.env ?? {});
   return Promise.resolve({
     status: "ok",
@@ -1476,17 +2257,20 @@ function fixtureProductConfigApply(payload: ProductConfigApplyRequest): Promise<
     source_label: payload.source_label ?? "product-config-ui",
     runtime_environment: {
       action: "updated",
-      scope: payload.runtime_env?.scope ?? runtimeScopeForTarget(payload.context, payload.instance),
+      scope:
+        payload.runtime_env?.scope ??
+        runtimeScopeForTarget(payload.context, payload.instance),
       context: payload.context,
       instance: payload.instance,
       keys: runtimeKeys,
       changed_keys: runtimeKeys,
       unchanged_keys: [],
-      env_value_count_after: runtimeKeys.length
+      env_value_count_after: runtimeKeys.length,
     },
     secrets: (payload.secrets ?? []).map((secret, index) => ({
       action: "rotated",
-      scope: secret.scope ?? secretScopeForTarget(payload.context, payload.instance),
+      scope:
+        secret.scope ?? secretScopeForTarget(payload.context, payload.instance),
       context: payload.context,
       instance: payload.instance,
       integration: secret.integration ?? "runtime_environment",
@@ -1494,30 +2278,32 @@ function fixtureProductConfigApply(payload: ProductConfigApplyRequest): Promise<
       binding_key: secret.binding_key,
       secret_id: `fixture-secret-${index + 1}`,
       description: secret.description ?? "",
-      value_present: true
+      value_present: true,
     })),
     summary: {
       runtime_changed_key_count: runtimeKeys.length,
-      secret_change_count: (payload.secrets ?? []).length
-    }
+      secret_change_count: (payload.secrets ?? []).length,
+    },
   });
 }
 
 function ActionReviewDialog({
   action,
-  onClose
+  onClose,
 }: {
   action: DriverActionDescriptor | null;
   onClose: () => void;
 }) {
   const [confirmation, setConfirmation] = useState("");
   const [operatorReason, setOperatorReason] = useState("");
-  const requiresTypedConfirmation = action?.safety === "destructive" || action?.safety === "mutation";
+  const requiresTypedConfirmation =
+    action?.safety === "destructive" || action?.safety === "mutation";
   const requiresReason = action?.safety === "destructive";
   const confirmationPhrase = action ? `confirm ${action.action_id}` : "";
-  const canConfirm = !requiresTypedConfirmation || (
-    confirmation === confirmationPhrase && (!requiresReason || operatorReason.trim().length > 0)
-  );
+  const canConfirm =
+    !requiresTypedConfirmation ||
+    (confirmation === confirmationPhrase &&
+      (!requiresReason || operatorReason.trim().length > 0));
 
   useEffect(() => {
     setConfirmation("");
@@ -1530,26 +2316,53 @@ function ActionReviewDialog({
 
   return (
     <div className="dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <section className="dialog" role="dialog" aria-modal="true" aria-labelledby="action-dialog-title" onMouseDown={(event) => event.stopPropagation()}>
-        <PanelHead eyebrow={safetyLabel(action.safety)} title={action.label} right={<SafetyIcon safety={action.safety} />} />
+      <section
+        className="dialog"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="action-dialog-title"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <PanelHead
+          eyebrow={safetyLabel(action.safety)}
+          title={action.label}
+          right={<SafetyIcon safety={action.safety} />}
+        />
         <p>{action.description}</p>
         {requiresTypedConfirmation ? (
           <div className="risk-callout" data-safety={action.safety}>
             <SafetyIcon safety={action.safety} />
             <div>
-              <strong>{action.safety === "destructive" ? "Destructive operator review" : "Mutation review"}</strong>
+              <strong>
+                {action.safety === "destructive"
+                  ? "Destructive operator review"
+                  : "Mutation review"}
+              </strong>
               <span>
-                This prepares a non-executing request preview for an action that can change Launchplane records.
+                This prepares a non-executing request preview for an action that
+                can change Launchplane records.
               </span>
             </div>
           </div>
         ) : null}
         <div className="dialog-facts">
           <KeyValue label="Action" value={action.action_id} mono />
-          <KeyValue label="Safety" value={safetyLabel(action.safety)} status={action.safety === "destructive" ? "blocked" : "unknown"} />
-          <KeyValue label="Route" value={`${action.method} ${action.route_path}`} mono />
+          <KeyValue
+            label="Safety"
+            value={safetyLabel(action.safety)}
+            status={action.safety === "destructive" ? "blocked" : "unknown"}
+          />
+          <KeyValue
+            label="Route"
+            value={`${action.method} ${action.route_path}`}
+            mono
+          />
           <KeyValue label="Scope" value={action.scope} />
-          <KeyValue label="Writes" value={action.writes_records.join(", ") || "none"} mono />
+          <KeyValue
+            label="Writes"
+            value={action.writes_records.join(", ") || "none"}
+            mono
+          />
         </div>
         {requiresTypedConfirmation ? (
           <div className="confirm-stack">
@@ -1566,12 +2379,22 @@ function ActionReviewDialog({
             ) : null}
             <label className="confirm-label">
               <span>Type "{confirmationPhrase}"</span>
-              <input value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck={false} />
+              <input
+                value={confirmation}
+                onChange={(event) => setConfirmation(event.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
             </label>
           </div>
         ) : null}
         <div className="dialog-actions">
-          <button className="button" type="button" aria-label="Cancel action review" onClick={onClose}>
+          <button
+            className="button"
+            type="button"
+            aria-label="Cancel action review"
+            onClick={onClose}
+          >
             Cancel
           </button>
           <button
@@ -1589,7 +2412,15 @@ function ActionReviewDialog({
   );
 }
 
-function PanelHead({ eyebrow, title, right }: { eyebrow: string; title: string; right?: ReactNode }) {
+function PanelHead({
+  eyebrow,
+  title,
+  right,
+}: {
+  eyebrow: string;
+  title: string;
+  right?: ReactNode;
+}) {
   return (
     <div className="panel-head">
       <div>
@@ -1606,7 +2437,7 @@ function KeyValue({
   value,
   mono = false,
   muted = false,
-  status
+  status,
 }: {
   label: string;
   value: string;
@@ -1617,14 +2448,25 @@ function KeyValue({
   return (
     <div className="kv-row">
       <span>{label}</span>
-      <strong className={`${mono ? "mono" : ""} ${muted ? "muted" : ""}`} data-status={status}>
+      <strong
+        className={`${mono ? "mono" : ""} ${muted ? "muted" : ""}`}
+        data-status={status}
+      >
         {value || "unknown"}
       </strong>
     </div>
   );
 }
 
-function MetricTile({ label, status, value }: { label: string; status: Status | string; value: string }) {
+function MetricTile({
+  label,
+  status,
+  value,
+}: {
+  label: string;
+  status: Status | string;
+  value: string;
+}) {
   return (
     <div className="metric-tile" data-status={status}>
       <span>{label}</span>
@@ -1688,7 +2530,13 @@ function SkeletonRows() {
   );
 }
 
-function EvidenceStrip({ lane, laneKind }: { lane: LaneSummary | null; laneKind: "prod" | "testing" }) {
+function EvidenceStrip({
+  lane,
+  laneKind,
+}: {
+  lane: LaneSummary | null;
+  laneKind: "prod" | "testing";
+}) {
   const backup = lane?.latest_backup_gate?.status ?? "unknown";
   const promotion = lane?.latest_promotion?.deploy.status ?? "unknown";
   return (
@@ -1700,56 +2548,99 @@ function EvidenceStrip({ lane, laneKind }: { lane: LaneSummary | null; laneKind:
   );
 }
 
-function buildPromotionDecision(prod: LaneSummary | null, testing: LaneSummary | null): PromotionDecision {
-  const gates = promotionGates(prod, testing);
-  const verdict = gates.some((gate) => gate.status === "fail" || gate.status === "blocked")
+function buildPromotionDecision(
+  prod: LaneSummary | null,
+  testing: LaneSummary | null,
+  options: { requireProdBackup?: boolean } = {},
+): PromotionDecision {
+  const gates = promotionGates(prod, testing, options);
+  const verdict = gates.some(
+    (gate) => gate.status === "fail" || gate.status === "blocked",
+  )
     ? "blocked"
-    : gates.some((gate) => gate.status === "pending" || gate.status === "unknown")
+    : gates.some(
+          (gate) => gate.status === "pending" || gate.status === "unknown",
+        )
       ? "pending"
       : "ready";
-  const blockingGate = gates.find((gate) => gate.status === "fail" || gate.status === "blocked" || gate.status === "unknown");
+  const blockingGate = gates.find(
+    (gate) =>
+      gate.status === "fail" ||
+      gate.status === "blocked" ||
+      gate.status === "unknown",
+  );
   return {
     verdict,
     gates,
     latestEvidence: latestEvidenceLabel(prod, testing),
-    blockingEvidence: blockingGate ? `${blockingGate.label}: ${blockingGate.evidence}` : "",
+    blockingEvidence: blockingGate
+      ? `${blockingGate.label}: ${blockingGate.evidence}`
+      : "",
     prodArtifact: artifactFromLane(prod),
-    testingArtifact: artifactFromLane(testing)
+    testingArtifact: artifactFromLane(testing),
   };
 }
 
-function promotionGates(prod: LaneSummary | null, testing: LaneSummary | null): PromotionGate[] {
-  const testingDeploy = testing?.latest_deployment?.deploy.status ?? testing?.inventory?.deploy.status ?? "unknown";
-  const testingHealth = testing?.inventory?.destination_health.status ?? testing?.latest_deployment?.destination_health.status ?? "unknown";
+function promotionGates(
+  prod: LaneSummary | null,
+  testing: LaneSummary | null,
+  { requireProdBackup = true }: { requireProdBackup?: boolean } = {},
+): PromotionGate[] {
+  const testingDeploy =
+    testing?.latest_deployment?.deploy.status ??
+    testing?.inventory?.deploy.status ??
+    "unknown";
+  const testingHealth =
+    testing?.inventory?.destination_health.status ??
+    testing?.latest_deployment?.destination_health.status ??
+    "unknown";
   const backupGate = prod?.latest_backup_gate?.status ?? "unknown";
   const candidateArtifact = artifactFromLane(testing);
   const prodArtifact = artifactFromLane(prod);
-  return [
+  const gates: PromotionGate[] = [
     {
       label: "Candidate deployment",
       status: normalizeGateStatus(testingDeploy),
       detail: labelForStatus(testingDeploy),
-      evidence: testing?.latest_deployment?.record_id ?? "missing deployment evidence"
+      evidence:
+        testing?.latest_deployment?.record_id ?? "missing deployment evidence",
     },
     {
       label: "Candidate health",
       status: normalizeGateStatus(testingHealth),
       detail: labelForStatus(testingHealth),
-      evidence: testing?.inventory?.destination_health.verified ? "verified healthcheck" : "missing healthcheck"
+      evidence: testing?.inventory?.destination_health.verified
+        ? "verified healthcheck"
+        : "missing healthcheck",
     },
-    {
-      label: "Prod backup gate",
-      status: backupGate === "pass" ? "pass" : backupGate === "fail" ? "blocked" : "unknown",
-      detail: labelForStatus(backupGate),
-      evidence: prod?.latest_backup_gate?.record_id ?? "required before prod change"
-    },
-    {
-      label: "Artifact delta",
-      status: candidateArtifact && candidateArtifact !== prodArtifact ? "pass" : "unknown",
-      detail: candidateArtifact && prodArtifact ? "changed" : "missing",
-      evidence: candidateArtifact && prodArtifact ? `${shorten(candidateArtifact)} -> ${shorten(prodArtifact)}` : "candidate or prod artifact missing"
-    }
   ];
+  if (requireProdBackup) {
+    gates.push({
+      label: "Prod backup gate",
+      status:
+        backupGate === "pass"
+          ? "pass"
+          : backupGate === "fail"
+            ? "blocked"
+            : "unknown",
+      detail: labelForStatus(backupGate),
+      evidence:
+        prod?.latest_backup_gate?.record_id ?? "required before prod change",
+    });
+  }
+  gates.push({
+    label: "Artifact delta",
+    status:
+      candidateArtifact && candidateArtifact !== prodArtifact
+        ? "pass"
+        : "unknown",
+    detail: candidateArtifact && prodArtifact ? "changed" : "missing",
+    evidence:
+      candidateArtifact && prodArtifact
+        ? `${shorten(candidateArtifact)} -> ${shorten(prodArtifact)}`
+        : "candidate or prod artifact missing",
+  });
+  return gates;
 }
 
 function normalizeGateStatus(status: Status | string): Status {
@@ -1765,11 +2656,15 @@ function normalizeGateStatus(status: Status | string): Status {
   return "unknown";
 }
 
-function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null, previews: PreviewSummary[]): EvidenceRow[] {
+function buildEvidenceRows(
+  prod: LaneSummary | null,
+  testing: LaneSummary | null,
+  previews: PreviewSummary[],
+): EvidenceRow[] {
   const rows: EvidenceRow[] = [];
   [
     { lane: prod, laneName: "prod" },
-    { lane: testing, laneName: "testing" }
+    { lane: testing, laneName: "testing" },
   ].forEach(({ lane, laneName }) => {
     if (lane?.latest_deployment) {
       const deployment = lane.latest_deployment;
@@ -1783,18 +2678,51 @@ function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null
         kind: "deploy",
         facts: [
           { label: "Record", value: deployment.record_id, mono: true },
-          { label: "Artifact", value: artifactFromLane(lane) || "unknown", mono: true },
-          { label: "Source ref", value: deployment.source_git_ref || "unknown", mono: true },
-          { label: "Target", value: deployment.deploy.target_name || "unknown" },
+          {
+            label: "Artifact",
+            value: artifactFromLane(lane) || "unknown",
+            mono: true,
+          },
+          {
+            label: "Source ref",
+            value: deployment.source_git_ref || "unknown",
+            mono: true,
+          },
+          {
+            label: "Target",
+            value: deployment.deploy.target_name || "unknown",
+          },
           { label: "Target type", value: deployment.deploy.target_type },
           { label: "Deploy mode", value: deployment.deploy.deploy_mode },
-          { label: "Deployment id", value: deployment.deploy.deployment_id ?? "unknown", mono: true },
-          { label: "Deploy status", value: labelForStatus(deployment.deploy.status), status: deployment.deploy.status },
-          { label: "Health status", value: labelForStatus(deployment.destination_health.status), status: deployment.destination_health.status },
-          { label: "Health URLs", value: deployment.destination_health.urls.join(", ") || "none", mono: true },
-          { label: "Started", value: formatTime(deployment.deploy.started_at ?? "") },
-          { label: "Finished", value: formatTime(deployment.deploy.finished_at ?? "") }
-        ]
+          {
+            label: "Deployment id",
+            value: deployment.deploy.deployment_id ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Deploy status",
+            value: labelForStatus(deployment.deploy.status),
+            status: deployment.deploy.status,
+          },
+          {
+            label: "Health status",
+            value: labelForStatus(deployment.destination_health.status),
+            status: deployment.destination_health.status,
+          },
+          {
+            label: "Health URLs",
+            value: deployment.destination_health.urls.join(", ") || "none",
+            mono: true,
+          },
+          {
+            label: "Started",
+            value: formatTime(deployment.deploy.started_at ?? ""),
+          },
+          {
+            label: "Finished",
+            value: formatTime(deployment.deploy.finished_at ?? ""),
+          },
+        ],
       });
     }
     if (lane?.latest_backup_gate) {
@@ -1811,14 +2739,18 @@ function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null
           { label: "Record", value: backup.record_id, mono: true },
           { label: "Source", value: backup.source || "unknown" },
           { label: "Required", value: backup.required ? "yes" : "no" },
-          { label: "Status", value: labelForStatus(backup.status), status: backup.status },
+          {
+            label: "Status",
+            value: labelForStatus(backup.status),
+            status: backup.status,
+          },
           { label: "Created", value: formatTime(backup.created_at) },
           ...Object.entries(backup.evidence).map(([label, value]) => ({
             label,
             value,
-            mono: true
-          }))
-        ]
+            mono: true,
+          })),
+        ],
       });
     }
     if (lane?.latest_promotion) {
@@ -1833,17 +2765,47 @@ function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null
         kind: "promote",
         facts: [
           { label: "Record", value: promotion.record_id, mono: true },
-          { label: "Artifact", value: promotion.artifact_identity.artifact_id, mono: true },
+          {
+            label: "Artifact",
+            value: promotion.artifact_identity.artifact_id,
+            mono: true,
+          },
           { label: "From", value: promotion.from_instance },
           { label: "To", value: promotion.to_instance },
-          { label: "Deployment record", value: promotion.deployment_record_id ?? "unknown", mono: true },
-          { label: "Backup record", value: promotion.backup_record_id ?? "unknown", mono: true },
-          { label: "Backup gate", value: labelForStatus(promotion.backup_gate.status), status: promotion.backup_gate.status },
-          { label: "Deploy target", value: promotion.deploy.target_name || "unknown" },
-          { label: "Deploy status", value: labelForStatus(promotion.deploy.status), status: promotion.deploy.status },
-          { label: "Health status", value: labelForStatus(promotion.destination_health.status), status: promotion.destination_health.status },
-          { label: "Finished", value: formatTime(promotion.deploy.finished_at ?? "") }
-        ]
+          {
+            label: "Deployment record",
+            value: promotion.deployment_record_id ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Backup record",
+            value: promotion.backup_record_id ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Backup gate",
+            value: labelForStatus(promotion.backup_gate.status),
+            status: promotion.backup_gate.status,
+          },
+          {
+            label: "Deploy target",
+            value: promotion.deploy.target_name || "unknown",
+          },
+          {
+            label: "Deploy status",
+            value: labelForStatus(promotion.deploy.status),
+            status: promotion.deploy.status,
+          },
+          {
+            label: "Health status",
+            value: labelForStatus(promotion.destination_health.status),
+            status: promotion.destination_health.status,
+          },
+          {
+            label: "Finished",
+            value: formatTime(promotion.deploy.finished_at ?? ""),
+          },
+        ],
       });
     }
   });
@@ -1860,24 +2822,55 @@ function buildEvidenceRows(prod: LaneSummary | null, testing: LaneSummary | null
       facts: [
         { label: "Preview", value: summary.preview.preview_id, mono: true },
         { label: "Label", value: summary.preview.preview_label },
-        { label: "Pull request", value: `${summary.preview.anchor_repo}#${summary.preview.anchor_pr_number}` },
+        {
+          label: "Pull request",
+          value: `${summary.preview.anchor_repo}#${summary.preview.anchor_pr_number}`,
+        },
         { label: "URL", value: summary.preview.canonical_url, mono: true },
         { label: "State", value: summary.preview.state },
-        { label: "Generation", value: generation?.generation_id ?? "none", mono: true },
-        { label: "Sequence", value: generation ? String(generation.sequence) : "none" },
-        { label: "Artifact", value: generation?.artifact_id ?? "unknown", mono: true },
-        { label: "Deploy", value: labelForStatus(generation?.deploy_status ?? "unknown"), status: generation?.deploy_status ?? "unknown" },
-        { label: "Verify", value: labelForStatus(generation?.verify_status ?? "unknown"), status: generation?.verify_status ?? "unknown" },
-        { label: "Health", value: labelForStatus(generation?.overall_health_status ?? "unknown"), status: generation?.overall_health_status ?? "unknown" },
+        {
+          label: "Generation",
+          value: generation?.generation_id ?? "none",
+          mono: true,
+        },
+        {
+          label: "Sequence",
+          value: generation ? String(generation.sequence) : "none",
+        },
+        {
+          label: "Artifact",
+          value: generation?.artifact_id ?? "unknown",
+          mono: true,
+        },
+        {
+          label: "Deploy",
+          value: labelForStatus(generation?.deploy_status ?? "unknown"),
+          status: generation?.deploy_status ?? "unknown",
+        },
+        {
+          label: "Verify",
+          value: labelForStatus(generation?.verify_status ?? "unknown"),
+          status: generation?.verify_status ?? "unknown",
+        },
+        {
+          label: "Health",
+          value: labelForStatus(generation?.overall_health_status ?? "unknown"),
+          status: generation?.overall_health_status ?? "unknown",
+        },
         { label: "Updated", value: formatTime(summary.preview.updated_at) },
-        { label: "Finished", value: formatTime(generation?.finished_at ?? "") }
-      ]
+        { label: "Finished", value: formatTime(generation?.finished_at ?? "") },
+      ],
     });
   });
-  return rows.sort((left, right) => right.time.localeCompare(left.time)).slice(0, 8);
+  return rows
+    .sort((left, right) => right.time.localeCompare(left.time))
+    .slice(0, 8);
 }
 
-function pickNextAction(actions: DriverActionDescriptor[], verdict: PromotionVerdict): DriverActionDescriptor | undefined {
+function pickNextAction(
+  actions: DriverActionDescriptor[],
+  verdict: PromotionVerdict,
+): DriverActionDescriptor | undefined {
   if (verdict === "ready") {
     return actions.find((action) => action.action_id === "prod_promotion");
   }
@@ -1888,7 +2881,14 @@ function pickNextAction(actions: DriverActionDescriptor[], verdict: PromotionVer
   );
 }
 
-function findDriverView(view: DriverContextView | null, driverId: string): DriverView | null {
+function requiresProdBackup(actions: DriverActionDescriptor[]): boolean {
+  return actions.some((action) => action.action_id === "prod_backup_gate");
+}
+
+function findDriverView(
+  view: DriverContextView | null,
+  driverId: string,
+): DriverView | null {
   return view?.drivers.find((driver) => driver.driver_id === driverId) ?? null;
 }
 
@@ -1901,6 +2901,14 @@ function artifactFromLane(lane: LaneSummary | null): string {
   );
 }
 
+function sourceRefFromLane(lane: LaneSummary | null): string {
+  return (
+    lane?.inventory?.source_git_ref ??
+    lane?.latest_deployment?.source_git_ref ??
+    ""
+  );
+}
+
 function releaseIdentityFromLane(lane: LaneSummary | null): string {
   if (lane?.release_tuple?.tuple_id) {
     return lane.release_tuple.tuple_id;
@@ -1909,10 +2917,15 @@ function releaseIdentityFromLane(lane: LaneSummary | null): string {
   if (!artifact) {
     return "";
   }
-  return artifact.includes("@") ? artifact.split("@").at(-1) ?? artifact : artifact;
+  return artifact.includes("@")
+    ? (artifact.split("@").at(-1) ?? artifact)
+    : artifact;
 }
 
-function latestEvidenceLabel(prod: LaneSummary | null, testing: LaneSummary | null): string {
+function latestEvidenceLabel(
+  prod: LaneSummary | null,
+  testing: LaneSummary | null,
+): string {
   const rows = buildEvidenceRows(prod, testing, []);
   const latest = rows[0];
   if (!latest) {
@@ -1926,7 +2939,7 @@ function fixtureLane({
   artifact,
   deployStatus,
   healthStatus,
-  backupStatus
+  backupStatus,
 }: {
   instance: "prod" | "testing";
   artifact: string;
@@ -1941,13 +2954,14 @@ function fixtureLane({
     deployment_id: `fixture-${instance}`,
     status: deployStatus,
     started_at: "2026-04-28T14:30:00Z",
-    finished_at: instance === "prod" ? "2026-04-28T14:40:00Z" : "2026-04-28T15:05:00Z"
+    finished_at:
+      instance === "prod" ? "2026-04-28T14:40:00Z" : "2026-04-28T15:05:00Z",
   };
   const destinationHealth = {
     verified: healthStatus !== "unknown",
     urls: [`https://${instance}.verireel.example/api/health`],
     timeout_seconds: 60,
-    status: healthStatus
+    status: healthStatus,
   };
   return {
     context: "verireel",
@@ -1960,7 +2974,7 @@ function fixtureLane({
       deploy,
       destination_health: destinationHealth,
       updated_at: deploy.finished_at,
-      deployment_record_id: `fixture-deployment-${instance}`
+      deployment_record_id: `fixture-deployment-${instance}`,
     },
     latest_deployment: {
       record_id: `fixture-deployment-${instance}`,
@@ -1969,7 +2983,7 @@ function fixtureLane({
       instance,
       source_git_ref: "6b3c9d7e8f901234567890abcdef1234567890ab",
       deploy,
-      destination_health: destinationHealth
+      destination_health: destinationHealth,
     },
     latest_backup_gate: backupStatus
       ? {
@@ -1980,7 +2994,7 @@ function fixtureLane({
           source: "fixture evidence",
           required: true,
           status: backupStatus,
-          evidence: backupStatus === "pass" ? { snapshot: "fixture-prod" } : {}
+          evidence: backupStatus === "pass" ? { snapshot: "fixture-prod" } : {},
         }
       : null,
     secret_bindings: [],
@@ -1991,8 +3005,8 @@ function fixtureLane({
       refreshed_at: deploy.finished_at,
       freshness_status: "verified",
       stale_after: "2026-04-28T15:35:00Z",
-      detail: "Development fixture lane evidence."
-    }
+      detail: "Development fixture lane evidence.",
+    },
   };
 }
 
@@ -2036,6 +3050,6 @@ function formatTime(value: string): string {
     month: "short",
     day: "2-digit",
     hour: "2-digit",
-    minute: "2-digit"
+    minute: "2-digit",
   }).format(date);
 }
