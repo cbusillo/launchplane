@@ -435,6 +435,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "/api/domain.create",
             ],
         )
+        update_application = [
+            request for request in requests if request["path"] == "/api/application.update"
+        ][0]
+        self.assertEqual(update_application["payload"]["endpointSpecSwarm"], {"Mode": "dnsrr"})
         save_environment = [
             request for request in requests if request["path"] == "/api/application.saveEnvironment"
         ][0]

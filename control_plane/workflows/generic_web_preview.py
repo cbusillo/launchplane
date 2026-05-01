@@ -346,6 +346,10 @@ def _ensure_application(
     return _fetch_application(host=host, token=token, application_id=created_application_id), True
 
 
+def _preview_endpoint_spec_swarm(template_application: dict[str, object]) -> object:
+    return template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
+
+
 def _configure_application(
     *,
     host: str,
@@ -369,7 +373,7 @@ def _configure_application(
             "sourceType": "docker",
             "autoDeploy": True,
             "replicas": template_application.get("replicas"),
-            "endpointSpecSwarm": template_application.get("endpointSpecSwarm"),
+            "endpointSpecSwarm": _preview_endpoint_spec_swarm(template_application),
             "createEnvFile": template_application.get("createEnvFile"),
             "triggerType": template_application.get("triggerType"),
             "enabled": template_application.get("enabled"),
