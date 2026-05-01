@@ -17,7 +17,7 @@ from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 
 import click
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 from jwt import InvalidTokenError
 
 from control_plane import dokploy as control_plane_dokploy
@@ -51,7 +51,12 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackStatus,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
-from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.promotion_record import (
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+    PromotionRecord,
+    ReleaseStatus,
+)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
@@ -583,6 +588,60 @@ class VeriReelTestingDeployEnvelope(BaseModel):
             raise ValueError("VeriReel testing deploy requires product 'verireel'.")
         if self.deploy.instance != "testing":
             raise ValueError("VeriReel testing deploy requires instance 'testing'.")
+        return self
+
+
+def _normalize_release_status(value: object, *, label: str) -> ReleaseStatus:
+    normalized = str(value or "").strip().lower()
+    if normalized in {"success", "passed", "pass"}:
+        return "pass"
+    if normalized in {"failure", "failed", "fail", "cancelled", "canceled", "timed_out"}:
+        return "fail"
+    if normalized in {"skipped", "not-run", "not_run", ""}:
+        return "skipped"
+    if normalized in {"pending", "in_progress", "in-progress"}:
+        return "pending"
+    raise ValueError(f"{label} must be pass, fail, skipped, or pending.")
+
+
+class VeriReelTestingVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str = "verireel"
+    instance: str = "testing"
+    deployment_record_id: str
+    migration_status: ReleaseStatus
+    verification_status: ReleaseStatus
+    owner_routes_status: ReleaseStatus
+
+    @field_validator("migration_status", "verification_status", "owner_routes_status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value: object) -> ReleaseStatus:
+        return _normalize_release_status(value, label="Testing verification status")
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "VeriReelTestingVerificationRequest":
+        if self.context != "verireel":
+            raise ValueError("VeriReel testing verification requires context 'verireel'.")
+        if self.instance != "testing":
+            raise ValueError("VeriReel testing verification requires instance 'testing'.")
+        if not self.deployment_record_id.strip():
+            raise ValueError("VeriReel testing verification requires deployment_record_id.")
+        return self
+
+
+class VeriReelTestingVerificationEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    verification: VeriReelTestingVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "VeriReelTestingVerificationEnvelope":
+        if self.product.strip() != "verireel":
+            raise ValueError("VeriReel testing verification requires product 'verireel'.")
         return self
 
 
@@ -1716,6 +1775,92 @@ def _apply_verireel_preview_verification_records(
     )
 
 
+def _testing_post_deploy_detail(status: ReleaseStatus) -> str:
+    if status == "pass":
+        return "Prisma migrations completed on testing."
+    if status == "fail":
+        return "Prisma migrations failed on testing."
+    return ""
+
+
+def _testing_destination_health_status(
+    *,
+    deployment_record: DeploymentRecord,
+    request: VeriReelTestingVerificationRequest,
+) -> ReleaseStatus:
+    statuses = (
+        deployment_record.destination_health.status,
+        request.verification_status,
+        request.owner_routes_status,
+    )
+    if any(status == "fail" for status in statuses):
+        return "fail"
+    if all(status == "pass" for status in statuses):
+        return "pass"
+    if any(status == "pending" for status in statuses):
+        return "pending"
+    return "skipped"
+
+
+def _updated_testing_destination_health(
+    *,
+    deployment_record: DeploymentRecord,
+    status: ReleaseStatus,
+) -> HealthcheckEvidence:
+    if status in {"pass", "fail"} and deployment_record.destination_health.urls:
+        return deployment_record.destination_health.model_copy(update={"status": status})
+    return HealthcheckEvidence(status=status)
+
+
+def _apply_verireel_testing_verification_records(
+    *,
+    record_store: object,
+    request: VeriReelTestingVerificationRequest,
+) -> dict[str, str]:
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    try:
+        deployment_record = typed_record_store.read_deployment_record(
+            request.deployment_record_id
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"No Launchplane deployment record found for {request.deployment_record_id}."
+        ) from exc
+    if deployment_record.context != request.context:
+        raise click.ClickException(
+            "Testing verification context does not match deployment record context."
+        )
+    if deployment_record.instance != request.instance:
+        raise click.ClickException(
+            "Testing verification instance does not match deployment record instance."
+        )
+
+    destination_health_status = _testing_destination_health_status(
+        deployment_record=deployment_record,
+        request=request,
+    )
+    updated_record = deployment_record.model_copy(
+        update={
+            "post_deploy_update": PostDeployUpdateEvidence(
+                attempted=request.migration_status != "skipped",
+                status=request.migration_status,
+                detail=_testing_post_deploy_detail(request.migration_status),
+            ),
+            "destination_health": _updated_testing_destination_health(
+                deployment_record=deployment_record,
+                status=destination_health_status,
+            ),
+        }
+    )
+    result = apply_deployment_evidence(
+        record_store=typed_record_store,
+        deployment_record=updated_record,
+    )
+    result["deployment_health_status"] = destination_health_status
+    result["post_deploy_status"] = request.migration_status
+    return result
+
+
 def _allows_preview_pr_feedback_write(
     *,
     authz_policy: LaunchplaneAuthzPolicy,
@@ -1820,6 +1965,7 @@ def create_launchplane_service_app(
         "/v1/drivers/verireel/preview-destroy",
         "/v1/drivers/verireel/preview-verification",
         "/v1/drivers/verireel/testing-deploy",
+        "/v1/drivers/verireel/testing-verification",
         "/v1/drivers/verireel/stable-environment",
         "/v1/drivers/verireel/runtime-verification",
         "/v1/drivers/verireel/app-maintenance",
@@ -3167,6 +3313,44 @@ def create_launchplane_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
+            elif path == "/v1/drivers/verireel/testing-verification":
+                request = VeriReelTestingVerificationEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="deployment.write",
+                    product=request.product,
+                    context=request.verification.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot write VeriReel testing verification"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = _apply_verireel_testing_verification_records(
+                    record_store=record_store,
+                    request=request.verification,
+                )
             elif path == "/v1/drivers/verireel/stable-environment":
                 request = VeriReelStableEnvironmentEnvelope.model_validate(payload)
                 if not authz_policy.allows(

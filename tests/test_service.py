@@ -2799,6 +2799,188 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(payload["result"]["target_id"], "testing-app-123")
             execute_mock.assert_called_once()
 
+    def test_verireel_testing_verification_driver_updates_deployment_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-verireel-testing-run-12345-attempt-1",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890"
+                    ),
+                    context="verireel",
+                    instance="testing",
+                    source_git_ref="abcdef1234567890",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application",
+                        target_id="testing-app-123",
+                        target_name="ver-testing-app",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="ver-testing-app",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="testing-app-123",
+                        status="pass",
+                        started_at="2026-04-20T18:20:00Z",
+                        finished_at="2026-04-20T18:21:15Z",
+                    ),
+                    destination_health={
+                        "verified": True,
+                        "urls": ["https://ver-testing.shinycomputers.com/api/health"],
+                        "timeout_seconds": 45,
+                        "status": "pass",
+                    },
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/testing-verification",
+                payload={
+                    "product": "verireel",
+                    "verification": {
+                        "deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1",
+                        "migration_status": "success",
+                        "verification_status": "success",
+                        "owner_routes_status": "success",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {
+                    "deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1",
+                    "inventory_record_id": "verireel-testing",
+                },
+            )
+            deployment = store.read_deployment_record(
+                "deployment-verireel-testing-run-12345-attempt-1"
+            )
+            inventory = store.read_environment_inventory(
+                context_name="verireel",
+                instance_name="testing",
+            )
+            self.assertEqual(deployment.post_deploy_update.status, "pass")
+            self.assertEqual(deployment.destination_health.status, "pass")
+            self.assertEqual(inventory.deployment_record_id, deployment.record_id)
+
+    def test_verireel_testing_verification_driver_marks_product_check_failure(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-verireel-testing-run-12345-attempt-1",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890"
+                    ),
+                    context="verireel",
+                    instance="testing",
+                    source_git_ref="abcdef1234567890",
+                    deploy=DeploymentEvidence(
+                        target_name="ver-testing-app",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="testing-app-123",
+                        status="pass",
+                    ),
+                    destination_health={
+                        "verified": True,
+                        "urls": ["https://ver-testing.shinycomputers.com/api/health"],
+                        "timeout_seconds": 45,
+                        "status": "pass",
+                    },
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["push", "workflow_dispatch"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel"],
+                            "actions": ["deployment.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        workflow_ref=(
+                            "every/verireel/.github/workflows/publish-image.yml@refs/heads/main"
+                        ),
+                        event_name="push",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, _payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/verireel/testing-verification",
+                payload={
+                    "product": "verireel",
+                    "verification": {
+                        "deployment_record_id": "deployment-verireel-testing-run-12345-attempt-1",
+                        "migration_status": "success",
+                        "verification_status": "failure",
+                        "owner_routes_status": "success",
+                    },
+                },
+            )
+
+            self.assertEqual(status_code, 202)
+            deployment = store.read_deployment_record(
+                "deployment-verireel-testing-run-12345-attempt-1"
+            )
+            self.assertEqual(deployment.post_deploy_update.status, "pass")
+            self.assertEqual(deployment.destination_health.status, "fail")
+
     def test_verireel_testing_deploy_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

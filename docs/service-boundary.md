@@ -56,6 +56,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/prod-promotion`
   - `POST /v1/drivers/odoo/prod-rollback`
   - `POST /v1/drivers/verireel/testing-deploy`
+  - `POST /v1/drivers/verireel/testing-verification`
   - `POST /v1/drivers/verireel/stable-environment`
   - `POST /v1/drivers/verireel/app-maintenance`
   - `POST /v1/drivers/verireel/prod-deploy`
@@ -374,6 +375,7 @@ The first explicit driver routes now in service are:
 - `POST /v1/drivers/odoo/prod-promotion`
 - `POST /v1/drivers/odoo/prod-rollback`
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/testing-verification`
 - `POST /v1/drivers/verireel/stable-environment`
 - `POST /v1/drivers/verireel/app-maintenance`
 - `POST /v1/drivers/verireel/prod-deploy`
@@ -475,6 +477,8 @@ retries do not collide. The regular cleanup workflow uses
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
+- VeriReel testing verification driver:
+  `verireel-testing-verification:<product>:<context>:<instance>:<deployment_record_id>`
 - VeriReel prod deploy driver:
   `verireel-prod-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel prod backup gate driver:

@@ -87,6 +87,7 @@ Current implementation scope:
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
 - `POST /v1/drivers/verireel/testing-deploy`
+- `POST /v1/drivers/verireel/testing-verification`
 - `POST /v1/drivers/verireel/prod-deploy`
 - `POST /v1/drivers/verireel/prod-backup-gate`
 - `POST /v1/drivers/verireel/prod-promotion`
@@ -244,15 +245,17 @@ Current derived-state behavior:
   drivers own the remaining stable-lane execution path. The prod-promotion
   driver writes the promotion record from the backup gate, deploy result,
   migration result, destination health check, and primitive testing-lane health
-  status sent by the product workflow. VeriReel maintenance
-  operations that need Dokploy authority, such as testing migrations, preview
-  owner-admin verification helpers, reset-testing, and preview inventory, also
-  flow through Launchplane driver routes instead of product-repo workflow
-  secrets. Stable testing/prod base URLs and target identity are resolved from
-  Launchplane's DB-backed target/runtime records through the stable-environment
-  route. Those routes return durable record identifiers, topology metadata, or
-  timing/status for the caller to thread into later verification or promotion
-  evidence.
+  status sent by the product workflow. The testing-verification route accepts
+  primitive migration, browser verification, and owner-route statuses and
+  updates the existing testing deployment record plus current inventory.
+  VeriReel maintenance operations that need Dokploy authority, such as testing
+  migrations, preview owner-admin verification helpers, reset-testing, and
+  preview inventory, also flow through Launchplane driver routes instead of
+  product-repo workflow secrets. Stable testing/prod base URLs and target
+  identity are resolved from Launchplane's DB-backed target/runtime records
+  through the stable-environment route. Those routes return durable record
+  identifiers, topology metadata, or timing/status for the caller to thread into
+  later verification or promotion evidence.
 - Launchplane can also execute the Odoo stable-lane driver path directly:
   `POST /v1/drivers/odoo/prod-backup-gate` captures DB and filestore backup
   evidence, `POST /v1/drivers/odoo/prod-promotion` validates the stored
