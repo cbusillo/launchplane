@@ -2828,11 +2828,14 @@ def create_launchplane_service_app(
                         source_label=request.source_label,
                     )
                 except control_plane_product_config.ProductConfigError as error:
+                    error_code = error.code
+                    error_message = "Product config request failed validation."
                     status_code = 400
-                    error_code = "invalid_request"
-                    if "LAUNCHPLANE_MASTER_ENCRYPTION_KEY" in str(error):
+                    if error_code == "secret_configuration_required":
                         status_code = 503
-                        error_code = "secret_configuration_required"
+                        error_message = (
+                            "Launchplane service is missing required secret write configuration."
+                        )
                     return _json_response(
                         start_response=start_response,
                         status_code=status_code,
@@ -2841,7 +2844,7 @@ def create_launchplane_service_app(
                             "trace_id": request_trace_id,
                             "error": {
                                 "code": error_code,
-                                "message": str(error),
+                                "message": error_message,
                             },
                         },
                     )

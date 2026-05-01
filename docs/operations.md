@@ -348,8 +348,9 @@ Current derived-state behavior:
   authenticated service API for operator UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
   `product_config.apply` after review. The service response is redacted and the
-  route fails closed when secret writes are requested without the Launchplane
-  master encryption key in the service runtime.
+  route rejects nested runtime or secret targets that differ from the authorized
+  top-level context/instance. It fails closed when secret writes are requested
+  without the Launchplane master encryption key in the service runtime.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
 - `environments relabel` updates runtime-environment record source metadata
