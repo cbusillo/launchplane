@@ -57,6 +57,9 @@ ODOO_RAW_COMPOSE_REQUIRED_SERVICES = ("web", "database", "script-runner")
 _LIKELY_SECRET_LOG_VALUE_PATTERN = re.compile(
     r"(?i)(\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*\s*[=:]\s*)([^\s,;]+)"
 )
+_QUOTED_SECRET_LOG_VALUE_PATTERN = re.compile(
+    r"(?i)([\"']?\b[A-Z0-9_]*(?:PASSWORD|PASS|TOKEN|SECRET|API_KEY|ACCESS_KEY|PRIVATE_KEY)[A-Z0-9_]*[\"']?\s*[=:]\s*)([\"'])(?:\\.|(?!\2).)*\2"
+)
 _BEARER_LOG_VALUE_PATTERN = re.compile(r"(?i)(bearer\s+)[A-Za-z0-9._~+/=-]+")
 _DOKPLOY_LOG_SINCE_PATTERN = re.compile(r"^(all|\d+[smhd])$")
 _DOKPLOY_LOG_SEARCH_PATTERN = re.compile(r"^[a-zA-Z0-9 ._-]{0,500}$")
@@ -689,7 +692,8 @@ def normalize_dokploy_log_search(raw_search: str) -> str:
 
 
 def redact_dokploy_log_line(raw_line: str) -> str:
-    redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", raw_line)
+    redacted_line = _QUOTED_SECRET_LOG_VALUE_PATTERN.sub(r"\1\2[redacted]\2", raw_line)
+    redacted_line = _LIKELY_SECRET_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
     return _BEARER_LOG_VALUE_PATTERN.sub(r"\1[redacted]", redacted_line)
 
 

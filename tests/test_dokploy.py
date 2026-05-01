@@ -93,6 +93,16 @@ class DokployConfigTests(unittest.TestCase):
         self.assertNotIn("re_123", lines[1])
         self.assertNotIn("smtp-secret", lines[1])
 
+    def test_redact_dokploy_log_line_redacts_quoted_secret_fields(self) -> None:
+        redacted_line = control_plane_dokploy.redact_dokploy_log_line(
+            '{"API_KEY":"super-secret","nested":{"SERVICE_TOKEN":"inner-secret"},"note":"safe"}'
+        )
+
+        self.assertEqual(
+            redacted_line,
+            '{"API_KEY":"[redacted]","nested":{"SERVICE_TOKEN":"[redacted]"},"note":"safe"}',
+        )
+
     def test_fetch_application_logs_calls_dokploy_read_logs_endpoint(self) -> None:
         requests: list[dict[str, object]] = []
 
