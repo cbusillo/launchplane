@@ -2557,6 +2557,72 @@ def create_launchplane_service_app(
                             "secrets": statuses,
                         },
                     )
+                if action == "target_logs.read":
+                    context_name = params["context"]
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=context_name,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read tracked target logs for the requested context.",
+                                },
+                            },
+                        )
+                    requested_line_count = control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT
+                    raw_line_count = str(
+                        (query.get("lines") or query.get("line_count") or [""])[0]
+                    ).strip()
+                    if raw_line_count:
+                        try:
+                            requested_line_count = int(raw_line_count)
+                        except ValueError:
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=400,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "invalid_request",
+                                        "message": "Query parameter 'lines' must be an integer.",
+                                    },
+                                },
+                            )
+                    try:
+                        payload = build_tracked_target_logs_payload(
+                            record_store=record_store,
+                            control_plane_root=resolved_root,
+                            context_name=context_name,
+                            instance_name=params["instance"],
+                            line_count=requested_line_count,
+                        )
+                    except ValueError as error:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=400,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "invalid_request",
+                                    "message": str(error),
+                                },
+                            },
+                        )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={"status": "ok", "trace_id": request_trace_id, **payload},
+                    )
                 if action == "launchplane_service.read":
                     if not authz_policy.allows(
                         identity=identity,

@@ -99,6 +99,16 @@ class DokployConfigTests(unittest.TestCase):
         self.assertEqual(payload["buildArgs"], "")
         self.assertEqual(payload["buildSecrets"], "")
 
+    def test_redact_dokploy_log_line_redacts_quoted_secret_fields(self) -> None:
+        redacted_line = control_plane_dokploy.redact_dokploy_log_line(
+            '{"API_KEY":"super-secret","nested":{"SERVICE_TOKEN":"inner-secret"},"note":"safe"}'
+        )
+
+        self.assertEqual(
+            redacted_line,
+            '{"API_KEY":"[redacted]","nested":{"SERVICE_TOKEN":"[redacted]"},"note":"safe"}',
+        )
+
     def test_dokploy_targets_list_and_show_include_shopify_policy_metadata(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

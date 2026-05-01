@@ -2150,6 +2150,55 @@ class LaunchplaneServiceTests(unittest.TestCase):
             {"prod_rollback", "preview_destroy"},
         )
 
+    def test_target_logs_endpoint_dispatches_to_tracked_target_logs_payload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["opw"],
+                            "actions": ["target_logs.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            with patch(
+                "control_plane.service.build_tracked_target_logs_payload",
+                return_value={
+                    "context": "opw",
+                    "instance": "testing",
+                    "target": {"target_type": "application"},
+                    "request": {"line_count": 200},
+                    "logs": {"line_count": 1, "lines": ["line 1"], "redacted": True},
+                },
+            ) as build_logs_payload:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/contexts/opw/instances/testing/logs",
+                )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["context"], "opw")
+        self.assertEqual(payload["instance"], "testing")
+        self.assertEqual(payload["logs"]["lines"], ["line 1"])
+        build_logs_payload.assert_called_once()
+        self.assertEqual(build_logs_payload.call_args.kwargs["line_count"], 200)
+
     def test_data_freshness_report_covers_visible_surfaces(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:

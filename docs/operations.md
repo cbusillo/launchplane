@@ -360,6 +360,9 @@ Current derived-state behavior:
   submit, and shows only key/action/count metadata from Launchplane responses.
 - `environments unset` removes named keys from a DB-backed runtime-environment
   record without reading or printing plaintext values.
+- `environments logs` reads tracked Dokploy application logs for a context and
+  instance, redacts secret-shaped values in bare and quoted fields, and fails
+  closed for unsupported tracked target types.
 - `environments delete-record --dry-run|--apply` deletes a whole mistaken
   runtime-environment record for `global`, `context`, or `instance` scope. The
   dry-run and apply responses include record identity, source label, update

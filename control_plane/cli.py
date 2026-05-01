@@ -12062,13 +12062,16 @@ def environments_logs(
 ) -> None:
     postgres_store = PostgresRecordStore(database_url=database_url)
     try:
-        payload = build_tracked_target_logs_payload(
-            record_store=postgres_store,
-            control_plane_root=control_plane_root or _control_plane_root(),
-            context_name=context_name.strip(),
-            instance_name=instance_name.strip(),
-            line_count=line_count,
-        )
+        try:
+            payload = build_tracked_target_logs_payload(
+                record_store=postgres_store,
+                control_plane_root=control_plane_root or _control_plane_root(),
+                context_name=context_name.strip(),
+                instance_name=instance_name.strip(),
+                line_count=line_count,
+            )
+        except ValueError as error:
+            raise click.ClickException(str(error)) from error
     finally:
         postgres_store.close()
     click.echo(json.dumps({"status": "ok", **payload}, indent=2, sort_keys=True))

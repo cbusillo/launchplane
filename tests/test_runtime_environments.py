@@ -241,6 +241,45 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         self.assertIn("must be written with launchplane secrets put", result.output)
         self.assertNotIn("secret-value", result.output)
 
+    def test_environments_logs_reports_unsupported_target_types_cleanly(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            _seed_dokploy_target_records(
+                database_url=database_url,
+                payload="""
+schema_version = 2
+
+[[targets]]
+context = "opw"
+instance = "testing"
+target_id = "compose-123"
+target_type = "compose"
+""",
+            )
+
+            result = runner.invoke(
+                main,
+                [
+                    "environments",
+                    "logs",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn(
+            "Tracked target logs currently support Dokploy application targets only.",
+            result.output,
+        )
+        self.assertNotIn("Traceback", result.output)
+
     def test_environments_unset_removes_keys_without_echoing_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
