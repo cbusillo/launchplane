@@ -18,6 +18,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 ProductConfigMode = Literal["dry-run", "apply"]
+_VALID_SECRET_SCOPES: tuple[SecretScope, ...] = ("global", "context", "context_instance")
 
 
 class ProductConfigError(ValueError):
@@ -199,6 +200,8 @@ def _product_config_runtime_input(
     if runtime_payload is None:
         return {
             "scope": _default_runtime_scope(context_name=context_name, instance_name=instance_name),
+            "context": context_name,
+            "instance": instance_name,
             "env": {},
         }
     if not isinstance(runtime_payload, dict):
@@ -215,16 +218,19 @@ def _product_config_runtime_input(
             for key, value in runtime_payload.items()
             if key not in {"scope", "context", "instance"}
         }
+    runtime_context = str(runtime_payload.get("context", context_name) or "").strip()
+    runtime_instance = str(runtime_payload.get("instance", instance_name) or "").strip()
     scope = str(
         runtime_payload.get(
-            "scope", _default_runtime_scope(context_name=context_name, instance_name=instance_name)
+            "scope",
+            _default_runtime_scope(context_name=runtime_context, instance_name=runtime_instance),
         )
         or ""
     ).strip()
     return {
         "scope": scope,
-        "context": str(runtime_payload.get("context", context_name) or "").strip(),
-        "instance": str(runtime_payload.get("instance", instance_name) or "").strip(),
+        "context": runtime_context,
+        "instance": runtime_instance,
         "env": raw_env,
     }
 
@@ -252,7 +258,7 @@ def _normalize_product_config_runtime_env(raw_env: object) -> dict[str, ScalarVa
 def _product_config_secret_inputs(
     payload: dict[str, object], *, context_name: str, instance_name: str
 ) -> tuple[dict[str, object], ...]:
-    raw_secrets = payload.get("secrets", ())
+    raw_secrets = payload.get("secrets", [])
     if raw_secrets is None:
         return ()
     if not isinstance(raw_secrets, list):
@@ -270,33 +276,74 @@ def _product_config_secret_inputs(
             raise ProductConfigError(f"Product config secret #{index} requires name.")
         if not isinstance(plaintext_value, str) or not plaintext_value.strip():
             raise ProductConfigError(f"Product config secret #{index} requires a non-empty value.")
+        secret_context = str(raw_secret.get("context", context_name) or "").strip()
+        secret_instance = str(raw_secret.get("instance", instance_name) or "").strip()
+        scope = str(
+            raw_secret.get(
+                "scope",
+                _default_secret_scope(context_name=secret_context, instance_name=secret_instance),
+            )
+            or ""
+        ).strip()
+        validated_scope = _validate_product_config_secret_scope_route(
+            scope=scope,
+            context_name=secret_context,
+            instance_name=secret_instance,
+            index=index,
+        )
+        integration = str(
+            raw_secret.get(
+                "integration",
+                control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            )
+            or ""
+        ).strip()
+        if not integration:
+            raise ProductConfigError(f"Product config secret #{index} requires integration.")
         normalized.append(
             {
-                "scope": str(
-                    raw_secret.get(
-                        "scope",
-                        _default_secret_scope(
-                            context_name=context_name, instance_name=instance_name
-                        ),
-                    )
-                    or ""
-                ).strip(),
-                "integration": str(
-                    raw_secret.get(
-                        "integration",
-                        control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
-                    )
-                    or ""
-                ).strip(),
+                "scope": validated_scope,
+                "integration": integration,
                 "name": name,
                 "binding_key": binding_key,
                 "value": plaintext_value,
-                "context": str(raw_secret.get("context", context_name) or "").strip(),
-                "instance": str(raw_secret.get("instance", instance_name) or "").strip(),
+                "context": secret_context,
+                "instance": secret_instance,
                 "description": str(raw_secret.get("description", "") or "").strip(),
             }
         )
     return tuple(normalized)
+
+
+def _validate_product_config_secret_scope_route(
+    *, scope: str, context_name: str, instance_name: str, index: int
+) -> SecretScope:
+    if scope not in _VALID_SECRET_SCOPES:
+        expected_scopes = ", ".join(_VALID_SECRET_SCOPES)
+        raise ProductConfigError(
+            f"Product config secret #{index} has unsupported scope {scope!r}; "
+            f"expected one of {expected_scopes}."
+        )
+    if scope == "global":
+        if context_name or instance_name:
+            raise ProductConfigError(
+                f"Product config secret #{index} uses global scope and must not set "
+                "context or instance."
+            )
+        return "global"
+    if scope == "context":
+        if not context_name or instance_name:
+            raise ProductConfigError(
+                f"Product config secret #{index} uses context scope and must set context "
+                "without instance."
+            )
+        return "context"
+    if not context_name or not instance_name:
+        raise ProductConfigError(
+            f"Product config secret #{index} uses context_instance scope and must set "
+            "context and instance."
+        )
+    return "context_instance"
 
 
 def _require_product_config_master_key_if_needed(secrets: tuple[dict[str, object], ...]) -> None:

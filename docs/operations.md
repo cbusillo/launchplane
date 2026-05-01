@@ -343,7 +343,11 @@ Current derived-state behavior:
   managed secret records while returning only key names, actions, counts, actor,
   and source metadata. Use it from a live Launchplane context that already has
   current `LAUNCHPLANE_DATABASE_URL`; bundles with secrets also require
-  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+  `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Runtime and secret scopes default from
+  the effective route they will write: top-level `context`/`instance` unless the
+  nested `runtime_env` object or an individual secret supplies its own route.
+  Dry-run validates secret scope/route compatibility before reporting a plan, so
+  apply does not discover invalid secret scopes after writing earlier secrets.
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
   authenticated service API for operator UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
@@ -388,8 +392,11 @@ Example product config bundle shape:
 ```
 
 `runtime_env` values are non-secret scalar values. `secrets` default to the
-`runtime_environment` integration and the current context/instance, which makes
-them available as managed runtime environment overlays.
+`runtime_environment` integration and the current or per-secret
+context/instance, which makes them available as managed runtime environment
+overlays. Secret scope routes must be compatible: `global` has no context or
+instance, `context` has context only, and `context_instance` has both context and
+instance.
 
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed

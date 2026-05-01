@@ -814,6 +814,164 @@ ODOO_DB_PASSWORD = "file-secret"
             finally:
                 store.close()
 
+    def test_product_config_apply_defaults_runtime_scope_from_nested_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "runtime_env": {
+                            "context": "sellyouroutboard",
+                            "instance": "prod",
+                            "env": {"CONTACT_EMAIL_MODE": "smtp"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "product-config",
+                    "apply",
+                    "--database-url",
+                    database_url,
+                    "--input-file",
+                    str(input_file),
+                    "--apply",
+                ],
+            )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["runtime_environment"]["scope"], "instance")
+            self.assertEqual(payload["runtime_environment"]["context"], "sellyouroutboard")
+            self.assertEqual(payload["runtime_environment"]["instance"], "prod")
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                runtime_records = store.list_runtime_environment_records()
+                self.assertEqual(len(runtime_records), 1)
+                self.assertEqual(runtime_records[0].scope, "instance")
+                self.assertEqual(runtime_records[0].context, "sellyouroutboard")
+                self.assertEqual(runtime_records[0].instance, "prod")
+            finally:
+                store.close()
+
+    def test_product_config_apply_defaults_secret_scope_from_per_secret_route(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "runtime_env": {},
+                        "secrets": [
+                            {
+                                "name": "smtp-password",
+                                "binding_key": "SMTP_PASSWORD",
+                                "value": "smtp-secret-value",
+                                "context": "sellyouroutboard",
+                                "instance": "prod",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--database-url",
+                        database_url,
+                        "--input-file",
+                        str(input_file),
+                        "--dry-run",
+                    ],
+                )
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            payload = json.loads(result.output)
+            self.assertEqual(payload["secrets"][0]["scope"], "context_instance")
+            self.assertEqual(payload["secrets"][0]["context"], "sellyouroutboard")
+            self.assertEqual(payload["secrets"][0]["instance"], "prod")
+
+    def test_product_config_apply_rejects_invalid_secret_scope_before_writes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "runtime_env": {},
+                        "secrets": [
+                            {
+                                "scope": "global",
+                                "name": "valid-secret",
+                                "binding_key": "VALID_SECRET",
+                                "value": "first-secret-value",
+                            },
+                            {
+                                "scope": "not-a-scope",
+                                "name": "invalid-secret",
+                                "binding_key": "INVALID_SECRET",
+                                "value": "second-secret-value",
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--database-url",
+                        database_url,
+                        "--input-file",
+                        str(input_file),
+                        "--apply",
+                    ],
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            self.assertIn("unsupported scope 'not-a-scope'", result.output)
+            self.assertNotIn("first-secret-value", result.output)
+            self.assertNotIn("second-secret-value", result.output)
+
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                self.assertEqual(store.list_secret_records(), ())
+                self.assertEqual(store.list_secret_bindings(limit=None), ())
+            finally:
+                store.close()
+
     def test_product_config_apply_requires_master_key_for_secrets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
