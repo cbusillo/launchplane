@@ -23,7 +23,7 @@ import {
   Trash2,
   XCircle
 } from "lucide-react";
-import { ReactNode, useEffect, useMemo, useState } from "react";
+import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { LaunchplaneApiError, applyProductConfig, listDrivers, logout, readAuthSession, readDriverView } from "./api";
 import type {
   AuthIdentity,
@@ -554,6 +554,7 @@ function ProductConfigPanel({
   const [submitting, setSubmitting] = useState<ProductConfigApplyRequest["mode"] | null>(null);
   const [panelError, setPanelError] = useState("");
   const [traceId, setTraceId] = useState("");
+  const requestSequence = useRef(0);
 
   useEffect(() => {
     setProduct(productDefault);
@@ -570,17 +571,23 @@ function ProductConfigPanel({
     const filledFields = [row.name, row.bindingKey, row.value].filter((value) => value.trim()).length;
     return filledFields > 0 && filledFields < 3;
   });
-  const showPartialSecretWarning = partialSecretRows.length > 0 && !result;
+  const showPartialSecretWarning = partialSecretRows.length > 0 && !result && !panelError && !submitting;
   const hasConfigInput = runtimeInputCount > 0 || completeSecretRows.length > 0;
   const canDryRun = Boolean(product.trim() && hasConfigInput && partialSecretRows.length === 0 && !disabled && !submitting);
   const canApply = Boolean(pendingApplyPayload && reviewed && !disabled && !submitting);
 
   function clearReviewState() {
+    requestSequence.current += 1;
     setResult(null);
     setPendingApplyPayload(null);
     setReviewed(false);
+    setSubmitting(null);
     setPanelError("");
     setTraceId("");
+  }
+
+  function clearRenderedSecretValues() {
+    setSecretRows((rows) => rows.map((row) => ({ ...row, value: "" })));
   }
 
   function updateRuntimeRow(rowId: string, patch: Partial<RuntimeConfigRow>) {
@@ -654,17 +661,25 @@ function ProductConfigPanel({
 
   function runDryRun() {
     const payload = buildPayload("dry-run");
+    requestSequence.current += 1;
+    const requestId = requestSequence.current;
     setSubmitting("dry-run");
     setPanelError("");
     setTraceId("");
+    clearRenderedSecretValues();
     applyConfig(payload)
       .then((payloadResult) => {
+        if (requestSequence.current !== requestId) {
+          return;
+        }
         setResult(payloadResult);
         setPendingApplyPayload({ ...payload, mode: "apply" });
         setReviewed(false);
-        setSecretRows((rows) => rows.map((row) => ({ ...row, value: "" })));
       })
       .catch((apiError: unknown) => {
+        if (requestSequence.current !== requestId) {
+          return;
+        }
         if (apiError instanceof LaunchplaneApiError) {
           setPanelError(apiError.message);
           setTraceId(apiError.traceId);
@@ -674,24 +689,37 @@ function ProductConfigPanel({
           setPanelError("Product config request failed.");
         }
       })
-      .finally(() => setSubmitting(null));
+      .finally(() => {
+        if (requestSequence.current === requestId) {
+          setSubmitting(null);
+        }
+      });
   }
 
   function runApply() {
     if (!pendingApplyPayload) {
       return;
     }
+    const payload = pendingApplyPayload;
+    requestSequence.current += 1;
+    const requestId = requestSequence.current;
     setSubmitting("apply");
     setPanelError("");
     setTraceId("");
-    applyConfig(pendingApplyPayload)
+    setPendingApplyPayload(null);
+    setReviewed(false);
+    clearRenderedSecretValues();
+    applyConfig(payload)
       .then((payloadResult) => {
+        if (requestSequence.current !== requestId) {
+          return;
+        }
         setResult(payloadResult);
-        setPendingApplyPayload(null);
-        setReviewed(false);
-        setSecretRows((rows) => rows.map((row) => ({ ...row, value: "" })));
       })
       .catch((apiError: unknown) => {
+        if (requestSequence.current !== requestId) {
+          return;
+        }
         if (apiError instanceof LaunchplaneApiError) {
           setPanelError(apiError.message);
           setTraceId(apiError.traceId);
@@ -701,7 +729,11 @@ function ProductConfigPanel({
           setPanelError("Product config apply failed.");
         }
       })
-      .finally(() => setSubmitting(null));
+      .finally(() => {
+        if (requestSequence.current === requestId) {
+          setSubmitting(null);
+        }
+      });
   }
 
   return (
