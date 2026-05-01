@@ -668,6 +668,306 @@ protected_store_keys = ["yps-your-part-supplier", "spare-store"]
             "git@github.com:cbusillo/odoo-devkit.git",
         )
 
+    def test_apply_live_target_dry_run_reports_runtime_key_delta_without_values(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard-testing",
+                        instance="prod",
+                        env={"CONTACT_EMAIL_MODE": "runtime-private-value"},
+                        updated_at="2026-05-01T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                _seed_dokploy_target_records(
+                    store=store,
+                    payload="""
+schema_version = 2
+
+[[targets]]
+context = "sellyouroutboard-testing"
+instance = "prod"
+target_id = "application-syo-prod"
+target_type = "application"
+target_name = "syo-prod-app"
+
+[targets.env]
+TRACKED_ONLY = "tracked-private-value"
+""",
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ):
+                    control_plane_secrets.write_secret_value(
+                        record_store=store,
+                        scope="context_instance",
+                        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                        name="smtp-password",
+                        plaintext_value="smtp-secret-value",
+                        binding_key="SMTP_PASSWORD",
+                        context_name="sellyouroutboard-testing",
+                        instance_name="prod",
+                        actor="test",
+                    )
+            finally:
+                store.close()
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "application-syo-prod",
+                        "name": "syo-prod-app",
+                        "env": "CONTACT_EMAIL_MODE=old-value\nEXISTING=value\n",
+                    },
+                ),
+                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "apply-live-target",
+                        "--context",
+                        "sellyouroutboard-testing",
+                        "--instance",
+                        "prod",
+                        "--dry-run",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        update_env.assert_not_called()
+        self.assertNotIn("runtime-private-value", result.output)
+        self.assertNotIn("tracked-private-value", result.output)
+        self.assertNotIn("smtp-secret-value", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "dry-run")
+        self.assertEqual(payload["tracked_target"]["target_type"], "application")
+        self.assertEqual(payload["runtime_environment"]["desired_key_count"], 3)
+        self.assertEqual(payload["runtime_environment"]["different_keys"], ["CONTACT_EMAIL_MODE"])
+        self.assertEqual(
+            payload["runtime_environment"]["missing_keys"], ["SMTP_PASSWORD", "TRACKED_ONLY"]
+        )
+        self.assertFalse(payload["apply"]["env_updated"])
+        self.assertFalse(payload["deploy"]["triggered"])
+
+    def test_apply_live_target_updates_runtime_env_and_verifies_without_values(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard-testing",
+                        instance="prod",
+                        env={"CONTACT_EMAIL_MODE": "smtp"},
+                        updated_at="2026-05-01T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                _seed_dokploy_target_records(
+                    store=store,
+                    payload="""
+schema_version = 2
+
+[[targets]]
+context = "sellyouroutboard-testing"
+instance = "prod"
+target_id = "application-syo-prod"
+target_type = "application"
+target_name = "syo-prod-app"
+deploy_timeout_seconds = 77
+""",
+                )
+            finally:
+                store.close()
+
+            captured_env_updates: list[dict[str, object]] = []
+
+            def fetch_target_payload(**_kwargs: object) -> dict[str, object]:
+                env_text = "CONTACT_EMAIL_MODE=old\nEXISTING=value\n"
+                if captured_env_updates:
+                    env_text = str(captured_env_updates[-1]["env_text"])
+                return {
+                    "applicationId": "application-syo-prod",
+                    "name": "syo-prod-app",
+                    "env": env_text,
+                }
+
+            with (
+                patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    side_effect=fetch_target_payload,
+                ),
+                patch(
+                    "control_plane.dokploy.update_dokploy_target_env",
+                    side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+                ),
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "apply-live-target",
+                        "--context",
+                        "sellyouroutboard-testing",
+                        "--instance",
+                        "prod",
+                        "--apply",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(len(captured_env_updates), 1)
+        env_text = str(captured_env_updates[0]["env_text"])
+        self.assertIn("CONTACT_EMAIL_MODE=smtp", env_text)
+        self.assertIn("EXISTING=value", env_text)
+        self.assertNotIn("CONTACT_EMAIL_MODE=old", result.output)
+        self.assertNotIn("CONTACT_EMAIL_MODE=smtp", result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "apply")
+        self.assertTrue(payload["apply"]["env_updated"])
+        self.assertEqual(payload["apply"]["verification"]["status"], "pass")
+        self.assertFalse(payload["deploy"]["triggered"])
+
+    def test_apply_live_target_deploy_is_explicit(self) -> None:
+        runner = CliRunner()
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard-testing",
+                        instance="prod",
+                        env={"CONTACT_EMAIL_MODE": "smtp"},
+                        updated_at="2026-05-01T00:00:00Z",
+                        source_label="test",
+                    )
+                )
+                _seed_dokploy_target_records(
+                    store=store,
+                    payload="""
+schema_version = 2
+
+[[targets]]
+context = "sellyouroutboard-testing"
+instance = "prod"
+target_id = "application-syo-prod"
+target_type = "application"
+target_name = "syo-prod-app"
+deploy_timeout_seconds = 77
+""",
+                )
+            finally:
+                store.close()
+
+            with (
+                patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "application-syo-prod",
+                        "name": "syo-prod-app",
+                        "env": "CONTACT_EMAIL_MODE=smtp\n",
+                    },
+                ),
+                patch(
+                    "control_plane.dokploy.latest_deployment_for_target",
+                    return_value={"deploymentId": "before"},
+                ),
+                patch("control_plane.dokploy.trigger_deployment") as trigger_deployment,
+                patch(
+                    "control_plane.dokploy.wait_for_target_deployment",
+                    return_value="deployment=after status=done",
+                ) as wait_for_target_deployment,
+            ):
+                result = runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "apply-live-target",
+                        "--context",
+                        "sellyouroutboard-testing",
+                        "--instance",
+                        "prod",
+                        "--apply",
+                        "--deploy",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        trigger_deployment.assert_called_once()
+        self.assertEqual(trigger_deployment.call_args.kwargs["target_type"], "application")
+        wait_for_target_deployment.assert_called_once()
+        self.assertEqual(wait_for_target_deployment.call_args.kwargs["timeout_seconds"], 77)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["apply"]["env_updated"])
+        self.assertTrue(payload["deploy"]["triggered"])
+        self.assertEqual(
+            payload["deploy"]["result"]["deployment_result"], "deployment=after status=done"
+        )
+
+    def test_apply_live_target_rejects_deploy_options_for_dry_run(self) -> None:
+        runner = CliRunner()
+        result = runner.invoke(
+            main,
+            [
+                "environments",
+                "apply-live-target",
+                "--context",
+                "sellyouroutboard-testing",
+                "--instance",
+                "prod",
+                "--dry-run",
+                "--deploy",
+            ],
+        )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Deploy options require --apply", result.output)
+
     def test_read_control_plane_dokploy_source_of_truth_prefers_postgres_target_ids_without_file_fallback(
         self,
     ) -> None:
