@@ -363,6 +363,13 @@ Current derived-state behavior:
   keys without echoing plaintext values.
 - `environments resolve` reads the control-plane-owned runtime environment
   contract for a context and instance.
+- `environments apply-live-target --dry-run|--apply` resolves the DB-backed
+  runtime environment and managed secret overlay for a tracked Dokploy target,
+  compares it against the live target env by key, and can apply those keys
+  without requiring an artifact manifest. It preserves unrelated live env keys,
+  verifies persistence by key/count metadata only, and never prints plaintext
+  env or secret values. Add `--deploy` with `--apply` when the app should be
+  explicitly redeployed/reloaded after the config update.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
 - Product repos and GitHub issues must not contain product secret values. Put
@@ -401,6 +408,8 @@ context only, and `context_instance` has both context and instance.
 - `environments show-live-target` reads the live Dokploy target payload for a
   tracked route and reports whether the target is ready for artifact-backed
   split-repo execution.
+- `environments apply-live-target` applies Launchplane DB-backed runtime env and
+  managed secret overlays to a tracked live target without shipping an artifact.
 - `environments sync-live-target --apply` pushes the tracked Dokploy source and
   tracked env overlay for a route into the live target before re-reading the
   artifact-readiness summary.
