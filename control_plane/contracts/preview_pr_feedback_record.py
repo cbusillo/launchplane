@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 PreviewPrFeedbackStatus = Literal[
+    "pending",
     "ready",
     "destroyed",
     "failed",
