@@ -4,9 +4,13 @@ title: UI Standards
 
 ## Purpose
 
-Launchplane UI work must read as a tenant environment control plane, not a
+Launchplane UI work must read as a product environment control plane, not a
 generic dashboard and not a preview-only queue. The first screen should make the
 operator's current product, lane state, and next safe action obvious.
+
+Use [operator-experience.md](operator-experience.md) for the API-first product
+and environment contract. Do not polish the transitional context-picker UI as if
+it were the target model.
 
 Use this document as the Launchplane UI quality gate. UI slices that pass tests
 but fail this rubric are not complete.

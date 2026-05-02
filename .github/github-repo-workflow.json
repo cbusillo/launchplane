@@ -7,6 +7,7 @@
     "configBoundary": "docs/config-boundary.md",
     "serviceBoundary": "docs/service-boundary.md",
     "driverDescriptors": "docs/driver-descriptors.md",
+    "operatorExperience": "docs/operator-experience.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
@@ -66,12 +67,22 @@
     "CodeQL",
     "Deploy Launchplane",
     "Preview Lifecycle",
+    "Product Context Cutover",
+    "Product Legacy Context Cleanup",
     "Dependency Graph"
   ],
   "qaLabels": [],
   "deployLabels": [],
-  "healthUrls": [],
-  "relatedRepos": [],
+  "healthUrls": [
+    "https://launchplane.shinycomputers.com/v1/health"
+  ],
+  "relatedRepos": [
+    "cbusillo/sellyouroutboard",
+    "cbusillo/verireel",
+    "cbusillo/odoo-devkit",
+    "cbusillo/odoo-tenant-cm",
+    "cbusillo/odoo-tenant-opw"
+  ],
   "validatedThrough": [],
   "githubSignals": {
     "postMerge": {

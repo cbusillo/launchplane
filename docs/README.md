@@ -21,6 +21,8 @@ Use these docs as the source of truth for `launchplane`.
   deleting or demoting local CLI/file-backed compatibility surfaces.
 - [ui-standards.md](ui-standards.md) — tenant-first Launchplane UI direction and
   review rubric.
+- [operator-experience.md](operator-experience.md) — API-first product,
+  environment, settings, promotion, cleanup, and UI rebuild contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria
