@@ -63,8 +63,12 @@ type Theme = "dark" | "light";
 type AuthStatus = "checking" | "signed_out" | "signed_in";
 type DriverChoice = {
   driverId: string;
-  context: string;
+  testingContext: string;
+  prodContext: string;
+  previewContext: string;
   label: string;
+  driverLabel: string;
+  repository?: string;
 };
 type PromotionVerdict = "ready" | "pending" | "blocked";
 type PromotionGate = {
@@ -114,11 +118,36 @@ const THEME_STORAGE_KEY = "launchplane.theme";
 const DEFAULT_CHOICES: DriverChoice[] = [
   {
     driverId: "sellyouroutboard",
-    context: "sellyouroutboard-testing",
-    label: "Sell Your Outboard",
+    testingContext: "sellyouroutboard-testing",
+    prodContext: "sellyouroutboard-testing",
+    previewContext: "sellyouroutboard-testing",
+    label: "SellYourOutboard",
+    driverLabel: "generic-web",
   },
-  { driverId: "verireel", context: "verireel", label: "VeriReel" },
-  { driverId: "odoo", context: "opw", label: "Odoo" },
+  {
+    driverId: "verireel",
+    testingContext: "verireel",
+    prodContext: "verireel",
+    previewContext: "verireel-testing",
+    label: "VeriReel",
+    driverLabel: "verireel",
+  },
+  {
+    driverId: "odoo",
+    testingContext: "cm",
+    prodContext: "cm",
+    previewContext: "",
+    label: "Odoo CM",
+    driverLabel: "odoo",
+  },
+  {
+    driverId: "odoo",
+    testingContext: "opw",
+    prodContext: "opw",
+    previewContext: "",
+    label: "Odoo OPW",
+    driverLabel: "odoo",
+  },
 ];
 const FIXTURE_ACTIONS: DriverActionDescriptor[] = [
   {
@@ -197,6 +226,62 @@ const FIXTURE_ODOO_DRIVER: DriverDescriptor = {
   capabilities: [],
   actions: [],
 };
+
+function choiceKey(choice: DriverChoice): string {
+  return `${choice.driverId}:${choice.testingContext}:${choice.prodContext}:${choice.previewContext}`;
+}
+
+function labelForDriverContext(
+  driver: DriverDescriptor,
+  context: string,
+): string {
+  if (driver.driver_id === "odoo") {
+    if (context === "cm") {
+      return "Odoo CM";
+    }
+    if (context === "opw") {
+      return "Odoo OPW";
+    }
+  }
+  return driver.label;
+}
+
+function displayNameForProduct(profile: ProductProfileRecord): string {
+  if (profile.product === "sellyouroutboard") {
+    return "SellYourOutboard";
+  }
+  return profile.display_name || profile.product;
+}
+
+function contextForProductLane(
+  profile: ProductProfileRecord,
+  instance: "testing" | "prod",
+): string {
+  const lane = profile.lanes.find(
+    (candidate) => candidate.instance === instance,
+  );
+  if (lane?.context.trim()) {
+    return lane.context.trim();
+  }
+  const fallbackLane = profile.lanes.find((candidate) =>
+    candidate.context.trim(),
+  );
+  return fallbackLane?.context.trim() || "";
+}
+
+function choiceFromProductProfile(profile: ProductProfileRecord): DriverChoice {
+  return {
+    driverId: profile.product,
+    testingContext: contextForProductLane(profile, "testing"),
+    prodContext: contextForProductLane(profile, "prod"),
+    previewContext: profile.preview?.enabled
+      ? profile.preview.context.trim()
+      : "",
+    label: displayNameForProduct(profile),
+    driverLabel: profile.driver_id,
+    repository: profile.repository,
+  };
+}
 
 export function App() {
   const showFixtureGallery =
@@ -283,10 +368,10 @@ export function App() {
     setTraceId("");
     Promise.all([
       listDrivers(),
-      readDriverView(selected.context, "prod"),
-      readDriverView(selected.context, "testing"),
-      selected.driverId === "verireel"
-        ? readDriverView("verireel-testing", "")
+      readDriverView(selected.prodContext, "prod"),
+      readDriverView(selected.testingContext, "testing"),
+      selected.previewContext
+        ? readDriverView(selected.previewContext, "")
         : Promise.resolve(null),
       listProductProfiles("generic-web").catch(() => ({
         status: "ok" as const,
@@ -342,24 +427,23 @@ export function App() {
       });
       return stableContexts.map((context) => ({
         driverId: driver.driver_id,
-        context,
-        label: driver.label,
+        testingContext: context,
+        prodContext: context,
+        previewContext:
+          driver.driver_id === "verireel" && context === "verireel"
+            ? "verireel-testing"
+            : "",
+        label: labelForDriverContext(driver, context),
+        driverLabel: driver.driver_id,
       }));
     });
-    const profileChoices = productProfiles.flatMap((profile) => {
-      const contexts = new Set(
-        profile.lanes.map((lane) => lane.context).filter(Boolean),
-      );
-      return [...contexts].map((context) => ({
-        driverId: profile.product,
-        context,
-        label: profile.display_name || profile.product,
-      }));
-    });
+    const profileChoices = productProfiles.map((profile) =>
+      choiceFromProductProfile(profile),
+    );
     const merged = [...profileChoices, ...driverChoices, ...DEFAULT_CHOICES];
     const seen = new Set<string>();
     return merged.filter((choice) => {
-      const key = `${choice.driverId}:${choice.context}`;
+      const key = choiceKey(choice);
       if (seen.has(key)) {
         return false;
       }
@@ -372,12 +456,8 @@ export function App() {
     if (!choices.length) {
       return;
     }
-    const selectedKey = `${selected.driverId}:${selected.context}`;
-    if (
-      choices.some(
-        (choice) => `${choice.driverId}:${choice.context}` === selectedKey,
-      )
-    ) {
+    const selectedKey = choiceKey(selected);
+    if (choices.some((choice) => choiceKey(choice) === selectedKey)) {
       return;
     }
     setSelected(choices[0]);
@@ -466,7 +546,7 @@ export function App() {
                 testing={testingDriverView?.lane_summary ?? null}
                 actions={actions}
                 product={selectedDriver?.product ?? selected.driverId}
-                context={selected.context}
+                context={selected.prodContext}
                 decision={promotionDecision}
                 loading={loading}
                 onAction={setReviewAction}
@@ -480,7 +560,7 @@ export function App() {
             </section>
             <ProductConfigPanel
               productDefault={selectedDriver?.product ?? selected.driverId}
-              contextDefault={selected.context}
+              contextDefault={selected.prodContext}
               instanceDefault="prod"
               disabled={loading}
             />
@@ -548,8 +628,8 @@ function Header({
   onLogout: () => void;
   onRefresh: () => void;
 }) {
-  const selectedValue = `${selected.driverId}:${selected.context}`;
-  const selectId = "launchplane-context-select";
+  const selectedValue = choiceKey(selected);
+  const selectId = "launchplane-product-select";
 
   return (
     <header className="topbar">
@@ -558,10 +638,10 @@ function Header({
           LP
         </div>
         <div>
-          <div className="brand-title">Launchplane</div>
+          <div className="brand-title">{selected.label}</div>
           <div className="brand-meta">
-            <span>{selected.context}</span>
-            <span>{selected.driverId}</span>
+            <span>{selected.driverLabel}</span>
+            <span>{selected.repository ?? "stable lanes"}</span>
           </div>
         </div>
       </div>
@@ -573,15 +653,14 @@ function Header({
           </div>
         ) : null}
         <label className="select-label">
-          <span>Context</span>
+          <span>Product</span>
           <select
             id={selectId}
-            aria-label="Launchplane context"
+            aria-label="Launchplane product"
             value={selectedValue}
             onChange={(event) => {
               const choice = choices.find(
-                (item) =>
-                  `${item.driverId}:${item.context}` === event.target.value,
+                (item) => choiceKey(item) === event.target.value,
               );
               if (choice) {
                 onSelect(choice);
@@ -589,11 +668,8 @@ function Header({
             }}
           >
             {choices.map((choice) => (
-              <option
-                key={`${choice.driverId}:${choice.context}`}
-                value={`${choice.driverId}:${choice.context}`}
-              >
-                {choice.label} / {choice.context}
+              <option key={choiceKey(choice)} value={choiceKey(choice)}>
+                {choice.label}
               </option>
             ))}
           </select>
@@ -944,8 +1020,8 @@ function ProductConfigPanel({
   return (
     <section className="panel product-config-panel">
       <PanelHead
-        eyebrow="runtime authority"
-        title="Product config"
+        eyebrow="write config"
+        title="Apply runtime config change"
         right={
           <StatusPill
             status={
@@ -960,7 +1036,7 @@ function ProductConfigPanel({
       />
       <div className="config-target-grid">
         <label className="config-label">
-          <span>Product</span>
+          <span>Product ID</span>
           <input
             value={product}
             onChange={(event) => {
@@ -971,7 +1047,7 @@ function ProductConfigPanel({
           />
         </label>
         <label className="config-label">
-          <span>Context</span>
+          <span>Stable context</span>
           <input
             value={contextName}
             onChange={(event) => {
@@ -2126,8 +2202,8 @@ function RuntimeAuthorityList({
   return (
     <section className="panel">
       <PanelHead
-        eyebrow="runtime authority"
-        title="Keys and bindings"
+        eyebrow="current state"
+        title="Current runtime authority"
         right={<KeyRound size={17} aria-hidden="true" />}
       />
       <div className="secret-list">

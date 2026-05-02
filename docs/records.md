@@ -134,6 +134,23 @@ template lane, required template env keys, copied or omitted settings, preview
 URL/domain env keys, required provider fields, and the declared data transport
 mode so readiness can fail before Launchplane mutates a provider.
 
+The product key is the durable workspace identity. For example,
+`sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
+and the preview inventory all appear under that workspace in the operator UI.
+The `context` fields on lane and preview profile entries are technical routing
+and record lookup identifiers, not user-facing product names. Stable
+generic-web lanes should converge on the product context, such as
+`sellyouroutboard` for both `testing` and `prod`, so promotion and runtime reads
+resolve one product stack. A separate preview context may remain while preview
+apps are isolated from stable lane records.
+
+When cleaning up a legacy context such as `sellyouroutboard-testing`, migrate or
+reseed only the mutable current-authority records needed by live resolution,
+such as runtime environments, secret bindings, tracked targets, inventories, and
+release tuples. Do not rewrite append-only deployments, promotions, backup
+gates, or preview history; those records are historical evidence and should
+continue to describe the route that produced them.
+
 These records replace repo-local Launchplane lifecycle manifests. Product repos
 still own their normal app/runtime contract, such as Dockerfile, image publish,
 health endpoint, tests, and source/build inputs. Launchplane owns the product
@@ -147,8 +164,8 @@ Launchplane service context; reads use `product_profile.read`.
 
 For initial seed or repair work, operators can write the same DB-backed record
 directly with `uv run launchplane product-profiles upsert --database-url ...`.
-That command is an operator tool for creating the Launchplane record; it is not a
-repo-local manifest and should not become product repo authority.
+That command is an operator tool for creating the Launchplane record; it is not
+a repo-local manifest and should not become product repo authority.
 
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
