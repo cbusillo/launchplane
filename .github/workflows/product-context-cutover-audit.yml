@@ -97,6 +97,32 @@ jobs:
             echo 'GitHub OIDC token response did not include a token value.' >&2
             exit 1
           fi
+          python3 - "$oidc_token" <<'PY'
+          import base64
+          import json
+          import sys
+
+          token = sys.argv[1]
+          payload = token.split(".")[1]
+          payload += "=" * (-len(payload) % 4)
+          claims = json.loads(base64.urlsafe_b64decode(payload))
+          safe_claims = {
+              key: claims.get(key, "")
+              for key in (
+                  "repository",
+                  "repository_owner",
+                  "workflow_ref",
+                  "job_workflow_ref",
+                  "event_name",
+                  "ref",
+                  "ref_type",
+                  "environment",
+                  "aud",
+                  "sub",
+              )
+          }
+          print(json.dumps({"oidc_claims": safe_claims}, sort_keys=True))
+          PY
 
           audit_url="$({
             SERVICE_ORIGIN="$service_origin" python3 - <<'PY'
