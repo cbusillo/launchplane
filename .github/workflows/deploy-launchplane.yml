@@ -366,13 +366,25 @@ jobs:
           }
 
           post_syo_grant() {
-            local action_name="$1"
-            local source_label="$2"
-            local idempotency_suffix="$3"
+            local product_name="$1"
+            local action_name="$2"
+            local source_label="$3"
+            local idempotency_suffix="$4"
             post_grant \
               cbusillo/sellyouroutboard \
               promote-prod.yml \
+              "$product_name" \
               sellyouroutboard \
+              "$action_name" \
+              "$source_label" \
+              "$idempotency_suffix"
+          }
+
+          post_syo_product_grant() {
+            local action_name="$1"
+            local source_label="$2"
+            local idempotency_suffix="$3"
+            post_syo_grant \
               sellyouroutboard \
               "$action_name" \
               "$source_label" \
@@ -395,10 +407,11 @@ jobs:
             deploy:product-legacy-context-cleanup-grant \
             product-legacy-context-cleanup
           post_syo_grant \
+            launchplane \
             inventory.read \
             deploy:syo-prod-promotion-inventory-read-grant \
             syo-prod-promotion-inventory-read
-          post_syo_grant \
+          post_syo_product_grant \
             generic_web_prod_promotion.execute \
             deploy:syo-prod-promotion-execute-grant \
             syo-prod-promotion-execute
