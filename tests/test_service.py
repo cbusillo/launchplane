@@ -1242,6 +1242,74 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["sellyouroutboard"],
         )
 
+    def test_product_context_cutover_endpoint_updates_profile_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.write", "product_profile.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-profiles/context-cutover/apply",
+                payload={
+                    "product": "sellyouroutboard",
+                    "source_context": "sellyouroutboard-testing",
+                    "target_context": "sellyouroutboard",
+                    "mode": "apply",
+                    "display_name": "SellYourOutboard",
+                    "source_label": "test:context-cutover",
+                },
+                headers={"Idempotency-Key": "profile-context-cutover"},
+            )
+            show_status_code, show_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard",
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(payload["result"]["profile"]["display_name"], "SellYourOutboard")
+        self.assertEqual(show_status_code, 200)
+        self.assertEqual(show_payload["profile"]["display_name"], "SellYourOutboard")
+        self.assertEqual(
+            {lane["context"] for lane in show_payload["profile"]["lanes"]},
+            {"sellyouroutboard"},
+        )
+        self.assertEqual(show_payload["profile"]["preview"]["context"], "sellyouroutboard")
+
     def test_product_profile_context_cutover_audit_returns_redacted_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

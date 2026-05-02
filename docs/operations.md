@@ -86,6 +86,7 @@ Current implementation scope:
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/authz-policies/github-actions/grants`
+- `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
@@ -113,6 +114,14 @@ The deploy workflow maintains the DB-backed grant that lets the manual Product
 Context Cutover Audit workflow read the SellYourOutboard product profile. The
 grant request returns only authz policy record metadata and rule counts; it does
 not echo workflow refs or the full policy body.
+
+The manual Product Context Cutover workflow plans or applies the same
+current-authority record move through the Launchplane service. Run it first with
+`dry_run=true`; run with `dry_run=false` only after the artifact shows the
+expected key/count metadata for runtime records, managed secrets, Dokploy
+targets, target IDs, inventories, release tuples, and the product profile lane
+contexts. The workflow intentionally leaves append-only deployments,
+promotions, backup gates, and preview history on their original contexts.
 
 Render an explicit emergency bootstrap policy or import a policy into DB-backed
 records with:

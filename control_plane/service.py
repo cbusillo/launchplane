@@ -23,6 +23,7 @@ from jwt import InvalidTokenError
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_context_audit as control_plane_product_context_audit
+from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -2229,6 +2230,7 @@ def create_launchplane_service_app(
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
         "/v1/product-config/apply",
+        "/v1/product-profiles/context-cutover/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -4483,6 +4485,73 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=request.verification,
                 )
+            elif path == "/v1/product-profiles/context-cutover/apply":
+                request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Product context cutover requires Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="product_profile.write",
+                    product=request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot cut over the requested product profile context.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                try:
+                    driver_result = (
+                        control_plane_product_context_cutover.apply_product_context_cutover(
+                            record_store=record_store,
+                            request=request,
+                        )
+                    )
+                except ValueError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_context_cutover_request",
+                                "message": "Product context cutover request is invalid.",
+                            },
+                        },
+                    )
+                result = {"product_profile": request.product}
             elif path == "/v1/product-profiles":
                 request = LaunchplaneProductProfileRecord.model_validate(payload)
                 if not authz_policy.allows(
