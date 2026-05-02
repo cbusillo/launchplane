@@ -398,11 +398,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
             ),
         ):
             profile = _profile().model_copy(
-                update={
-                    "promotion_workflow": ProductPromotionWorkflowProfile(
-                        default_bump="minor"
-                    )
-                }
+                update={"promotion_workflow": ProductPromotionWorkflowProfile(default_bump="minor")}
             )
             result = dispatch_generic_web_promotion_workflow(
                 control_plane_root=Path("."),
@@ -448,6 +444,53 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
                 "workflow_runs": [
                     {"id": 101, "html_url": "https://github.example/runs/101", "status": "queued"},
                     {"id": 102, "html_url": "https://github.example/runs/102", "status": "queued"},
+                ]
+            }
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                side_effect=fake_github_api_request,
+            ),
+        ):
+            result = dispatch_generic_web_promotion_workflow(
+                control_plane_root=Path("."),
+                profile=_profile(),
+                request=GenericWebPromotionWorkflowRequest(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    observe_timeout_seconds=0,
+                ),
+            )
+
+        self.assertEqual(result.run_id, 0)
+        self.assertEqual(result.run_url, "")
+        self.assertEqual(result.run_status, "pending")
+
+    def test_observation_ignores_new_run_created_before_dispatch(self) -> None:
+        list_count = 0
+
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ):
+            nonlocal list_count
+            if method == "POST":
+                return None
+            list_count += 1
+            if list_count == 1:
+                return {"workflow_runs": []}
+            return {
+                "workflow_runs": [
+                    {
+                        "id": 101,
+                        "html_url": "https://github.example/runs/101",
+                        "status": "queued",
+                        "created_at": "2000-01-01T00:00:00Z",
+                    }
                 ]
             }
 

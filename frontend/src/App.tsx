@@ -2287,6 +2287,9 @@ function StateFixtureGallery({
 }: {
   actions: DriverActionDescriptor[];
 }) {
+  const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(
+    null,
+  );
   const readyProd = fixtureLane({
     instance: "prod",
     artifact: "ghcr.io/every/verireel@sha256:11112222",
@@ -2386,6 +2389,14 @@ function StateFixtureGallery({
         </div>
       </div>
       <div className="fixture-wide">
+        <EvidenceTimeline
+          prod={readyProd}
+          testing={readyTesting}
+          previews={[]}
+          onSelect={setSelectedEvidence}
+        />
+      </div>
+      <div className="fixture-wide">
         <ProductConfigPanel
           productDefault="sellyouroutboard"
           contextDefault="sellyouroutboard-testing"
@@ -2394,6 +2405,10 @@ function StateFixtureGallery({
           applyConfig={fixtureProductConfigApply}
         />
       </div>
+      <EvidenceDetailDrawer
+        evidence={selectedEvidence}
+        onClose={() => setSelectedEvidence(null)}
+      />
     </section>
   );
 }
@@ -2866,6 +2881,113 @@ function buildEvidenceRows(
     { lane: prod, laneName: "prod" },
     { lane: testing, laneName: "testing" },
   ].forEach(({ lane, laneName }) => {
+    if (lane?.inventory) {
+      const inventory = lane.inventory;
+      rows.push({
+        id: `${inventory.context}:${inventory.instance}:inventory`,
+        title: `${lane.instance} inventory`,
+        detail:
+          inventory.deploy.target_name ||
+          artifactFromLane(lane) ||
+          "recorded inventory",
+        status: worstStatus([
+          inventory.deploy.status,
+          inventory.destination_health.status,
+        ]),
+        time: inventory.updated_at,
+        lane: laneName,
+        kind: "inventory",
+        facts: [
+          { label: "Context", value: inventory.context },
+          { label: "Instance", value: inventory.instance },
+          {
+            label: "Artifact",
+            value: inventory.artifact_identity?.artifact_id ?? "unknown",
+            mono: true,
+          },
+          { label: "Source ref", value: inventory.source_git_ref, mono: true },
+          {
+            label: "Deployment record",
+            value: inventory.deployment_record_id,
+            mono: true,
+          },
+          {
+            label: "Promotion record",
+            value: inventory.promotion_record_id ?? "none",
+            mono: true,
+          },
+          {
+            label: "Promoted from",
+            value: inventory.promoted_from_instance ?? "none",
+          },
+          {
+            label: "Deploy status",
+            value: labelForStatus(inventory.deploy.status),
+            status: inventory.deploy.status,
+          },
+          {
+            label: "Health status",
+            value: labelForStatus(inventory.destination_health.status),
+            status: inventory.destination_health.status,
+          },
+          {
+            label: "Health URLs",
+            value: inventory.destination_health.urls.join(", ") || "none",
+            mono: true,
+          },
+          { label: "Updated", value: formatTime(inventory.updated_at) },
+        ],
+      });
+    }
+    if (lane?.release_tuple) {
+      const release = lane.release_tuple;
+      rows.push({
+        id: release.tuple_id,
+        title: `${release.channel} release tuple`,
+        detail: release.artifact_id,
+        status: "pass",
+        time: release.minted_at,
+        lane: laneName,
+        kind: "release",
+        facts: [
+          { label: "Tuple", value: release.tuple_id, mono: true },
+          { label: "Context", value: release.context },
+          { label: "Channel", value: release.channel },
+          { label: "Provenance", value: release.provenance },
+          { label: "Artifact", value: release.artifact_id, mono: true },
+          {
+            label: "Image repository",
+            value: release.image_repository ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Image digest",
+            value: release.image_digest ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Deployment record",
+            value: release.deployment_record_id ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Promotion record",
+            value: release.promotion_record_id ?? "unknown",
+            mono: true,
+          },
+          {
+            label: "Promoted from",
+            value: release.promoted_from_channel ?? "none",
+          },
+          ...Object.entries(release.repo_shas).map(([repo, sha]) => ({
+            label: repo,
+            value: sha,
+            mono: true,
+          })),
+          { label: "Minted", value: formatTime(release.minted_at) },
+        ],
+      });
+    }
     if (lane?.latest_deployment) {
       const deployment = lane.latest_deployment;
       rows.push({
@@ -2913,6 +3035,10 @@ function buildEvidenceRows(
             label: "Health URLs",
             value: deployment.destination_health.urls.join(", ") || "none",
             mono: true,
+          },
+          {
+            label: "Health verified",
+            value: deployment.destination_health.verified ? "yes" : "no",
           },
           {
             label: "Started",
@@ -3000,6 +3126,25 @@ function buildEvidenceRows(
             label: "Health status",
             value: labelForStatus(promotion.destination_health.status),
             status: promotion.destination_health.status,
+          },
+          {
+            label: "Source health",
+            value: labelForStatus(promotion.source_health?.status ?? "unknown"),
+            status: promotion.source_health?.status ?? "unknown",
+          },
+          {
+            label: "Source health URLs",
+            value: promotion.source_health?.urls.join(", ") || "none",
+            mono: true,
+          },
+          {
+            label: "Health URLs",
+            value: promotion.destination_health.urls.join(", ") || "none",
+            mono: true,
+          },
+          {
+            label: "Health verified",
+            value: promotion.destination_health.verified ? "yes" : "no",
           },
           {
             label: "Finished",
@@ -3175,6 +3320,26 @@ function fixtureLane({
       destination_health: destinationHealth,
       updated_at: deploy.finished_at,
       deployment_record_id: `fixture-deployment-${instance}`,
+      promotion_record_id:
+        instance === "prod" ? "fixture-promotion-prod" : undefined,
+      promoted_from_instance: instance === "prod" ? "testing" : undefined,
+    },
+    release_tuple: {
+      tuple_id: `verireel-${instance}-20260428`,
+      context: "verireel",
+      channel: instance,
+      artifact_id: artifact,
+      repo_shas: {
+        verireel: "6b3c9d7e8f901234567890abcdef1234567890ab",
+      },
+      image_repository: "ghcr.io/every/verireel",
+      image_digest: `sha256:${instance === "prod" ? "prod" : "test"}fixture`,
+      deployment_record_id: `fixture-deployment-${instance}`,
+      promotion_record_id:
+        instance === "prod" ? "fixture-promotion-prod" : undefined,
+      promoted_from_channel: instance === "prod" ? "testing" : undefined,
+      provenance: instance === "prod" ? "promotion" : "ship",
+      minted_at: deploy.finished_at,
     },
     latest_deployment: {
       record_id: `fixture-deployment-${instance}`,

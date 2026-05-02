@@ -144,6 +144,7 @@ export interface PromotionRecord {
   context: string;
   from_instance: string;
   to_instance: string;
+  source_health?: HealthcheckEvidence;
   backup_gate: {
     required: boolean;
     status: Status;
