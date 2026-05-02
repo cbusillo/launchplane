@@ -71,6 +71,7 @@ from control_plane.launchplane_mutations import (
 )
 from control_plane.service_auth import (
     GitHubActionsIdentity,
+    GitHubActionsPolicyRule,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
@@ -942,6 +943,71 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         return self
 
 
+class AuthzPolicyGitHubActionsGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    workflow_refs: tuple[str, ...] = ()
+    job_workflow_refs: tuple[str, ...] = ()
+    event_names: tuple[str, ...] = ()
+    refs: tuple[str, ...] = ()
+    environments: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    actions: tuple[str, ...]
+    source_label: str = "service:authz-policy-grant"
+
+    @staticmethod
+    def _normalized_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(value.strip() for value in values if value.strip())
+
+    @model_validator(mode="after")
+    def _validate_grant(self) -> "AuthzPolicyGitHubActionsGrant":
+        self.repository = self.repository.strip()
+        if not self.repository:
+            raise ValueError("Authz policy grant requires repository.")
+        self.workflow_refs = self._normalized_tuple(self.workflow_refs)
+        self.job_workflow_refs = self._normalized_tuple(self.job_workflow_refs)
+        self.event_names = self._normalized_tuple(self.event_names)
+        self.refs = self._normalized_tuple(self.refs)
+        self.environments = self._normalized_tuple(self.environments)
+        self.products = self._normalized_tuple(self.products)
+        self.contexts = self._normalized_tuple(self.contexts)
+        self.actions = self._normalized_tuple(self.actions)
+        if not self.actions:
+            raise ValueError("Authz policy grant requires at least one action.")
+        self.source_label = self.source_label.strip() or "service:authz-policy-grant"
+        return self
+
+    def to_policy_rule(self) -> GitHubActionsPolicyRule:
+        return GitHubActionsPolicyRule(
+            repository=self.repository,
+            workflow_refs=self.workflow_refs,
+            job_workflow_refs=self.job_workflow_refs,
+            event_names=self.event_names,
+            refs=self.refs,
+            environments=self.environments,
+            products=self.products,
+            contexts=self.contexts,
+            actions=self.actions,
+        )
+
+
+class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    grant: AuthzPolicyGitHubActionsGrant
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "AuthzPolicyGitHubActionsGrantEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Authz policy grant writes require product 'launchplane'.")
+        self.product = "launchplane"
+        return self
+
+
 class ProductConfigApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1288,6 +1354,7 @@ def _accepted_payload(
                 "preview_pr_feedback_id",
                 "preview_lifecycle_cleanup_id",
                 "preview_lifecycle_plan_id",
+                "authz_policy_record_id",
                 "product_profile",
                 "generation_id",
                 "promotion_record_id",
@@ -1622,6 +1689,52 @@ def _launchplane_runtime_payload(
         "service_audience": os.environ.get("LAUNCHPLANE_SERVICE_AUDIENCE", "").strip(),
         "storage_backend": storage_backend,
     }
+
+
+def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "status": record.status,
+        "source": record.source,
+        "updated_at": record.updated_at,
+        "policy_sha256": record.policy_sha256,
+        "github_actions_rule_count": len(record.policy.github_actions),
+        "github_humans_rule_count": len(record.policy.github_humans),
+    }
+
+
+def _write_github_actions_authz_policy_grant(
+    *,
+    record_store: PostgresRecordStore,
+    grant: AuthzPolicyGitHubActionsGrant,
+) -> tuple[LaunchplaneAuthzPolicy, LaunchplaneAuthzPolicyRecord, bool]:
+    active_records = record_store.list_authz_policy_records(status="active", limit=1)
+    if not active_records:
+        raise ValueError("No active Launchplane authz policy record found.")
+    current_policy = active_records[0].policy
+    desired_rule = grant.to_policy_rule()
+    changed = not any(rule == desired_rule for rule in current_policy.github_actions)
+    if not changed:
+        return current_policy, active_records[0], False
+
+    updated_policy = current_policy.model_copy(
+        update={"github_actions": current_policy.github_actions + (desired_rule,)}
+    )
+    updated_at = _now_timestamp()
+    policy_sha256 = authz_policy_sha256(updated_policy)
+    record = LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            updated_at=updated_at,
+            policy_sha256=policy_sha256,
+        ),
+        status="active",
+        source=grant.source_label,
+        updated_at=updated_at,
+        policy_sha256=policy_sha256,
+        policy=updated_policy,
+    )
+    record_store.write_authz_policy_record(record)
+    return updated_policy, record, changed
 
 
 def _request_launchplane_self_deploy(
@@ -2114,6 +2227,7 @@ def create_launchplane_service_app(
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
+        "/v1/authz-policies/github-actions/grants",
         "/v1/product-config/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
@@ -2155,6 +2269,8 @@ def create_launchplane_service_app(
         environ: dict[str, object],
         start_response: Callable[[str, list[tuple[str, str]]], None],
     ) -> list[bytes]:
+        nonlocal authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source
+
         request_trace_id = _trace_id()
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
         path = str(environ.get("PATH_INFO", ""))
@@ -3116,6 +3232,81 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+            elif path == "/v1/authz-policies/github-actions/grants":
+                request = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(payload)
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Authz policy grant writes require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write Launchplane authz policy grants.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                try:
+                    updated_policy, authz_policy_record, changed = (
+                        _write_github_actions_authz_policy_grant(
+                            record_store=record_store,
+                            grant=request.grant,
+                        )
+                    )
+                except ValueError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authz_policy_unavailable",
+                                "message": "Launchplane active authz policy is unavailable.",
+                            },
+                        },
+                    )
+                authz_policy = updated_policy
+                resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                resolved_authz_policy_source = "db"
+                result = {
+                    "authz_policy_record_id": authz_policy_record.record_id,
+                    "authz_policy_changed": str(changed).lower(),
+                }
+                driver_result = {
+                    "authz_policy": _summarize_authz_policy_record(authz_policy_record),
+                    "changed": changed,
+                }
             elif path == "/v1/drivers/launchplane/self-deploy":
                 request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(

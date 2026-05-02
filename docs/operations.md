@@ -85,6 +85,7 @@ Current implementation scope:
 - `POST /v1/evidence/promotions`
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
+- `POST /v1/authz-policies/github-actions/grants`
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
 - `POST /v1/drivers/verireel/preview-destroy`
@@ -107,6 +108,11 @@ and record contracts.
 The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
 Additional evidence routes should land against the same authn/authz boundary
 rather than creating separate ad hoc ingress patterns.
+
+The deploy workflow maintains the DB-backed grant that lets the manual Product
+Context Cutover Audit workflow read the SellYourOutboard product profile. The
+grant request returns only authz policy record metadata and rule counts; it does
+not echo workflow refs or the full policy body.
 
 Render an explicit emergency bootstrap policy or import a policy into DB-backed
 records with:

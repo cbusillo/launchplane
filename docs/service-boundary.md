@@ -44,6 +44,8 @@ VeriReel product paths:
   - `POST /v1/product-profiles`
 - product config write route:
   - `POST /v1/product-config/apply`
+- authz policy maintenance route:
+  - `POST /v1/authz-policies/github-actions/grants`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
@@ -74,7 +76,10 @@ VeriReel product paths:
 Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
-and preview mutations as authenticated Launchplane routes.
+and preview mutations as authenticated Launchplane routes. The authz policy
+grant route is reserved for Launchplane-owned deployment workflows, requires the
+`launchplane_service_deploy.execute` action, writes DB-backed GitHub Actions
+policy rules, and returns only record metadata and rule counts.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a compatibility alias. Built assets live under `/ui/assets/...`, while
