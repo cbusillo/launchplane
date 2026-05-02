@@ -383,6 +383,11 @@ export interface ProductProfileRecord {
     base_url: string;
     health_url: string;
   }>;
+  preview?: {
+    enabled: boolean;
+    context: string;
+    slug_template: string;
+  };
   promotion_workflow: {
     workflow_id: string;
     ref: string;
