@@ -4520,6 +4520,25 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                profile = record_store.read_product_profile_record(request.product)
+                if not _product_profile_context_cutover_contexts_allowed(
+                    profile=profile,
+                    source_context=request.source_context,
+                    target_context=request.target_context,
+                    preview_context="",
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "context_not_in_product_boundary",
+                                "message": "Requested cutover contexts are not owned by the product profile.",
+                            },
+                        },
+                    )
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
