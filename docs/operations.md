@@ -123,6 +123,15 @@ targets, target IDs, inventories, release tuples, and the product profile lane
 contexts. The workflow intentionally leaves append-only deployments,
 promotions, backup gates, and preview history on their original contexts.
 
+After a cutover has been applied and the product profile no longer references
+the legacy context, run the manual Product Legacy Context Cleanup workflow with
+`dry_run=true`. The artifact reports mutable source records that can be cleaned:
+runtime environment records and Dokploy target lookups are deleted only when the
+matching target-context record already exists, and managed secret records and
+bindings are disabled rather than deleted. Run with `dry_run=false` only when
+`blocked=false`. Inventory records, release tuples, deployments, promotions,
+backup gates, and preview history are preserved as historical evidence.
+
 Render an explicit emergency bootstrap policy or import a policy into DB-backed
 records with:
 

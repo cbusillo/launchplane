@@ -13,7 +13,10 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.product_context_cutover import (
+    LegacyContextCleanupBoundaryError,
+    LegacyContextCleanupRequest,
     ProductContextCutoverRequest,
+    apply_legacy_context_cleanup,
     apply_product_context_cutover,
 )
 from control_plane.storage.postgres import PostgresRecordStore
@@ -249,6 +252,131 @@ class ProductContextCutoverTests(unittest.TestCase):
             {"created": 0, "skipped": 1},
         )
         self.assertEqual(repeated_payload["profile"]["action"], "unchanged")
+
+    def test_legacy_cleanup_deletes_lookup_records_and_disables_source_secrets(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+                apply_product_context_cutover(
+                    record_store=store,
+                    request=ProductContextCutoverRequest(
+                        product="sellyouroutboard",
+                        source_context="sellyouroutboard-testing",
+                        target_context="sellyouroutboard",
+                        mode="apply",
+                        display_name="SellYourOutboard",
+                    ),
+                )
+
+                dry_run = apply_legacy_context_cleanup(
+                    record_store=store,
+                    request=LegacyContextCleanupRequest(
+                        product="sellyouroutboard",
+                        source_context="sellyouroutboard-testing",
+                        target_context="sellyouroutboard",
+                    ),
+                )
+                payload = apply_legacy_context_cleanup(
+                    record_store=store,
+                    request=LegacyContextCleanupRequest(
+                        product="sellyouroutboard",
+                        source_context="sellyouroutboard-testing",
+                        target_context="sellyouroutboard",
+                        mode="apply",
+                        actor="test-operator",
+                    ),
+                )
+
+                source_runtime_records = store.list_runtime_environment_records(
+                    context_name="sellyouroutboard-testing"
+                )
+                target_runtime_records = store.list_runtime_environment_records(
+                    context_name="sellyouroutboard"
+                )
+                source_secrets = store.list_secret_records(
+                    context_name="sellyouroutboard-testing",
+                    limit=None,
+                )
+                source_bindings = store.list_secret_bindings(
+                    integration="runtime_environment",
+                    context_name="sellyouroutboard-testing",
+                    instance_name="prod",
+                    limit=None,
+                )
+                target_secret = store.find_secret_record(
+                    scope="context_instance",
+                    integration="runtime_environment",
+                    name="SMTP_PASSWORD",
+                    context="sellyouroutboard",
+                    instance="prod",
+                )
+                source_target_records = tuple(
+                    record
+                    for record in store.list_dokploy_target_records()
+                    if record.context == "sellyouroutboard-testing"
+                )
+                source_target_ids = tuple(
+                    record
+                    for record in store.list_dokploy_target_id_records()
+                    if record.context == "sellyouroutboard-testing"
+                )
+                target = store.read_dokploy_target_record(
+                    context_name="sellyouroutboard",
+                    instance_name="prod",
+                )
+                delete_events = store.list_runtime_environment_delete_events(
+                    context_name="sellyouroutboard-testing"
+                )
+                audit_events = store.list_secret_audit_events(
+                    secret_id="secret-runtime-environment-smtp-password-sellyouroutboard-testing-prod"
+                )
+            finally:
+                store.close()
+
+        self.assertEqual(dry_run["mode"], "dry-run")
+        self.assertFalse(dry_run["blocked"])
+        self.assertEqual(dry_run["counts"]["runtime_environment_records"], {"deleted": 2})
+        self.assertEqual(dry_run["counts"]["managed_secret_records"], {"disabled": 1})
+        self.assertEqual(payload["mode"], "apply")
+        self.assertTrue(payload["applied"])
+        self.assertEqual(source_runtime_records, ())
+        self.assertEqual(len(target_runtime_records), 2)
+        self.assertEqual([secret.status for secret in source_secrets], ["disabled"])
+        self.assertEqual([binding.status for binding in source_bindings], ["disabled"])
+        self.assertIsNotNone(target_secret)
+        assert target_secret is not None
+        self.assertEqual(target_secret.status, "configured")
+        self.assertEqual(source_target_records, ())
+        self.assertEqual(source_target_ids, ())
+        self.assertEqual(target.target_name, "syo-prod-app")
+        self.assertEqual(len(delete_events), 2)
+        self.assertEqual([event.event_type for event in audit_events], ["disabled"])
+        self.assertNotIn("encrypted-value", str(payload))
+
+    def test_legacy_cleanup_rejects_source_context_still_owned_by_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+
+                with self.assertRaises(LegacyContextCleanupBoundaryError):
+                    apply_legacy_context_cleanup(
+                        record_store=store,
+                        request=LegacyContextCleanupRequest(
+                            product="sellyouroutboard",
+                            source_context="sellyouroutboard-testing",
+                            target_context="sellyouroutboard",
+                        ),
+                    )
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

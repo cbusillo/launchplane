@@ -1383,6 +1383,67 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "context_not_in_product_boundary")
 
+    def test_legacy_context_cleanup_endpoint_returns_redacted_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            profile_payload = _product_profile_payload_with_prod()
+            profile_payload["lanes"] = tuple(
+                {**lane, "context": "sellyouroutboard"} for lane in profile_payload["lanes"]
+            )
+            profile_payload["preview"] = {
+                **profile_payload["preview"],
+                "context": "sellyouroutboard",
+            }
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile_payload)
+                )
+            finally:
+                store.close()
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-profiles/legacy-context-cleanup/apply",
+                payload={
+                    "product": "sellyouroutboard",
+                    "source_context": "sellyouroutboard-testing",
+                    "target_context": "sellyouroutboard",
+                    "mode": "dry-run",
+                },
+                headers={"Idempotency-Key": "legacy-context-cleanup-dry-run"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertFalse(payload["result"]["blocked"])
+        self.assertEqual(payload["result"]["groups"]["runtime_environment_records"], [])
+
     def test_product_profile_context_cutover_audit_returns_redacted_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

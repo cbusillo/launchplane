@@ -46,6 +46,8 @@ VeriReel product paths:
   - `POST /v1/product-config/apply`
 - product context cutover route:
   - `POST /v1/product-profiles/context-cutover/apply`
+- product legacy context cleanup route:
+  - `POST /v1/product-profiles/legacy-context-cleanup/apply`
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
 - product driver routes:
@@ -404,6 +406,17 @@ modes, copies only current-authority records into the target context, updates
 lane/preview product profile context fields, and returns key names/counts only.
 It does not copy append-only deployments, promotions, backup gates, or preview
 history.
+
+Product legacy context cleanup uses `product_profile.write` for the requested
+product in the Launchplane service context. It supports `dry-run` and `apply`
+modes after a context cutover has moved the product profile to the target
+context. Cleanup refuses to run while the source context is still owned by this
+or another product profile. It deletes legacy runtime environment records and
+Dokploy target lookup records only when matching target-context records already
+exist, disables legacy managed secret records and bindings, and preserves
+inventory, release tuple, deployment, promotion, backup gate, and preview
+history records as evidence. Responses remain redacted to key names, counts,
+target metadata, secret IDs, and binding keys/status.
 
 ### Driver execution endpoints
 

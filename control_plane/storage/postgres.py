@@ -49,6 +49,7 @@ ConnectionFactory = Callable[[], Any]
 PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
+CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
 
 
 class Base(DeclarativeBase):
@@ -1370,6 +1371,34 @@ class PostgresRecordStore(HumanSessionStore):
             ),
         )
 
+    def delete_dokploy_target_id_record(
+        self,
+        *,
+        expected_record: DokployTargetIdRecord,
+    ) -> CurrentAuthorityDeleteStatus:
+        statement = (
+            select(LaunchplaneDokployTargetIdRow)
+            .where(
+                LaunchplaneDokployTargetIdRow.context == expected_record.context,
+                LaunchplaneDokployTargetIdRow.instance == expected_record.instance,
+            )
+            .limit(1)
+            .with_for_update()
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return "missing"
+            current_record = self._read_payload(
+                model_type=DokployTargetIdRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return "changed"
+            session.delete(row)
+            session.commit()
+            return "deleted"
+
     def write_dokploy_target_record(self, record: DokployTargetRecord) -> None:
         self._write_row(
             LaunchplaneDokployTargetRow(
@@ -1401,6 +1430,34 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneDokployTargetRow.instance.asc(),
             ),
         )
+
+    def delete_dokploy_target_record(
+        self,
+        *,
+        expected_record: DokployTargetRecord,
+    ) -> CurrentAuthorityDeleteStatus:
+        statement = (
+            select(LaunchplaneDokployTargetRow)
+            .where(
+                LaunchplaneDokployTargetRow.context == expected_record.context,
+                LaunchplaneDokployTargetRow.instance == expected_record.instance,
+            )
+            .limit(1)
+            .with_for_update()
+        )
+        with self._session_factory() as session:
+            row = session.scalar(statement)
+            if row is None:
+                return "missing"
+            current_record = self._read_payload(
+                model_type=DokployTargetRecord,
+                payload=row.payload,
+            )
+            if self._payload_dict(current_record) != self._payload_dict(expected_record):
+                return "changed"
+            session.delete(row)
+            session.commit()
+            return "deleted"
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
         self._write_row(
