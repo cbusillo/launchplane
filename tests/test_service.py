@@ -1323,6 +1323,106 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["TAWK_WIDGET_ID"],
         )
 
+    def test_product_profile_context_cutover_audit_rejects_unowned_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard/context-cutover-audit",
+                query_string="source_context=opw&target_context=sellyouroutboard",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "context_not_in_product_boundary")
+
+    def test_product_profile_context_cutover_audit_invalid_request_is_generic(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard/context-cutover-audit",
+                query_string=("source_context=sellyouroutboard&target_context=sellyouroutboard"),
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_context_cutover_audit_request")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Context cutover audit request is invalid.",
+        )
+
     def test_product_profile_context_cutover_audit_rejects_unauthorized_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -1368,6 +1468,43 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 query_string=(
                     "source_context=sellyouroutboard-testing&target_context=sellyouroutboard"
                 ),
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["identity"]["repository"], "every/verireel")
+        self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
+
+    def test_product_profile_list_denial_includes_authz_diagnostics(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles",
             )
 
         self.assertEqual(status_code, 403)

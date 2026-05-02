@@ -1510,6 +1510,31 @@ def _authz_diagnostic_payload(
     }
 
 
+def _product_profile_context_cutover_allowed_contexts(
+    profile: LaunchplaneProductProfileRecord,
+) -> frozenset[str]:
+    contexts = {profile.product.strip()}
+    contexts.update(lane.context.strip() for lane in profile.lanes if lane.context.strip())
+    if profile.preview.enabled and profile.preview.context.strip():
+        contexts.add(profile.preview.context.strip())
+    return frozenset(context for context in contexts if context)
+
+
+def _product_profile_context_cutover_contexts_allowed(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    source_context: str,
+    target_context: str,
+    preview_context: str,
+) -> bool:
+    allowed_contexts = _product_profile_context_cutover_allowed_contexts(profile)
+    requested_contexts = {source_context.strip(), target_context.strip()}
+    if preview_context.strip():
+        requested_contexts.add(preview_context.strip())
+    requested_contexts.discard("")
+    return requested_contexts.issubset(allowed_contexts)
+
+
 def _safe_return_to(value: str) -> str:
     normalized = value.strip() or "/"
     if not normalized.startswith("/") or normalized.startswith("//"):
@@ -2791,6 +2816,24 @@ def create_launchplane_service_app(
                             preview_context = str(
                                 (query.get("preview_context") or [""])[0] or ""
                             ).strip()
+                            if not _product_profile_context_cutover_contexts_allowed(
+                                profile=profile,
+                                source_context=source_context,
+                                target_context=target_context,
+                                preview_context=preview_context,
+                            ):
+                                return _json_response(
+                                    start_response=start_response,
+                                    status_code=403,
+                                    payload={
+                                        "status": "rejected",
+                                        "trace_id": request_trace_id,
+                                        "error": {
+                                            "code": "context_not_in_product_boundary",
+                                            "message": "Requested audit contexts are not owned by the product profile.",
+                                        },
+                                    },
+                                )
                             try:
                                 audit_payload = control_plane_product_context_audit.build_product_context_cutover_audit(
                                     record_store=record_store,
@@ -2799,7 +2842,7 @@ def create_launchplane_service_app(
                                     target_context=target_context,
                                     preview_context=preview_context,
                                 )
-                            except ValueError as error:
+                            except ValueError:
                                 return _json_response(
                                     start_response=start_response,
                                     status_code=400,
@@ -2808,7 +2851,7 @@ def create_launchplane_service_app(
                                         "trace_id": request_trace_id,
                                         "error": {
                                             "code": "invalid_context_cutover_audit_request",
-                                            "message": str(error),
+                                            "message": "Context cutover audit request is invalid.",
                                         },
                                     },
                                 )
@@ -2846,6 +2889,11 @@ def create_launchplane_service_app(
                                     "code": "authorization_denied",
                                     "message": "Workflow cannot list Launchplane product profiles.",
                                 },
+                                "authz": _authz_diagnostic_payload(
+                                    identity=identity,
+                                    authz_policy_sha256_value=resolved_authz_policy_sha256,
+                                    authz_policy_source=resolved_authz_policy_source,
+                                ),
                             },
                         )
                     driver_id_filter = str((query.get("driver_id") or [""])[0] or "").strip()
