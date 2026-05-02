@@ -1,11 +1,11 @@
 ---
-title: Public Readiness
+title: Public Source Posture
 ---
 
 ## Current Verdict
 
-The repo is acceptable to make public once the public-readiness scrub PR is
-merged and the first public CodeQL run is reviewed.
+The repository is public. Keep this document as the standing public-source
+posture, not as a one-time readiness gate.
 
 Launchplane is still product-proving-ground code, not a polished standalone
 distribution. That is acceptable for public source visibility because live
@@ -28,20 +28,19 @@ GitHub settings, and private product repos.
 ## Image And Secret Posture
 
 The Launchplane container image should not contain runtime secrets. The Docker
-build copies source, scripts, and public-safe config/docs, while `.dockerignore` excludes
-runtime state and local artifacts. Secrets such as database URLs, encryption
-keys, Dokploy credentials, product tokens, passwords, and SSH private keys should
-remain runtime inputs or Launchplane-managed encrypted records.
+build copies source, scripts, and public-safe config/docs, while `.dockerignore`
+excludes runtime state and local artifacts. Secrets such as database URLs,
+encryption keys, Dokploy credentials, product tokens, passwords, and SSH private
+keys should remain runtime inputs or Launchplane-managed encrypted records.
 
-The public-readiness concern is therefore not "the image has secrets baked in."
-The remaining concern is keeping product-private operations in private product
-repos and verifying the first public code-scanning signal after visibility
-changes.
+The public-source concern is therefore not "the image has secrets baked in."
+The ongoing concern is keeping product-private operations in private product
+repos and keeping GitHub security signals reviewed.
 
-## Ready-To-Public Checklist
+## Ongoing Public Hygiene
 
-- Keep the checked-in CodeQL workflow enabled once the repo is public and verify
-  initial code-scanning alerts are clean or tracked.
+- Keep the checked-in CodeQL workflow enabled and keep code-scanning alerts clean
+  or tracked.
 - Confirm live target identifiers and product-specific authorization policy stay
   out of checked-in config and are represented by DB-backed Launchplane records.
 - Audit the built image layers before any package visibility change and confirm
@@ -53,7 +52,8 @@ changes.
 
 ## Safe Public Posture
 
-The safe public posture before Launchplane is fully generalized is:
+The safe public posture while Launchplane is still becoming a generalized
+product is:
 
 - public source code
 - private runtime secrets and operator catalogs
