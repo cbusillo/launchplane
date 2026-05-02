@@ -79,6 +79,7 @@ from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResu
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
+from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 
 
 class _StubVerifier:
@@ -2089,6 +2090,119 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "product": "sellyouroutboard",
                         "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
                         "source_git_ref": "abc123",
+                        "dry_run": False,
+                    },
+                },
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_human_session_can_dispatch_generic_web_promotion_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.dispatch"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            with patch(
+                "control_plane.service.dispatch_generic_web_promotion_workflow",
+                return_value=GenericWebPromotionWorkflowResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    repository="cbusillo/sellyouroutboard",
+                    workflow_id="promote-prod.yml",
+                    ref="main",
+                    dry_run=False,
+                    bump="patch",
+                    run_id=25237186636,
+                    run_url="https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
+                    run_status="queued",
+                ),
+            ) as dispatch_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion-workflow",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "workflow": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "context": "sellyouroutboard-testing",
+                            "dry_run": False,
+                            "bump": "patch",
+                            "observe_timeout_seconds": 0,
+                        },
+                    },
+                    authorization="",
+                    headers={"Cookie": cookie},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["repository"], "cbusillo/sellyouroutboard")
+        self.assertEqual(payload["result"]["workflow_id"], "promote-prod.yml")
+        self.assertFalse(payload["result"]["dry_run"])
+        self.assertEqual(payload["result"]["run_id"], 25237186636)
+        self.assertEqual(payload["records"], {})
+        dispatch_mock.assert_called_once()
+
+    def test_generic_web_promotion_workflow_rejects_unauthorized_human(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_humans": []}),
+                control_plane_root_path=root,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard-testing",
                         "dry_run": False,
                     },
                 },

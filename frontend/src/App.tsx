@@ -28,6 +28,7 @@ import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import {
   LaunchplaneApiError,
   applyProductConfig,
+  dispatchGenericWebPromotionWorkflow,
   dryRunGenericWebProdPromotion,
   listDrivers,
   listProductProfiles,
@@ -44,6 +45,8 @@ import type {
   DriverView,
   GenericWebProdPromotionPayload,
   GenericWebProdPromotionRequest,
+  GenericWebPromotionWorkflowPayload,
+  GenericWebPromotionWorkflowRequest,
   LaneSummary,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
@@ -152,6 +155,16 @@ const FIXTURE_GENERIC_WEB_ACTIONS: DriverActionDescriptor[] = [
     method: "POST",
     route_path: "/v1/drivers/generic-web/prod-promotion",
     writes_records: ["deployment", "promotion", "inventory"],
+  },
+  {
+    action_id: "prod_promotion_workflow",
+    label: "Dispatch promote workflow",
+    description: "Dispatch the product-owned GitHub promote workflow.",
+    safety: "mutation",
+    scope: "instance",
+    method: "POST",
+    route_path: "/v1/drivers/generic-web/prod-promotion-workflow",
+    writes_records: [],
   },
 ];
 const FIXTURE_VERIREEL_DRIVER: DriverDescriptor = {
@@ -1385,6 +1398,7 @@ function PromotionBridge({
   loading,
   onAction,
   dryRunPromotion = dryRunGenericWebProdPromotion,
+  dispatchWorkflow = dispatchGenericWebPromotionWorkflow,
 }: {
   prod: LaneSummary | null;
   testing: LaneSummary | null;
@@ -1397,13 +1411,27 @@ function PromotionBridge({
   dryRunPromotion?: (
     payload: GenericWebProdPromotionRequest,
   ) => Promise<GenericWebProdPromotionPayload>;
+  dispatchWorkflow?: (
+    payload: GenericWebPromotionWorkflowRequest,
+  ) => Promise<GenericWebPromotionWorkflowPayload>;
 }) {
   const primaryAction = pickNextAction(actions, decision.verdict);
+  const workflowAction = actions.find(
+    (action) =>
+      action.route_path === "/v1/drivers/generic-web/prod-promotion-workflow",
+  );
   const [dryRunResult, setDryRunResult] =
     useState<GenericWebProdPromotionPayload | null>(null);
+  const [workflowResult, setWorkflowResult] =
+    useState<GenericWebPromotionWorkflowPayload | null>(null);
   const [dryRunError, setDryRunError] = useState("");
   const [dryRunTraceId, setDryRunTraceId] = useState("");
   const [submittingDryRun, setSubmittingDryRun] = useState(false);
+  const [workflowError, setWorkflowError] = useState("");
+  const [workflowTraceId, setWorkflowTraceId] = useState("");
+  const [submittingWorkflowMode, setSubmittingWorkflowMode] = useState<
+    "dry-run" | "promote" | ""
+  >("");
   const testingArtifact = artifactFromLane(testing);
   const testingSourceRef = sourceRefFromLane(testing);
   const supportsGenericWebPromotion =
@@ -1418,6 +1446,15 @@ function PromotionBridge({
     !loading &&
     !submittingDryRun,
   );
+  const canDispatchWorkflow = Boolean(
+    supportsGenericWebPromotion &&
+    workflowAction &&
+    dryRunResult &&
+    product.trim() &&
+    context.trim() &&
+    !loading &&
+    !submittingWorkflowMode,
+  );
   const verdictLabel =
     decision.verdict === "ready"
       ? "Ready to promote"
@@ -1427,8 +1464,11 @@ function PromotionBridge({
 
   useEffect(() => {
     setDryRunResult(null);
+    setWorkflowResult(null);
     setDryRunError("");
     setDryRunTraceId("");
+    setWorkflowError("");
+    setWorkflowTraceId("");
   }, [product, context, testingArtifact, testingSourceRef]);
 
   function runPromotionDryRun() {
@@ -1466,6 +1506,39 @@ function PromotionBridge({
         }
       })
       .finally(() => setSubmittingDryRun(false));
+  }
+
+  function dispatchPromotionWorkflow(dryRun: boolean) {
+    if (!canDispatchWorkflow) {
+      return;
+    }
+    setSubmittingWorkflowMode(dryRun ? "dry-run" : "promote");
+    setWorkflowError("");
+    setWorkflowTraceId("");
+    const request: GenericWebPromotionWorkflowRequest = {
+      schema_version: 1,
+      product: product.trim(),
+      workflow: {
+        schema_version: 1,
+        product: product.trim(),
+        context: context.trim(),
+        dry_run: dryRun,
+        observe_timeout_seconds: 12,
+      },
+    };
+    dispatchWorkflow(request)
+      .then((payload) => setWorkflowResult(payload))
+      .catch((apiError: unknown) => {
+        if (apiError instanceof LaunchplaneApiError) {
+          setWorkflowError(apiError.message);
+          setWorkflowTraceId(apiError.traceId);
+        } else if (apiError instanceof Error) {
+          setWorkflowError(apiError.message);
+        } else {
+          setWorkflowError("Promotion workflow dispatch failed.");
+        }
+      })
+      .finally(() => setSubmittingWorkflowMode(""));
   }
 
   return (
@@ -1514,21 +1587,55 @@ function PromotionBridge({
           {primaryAction ? (
             <div className="bridge-action-stack">
               {supportsGenericWebPromotion ? (
-                <button
-                  className="button button-primary bridge-action"
-                  type="button"
-                  data-safety="safe_write"
-                  aria-label="Dry run generic-web prod promotion"
-                  disabled={!canDryRun}
-                  onClick={runPromotionDryRun}
-                >
-                  {submittingDryRun ? (
-                    <Loader2 className="spin" size={16} />
-                  ) : (
-                    <Send size={16} />
-                  )}
-                  <span>Dry run promotion</span>
-                </button>
+                <>
+                  <button
+                    className="button button-primary bridge-action"
+                    type="button"
+                    data-safety="safe_write"
+                    aria-label="Dry run generic-web prod promotion"
+                    disabled={!canDryRun}
+                    onClick={runPromotionDryRun}
+                  >
+                    {submittingDryRun ? (
+                      <Loader2 className="spin" size={16} />
+                    ) : (
+                      <Send size={16} />
+                    )}
+                    <span>Dry run promotion</span>
+                  </button>
+                  {dryRunResult ? (
+                    <div className="workflow-action-row">
+                      <button
+                        className="button button-secondary bridge-action"
+                        type="button"
+                        data-safety="safe_write"
+                        disabled={!canDispatchWorkflow}
+                        onClick={() => dispatchPromotionWorkflow(true)}
+                      >
+                        {submittingWorkflowMode === "dry-run" ? (
+                          <Loader2 className="spin" size={16} />
+                        ) : (
+                          <Play size={16} />
+                        )}
+                        <span>Run workflow dry run</span>
+                      </button>
+                      <button
+                        className="button button-primary bridge-action"
+                        type="button"
+                        data-safety="mutation"
+                        disabled={!canDispatchWorkflow}
+                        onClick={() => dispatchPromotionWorkflow(false)}
+                      >
+                        {submittingWorkflowMode === "promote" ? (
+                          <Loader2 className="spin" size={16} />
+                        ) : (
+                          <Send size={16} />
+                        )}
+                        <span>Promote through workflow</span>
+                      </button>
+                    </div>
+                  ) : null}
+                </>
               ) : (
                 <button
                   className="button button-primary bridge-action"
@@ -1553,6 +1660,15 @@ function PromotionBridge({
               ) : null}
               {dryRunResult ? (
                 <PromotionDryRunResult payload={dryRunResult} />
+              ) : null}
+              {workflowError ? (
+                <InlinePanelError
+                  message={workflowError}
+                  traceId={workflowTraceId}
+                />
+              ) : null}
+              {workflowResult ? (
+                <PromotionWorkflowResult payload={workflowResult} />
               ) : null}
             </div>
           ) : null}
@@ -1620,6 +1736,64 @@ function PromotionDryRunResult({
               ? "unexpected write candidate"
               : "none"}
           </code>
+        </div>
+        <div className="config-result-row">
+          <strong>Trace</strong>
+          <code>{payload.trace_id}</code>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PromotionWorkflowResult({
+  payload,
+}: {
+  payload: GenericWebPromotionWorkflowPayload;
+}) {
+  const result = payload.result;
+  return (
+    <div className="config-result bridge-workflow-result" aria-live="polite">
+      <div className="config-result-summary">
+        <KeyValue
+          label="Workflow"
+          value={result.dry_run ? "dry-run" : "promote"}
+          status={result.dry_run ? "pending" : "pass"}
+        />
+        <KeyValue
+          label="Dispatch"
+          value={result.dispatch_status}
+          status="pass"
+        />
+        <KeyValue
+          label="Run"
+          value={result.run_status || "pending"}
+          status={result.run_status}
+        />
+        <KeyValue
+          label="Conclusion"
+          value={result.run_conclusion || "pending"}
+          status={result.run_conclusion || "pending"}
+        />
+      </div>
+      <div className="config-result-list">
+        <div className="config-result-row">
+          <strong>Repository</strong>
+          <code>{result.repository}</code>
+        </div>
+        <div className="config-result-row">
+          <strong>Workflow</strong>
+          <code>{`${result.workflow_id}@${result.ref}`}</code>
+        </div>
+        <div className="config-result-row">
+          <strong>Run</strong>
+          {result.run_url ? (
+            <a href={result.run_url} target="_blank" rel="noreferrer">
+              {result.run_id || result.run_url}
+            </a>
+          ) : (
+            <code>not observed yet</code>
+          )}
         </div>
         <div className="config-result-row">
           <strong>Trace</strong>
@@ -2183,6 +2357,7 @@ function StateFixtureGallery({
             loading={false}
             onAction={() => undefined}
             dryRunPromotion={fixtureGenericWebPromotionDryRun}
+            dispatchWorkflow={fixtureGenericWebPromotionWorkflow}
           />
         </div>
         <div className="fixture-card">
@@ -2239,6 +2414,31 @@ function fixtureGenericWebPromotionDryRun(): Promise<GenericWebProdPromotionPayl
       destination_health_status: "skipped",
       backup_status: "skipped",
       dry_run: true,
+    },
+  });
+}
+
+function fixtureGenericWebPromotionWorkflow(
+  payload: GenericWebPromotionWorkflowRequest,
+): Promise<GenericWebPromotionWorkflowPayload> {
+  return Promise.resolve({
+    status: "accepted",
+    trace_id: "fixture-trace-generic-web-workflow",
+    records: {},
+    result: {
+      product: payload.product,
+      context: payload.workflow.context,
+      repository: "cbusillo/sellyouroutboard",
+      workflow_id: "promote-prod.yml",
+      ref: "main",
+      dry_run: payload.workflow.dry_run,
+      bump: payload.workflow.bump ?? "patch",
+      dispatch_status: "dispatched",
+      run_id: 25237186636,
+      run_url:
+        "https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
+      run_status: "queued",
+      run_conclusion: "",
     },
   });
 }

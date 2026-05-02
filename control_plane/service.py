@@ -105,6 +105,10 @@ from control_plane.workflows.generic_web_promotion import (
     execute_generic_web_prod_promotion,
     resolve_generic_web_promotion_lanes,
 )
+from control_plane.workflows.generic_web_promotion_workflow import (
+    GenericWebPromotionWorkflowRequest,
+    dispatch_generic_web_promotion_workflow,
+)
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
@@ -285,6 +289,22 @@ class GenericWebProdPromotionEnvelope(BaseModel):
             raise ValueError("generic web prod promotion requires product")
         if self.product.strip() != self.promotion.product.strip():
             raise ValueError("generic web prod promotion requires matching product values")
+        return self
+
+
+class GenericWebPromotionWorkflowEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    workflow: GenericWebPromotionWorkflowRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "GenericWebPromotionWorkflowEnvelope":
+        if not self.product.strip():
+            raise ValueError("generic web promotion workflow requires product")
+        if self.product.strip() != self.workflow.product.strip():
+            raise ValueError("generic web promotion workflow requires matching product values")
         return self
 
 
@@ -2041,6 +2061,7 @@ def create_launchplane_service_app(
         "/v1/drivers/launchplane/self-deploy",
         "/v1/drivers/generic-web/deploy",
         "/v1/drivers/generic-web/prod-promotion",
+        "/v1/drivers/generic-web/prod-promotion-workflow",
         "/v1/drivers/generic-web/preview-desired-state",
         "/v1/drivers/generic-web/preview-refresh",
         "/v1/drivers/generic-web/preview-inventory",
@@ -2283,7 +2304,10 @@ def create_launchplane_service_app(
                     session_manager=session_manager,
                 )
             else:
-                if path == "/v1/drivers/generic-web/prod-promotion":
+                if path in {
+                    "/v1/drivers/generic-web/prod-promotion",
+                    "/v1/drivers/generic-web/prod-promotion-workflow",
+                }:
                     identity = _read_identity(
                         environ=environ,
                         verifier=verifier,
@@ -3097,6 +3121,47 @@ def create_launchplane_service_app(
                     "backup_status": driver_result.backup_status,
                     "dry_run": driver_result.dry_run,
                 }
+            elif path == "/v1/drivers/generic-web/prod-promotion-workflow":
+                request = GenericWebPromotionWorkflowEnvelope.model_validate(payload)
+                profile = record_store.read_product_profile_record(request.product)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="generic_web_prod_promotion.dispatch",
+                    product=profile.product,
+                    context=request.workflow.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Caller cannot dispatch the generic web prod promotion workflow"
+                                    " for the requested product/context."
+                                ),
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = dispatch_generic_web_promotion_workflow(
+                    control_plane_root=resolved_root,
+                    profile=profile,
+                    request=request.workflow,
+                )
+                result = driver_result.model_dump(mode="json")
             elif path == "/v1/drivers/generic-web/preview-desired-state":
                 request = GenericWebPreviewDesiredStateEnvelope.model_validate(payload)
                 profile = resolve_generic_web_preview_profile(

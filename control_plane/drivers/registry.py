@@ -117,6 +117,15 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             writes_records=("deployment", "promotion", "inventory"),
         ),
         _action(
+            "prod_promotion_workflow",
+            "Dispatch promote workflow",
+            "Dispatch the product-owned GitHub workflow that promotes testing to prod.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+            writes_records=(),
+        ),
+        _action(
             "preview_desired_state",
             "Discover desired previews",
             "Discover labeled pull requests for a generic-web product profile and record desired preview state.",

@@ -10,6 +10,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+    ProductPromotionWorkflowProfile,
     ProductPreviewProfile,
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence
@@ -17,6 +18,10 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     execute_generic_web_prod_promotion,
+)
+from control_plane.workflows.generic_web_promotion_workflow import (
+    GenericWebPromotionWorkflowRequest,
+    dispatch_generic_web_promotion_workflow,
 )
 from control_plane.workflows.ship import build_deployment_record
 
@@ -343,6 +348,149 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.source_health_status, "pass")
         self.assertEqual(result.destination_health_status, "skipped")
         self.assertEqual(healthcheck.call_count, 1)
+
+
+class GenericWebPromotionWorkflowTests(unittest.TestCase):
+    def test_dispatches_product_workflow_and_observes_run(self) -> None:
+        requests: list[tuple[str, str, dict[str, object] | None]] = []
+        listed_once = False
+
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ):
+            nonlocal listed_once
+            requests.append((method, path, body))
+            if method == "POST":
+                self.assertEqual(token, "github-token")
+                return None
+            if not listed_once:
+                listed_once = True
+                return {
+                    "workflow_runs": [
+                        {
+                            "id": 100,
+                            "html_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/100",
+                            "status": "completed",
+                            "conclusion": "success",
+                        }
+                    ]
+                }
+            return {
+                "workflow_runs": [
+                    {
+                        "id": 25237186636,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
+                        "status": "queued",
+                        "conclusion": None,
+                        "created_at": "2099-01-01T00:00:00Z",
+                    }
+                ]
+            }
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                side_effect=fake_github_api_request,
+            ),
+        ):
+            profile = _profile().model_copy(
+                update={
+                    "promotion_workflow": ProductPromotionWorkflowProfile(
+                        default_bump="minor"
+                    )
+                }
+            )
+            result = dispatch_generic_web_promotion_workflow(
+                control_plane_root=Path("."),
+                profile=profile,
+                request=GenericWebPromotionWorkflowRequest(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    dry_run=False,
+                    observe_timeout_seconds=0,
+                ),
+            )
+
+        self.assertEqual(result.repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(result.workflow_id, "promote-prod.yml")
+        self.assertEqual(result.ref, "main")
+        self.assertFalse(result.dry_run)
+        self.assertEqual(result.bump, "minor")
+        self.assertEqual(result.run_id, 25237186636)
+        self.assertEqual(result.run_status, "queued")
+        self.assertEqual(requests[1][0], "POST")
+        self.assertEqual(
+            requests[1][1],
+            "/repos/cbusillo/sellyouroutboard/actions/workflows/promote-prod.yml/dispatches",
+        )
+        self.assertEqual(
+            requests[1][2],
+            {"ref": "main", "inputs": {"dry_run": "false", "bump": "minor"}},
+        )
+
+    def test_observation_declines_ambiguous_new_runs(self) -> None:
+        list_count = 0
+
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ):
+            nonlocal list_count
+            if method == "POST":
+                return None
+            list_count += 1
+            if list_count == 1:
+                return {"workflow_runs": []}
+            return {
+                "workflow_runs": [
+                    {"id": 101, "html_url": "https://github.example/runs/101", "status": "queued"},
+                    {"id": 102, "html_url": "https://github.example/runs/102", "status": "queued"},
+                ]
+            }
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+                side_effect=fake_github_api_request,
+            ),
+        ):
+            result = dispatch_generic_web_promotion_workflow(
+                control_plane_root=Path("."),
+                profile=_profile(),
+                request=GenericWebPromotionWorkflowRequest(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    observe_timeout_seconds=0,
+                ),
+            )
+
+        self.assertEqual(result.run_id, 0)
+        self.assertEqual(result.run_url, "")
+        self.assertEqual(result.run_status, "pending")
+
+    def test_dispatch_requires_managed_github_token(self) -> None:
+        with patch(
+            "control_plane.workflows.generic_web_promotion_workflow.resolve_launchplane_github_token",
+            return_value="",
+        ):
+            with self.assertRaises(click.ClickException) as raised:
+                dispatch_generic_web_promotion_workflow(
+                    control_plane_root=Path("."),
+                    profile=_profile(),
+                    request=GenericWebPromotionWorkflowRequest(
+                        product="sellyouroutboard",
+                        context="sellyouroutboard-testing",
+                    ),
+                )
+
+        self.assertIn("GITHUB_TOKEN", str(raised.exception))
 
 
 if __name__ == "__main__":

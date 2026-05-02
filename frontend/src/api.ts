@@ -5,6 +5,8 @@ import type {
   DriverViewPayload,
   GenericWebProdPromotionPayload,
   GenericWebProdPromotionRequest,
+  GenericWebPromotionWorkflowPayload,
+  GenericWebPromotionWorkflowRequest,
   LogoutPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
@@ -102,6 +104,16 @@ export function dryRunGenericWebProdPromotion(
 ): Promise<GenericWebProdPromotionPayload> {
   return requestJson<GenericWebProdPromotionPayload>(
     "/v1/drivers/generic-web/prod-promotion",
+    "POST",
+    payload,
+  );
+}
+
+export function dispatchGenericWebPromotionWorkflow(
+  payload: GenericWebPromotionWorkflowRequest,
+): Promise<GenericWebPromotionWorkflowPayload> {
+  return requestJson<GenericWebPromotionWorkflowPayload>(
+    "/v1/drivers/generic-web/prod-promotion-workflow",
     "POST",
     payload,
   );

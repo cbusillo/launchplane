@@ -709,8 +709,15 @@ p {
   width: 100%;
 }
 
+.workflow-action-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
 .bridge-inline-alert,
-.bridge-dry-run-result {
+.bridge-dry-run-result,
+.bridge-workflow-result {
   border: 1px solid var(--hair-soft);
 }
 
@@ -805,10 +812,9 @@ p {
 }
 
 .config-row-secret {
-  grid-template-columns: minmax(130px, 0.85fr) minmax(130px, 0.85fr) minmax(
-      130px,
-      1fr
-    ) minmax(120px, 0.9fr) auto;
+  grid-template-columns:
+    minmax(130px, 0.85fr) minmax(130px, 0.85fr) minmax(130px, 1fr)
+    minmax(120px, 0.9fr) auto;
 }
 
 .config-inline-alert {
@@ -1393,6 +1399,10 @@ p {
   .bridge-direction {
     grid-template-columns: minmax(0, 1fr);
     align-items: stretch;
+  }
+
+  .workflow-action-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .preview-row .status-pill,

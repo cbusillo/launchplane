@@ -46,6 +46,8 @@ VeriReel product paths:
   - `POST /v1/product-config/apply`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
+  - `POST /v1/drivers/generic-web/prod-promotion`
+  - `POST /v1/drivers/generic-web/prod-promotion-workflow`
   - `POST /v1/drivers/generic-web/preview-desired-state`
   - `POST /v1/drivers/generic-web/preview-refresh`
   - `POST /v1/drivers/generic-web/preview-inventory`
@@ -338,6 +340,15 @@ Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
 Launchplane resolves the context from the DB-backed product profile lane and the
 runtime target from DB-backed Dokploy target records.
+
+Generic web prod promotion can be exercised directly with
+`POST /v1/drivers/generic-web/prod-promotion`; browser sessions may only use this
+route with `dry_run=true`. The operator UI then uses
+`POST /v1/drivers/generic-web/prod-promotion-workflow` to dispatch the
+product-owned GitHub workflow configured by the DB-backed product profile. That
+workflow remains responsible for product release/tag behavior while Launchplane
+supplies authz, managed `GITHUB_TOKEN` lookup, dispatch inputs, and workflow-run
+observation.
 
 Generic web preview desired-state discovery uses
 `POST /v1/drivers/generic-web/preview-desired-state`. The request names the
