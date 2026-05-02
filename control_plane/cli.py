@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import product_config as control_plane_product_config
+from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
@@ -74,7 +75,6 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
 )
-from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.launchplane_mutations import (
@@ -259,168 +259,6 @@ def _summarize_product_profile_record(record: LaunchplaneProductProfileRecord) -
         "updated_at": record.updated_at,
         "source": record.source,
     }
-
-
-def _summarize_product_profile_lane(record: ProductLaneProfile) -> dict[str, object]:
-    return {
-        "instance": record.instance,
-        "context": record.context,
-        "base_url": record.base_url,
-        "health_url": record.health_url,
-    }
-
-
-def _route_key(context_name: str, instance_name: str) -> tuple[str, str]:
-    return (context_name, instance_name)
-
-
-def _summarize_secret_record_for_context_audit(
-    *,
-    record_store: PostgresRecordStore,
-    record: SecretRecord,
-) -> dict[str, object]:
-    binding = control_plane_secrets.build_secret_status(
-        record_store,
-        secret_id=record.secret_id,
-    ).get("binding")
-    return {
-        "secret_id": record.secret_id,
-        "scope": record.scope,
-        "integration": record.integration,
-        "name": record.name,
-        "context": record.context,
-        "instance": record.instance,
-        "status": record.status,
-        "binding_key": str(binding.get("binding_key", "")) if isinstance(binding, dict) else "",
-        "binding_status": str(binding.get("status", "")) if isinstance(binding, dict) else "",
-        "updated_at": record.updated_at,
-    }
-
-
-def _context_cutover_route_payload(
-    *,
-    record_store: PostgresRecordStore,
-    context_name: str,
-) -> dict[str, object]:
-    runtime_records = record_store.list_runtime_environment_records(context_name=context_name)
-    secret_records = record_store.list_secret_records(context_name=context_name, limit=None)
-    target_records = tuple(
-        record
-        for record in record_store.list_dokploy_target_records()
-        if record.context == context_name
-    )
-    target_ids_by_route = _target_id_map(
-        tuple(
-            record
-            for record in record_store.list_dokploy_target_id_records()
-            if record.context == context_name
-        )
-    )
-    inventory_records = tuple(
-        record
-        for record in record_store.list_environment_inventory()
-        if record.context == context_name
-    )
-    release_tuple_records = tuple(
-        record
-        for record in record_store.list_release_tuple_records()
-        if record.context == context_name
-    )
-    return {
-        "context": context_name,
-        "runtime_environment_records": [
-            _summarize_runtime_environment_record(record) for record in runtime_records
-        ],
-        "managed_secret_records": [
-            _summarize_secret_record_for_context_audit(
-                record_store=record_store,
-                record=record,
-            )
-            for record in secret_records
-        ],
-        "dokploy_targets": [
-            _summarize_dokploy_target_record(
-                record,
-                target_id=target_ids_by_route.get(_route_key(record.context, record.instance), ""),
-            )
-            for record in target_records
-        ],
-        "inventory_records": [
-            _summarize_environment_inventory(record) for record in inventory_records
-        ],
-        "release_tuple_records": [
-            {
-                "tuple_id": record.tuple_id,
-                "context": record.context,
-                "channel": record.channel,
-                "artifact_id": record.artifact_id,
-                "image_repository": record.image_repository,
-                "image_digest": record.image_digest,
-                "deployment_record_id": record.deployment_record_id,
-                "promotion_record_id": record.promotion_record_id,
-                "promoted_from_channel": record.promoted_from_channel,
-                "provenance": record.provenance,
-                "minted_at": record.minted_at,
-            }
-            for record in release_tuple_records
-        ],
-        "append_only_evidence_counts": {
-            "backup_gates": len(
-                record_store.list_backup_gate_records(context_name=context_name, limit=None)
-            ),
-            "deployments": len(
-                record_store.list_deployment_records(context_name=context_name, limit=None)
-            ),
-            "promotions": len(
-                record_store.list_promotion_records(context_name=context_name, limit=None)
-            ),
-        },
-    }
-
-
-def _build_context_cutover_warnings(
-    *,
-    profile: LaunchplaneProductProfileRecord,
-    source_context: str,
-    target_context: str,
-    preview_context: str,
-    source_payload: dict[str, object],
-    target_payload: dict[str, object],
-) -> list[str]:
-    warnings: list[str] = []
-    stable_lane_contexts = {
-        lane.instance: lane.context
-        for lane in profile.lanes
-        if lane.instance in {"testing", "prod"}
-    }
-    if source_context in stable_lane_contexts.values():
-        warnings.append(
-            f"Stable product profile lanes still reference legacy context {source_context!r}."
-        )
-    if target_context not in stable_lane_contexts.values():
-        warnings.append(
-            f"No stable product profile lane currently references target context {target_context!r}."
-        )
-    if profile.preview.enabled and profile.preview.context not in {preview_context, target_context}:
-        warnings.append(
-            f"Preview profile context {profile.preview.context!r} differs from requested preview context."
-        )
-    if source_payload["append_only_evidence_counts"] != {
-        "backup_gates": 0,
-        "deployments": 0,
-        "promotions": 0,
-    }:
-        warnings.append(
-            "Legacy context has append-only evidence; do not rewrite those records during cutover."
-        )
-    if (
-        target_payload["runtime_environment_records"]
-        and source_payload["runtime_environment_records"]
-    ):
-        warnings.append(
-            "Both source and target contexts have runtime environment records; compare key sets before deleting either side."
-        )
-    return warnings
 
 
 def _parse_product_profile_lanes(lanes_json: str) -> tuple[ProductLaneProfile, ...]:
@@ -12392,79 +12230,23 @@ def product_profiles_audit_context_cutover(
     target_context: str,
     preview_context: str,
 ) -> None:
-    normalized_source_context = source_context.strip()
-    normalized_target_context = target_context.strip()
-    if not normalized_source_context or not normalized_target_context:
-        raise click.ClickException("Provide non-empty --source-context and --target-context.")
-    if normalized_source_context == normalized_target_context:
-        raise click.ClickException("Source and target contexts must differ.")
-
     record_store = _product_profile_store(database_url)
     try:
-        profile = record_store.read_product_profile_record(product.strip())
-        normalized_preview_context = preview_context.strip() or profile.preview.context.strip()
-        source_payload = _context_cutover_route_payload(
+        payload = control_plane_product_context_audit.build_product_context_cutover_audit(
             record_store=record_store,
-            context_name=normalized_source_context,
+            product=product,
+            source_context=source_context,
+            target_context=target_context,
+            preview_context=preview_context,
         )
-        target_payload = _context_cutover_route_payload(
-            record_store=record_store,
-            context_name=normalized_target_context,
-        )
-        preview_payload = (
-            _context_cutover_route_payload(
-                record_store=record_store,
-                context_name=normalized_preview_context,
-            )
-            if normalized_preview_context
-            and normalized_preview_context
-            not in {normalized_source_context, normalized_target_context}
-            else None
-        )
-        warnings = _build_context_cutover_warnings(
-            profile=profile,
-            source_context=normalized_source_context,
-            target_context=normalized_target_context,
-            preview_context=normalized_preview_context,
-            source_payload=source_payload,
-            target_payload=target_payload,
-        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     finally:
         record_store.close()
 
-    stable_lanes = [lane for lane in profile.lanes if lane.instance in {"testing", "prod"}]
     click.echo(
         json.dumps(
-            {
-                "status": "ok",
-                "product": profile.product,
-                "source_context": normalized_source_context,
-                "target_context": normalized_target_context,
-                "preview_context": normalized_preview_context,
-                "profile": {
-                    "summary": _summarize_product_profile_record(profile),
-                    "stable_lanes": [
-                        _summarize_product_profile_lane(lane) for lane in stable_lanes
-                    ],
-                    "preview": {
-                        "enabled": profile.preview.enabled,
-                        "context": profile.preview.context,
-                        "slug_template": profile.preview.slug_template,
-                        "template_instance": profile.preview.template_instance,
-                    },
-                },
-                "contexts": {
-                    "source": source_payload,
-                    "target": target_payload,
-                    "preview": preview_payload,
-                },
-                "warnings": warnings,
-                "guardrails": [
-                    "Do not rewrite append-only deployments, promotions, backup gates, or preview history.",
-                    "Compare runtime key sets before deleting source or target runtime records.",
-                    "Apply product profile lane changes only after target current-authority records exist.",
-                ],
-            },
+            payload,
             indent=2,
             sort_keys=True,
         )

@@ -374,6 +374,7 @@ only after a passing plan and a matching stored preview record are present.
 - `GET /v1/contexts/{context}/instances/{instance}/secrets`
 - `GET /v1/secrets/{secret_id}`
 - `GET /v1/contexts/{context}/operations/recent`
+- `GET /v1/product-profiles/{product}/context-cutover-audit`
 
 These operator reads use the same Launchplane authn/authz boundary as evidence
 ingress. The intent is to give operators a minimal typed read surface for the
@@ -381,6 +382,14 @@ current Launchplane record nouns without forcing them to infer state from
 workflow logs or host-local files. Secret status reads return metadata only:
 Launchplane does not expose plaintext secret retrieval through the service
 boundary.
+
+Product context cutover audit is read-only and uses `product_profile.read` for
+the requested product in the Launchplane service context. It returns redacted
+current-authority metadata for source, target, and optional preview contexts:
+runtime key names, managed secret IDs/binding keys, Dokploy target metadata,
+inventory and release tuple pointers, and append-only evidence counts. It does
+not return runtime values, secret plaintext, secret ciphertext, or full provider
+environment text.
 
 ### Driver execution endpoints
 

@@ -1242,6 +1242,137 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["sellyouroutboard"],
         )
 
+    def test_product_profile_context_cutover_audit_returns_redacted_metadata(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard-testing",
+                        instance="prod",
+                        env={"TAWK_PROPERTY_ID": "property-legacy"},
+                        updated_at="2026-05-01T00:03:00Z",
+                        source_label="legacy",
+                    )
+                )
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard",
+                        instance="prod",
+                        env={"TAWK_WIDGET_ID": "widget-canonical"},
+                        updated_at="2026-05-01T00:04:00Z",
+                        source_label="operator:mistake",
+                    )
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard/context-cutover-audit",
+                query_string=(
+                    "source_context=sellyouroutboard-testing&target_context=sellyouroutboard"
+                ),
+            )
+
+        payload_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["audit"]["status"], "ok")
+        self.assertNotIn("property-legacy", payload_text)
+        self.assertNotIn("widget-canonical", payload_text)
+        self.assertEqual(
+            payload["audit"]["contexts"]["source"]["runtime_environment_records"][0]["env_keys"],
+            ["TAWK_PROPERTY_ID"],
+        )
+        self.assertEqual(
+            payload["audit"]["contexts"]["target"]["runtime_environment_records"][0]["env_keys"],
+            ["TAWK_WIDGET_ID"],
+        )
+
+    def test_product_profile_context_cutover_audit_rejects_unauthorized_product(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_profile.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard/context-cutover-audit",
+                query_string=(
+                    "source_context=sellyouroutboard-testing&target_context=sellyouroutboard"
+                ),
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_product_profile_write_rejects_unauthorized_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2255,7 +2386,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(driver["driver_id"], "sellyouroutboard")
         self.assertEqual(driver["descriptor"]["base_driver_id"], "generic-web")
         self.assertEqual(driver["descriptor"]["product"], "sellyouroutboard")
-        self.assertEqual(driver["available_actions"][1]["route_path"], "/v1/drivers/generic-web/prod-promotion")
+        self.assertEqual(
+            driver["available_actions"][1]["route_path"], "/v1/drivers/generic-web/prod-promotion"
+        )
 
     def test_generic_web_preview_desired_state_route_uses_profile_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
