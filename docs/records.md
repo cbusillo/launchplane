@@ -151,6 +151,20 @@ release tuples. Do not rewrite append-only deployments, promotions, backup
 gates, or preview history; those records are historical evidence and should
 continue to describe the route that produced them.
 
+Before changing a product profile or deleting legacy rows, audit both route
+families with:
+
+```bash
+uv run launchplane product-profiles audit-context-cutover \
+  --product sellyouroutboard \
+  --source-context sellyouroutboard-testing \
+  --target-context sellyouroutboard
+```
+
+The audit reports key names, record ids, counts, target names, and binding
+metadata only. It does not print runtime values, managed secret plaintext,
+secret ciphertext, or full provider env text.
+
 These records replace repo-local Launchplane lifecycle manifests. Product repos
 still own their normal app/runtime contract, such as Dockerfile, image publish,
 health endpoint, tests, and source/build inputs. Launchplane owns the product
