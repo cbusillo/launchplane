@@ -1479,6 +1479,37 @@ def _human_identity_payload(identity: GitHubHumanIdentity) -> dict[str, object]:
     }
 
 
+def _authz_diagnostic_payload(
+    *,
+    identity: LaunchplaneIdentity,
+    authz_policy_sha256_value: str,
+    authz_policy_source: str,
+) -> dict[str, object]:
+    if isinstance(identity, GitHubHumanIdentity):
+        identity_payload: dict[str, object] = {
+            "type": "github_human",
+            "login": identity.login,
+            "role": identity.role,
+        }
+    else:
+        identity_payload = {
+            "type": "github_actions",
+            "repository": identity.repository,
+            "workflow_ref": identity.workflow_ref,
+            "job_workflow_ref": identity.job_workflow_ref,
+            "event_name": identity.event_name,
+            "ref": identity.ref,
+            "ref_type": identity.ref_type,
+            "environment": identity.environment,
+            "subject": identity.subject,
+        }
+    return {
+        "identity": identity_payload,
+        "policy_source": authz_policy_source,
+        "policy_sha256": authz_policy_sha256_value,
+    }
+
+
 def _safe_return_to(value: str) -> str:
     normalized = value.strip() or "/"
     if not normalized.startswith("/") or normalized.startswith("//"):
@@ -2730,6 +2761,11 @@ def create_launchplane_service_app(
                                         "code": "authorization_denied",
                                         "message": "Workflow cannot read the requested product profile.",
                                     },
+                                    "authz": _authz_diagnostic_payload(
+                                        identity=identity,
+                                        authz_policy_sha256_value=resolved_authz_policy_sha256,
+                                        authz_policy_source=resolved_authz_policy_source,
+                                    ),
                                 },
                             )
                         if params.get("context_cutover_audit") == "true":
