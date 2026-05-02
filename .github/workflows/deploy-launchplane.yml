@@ -300,26 +300,32 @@ jobs:
           })"
 
           post_grant() {
-            local workflow_file="$1"
-            local action_name="$2"
-            local source_label="$3"
-            local idempotency_suffix="$4"
+            local repository="$1"
+            local workflow_file="$2"
+            local product_name="$3"
+            local context_name="$4"
+            local action_name="$5"
+            local source_label="$6"
+            local idempotency_suffix="$7"
             local request_payload response_file status_code
 
             request_payload="$({
               jq -n \
-                --arg workflow_ref "${GITHUB_REPOSITORY}/.github/workflows/${workflow_file}@refs/heads/main" \
+                --arg repository "$repository" \
+                --arg workflow_ref "${repository}/.github/workflows/${workflow_file}@refs/heads/main" \
+                --arg product_name "$product_name" \
+                --arg context_name "$context_name" \
                 --arg action_name "$action_name" \
                 --arg source_label "$source_label" \
                 '{
                   schema_version: 1,
                   product: "launchplane",
                   grant: {
-                    repository: env.GITHUB_REPOSITORY,
+                    repository: $repository,
                     workflow_refs: [$workflow_ref],
                     event_names: ["workflow_dispatch"],
-                    products: ["sellyouroutboard"],
-                    contexts: ["launchplane"],
+                    products: [$product_name],
+                    contexts: [$context_name],
                     actions: [$action_name],
                     source_label: $source_label
                   }
@@ -344,18 +350,55 @@ jobs:
             return 1
           }
 
-          post_grant \
+          post_launchplane_grant() {
+            local workflow_file="$1"
+            local action_name="$2"
+            local source_label="$3"
+            local idempotency_suffix="$4"
+            post_grant \
+              "$GITHUB_REPOSITORY" \
+              "$workflow_file" \
+              sellyouroutboard \
+              launchplane \
+              "$action_name" \
+              "$source_label" \
+              "$idempotency_suffix"
+          }
+
+          post_syo_grant() {
+            local action_name="$1"
+            local source_label="$2"
+            local idempotency_suffix="$3"
+            post_grant \
+              cbusillo/sellyouroutboard \
+              promote-prod.yml \
+              sellyouroutboard \
+              sellyouroutboard \
+              "$action_name" \
+              "$source_label" \
+              "$idempotency_suffix"
+          }
+
+          post_launchplane_grant \
             product-context-cutover-audit.yml \
             product_profile.read \
             deploy:product-context-cutover-audit-grant \
             product-context-cutover-audit
-          post_grant \
+          post_launchplane_grant \
             product-context-cutover.yml \
             product_profile.write \
             deploy:product-context-cutover-apply-grant \
             product-context-cutover-apply
-          post_grant \
+          post_launchplane_grant \
             product-legacy-context-cleanup.yml \
             product_profile.write \
             deploy:product-legacy-context-cleanup-grant \
             product-legacy-context-cleanup
+          post_syo_grant \
+            inventory.read \
+            deploy:syo-prod-promotion-inventory-read-grant \
+            syo-prod-promotion-inventory-read
+          post_syo_grant \
+            generic_web_prod_promotion.execute \
+            deploy:syo-prod-promotion-execute-grant \
+            syo-prod-promotion-execute
