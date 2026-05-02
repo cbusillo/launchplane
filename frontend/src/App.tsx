@@ -371,7 +371,7 @@ export function App() {
       readDriverView(selected.prodContext, "prod"),
       readDriverView(selected.testingContext, "testing"),
       selected.previewContext
-        ? readDriverView(selected.previewContext, "")
+        ? readDriverView(selected.previewContext, "").catch(() => null)
         : Promise.resolve(null),
       listProductProfiles("generic-web").catch(() => ({
         status: "ok" as const,
