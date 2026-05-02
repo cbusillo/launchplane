@@ -248,6 +248,7 @@ class ProductContextCutoverTests(unittest.TestCase):
             repeated_payload["counts"]["managed_secret_records"],
             {"created": 0, "skipped": 1},
         )
+        self.assertEqual(repeated_payload["profile"]["action"], "unchanged")
 
 
 if __name__ == "__main__":

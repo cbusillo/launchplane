@@ -116,6 +116,14 @@ def _profile_after_cutover(
     )
 
 
+def _profile_semantic_payload(profile: LaunchplaneProductProfileRecord) -> dict[str, object]:
+    return {
+        "display_name": profile.display_name,
+        "lanes": [lane.model_dump(mode="json") for lane in profile.lanes],
+        "preview": profile.preview.model_dump(mode="json"),
+    }
+
+
 def plan_product_context_cutover(
     *,
     record_store: PostgresRecordStore,
@@ -269,7 +277,7 @@ def plan_product_context_cutover(
         now=utc_now_timestamp(),
         source_label=request.source_label,
     )
-    profile_changed = profile.model_dump(mode="json") != next_profile.model_dump(mode="json")
+    profile_changed = _profile_semantic_payload(profile) != _profile_semantic_payload(next_profile)
     groups = {
         "runtime_environment_records": runtime_records,
         "managed_secret_records": managed_secrets,
@@ -501,14 +509,14 @@ def apply_product_context_cutover(
             )
 
     profile = record_store.read_product_profile_record(request.product)
-    record_store.write_product_profile_record(
-        _profile_after_cutover(
-            profile,
-            source_context=request.source_context,
-            target_context=request.target_context,
-            display_name=request.display_name,
-            now=now,
-            source_label=request.source_label,
-        )
+    next_profile = _profile_after_cutover(
+        profile,
+        source_context=request.source_context,
+        target_context=request.target_context,
+        display_name=request.display_name,
+        now=now,
+        source_label=request.source_label,
     )
+    if _profile_semantic_payload(profile) != _profile_semantic_payload(next_profile):
+        record_store.write_product_profile_record(next_profile)
     return {**plan, "applied": True}
