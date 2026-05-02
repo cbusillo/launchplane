@@ -4520,6 +4520,17 @@ def create_launchplane_service_app(
                             },
                         },
                     )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
                 profile = record_store.read_product_profile_record(request.product)
                 if not _product_profile_context_cutover_contexts_allowed(
                     profile=profile,
@@ -4539,17 +4550,6 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
                 try:
                     driver_result = (
                         control_plane_product_context_cutover.apply_product_context_cutover(

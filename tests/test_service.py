@@ -1293,6 +1293,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 headers={"Idempotency-Key": "profile-context-cutover"},
             )
+            replay_status_code, replay_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-profiles/context-cutover/apply",
+                payload={
+                    "product": "sellyouroutboard",
+                    "source_context": "sellyouroutboard-testing",
+                    "target_context": "sellyouroutboard",
+                    "mode": "apply",
+                    "display_name": "SellYourOutboard",
+                    "source_label": "test:context-cutover",
+                },
+                headers={"Idempotency-Key": "profile-context-cutover"},
+            )
             show_status_code, show_payload = _invoke_app(
                 app,
                 method="GET",
@@ -1301,6 +1315,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(replay_status_code, 202)
+        self.assertEqual(replay_payload["records"], {"product_profile": "sellyouroutboard"})
+        self.assertEqual(replay_payload["result"], payload["result"])
         self.assertEqual(payload["result"]["profile"]["display_name"], "SellYourOutboard")
         self.assertEqual(show_status_code, 200)
         self.assertEqual(show_payload["profile"]["display_name"], "SellYourOutboard")
