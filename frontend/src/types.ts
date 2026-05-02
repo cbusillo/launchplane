@@ -372,6 +372,13 @@ export interface ProductProfileRecord {
     base_url: string;
     health_url: string;
   }>;
+  promotion_workflow: {
+    workflow_id: string;
+    ref: string;
+    dry_run_input: string;
+    bump_input: string;
+    default_bump: "patch" | "minor" | "major";
+  };
 }
 
 export interface ProductProfileListPayload {
@@ -417,5 +424,38 @@ export interface GenericWebProdPromotionPayload {
     destination_health_status: Status;
     backup_status: Status;
     dry_run: boolean;
+  };
+}
+
+export interface GenericWebPromotionWorkflowRequest {
+  schema_version: 1;
+  product: string;
+  workflow: {
+    schema_version: 1;
+    product: string;
+    context: string;
+    dry_run: boolean;
+    bump?: "patch" | "minor" | "major";
+    observe_timeout_seconds: number;
+  };
+}
+
+export interface GenericWebPromotionWorkflowPayload {
+  status: "accepted";
+  trace_id: string;
+  records: Record<string, string>;
+  result: {
+    product: string;
+    context: string;
+    repository: string;
+    workflow_id: string;
+    ref: string;
+    dry_run: boolean;
+    bump: "patch" | "minor" | "major";
+    dispatch_status: "dispatched";
+    run_id: number;
+    run_url: string;
+    run_status: string;
+    run_conclusion: string;
   };
 }

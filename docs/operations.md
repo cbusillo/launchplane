@@ -278,6 +278,13 @@ Current derived-state behavior:
   and refreshes prod inventory after a verified deploy. Product-specific
   drivers can wrap this base path with stricter backup, migration, rollout, or
   tenant checks instead of reimplementing the shared promotion record flow.
+- Operators should promote generic web products through the product-owned GitHub
+  workflow bridge. The UI first calls the generic-web prod-promotion route with
+  `dry_run=true`, then dispatches
+  `POST /v1/drivers/generic-web/prod-promotion-workflow`. Launchplane resolves
+  the product repository/workflow from the DB-backed product profile and the
+  managed `GITHUB_TOKEN` from runtime records; the product workflow still owns
+  release/tag creation and any product-specific safeguards.
 
 ## Core Rules
 

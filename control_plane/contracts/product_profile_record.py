@@ -96,6 +96,30 @@ class ProductPreviewProfile(BaseModel):
         return self
 
 
+class ProductPromotionWorkflowProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    workflow_id: str = "promote-prod.yml"
+    ref: str = "main"
+    dry_run_input: str = "dry_run"
+    bump_input: str = "bump"
+    default_bump: str = "patch"
+
+    @model_validator(mode="after")
+    def _validate_workflow(self) -> "ProductPromotionWorkflowProfile":
+        if not self.workflow_id.strip():
+            raise ValueError("product promotion workflow requires workflow_id")
+        if not self.ref.strip():
+            raise ValueError("product promotion workflow requires ref")
+        if not self.dry_run_input.strip():
+            raise ValueError("product promotion workflow requires dry_run_input")
+        if not self.bump_input.strip():
+            raise ValueError("product promotion workflow requires bump_input")
+        if self.default_bump.strip() not in {"patch", "minor", "major"}:
+            raise ValueError("product promotion workflow default_bump must be patch, minor, or major")
+        return self
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -109,6 +133,9 @@ class LaunchplaneProductProfileRecord(BaseModel):
     health_path: str
     lanes: tuple[ProductLaneProfile, ...] = ()
     preview: ProductPreviewProfile = Field(default_factory=ProductPreviewProfile)
+    promotion_workflow: ProductPromotionWorkflowProfile = Field(
+        default_factory=ProductPromotionWorkflowProfile
+    )
     updated_at: str
     source: str
 
