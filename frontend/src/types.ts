@@ -167,6 +167,15 @@ export interface SecretBinding {
   updated_at: string;
 }
 
+export interface RuntimeEnvironmentRecord {
+  scope: "global" | "context" | "instance";
+  context: string;
+  instance: string;
+  env: Record<string, string | number | boolean>;
+  updated_at: string;
+  source_label: string;
+}
+
 export interface LaneSummary {
   context: string;
   instance: string;
@@ -176,6 +185,7 @@ export interface LaneSummary {
   latest_promotion?: PromotionRecord | null;
   latest_backup_gate?: BackupGateRecord | null;
   odoo_instance_override?: unknown | null;
+  runtime_environment_records?: RuntimeEnvironmentRecord[];
   secret_bindings: SecretBinding[];
   provenance: DataProvenance;
 }

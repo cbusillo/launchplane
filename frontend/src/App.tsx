@@ -336,10 +336,7 @@ export function App() {
   }, [authStatus, selected, refreshKey]);
 
   const choices = useMemo(() => {
-    if (!drivers.length) {
-      return DEFAULT_CHOICES;
-    }
-    return drivers.flatMap((driver) => {
+    const driverChoices = drivers.flatMap((driver) => {
       const stableContexts = driver.context_patterns.filter((context) => {
         return context !== "verireel-testing" && !context.includes("*");
       });
@@ -359,7 +356,7 @@ export function App() {
         label: profile.display_name || profile.product,
       }));
     });
-    const merged = [...profileChoices, ...DEFAULT_CHOICES];
+    const merged = [...profileChoices, ...driverChoices, ...DEFAULT_CHOICES];
     const seen = new Set<string>();
     return merged.filter((choice) => {
       const key = `${choice.driverId}:${choice.context}`;
@@ -370,6 +367,21 @@ export function App() {
       return true;
     });
   }, [drivers, productProfiles]);
+
+  useEffect(() => {
+    if (!choices.length) {
+      return;
+    }
+    const selectedKey = `${selected.driverId}:${selected.context}`;
+    if (
+      choices.some(
+        (choice) => `${choice.driverId}:${choice.context}` === selectedKey,
+      )
+    ) {
+      return;
+    }
+    setSelected(choices[0]);
+  }, [choices, selected]);
 
   const currentDriver = drivers.find(
     (driver) => driver.driver_id === selected.driverId,
@@ -489,7 +501,7 @@ export function App() {
               />
             </section>
             <section className="work-grid work-grid-evidence">
-              <SecretBindingList
+              <RuntimeAuthorityList
                 driver={selectedDriver ?? null}
                 lane={prodDriverView?.lane_summary ?? null}
               />
@@ -2097,7 +2109,7 @@ function ActionList({
   );
 }
 
-function SecretBindingList({
+function RuntimeAuthorityList({
   driver,
   lane,
 }: {
@@ -2109,14 +2121,35 @@ function SecretBindingList({
       return group.secret_bindings.map((binding) => ({ group, binding }));
     }) ?? [];
   const actualBindings = lane?.secret_bindings ?? [];
+  const runtimeRecords = lane?.runtime_environment_records ?? [];
 
   return (
     <section className="panel">
       <PanelHead
-        eyebrow="managed secrets"
-        title="Bindings"
+        eyebrow="runtime authority"
+        title="Keys and bindings"
         right={<KeyRound size={17} aria-hidden="true" />}
       />
+      <div className="secret-list">
+        {runtimeRecords.map((record) => {
+          const envKeys = Object.keys(record.env).sort();
+          return (
+            <div
+              className="secret-row"
+              key={`${record.scope}:${record.context}:${record.instance}:${record.updated_at}`}
+            >
+              <span className="lane-chip lane-chip-prod">
+                {record.scope === "global"
+                  ? "global"
+                  : record.instance || record.context}
+              </span>
+              <strong>{envKeys.join(", ") || "no keys"}</strong>
+              <span>{record.source_label || "runtime environment"}</span>
+              <StatusPill status={envKeys.length ? "pass" : "unknown"} />
+            </div>
+          );
+        })}
+      </div>
       {actualBindings.length ? (
         <div className="secret-list">
           {actualBindings.map((binding) => (
@@ -2145,7 +2178,11 @@ function SecretBindingList({
           {!bindingHints.length ? (
             <StateBlock
               icon={<KeyRound size={18} />}
-              title="No binding metadata"
+              title={
+                runtimeRecords.length
+                  ? "No secret binding metadata"
+                  : "No runtime metadata"
+              }
             />
           ) : null}
         </div>
@@ -2387,6 +2424,12 @@ function StateFixtureGallery({
             loading={false}
           />
         </div>
+      </div>
+      <div className="fixture-wide">
+        <RuntimeAuthorityList
+          driver={FIXTURE_VERIREEL_DRIVER}
+          lane={readyProd}
+        />
       </div>
       <div className="fixture-wide">
         <EvidenceTimeline
@@ -3341,6 +3384,29 @@ function fixtureLane({
       provenance: instance === "prod" ? "promotion" : "ship",
       minted_at: deploy.finished_at,
     },
+    runtime_environment_records: [
+      {
+        scope: "context",
+        context: "verireel",
+        instance: "",
+        env: {
+          LAUNCHPLANE_PREVIEW_BASE_URL: "https://preview.verireel.example",
+        },
+        updated_at: deploy.finished_at,
+        source_label: "fixture-context-env",
+      },
+      {
+        scope: "instance",
+        context: "verireel",
+        instance,
+        env: {
+          CONTACT_EMAIL_MODE: "smtp",
+          PUBLIC_TAWK_WIDGET_ID: "redacted-fixture",
+        },
+        updated_at: deploy.finished_at,
+        source_label: "fixture-instance-env",
+      },
+    ],
     latest_deployment: {
       record_id: `fixture-deployment-${instance}`,
       artifact_identity: { artifact_id: artifact },
@@ -3362,7 +3428,20 @@ function fixtureLane({
           evidence: backupStatus === "pass" ? { snapshot: "fixture-prod" } : {},
         }
       : null,
-    secret_bindings: [],
+    secret_bindings: [
+      {
+        binding_id: `fixture-secret-binding-${instance}`,
+        secret_id: `fixture-secret-${instance}`,
+        integration: "runtime_environment",
+        binding_type: "env",
+        binding_key: "SMTP_PASSWORD",
+        context: "verireel",
+        instance,
+        status: "configured",
+        created_at: deploy.finished_at,
+        updated_at: deploy.finished_at,
+      },
+    ],
     provenance: {
       source_kind: "record",
       source_record_id: `fixture-deployment-${instance}`,
