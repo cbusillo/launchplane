@@ -144,12 +144,16 @@ generic-web lanes should converge on the product context, such as
 resolve one product stack. A separate preview context may remain while preview
 apps are isolated from stable lane records.
 
-When cleaning up a legacy context such as `sellyouroutboard-testing`, migrate or
-reseed only the mutable current-authority records needed by live resolution,
-such as runtime environments, secret bindings, tracked targets, inventories, and
-release tuples. Do not rewrite append-only deployments, promotions, backup
-gates, or preview history; those records are historical evidence and should
-continue to describe the route that produced them.
+When cleaning up a legacy context such as `sellyouroutboard-testing`, first
+copy or reseed only the mutable current-authority records needed by live
+resolution: runtime environments, managed secrets and bindings, tracked targets,
+tracked target IDs, inventories, and release tuples. After the product profile
+points at the canonical context, cleanup can delete legacy runtime environment
+records and Dokploy target lookups, and can disable legacy managed secret records
+and bindings. It should not delete inventory records, release tuples,
+deployments, promotions, backup gates, or preview history; those records are
+historical evidence and should continue to describe the route that produced
+them.
 
 Before changing a product profile or deleting legacy rows, audit both route
 families with:
@@ -170,6 +174,11 @@ The same redacted audit is exposed through the Launchplane service at
 `source_context`, `target_context`, and optional `preview_context` query
 parameters. The manual `Product Context Cutover Audit` GitHub workflow calls
 that service route through GitHub OIDC and uploads the redacted JSON artifact.
+The manual `Product Legacy Context Cleanup` GitHub workflow calls the matching
+write route through GitHub OIDC. It defaults to `dry_run=true`, refuses cleanup
+while the source context is still product-owned, blocks individual mutable
+records without target-context replacements, and preserves historical evidence
+rows.
 
 These records replace repo-local Launchplane lifecycle manifests. Product repos
 still own their normal app/runtime contract, such as Dockerfile, image publish,

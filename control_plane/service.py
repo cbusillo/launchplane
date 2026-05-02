@@ -2231,6 +2231,7 @@ def create_launchplane_service_app(
         "/v1/authz-policies/github-actions/grants",
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
+        "/v1/product-profiles/legacy-context-cleanup/apply",
         "/v1/previews/desired-state",
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
@@ -4567,6 +4568,86 @@ def create_launchplane_service_app(
                             "error": {
                                 "code": "invalid_context_cutover_request",
                                 "message": "Product context cutover request is invalid.",
+                            },
+                        },
+                    )
+                result = {"product_profile": request.product}
+            elif path == "/v1/product-profiles/legacy-context-cleanup/apply":
+                request = control_plane_product_context_cutover.LegacyContextCleanupRequest.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Legacy context cleanup requires Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="product_profile.write",
+                    product=request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot clean up the requested legacy product context.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                try:
+                    driver_result = (
+                        control_plane_product_context_cutover.apply_legacy_context_cleanup(
+                            record_store=record_store,
+                            request=request,
+                        )
+                    )
+                except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "context_not_in_product_boundary",
+                                "message": "Requested cleanup contexts are not in the product cleanup boundary.",
+                            },
+                        },
+                    )
+                except ValueError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_legacy_context_cleanup_request",
+                                "message": "Legacy context cleanup request is invalid.",
                             },
                         },
                     )

@@ -354,3 +354,8 @@ jobs:
             product_profile.write \
             deploy:product-context-cutover-apply-grant \
             product-context-cutover-apply
+          post_grant \
+            product-legacy-context-cleanup.yml \
+            product_profile.write \
+            deploy:product-legacy-context-cleanup-grant \
+            product-legacy-context-cleanup
