@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from pathlib import Path
 import time
 from typing import Literal
@@ -60,7 +61,9 @@ def dispatch_generic_web_promotion_workflow(
         raise click.ClickException("Generic-web promotion workflow product does not match profile.")
     contexts = {lane.context.strip() for lane in profile.lanes if lane.context.strip()}
     if request.context not in contexts:
-        raise click.ClickException("Generic-web promotion workflow context is not in the product profile.")
+        raise click.ClickException(
+            "Generic-web promotion workflow context is not in the product profile."
+        )
     owner, repo = _repository_parts(profile.repository)
     token = resolve_launchplane_github_token(
         control_plane_root=control_plane_root,
@@ -81,6 +84,7 @@ def dispatch_generic_web_promotion_workflow(
         ref=ref,
         token=token,
     )
+    dispatch_started_at = datetime.now(UTC)
     github_api_request(
         path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
         token=token,
@@ -100,6 +104,7 @@ def dispatch_generic_web_promotion_workflow(
         ref=ref,
         token=token,
         previous_run_ids=previous_run_ids,
+        min_created_at=dispatch_started_at,
         timeout_seconds=request.observe_timeout_seconds,
     )
     return GenericWebPromotionWorkflowResult(
@@ -125,6 +130,7 @@ def _wait_for_workflow_run(
     ref: str,
     token: str,
     previous_run_ids: set[int],
+    min_created_at: datetime,
     timeout_seconds: int,
 ) -> dict[str, object]:
     deadline = time.monotonic() + timeout_seconds
@@ -136,6 +142,7 @@ def _wait_for_workflow_run(
             ref=ref,
             token=token,
             previous_run_ids=previous_run_ids,
+            min_created_at=min_created_at,
         )
         if run:
             return run
@@ -152,6 +159,7 @@ def _latest_workflow_dispatch_run(
     ref: str,
     token: str,
     previous_run_ids: set[int],
+    min_created_at: datetime,
 ) -> dict[str, object]:
     workflow_runs = _workflow_dispatch_runs(
         owner=owner,
@@ -164,6 +172,9 @@ def _latest_workflow_dispatch_run(
     for raw_run in workflow_runs:
         run_id = _int_value(raw_run.get("id"))
         if not run_id or run_id in previous_run_ids:
+            continue
+        created_at = _datetime_value(raw_run.get("created_at"))
+        if created_at is None or created_at < min_created_at:
             continue
         new_runs.append(raw_run)
     if len(new_runs) == 1:
@@ -223,3 +234,14 @@ def _string_value(value: object) -> str:
 
 def _int_value(value: object) -> int:
     return value if isinstance(value, int) else 0
+
+
+def _datetime_value(value: object) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    normalized = value.strip().removesuffix("Z") + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(normalized)
+    except ValueError:
+        return None
+    return parsed.astimezone(UTC)
