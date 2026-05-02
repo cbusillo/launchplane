@@ -1372,6 +1372,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["identity"]["repository"], "every/verireel")
+        self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
 
     def test_product_profile_write_rejects_unauthorized_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
