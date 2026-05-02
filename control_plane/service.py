@@ -22,6 +22,7 @@ from jwt import InvalidTokenError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import product_config as control_plane_product_config
+from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -1191,6 +1192,12 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "launchplane_service.read", {}
     if len(segments) == 2 and segments == ["v1", "product-profiles"]:
         return "product_profile.read", {}
+    if (
+        len(segments) == 4
+        and segments[:2] == ["v1", "product-profiles"]
+        and segments[3] == "context-cutover-audit"
+    ):
+        return "product_profile.read", {"product": segments[2], "context_cutover_audit": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "product-profiles"]:
         return "product_profile.read", {"product": segments[2]}
     return None
@@ -2723,6 +2730,59 @@ def create_launchplane_service_app(
                                         "code": "authorization_denied",
                                         "message": "Workflow cannot read the requested product profile.",
                                     },
+                                },
+                            )
+                        if params.get("context_cutover_audit") == "true":
+                            if not isinstance(record_store, PostgresRecordStore):
+                                return _json_response(
+                                    start_response=start_response,
+                                    status_code=503,
+                                    payload={
+                                        "status": "rejected",
+                                        "trace_id": request_trace_id,
+                                        "error": {
+                                            "code": "database_required",
+                                            "message": "Context cutover audit requires Launchplane database storage.",
+                                        },
+                                    },
+                                )
+                            source_context = str(
+                                (query.get("source_context") or [""])[0] or ""
+                            ).strip()
+                            target_context = str(
+                                (query.get("target_context") or [""])[0] or ""
+                            ).strip()
+                            preview_context = str(
+                                (query.get("preview_context") or [""])[0] or ""
+                            ).strip()
+                            try:
+                                audit_payload = control_plane_product_context_audit.build_product_context_cutover_audit(
+                                    record_store=record_store,
+                                    product=profile.product,
+                                    source_context=source_context,
+                                    target_context=target_context,
+                                    preview_context=preview_context,
+                                )
+                            except ValueError as error:
+                                return _json_response(
+                                    start_response=start_response,
+                                    status_code=400,
+                                    payload={
+                                        "status": "rejected",
+                                        "trace_id": request_trace_id,
+                                        "error": {
+                                            "code": "invalid_context_cutover_audit_request",
+                                            "message": str(error),
+                                        },
+                                    },
+                                )
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=200,
+                                payload={
+                                    "status": "ok",
+                                    "trace_id": request_trace_id,
+                                    "audit": audit_payload,
                                 },
                             )
                         return _json_response(

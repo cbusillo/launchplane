@@ -165,6 +165,12 @@ The audit reports key names, record ids, counts, target names, and binding
 metadata only. It does not print runtime values, managed secret plaintext,
 secret ciphertext, or full provider env text.
 
+The same redacted audit is exposed through the Launchplane service at
+`GET /v1/product-profiles/{product}/context-cutover-audit` with
+`source_context`, `target_context`, and optional `preview_context` query
+parameters. The manual `Product Context Cutover Audit` GitHub workflow calls
+that service route through GitHub OIDC and uploads the redacted JSON artifact.
+
 These records replace repo-local Launchplane lifecycle manifests. Product repos
 still own their normal app/runtime contract, such as Dockerfile, image publish,
 health endpoint, tests, and source/build inputs. Launchplane owns the product
