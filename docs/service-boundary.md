@@ -44,6 +44,8 @@ VeriReel product paths:
   - `POST /v1/product-profiles`
 - product config write route:
   - `POST /v1/product-config/apply`
+- product context cutover route:
+  - `POST /v1/product-profiles/context-cutover/apply`
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
 - product driver routes:
@@ -395,6 +397,13 @@ runtime key names, managed secret IDs/binding keys, Dokploy target metadata,
 inventory and release tuple pointers, and append-only evidence counts. It does
 not return runtime values, secret plaintext, secret ciphertext, or full provider
 environment text.
+
+Product context cutover apply uses `product_profile.write` for the requested
+product in the Launchplane service context. It supports `dry-run` and `apply`
+modes, copies only current-authority records into the target context, updates
+lane/preview product profile context fields, and returns key names/counts only.
+It does not copy append-only deployments, promotions, backup gates, or preview
+history.
 
 ### Driver execution endpoints
 

@@ -1,0 +1,157 @@
+---
+name: Product Context Cutover
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Product profile key to cut over.
+        required: true
+        default: sellyouroutboard
+        type: string
+      source_context:
+        description: Legacy context to copy current-authority records from.
+        required: true
+        default: sellyouroutboard-testing
+        type: string
+      target_context:
+        description: Canonical product context to copy current-authority records to.
+        required: true
+        default: sellyouroutboard
+        type: string
+      display_name:
+        description: Product display name to write with the profile cutover.
+        required: true
+        default: SellYourOutboard
+        type: string
+      dry_run:
+        description: Plan only when true; write records and profile when false.
+        required: true
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-product-context-cutover
+  cancel-in-progress: false
+
+jobs:
+  cutover:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+      PRODUCT: ${{ inputs.product }}
+      SOURCE_CONTEXT: ${{ inputs.source_context }}
+      TARGET_CONTEXT: ${{ inputs.target_context }}
+      DISPLAY_NAME: ${{ inputs.display_name }}
+      DRY_RUN: ${{ inputs.dry_run }}
+    steps:
+      - name: Request product context cutover
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+          : "${PRODUCT:?Missing product input}"
+          : "${SOURCE_CONTEXT:?Missing source_context input}"
+          : "${TARGET_CONTEXT:?Missing target_context input}"
+          : "${DISPLAY_NAME:?Missing display_name input}"
+
+          service_origin="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
+          print(f"{parsed.scheme}://{parsed.netloc}")
+          PY
+          })"
+          service_audience="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+          })"
+          mode="apply"
+          if [ "$DRY_RUN" = "true" ]; then
+            mode="dry-run"
+          fi
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
+            | jq -r '.value'
+          })"
+          request_payload="$({
+            jq -n \
+              --arg product "$PRODUCT" \
+              --arg source_context "$SOURCE_CONTEXT" \
+              --arg target_context "$TARGET_CONTEXT" \
+              --arg display_name "$DISPLAY_NAME" \
+              --arg mode "$mode" \
+              '{
+                product: $product,
+                source_context: $source_context,
+                target_context: $target_context,
+                display_name: $display_name,
+                mode: $mode,
+                source_label: "workflow:product-context-cutover"
+              }'
+          })"
+          response_file="launchplane-product-context-cutover.json"
+          status_code="$(curl -sS \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: product-context-cutover:${PRODUCT}:${SOURCE_CONTEXT}:${TARGET_CONTEXT}:${mode}:${GITHUB_RUN_ID}" \
+            --data "$request_payload" \
+            "${service_origin}/v1/product-profiles/context-cutover/apply")"
+          if [ "$status_code" != "202" ]; then
+            cat "$response_file" >&2
+            echo "Launchplane product context cutover failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+          jq . "$response_file"
+
+      - name: Upload cutover artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: launchplane-product-context-cutover-${{ inputs.product }}
+          path: launchplane-product-context-cutover.json
+          if-no-files-found: error
+
+      - name: Summarize cutover
+        shell: bash
+        run: |
+          set -euo pipefail
+          {
+            echo '## Launchplane product context cutover'
+            echo
+            echo "- Product: ${PRODUCT}"
+            echo "- Source context: ${SOURCE_CONTEXT}"
+            echo "- Target context: ${TARGET_CONTEXT}"
+            echo "- Dry run: ${DRY_RUN}"
+            echo "- Display name: ${DISPLAY_NAME}"
+            echo "- Runtime records: $(jq -c '.result.counts.runtime_environment_records' launchplane-product-context-cutover.json)"
+            echo "- Managed secrets: $(jq -c '.result.counts.managed_secret_records' launchplane-product-context-cutover.json)"
+            echo "- Dokploy targets: $(jq -c '.result.counts.dokploy_targets' launchplane-product-context-cutover.json)"
+            echo "- Dokploy target IDs: $(jq -c '.result.counts.dokploy_target_ids' launchplane-product-context-cutover.json)"
+            echo "- Inventory records: $(jq -c '.result.counts.inventory_records' launchplane-product-context-cutover.json)"
+            echo "- Release tuples: $(jq -c '.result.counts.release_tuple_records' launchplane-product-context-cutover.json)"
+          } >> "$GITHUB_STEP_SUMMARY"
