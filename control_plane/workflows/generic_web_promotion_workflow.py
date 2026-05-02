@@ -84,7 +84,7 @@ def dispatch_generic_web_promotion_workflow(
         ref=ref,
         token=token,
     )
-    dispatch_started_at = datetime.now(UTC)
+    dispatch_started_at = _github_timestamp_precision(datetime.now(UTC))
     github_api_request(
         path=f"/repos/{owner}/{repo}/actions/workflows/{quote(workflow_id, safe='')}/dispatches",
         token=token,
@@ -161,6 +161,7 @@ def _latest_workflow_dispatch_run(
     previous_run_ids: set[int],
     min_created_at: datetime,
 ) -> dict[str, object]:
+    min_created_at = _github_timestamp_precision(min_created_at)
     workflow_runs = _workflow_dispatch_runs(
         owner=owner,
         repo=repo,
@@ -239,9 +240,15 @@ def _int_value(value: object) -> int:
 def _datetime_value(value: object) -> datetime | None:
     if not isinstance(value, str) or not value.strip():
         return None
-    normalized = value.strip().removesuffix("Z") + "+00:00"
+    normalized = value.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized.removesuffix("Z") + "+00:00"
     try:
         parsed = datetime.fromisoformat(normalized)
     except ValueError:
         return None
     return parsed.astimezone(UTC)
+
+
+def _github_timestamp_precision(value: datetime) -> datetime:
+    return value.astimezone(UTC).replace(microsecond=0)

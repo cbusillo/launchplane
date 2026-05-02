@@ -1,4 +1,5 @@
 import unittest
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -21,6 +22,7 @@ from control_plane.workflows.generic_web_promotion import (
 )
 from control_plane.workflows.generic_web_promotion_workflow import (
     GenericWebPromotionWorkflowRequest,
+    _latest_workflow_dispatch_run,
     dispatch_generic_web_promotion_workflow,
 )
 from control_plane.workflows.ship import build_deployment_record
@@ -517,6 +519,38 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
         self.assertEqual(result.run_id, 0)
         self.assertEqual(result.run_url, "")
         self.assertEqual(result.run_status, "pending")
+
+    def test_observation_accepts_run_created_in_same_second_as_dispatch(self) -> None:
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ):
+            self.assertEqual(method, "GET")
+            return {
+                "workflow_runs": [
+                    {
+                        "id": 101,
+                        "html_url": "https://github.example/runs/101",
+                        "status": "queued",
+                        "created_at": "2099-01-01T00:00:00Z",
+                    }
+                ]
+            }
+
+        with patch(
+            "control_plane.workflows.generic_web_promotion_workflow.github_api_request",
+            side_effect=fake_github_api_request,
+        ):
+            run = _latest_workflow_dispatch_run(
+                owner="cbusillo",
+                repo="sellyouroutboard",
+                workflow_id="promote-prod.yml",
+                ref="main",
+                token="github-token",
+                previous_run_ids=set(),
+                min_created_at=datetime(2099, 1, 1, 0, 0, 0, 999999, UTC),
+            )
+
+        self.assertEqual(run.get("id"), 101)
 
     def test_dispatch_requires_managed_github_token(self) -> None:
         with patch(
