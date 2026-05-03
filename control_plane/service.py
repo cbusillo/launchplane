@@ -3628,7 +3628,7 @@ def create_launchplane_service_app(
                     context_name=context_name, limit=10
                 )
                 previews = record_store.list_preview_records(context_name=context_name, limit=10)
-                inventory = [
+                recent_inventory = [
                     record
                     for record in record_store.list_environment_inventory()
                     if record.context == context_name
@@ -3641,7 +3641,9 @@ def create_launchplane_service_app(
                         "trace_id": request_trace_id,
                         "context": context_name,
                         "storage_backend": storage_backend,
-                        "inventory": [record.model_dump(mode="json") for record in inventory],
+                        "inventory": [
+                            record.model_dump(mode="json") for record in recent_inventory
+                        ],
                         "recent_deployments": [
                             record.model_dump(mode="json") for record in deployments
                         ],
@@ -3658,12 +3660,12 @@ def create_launchplane_service_app(
             driver_result: BaseModel | dict[str, object] | None = None
             result: dict[str, object] = {}
             if path == "/v1/evidence/deployments":
-                request = DeploymentEvidenceEnvelope.model_validate(payload)
+                deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="deployment.write",
-                    product=request.product,
-                    context=request.deployment.context,
+                    product=deployment_request.product,
+                    context=deployment_request.deployment.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -3691,17 +3693,19 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                result = apply_deployment_evidence(
-                    record_store=record_store,
-                    deployment_record=request.deployment,
+                result = dict[str, object](
+                    apply_deployment_evidence(
+                        record_store=record_store,
+                        deployment_record=deployment_request.deployment,
+                    )
                 )
             elif path == "/v1/evidence/backup-gates":
-                request = BackupGateEvidenceEnvelope.model_validate(payload)
+                backup_gate_request = BackupGateEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="backup_gate.write",
-                    product=request.product,
-                    context=request.backup_gate.context,
+                    product=backup_gate_request.product,
+                    context=backup_gate_request.backup_gate.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -3729,18 +3733,18 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                record_store.write_backup_gate_record(request.backup_gate)
-                result = {"backup_gate_record_id": request.backup_gate.record_id}
+                record_store.write_backup_gate_record(backup_gate_request.backup_gate)
+                result = {"backup_gate_record_id": backup_gate_request.backup_gate.record_id}
             elif path == "/v1/product-config/apply":
-                request = ProductConfigApplyEnvelope.model_validate(payload)
+                product_config_request = ProductConfigApplyEnvelope.model_validate(payload)
                 action = (
-                    "product_config.apply" if request.mode == "apply" else "product_config.plan"
+                    "product_config.apply" if product_config_request.mode == "apply" else "product_config.plan"
                 )
                 if not authz_policy.allows(
                     identity=identity,
                     action=action,
-                    product=request.product,
-                    context=request.context,
+                    product=product_config_request.product,
+                    context=product_config_request.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -3784,10 +3788,10 @@ def create_launchplane_service_app(
                 try:
                     driver_result = control_plane_product_config.apply_product_config_bundle(
                         record_store=record_store,
-                        payload=request.product_config_payload(),
-                        mode=cast(control_plane_product_config.ProductConfigMode, request.mode),
+                        payload=product_config_request.product_config_payload(),
+                        mode=cast(control_plane_product_config.ProductConfigMode, product_config_request.mode),
                         actor=_identity_actor(identity),
-                        source_label=request.source_label,
+                        source_label=product_config_request.source_label,
                     )
                 except control_plane_product_config.ProductConfigError as error:
                     error_code = error.code
@@ -3811,7 +3815,7 @@ def create_launchplane_service_app(
                         },
                     )
             elif path == "/v1/authz-policies/github-actions/grants":
-                request = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(payload)
+                authz_grant_request = AuthzPolicyGitHubActionsGrantEnvelope.model_validate(payload)
                 if not isinstance(record_store, PostgresRecordStore):
                     return _json_response(
                         start_response=start_response,
@@ -3828,7 +3832,7 @@ def create_launchplane_service_app(
                 if not authz_policy.allows(
                     identity=identity,
                     action="launchplane_service_deploy.execute",
-                    product=request.product,
+                    product=authz_grant_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
                     return _json_response(
@@ -3858,7 +3862,7 @@ def create_launchplane_service_app(
                     updated_policy, authz_policy_record, changed = (
                         _write_github_actions_authz_policy_grant(
                             record_store=record_store,
-                            grant=request.grant,
+                            grant=authz_grant_request.grant,
                         )
                     )
                 except ValueError:
@@ -3886,11 +3890,11 @@ def create_launchplane_service_app(
                     "changed": changed,
                 }
             elif path == "/v1/drivers/launchplane/self-deploy":
-                request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
+                self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="launchplane_service_deploy.execute",
-                    product=request.product,
+                    product=self_deploy_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
                     return _json_response(
@@ -3918,15 +3922,15 @@ def create_launchplane_service_app(
                     return idempotent_response
                 result = _request_launchplane_self_deploy(
                     control_plane_root_path=resolved_root,
-                    request=request.deploy,
+                    request=self_deploy_request.deploy,
                 )
             elif path == _GENERIC_WEB_DEPLOY_ROUTE.route_path:
-                request = _GENERIC_WEB_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                generic_web_deploy_request = _GENERIC_WEB_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.deploy.product,
-                    instance=request.deploy.instance,
+                    product=generic_web_deploy_request.deploy.product,
+                    instance=generic_web_deploy_request.deploy.instance,
                     require_profile=True,
                 )
                 if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
@@ -3961,20 +3965,20 @@ def create_launchplane_service_app(
                 driver_result = execute_generic_web_deploy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.deploy,
+                    request=generic_web_deploy_request.deploy,
                     profile=profile,
                     lane=lane,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path:
-                request = _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
+                generic_web_promotion_request = _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _profile, _source_lane, destination_lane = resolve_generic_web_promotion_lanes(
                     record_store=record_store,
-                    request=request.promotion,
+                    request=generic_web_promotion_request.promotion,
                 )
-                if isinstance(identity, GitHubHumanIdentity) and not request.promotion.dry_run:
+                if isinstance(identity, GitHubHumanIdentity) and not generic_web_promotion_request.promotion.dry_run:
                     return _json_response(
                         start_response=start_response,
                         status_code=403,
@@ -3991,7 +3995,7 @@ def create_launchplane_service_app(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
+                    product=generic_web_promotion_request.product,
                     context=destination_lane.context,
                     denial_message=_GENERIC_WEB_PROD_PROMOTION_ROUTE.denial_message,
                     start_response=start_response,
@@ -4013,7 +4017,7 @@ def create_launchplane_service_app(
                 driver_result = execute_generic_web_prod_promotion(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.promotion,
+                    request=generic_web_promotion_request.promotion,
                 )
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
@@ -4028,14 +4032,14 @@ def create_launchplane_service_app(
                     "dry_run": driver_result.dry_run,
                 }
             elif path == _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path:
-                request = _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
+                generic_web_workflow_request = _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.workflow.context,
+                    product=generic_web_workflow_request.product,
+                    context=generic_web_workflow_request.workflow.context,
                     require_profile=True,
                 )
                 if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
@@ -4070,11 +4074,11 @@ def create_launchplane_service_app(
                 driver_result = dispatch_generic_web_promotion_workflow(
                     control_plane_root=resolved_root,
                     profile=profile,
-                    request=request.workflow,
+                    request=generic_web_workflow_request.workflow,
                 )
                 result = driver_result.model_dump(mode="json")
             elif path == _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path:
-                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                generic_web_desired_state_request, profile, authorization_response = _authorize_generic_web_preview_route(
                     route_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
                     payload=payload,
                     record_store=record_store,
@@ -4099,7 +4103,7 @@ def create_launchplane_service_app(
                 driver_result = discover_generic_web_preview_desired_state(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.desired_state,
+                    request=generic_web_desired_state_request.desired_state,
                     discovered_at=_utc_now_timestamp(),
                     profile=profile,
                 )
@@ -4109,7 +4113,7 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path:
-                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                generic_web_inventory_request, profile, authorization_response = _authorize_generic_web_preview_route(
                     route_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
                     payload=payload,
                     record_store=record_store,
@@ -4123,7 +4127,7 @@ def create_launchplane_service_app(
                 driver_result = execute_generic_web_preview_inventory(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.inventory,
+                    request=generic_web_inventory_request.inventory,
                     profile=profile,
                 )
                 preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
@@ -4134,7 +4138,7 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path:
-                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                generic_web_refresh_request, profile, authorization_response = _authorize_generic_web_preview_route(
                     route_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
                     payload=payload,
                     record_store=record_store,
@@ -4159,12 +4163,12 @@ def create_launchplane_service_app(
                 driver_result = execute_generic_web_preview_refresh(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.refresh,
+                    request=generic_web_refresh_request.refresh,
                     profile=profile,
                 )
                 result = {}
             elif path == _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path:
-                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                generic_web_readiness_request, profile, authorization_response = _authorize_generic_web_preview_route(
                     route_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
                     payload=payload,
                     record_store=record_store,
@@ -4178,13 +4182,13 @@ def create_launchplane_service_app(
                 driver_result = evaluate_generic_web_preview_readiness(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.readiness,
+                    request=generic_web_readiness_request.readiness,
                     checked_at=_utc_now_timestamp(),
                     profile=profile,
                 )
                 result = {}
             elif path == _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
-                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                generic_web_destroy_request, profile, authorization_response = _authorize_generic_web_preview_route(
                     route_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
                     payload=payload,
                     record_store=record_store,
@@ -4209,19 +4213,19 @@ def create_launchplane_service_app(
                 driver_result = execute_generic_web_preview_destroy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.destroy,
+                    request=generic_web_destroy_request.destroy,
                     profile=profile,
                 )
                 result = {}
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
-                request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_POST_DEPLOY_ROUTE,
                     record_store=record_store,
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    authorization_context=request.post_deploy.context,
+                    product=odoo_post_deploy_request.product,
+                    authorization_context=odoo_post_deploy_request.post_deploy.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4241,7 +4245,7 @@ def create_launchplane_service_app(
                 driver_result = execute_odoo_post_deploy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.post_deploy,
+                    request=odoo_post_deploy_request.post_deploy,
                 )
                 result = {
                     "transition": (
@@ -4249,14 +4253,14 @@ def create_launchplane_service_app(
                     )
                 }
             elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
-                request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(payload)
+                odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(payload)
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
                     record_store=record_store,
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    authorization_context=request.publish.context,
+                    product=odoo_publish_request.product,
+                    authorization_context=odoo_publish_request.publish.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4275,7 +4279,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = ingest_odoo_artifact_publish_evidence(
                     record_store=record_store,
-                    request=request.publish,
+                    request=odoo_publish_request.publish,
                 )
                 result = {
                     "artifact_id": driver_result.artifact_id,
@@ -4285,7 +4289,7 @@ def create_launchplane_service_app(
                     "source_commit": driver_result.source_commit,
                 }
             elif path == _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path:
-                request = _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(
+                odoo_inputs_request = _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
@@ -4293,8 +4297,8 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    authorization_context=request.inputs.context,
+                    product=odoo_inputs_request.product,
+                    authorization_context=odoo_inputs_request.inputs.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4313,18 +4317,18 @@ def create_launchplane_service_app(
                     return idempotent_response
                 result = build_odoo_artifact_publish_inputs(
                     control_plane_root=resolved_root,
-                    request=request.inputs,
+                    request=odoo_inputs_request.inputs,
                 )
                 driver_result = result
             elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
-                request = _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
+                odoo_backup_gate_request = _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
                     record_store=record_store,
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    authorization_context=request.backup_gate.context,
+                    product=odoo_backup_gate_request.product,
+                    authorization_context=odoo_backup_gate_request.backup_gate.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4344,7 +4348,7 @@ def create_launchplane_service_app(
                 driver_result = execute_odoo_prod_backup_gate(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.backup_gate,
+                    request=odoo_backup_gate_request.backup_gate,
                 )
                 result = {
                     "backup_record_id": driver_result.backup_record_id,
@@ -4355,14 +4359,14 @@ def create_launchplane_service_app(
                     "manifest_path": driver_result.manifest_path,
                 }
             elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
-                request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
+                odoo_promotion_request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_PROD_PROMOTION_ROUTE,
                     record_store=record_store,
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    authorization_context=request.promotion.context,
+                    product=odoo_promotion_request.product,
+                    authorization_context=odoo_promotion_request.promotion.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4384,7 +4388,7 @@ def create_launchplane_service_app(
                     state_dir=state_dir,
                     database_url=database_url,
                     record_store=record_store,
-                    request=request.promotion,
+                    request=odoo_promotion_request.promotion,
                 )
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
@@ -4397,14 +4401,14 @@ def create_launchplane_service_app(
                     "destination_health_status": driver_result.destination_health_status,
                 }
             elif path == _ODOO_PROD_ROLLBACK_ROUTE.route_path:
-                request = _ODOO_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
+                odoo_rollback_request = _ODOO_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_PROD_ROLLBACK_ROUTE,
                     record_store=record_store,
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    authorization_context=request.rollback.context,
+                    product=odoo_rollback_request.product,
+                    authorization_context=odoo_rollback_request.rollback.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4424,7 +4428,7 @@ def create_launchplane_service_app(
                 driver_result = execute_odoo_prod_rollback(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.rollback,
+                    request=odoo_rollback_request.rollback,
                 )
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
@@ -4433,20 +4437,20 @@ def create_launchplane_service_app(
                     "rollback_health_status": driver_result.rollback_health_status,
                 }
             elif path == _VERIREEL_TESTING_DEPLOY_ROUTE.route_path:
-                request = _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                verireel_testing_deploy_request = _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.deploy.context,
-                    instance=request.deploy.instance,
+                    product=verireel_testing_deploy_request.product,
+                    context=verireel_testing_deploy_request.deploy.context,
+                    instance=verireel_testing_deploy_request.deploy.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.deploy.context,
+                    product=verireel_testing_deploy_request.product,
+                    context=verireel_testing_deploy_request.deploy.context,
                     denial_message=_VERIREEL_TESTING_DEPLOY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4467,26 +4471,26 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.deploy,
+                    request=verireel_testing_deploy_request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path:
-                request = _VERIREEL_TESTING_VERIFICATION_ROUTE.envelope_model.model_validate(
+                verireel_testing_verification_request = _VERIREEL_TESTING_VERIFICATION_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.verification.context,
-                    instance=request.verification.instance,
+                    product=verireel_testing_verification_request.product,
+                    context=verireel_testing_verification_request.verification.context,
+                    instance=verireel_testing_verification_request.verification.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.verification.context,
+                    product=verireel_testing_verification_request.product,
+                    context=verireel_testing_verification_request.verification.context,
                     denial_message=_VERIREEL_TESTING_VERIFICATION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4504,27 +4508,29 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                result = _apply_verireel_testing_verification_records(
-                    record_store=record_store,
-                    request=request.verification,
+                result = dict[str, object](
+                    _apply_verireel_testing_verification_records(
+                        record_store=record_store,
+                        request=verireel_testing_verification_request.verification,
+                    )
                 )
             elif path == _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path:
-                request = _VERIREEL_STABLE_ENVIRONMENT_ROUTE.envelope_model.model_validate(
+                verireel_environment_request = _VERIREEL_STABLE_ENVIRONMENT_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.environment.context,
-                    instance=request.environment.instance,
+                    product=verireel_environment_request.product,
+                    context=verireel_environment_request.environment.context,
+                    instance=verireel_environment_request.environment.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.environment.context,
+                    product=verireel_environment_request.product,
+                    context=verireel_environment_request.environment.context,
                     denial_message=_VERIREEL_STABLE_ENVIRONMENT_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4533,26 +4539,26 @@ def create_launchplane_service_app(
                     return authorization_response
                 driver_result = resolve_verireel_stable_environment(
                     control_plane_root=resolved_root,
-                    request=request.environment,
+                    request=verireel_environment_request.environment,
                 )
                 result = {}
             elif path == _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path:
-                request = _VERIREEL_RUNTIME_VERIFICATION_ROUTE.envelope_model.model_validate(
+                verireel_runtime_verification_request = _VERIREEL_RUNTIME_VERIFICATION_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.verification.context,
-                    instance=request.verification.instance,
+                    product=verireel_runtime_verification_request.product,
+                    context=verireel_runtime_verification_request.verification.context,
+                    instance=verireel_runtime_verification_request.verification.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.verification.context,
+                    product=verireel_runtime_verification_request.product,
+                    context=verireel_runtime_verification_request.verification.context,
                     denial_message=_VERIREEL_RUNTIME_VERIFICATION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4561,22 +4567,22 @@ def create_launchplane_service_app(
                     return authorization_response
                 driver_result = execute_verireel_rollout_verification(
                     control_plane_root=resolved_root,
-                    request=request.verification,
+                    request=verireel_runtime_verification_request.verification,
                 )
                 result = {}
             elif path == _VERIREEL_APP_MAINTENANCE_ROUTE.route_path:
-                request = _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
+                verireel_maintenance_request = _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
+                    product=verireel_maintenance_request.product,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.maintenance.context,
+                    product=verireel_maintenance_request.product,
+                    context=verireel_maintenance_request.maintenance.context,
                     denial_message=_VERIREEL_APP_MAINTENANCE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4596,24 +4602,24 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_app_maintenance(
                     control_plane_root=resolved_root,
-                    request=request.maintenance,
+                    request=verireel_maintenance_request.maintenance,
                 )
                 result = driver_result.model_dump(mode="json")
             elif path == _VERIREEL_PROD_DEPLOY_ROUTE.route_path:
-                request = _VERIREEL_PROD_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                verireel_prod_deploy_request = _VERIREEL_PROD_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.deploy.context,
-                    instance=request.deploy.instance,
+                    product=verireel_prod_deploy_request.product,
+                    context=verireel_prod_deploy_request.deploy.context,
+                    instance=verireel_prod_deploy_request.deploy.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.deploy.context,
+                    product=verireel_prod_deploy_request.product,
+                    context=verireel_prod_deploy_request.deploy.context,
                     denial_message=_VERIREEL_PROD_DEPLOY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4634,26 +4640,26 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.deploy,
+                    request=verireel_prod_deploy_request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path:
-                request = _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(
+                verireel_prod_backup_gate_request = _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.backup_gate.context,
-                    instance=request.backup_gate.instance,
+                    product=verireel_prod_backup_gate_request.product,
+                    context=verireel_prod_backup_gate_request.backup_gate.context,
+                    instance=verireel_prod_backup_gate_request.backup_gate.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.backup_gate.context,
+                    product=verireel_prod_backup_gate_request.product,
+                    context=verireel_prod_backup_gate_request.backup_gate.context,
                     denial_message=_VERIREEL_PROD_BACKUP_GATE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4674,32 +4680,32 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_prod_backup_gate(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.backup_gate,
+                    request=verireel_prod_backup_gate_request.backup_gate,
                     run_async=True,
                 )
                 result = {"backup_gate_record_id": driver_result.backup_record_id}
             elif path == _VERIREEL_PROD_PROMOTION_ROUTE.route_path:
-                request = _VERIREEL_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
+                verireel_prod_promotion_request = _VERIREEL_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.promotion.context,
-                    instance=request.promotion.from_instance,
+                    product=verireel_prod_promotion_request.product,
+                    context=verireel_prod_promotion_request.promotion.context,
+                    instance=verireel_prod_promotion_request.promotion.from_instance,
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.promotion.context,
-                    instance=request.promotion.to_instance,
+                    product=verireel_prod_promotion_request.product,
+                    context=verireel_prod_promotion_request.promotion.context,
+                    instance=verireel_prod_promotion_request.promotion.to_instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.promotion.context,
+                    product=verireel_prod_promotion_request.product,
+                    context=verireel_prod_promotion_request.promotion.context,
                     denial_message=_VERIREEL_PROD_PROMOTION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4720,27 +4726,27 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_prod_promotion(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.promotion,
+                    request=verireel_prod_promotion_request.promotion,
                 )
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
                     "deployment_record_id": driver_result.deployment_record_id,
                 }
             elif path == _VERIREEL_PROD_ROLLBACK_ROUTE.route_path:
-                request = _VERIREEL_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
+                verireel_prod_rollback_request = _VERIREEL_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
-                    context=request.rollback.context,
-                    instance=request.rollback.instance,
+                    product=verireel_prod_rollback_request.product,
+                    context=verireel_prod_rollback_request.rollback.context,
+                    instance=verireel_prod_rollback_request.rollback.instance,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.rollback.context,
+                    product=verireel_prod_rollback_request.product,
+                    context=verireel_prod_rollback_request.rollback.context,
                     denial_message=_VERIREEL_PROD_ROLLBACK_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4761,25 +4767,25 @@ def create_launchplane_service_app(
                 driver_result = execute_verireel_prod_rollback(
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    request=request.rollback,
+                    request=verireel_prod_rollback_request.rollback,
                 )
                 result = {
                     "promotion_record_id": driver_result.promotion_record_id,
                     "backup_record_id": driver_result.backup_record_id,
                 }
             elif path == _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path:
-                request = _VERIREEL_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload)
+                verireel_preview_refresh_request = _VERIREEL_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
+                    product=verireel_preview_refresh_request.product,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.refresh.context,
+                    product=verireel_preview_refresh_request.product,
+                    context=verireel_preview_refresh_request.refresh.context,
                     denial_message=_VERIREEL_PREVIEW_REFRESH_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4799,29 +4805,29 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_preview_refresh(
                     control_plane_root=resolved_root,
-                    request=request.refresh,
+                    request=verireel_preview_refresh_request.refresh,
                 )
                 result = _apply_verireel_preview_refresh_records(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
-                    request=request.refresh,
+                    request=verireel_preview_refresh_request.refresh,
                     driver_result=driver_result,
                 )
             elif path == _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path:
-                request = _VERIREEL_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(
+                verireel_preview_inventory_request = _VERIREEL_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
+                    product=verireel_preview_inventory_request.product,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.inventory.context,
+                    product=verireel_preview_inventory_request.product,
+                    context=verireel_preview_inventory_request.inventory.context,
                     denial_message=_VERIREEL_PREVIEW_INVENTORY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4830,7 +4836,7 @@ def create_launchplane_service_app(
                     return authorization_response
                 driver_result = execute_verireel_preview_inventory(
                     control_plane_root=resolved_root,
-                    request=request.inventory,
+                    request=verireel_preview_inventory_request.inventory,
                 )
                 preview_inventory_scan_id = _write_preview_inventory_scan_if_supported(
                     record_store=record_store,
@@ -4840,18 +4846,18 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path:
-                request = _VERIREEL_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload)
+                verireel_preview_destroy_request = _VERIREEL_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
+                    product=verireel_preview_destroy_request.product,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.destroy.context,
+                    product=verireel_preview_destroy_request.product,
+                    context=verireel_preview_destroy_request.destroy.context,
                     denial_message=_VERIREEL_PREVIEW_DESTROY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4871,28 +4877,28 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_preview_destroy(
                     control_plane_root=resolved_root,
-                    request=request.destroy,
+                    request=verireel_preview_destroy_request.destroy,
                 )
                 result = _apply_verireel_preview_destroy_records(
                     record_store=record_store,
-                    request=request.destroy,
+                    request=verireel_preview_destroy_request.destroy,
                     driver_result=driver_result,
                 )
             elif path == _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path:
-                request = _VERIREEL_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(
+                verireel_preview_verification_request = _VERIREEL_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(
                     payload
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
-                    product=request.product,
+                    product=verireel_preview_verification_request.product,
                 )
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
-                    product=request.product,
-                    context=request.verification.context,
+                    product=verireel_preview_verification_request.product,
+                    context=verireel_preview_verification_request.verification.context,
                     denial_message=_VERIREEL_PREVIEW_VERIFICATION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
@@ -4913,10 +4919,10 @@ def create_launchplane_service_app(
                 result = _apply_verireel_preview_verification_records(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
-                    request=request.verification,
+                    request=verireel_preview_verification_request.verification,
                 )
             elif path == "/v1/product-profiles/context-cutover/apply":
-                request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
+                context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
                     payload
                 )
                 if not isinstance(record_store, PostgresRecordStore):
@@ -4935,7 +4941,7 @@ def create_launchplane_service_app(
                 if not authz_policy.allows(
                     identity=identity,
                     action="product_profile.write",
-                    product=request.product,
+                    product=context_cutover_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
                     return _json_response(
@@ -4961,11 +4967,11 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                profile = record_store.read_product_profile_record(request.product)
+                profile = record_store.read_product_profile_record(context_cutover_request.product)
                 if not _product_profile_context_cutover_contexts_allowed(
                     profile=profile,
-                    source_context=request.source_context,
-                    target_context=request.target_context,
+                    source_context=context_cutover_request.source_context,
+                    target_context=context_cutover_request.target_context,
                     preview_context="",
                 ):
                     return _json_response(
@@ -4984,7 +4990,7 @@ def create_launchplane_service_app(
                     driver_result = (
                         control_plane_product_context_cutover.apply_product_context_cutover(
                             record_store=record_store,
-                            request=request,
+                            request=context_cutover_request,
                         )
                     )
                 except ValueError:
@@ -4996,13 +5002,13 @@ def create_launchplane_service_app(
                             "trace_id": request_trace_id,
                             "error": {
                                 "code": "invalid_context_cutover_request",
-                                "message": "Product context cutover request is invalid.",
+                                "message": "Product context cutover context_cutover_request is invalid.",
                             },
                         },
                     )
-                result = {"product_profile": request.product}
+                result = {"product_profile": context_cutover_request.product}
             elif path == "/v1/product-profiles/legacy-context-cleanup/apply":
-                request = control_plane_product_context_cutover.LegacyContextCleanupRequest.model_validate(
+                legacy_cleanup_request = control_plane_product_context_cutover.LegacyContextCleanupRequest.model_validate(
                     payload
                 )
                 if not isinstance(record_store, PostgresRecordStore):
@@ -5021,7 +5027,7 @@ def create_launchplane_service_app(
                 if not authz_policy.allows(
                     identity=identity,
                     action="product_profile.write",
-                    product=request.product,
+                    product=legacy_cleanup_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
                     return _json_response(
@@ -5051,7 +5057,7 @@ def create_launchplane_service_app(
                     driver_result = (
                         control_plane_product_context_cutover.apply_legacy_context_cleanup(
                             record_store=record_store,
-                            request=request,
+                            request=legacy_cleanup_request,
                         )
                     )
                 except control_plane_product_context_cutover.LegacyContextCleanupBoundaryError:
@@ -5076,17 +5082,17 @@ def create_launchplane_service_app(
                             "trace_id": request_trace_id,
                             "error": {
                                 "code": "invalid_legacy_context_cleanup_request",
-                                "message": "Legacy context cleanup request is invalid.",
+                                "message": "Legacy context cleanup legacy_cleanup_request is invalid.",
                             },
                         },
                     )
-                result = {"product_profile": request.product}
+                result = {"product_profile": legacy_cleanup_request.product}
             elif path == "/v1/product-profiles":
-                request = LaunchplaneProductProfileRecord.model_validate(payload)
+                product_profile_request = LaunchplaneProductProfileRecord.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="product_profile.write",
-                    product=request.product,
+                    product=product_profile_request.product,
                     context=_LAUNCHPLANE_SERVICE_CONTEXT,
                 ):
                     return _json_response(
@@ -5112,15 +5118,15 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                record_store.write_product_profile_record(request)
-                result = {"product_profile": request.product}
+                record_store.write_product_profile_record(product_profile_request)
+                result = {"product_profile": product_profile_request.product}
             elif path == "/v1/evidence/promotions":
-                request = PromotionEvidenceEnvelope.model_validate(payload)
+                promotion_request = PromotionEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="promotion.write",
-                    product=request.product,
-                    context=request.promotion.context,
+                    product=promotion_request.product,
+                    context=promotion_request.promotion.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5148,17 +5154,19 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                result = apply_promotion_evidence(
-                    record_store=record_store,
-                    promotion_record=request.promotion,
+                result = dict[str, object](
+                    apply_promotion_evidence(
+                        record_store=record_store,
+                        promotion_record=promotion_request.promotion,
+                    )
                 )
             elif path == "/v1/evidence/previews/generations":
-                request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
+                preview_generation_request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_generation.write",
-                    product=request.product,
-                    context=request.preview.context,
+                    product=preview_generation_request.product,
+                    context=preview_generation_request.preview.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5189,16 +5197,16 @@ def create_launchplane_service_app(
                 result = apply_launchplane_generation_evidence(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
-                    preview_request=request.preview,
-                    generation_request=request.generation,
+                    preview_request=preview_generation_request.preview,
+                    generation_request=preview_generation_request.generation,
                 )
             elif path == "/v1/previews/lifecycle-plan":
-                request = PreviewLifecyclePlanEnvelope.model_validate(payload)
+                preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_lifecycle.plan",
-                    product=request.product,
-                    context=request.context,
+                    product=preview_lifecycle_plan_request.product,
+                    context=preview_lifecycle_plan_request.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5227,15 +5235,15 @@ def create_launchplane_service_app(
                 if idempotent_response is not None:
                     return idempotent_response
                 driver_result = build_preview_lifecycle_plan(
-                    product=request.product,
-                    context=request.context,
+                    product=preview_lifecycle_plan_request.product,
+                    context=preview_lifecycle_plan_request.context,
                     planned_at=_utc_now_timestamp(),
-                    source=request.source,
-                    desired_previews=request.desired_previews,
-                    desired_state_id=request.desired_state_id,
+                    source=preview_lifecycle_plan_request.source,
+                    desired_previews=preview_lifecycle_plan_request.desired_previews,
+                    desired_state_id=preview_lifecycle_plan_request.desired_state_id,
                     latest_inventory_scan=_latest_preview_inventory_scan(
                         record_store=record_store,
-                        context_name=request.context,
+                        context_name=preview_lifecycle_plan_request.context,
                     ),
                 )
                 preview_lifecycle_plan_id = _write_preview_lifecycle_plan_if_supported(
@@ -5244,12 +5252,12 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_lifecycle_plan_id": preview_lifecycle_plan_id}
             elif path == "/v1/previews/desired-state":
-                request = PreviewDesiredStateEnvelope.model_validate(payload)
+                preview_desired_state_request = PreviewDesiredStateEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_desired_state.discover",
-                    product=request.product,
-                    context=request.context,
+                    product=preview_desired_state_request.product,
+                    context=preview_desired_state_request.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5279,15 +5287,15 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = discover_github_preview_desired_state(
                     control_plane_root=resolved_root,
-                    product=request.product,
-                    context=request.context,
-                    source=request.source,
+                    product=preview_desired_state_request.product,
+                    context=preview_desired_state_request.context,
+                    source=preview_desired_state_request.source,
                     discovered_at=_utc_now_timestamp(),
-                    repository=request.repository,
-                    label=request.label,
-                    anchor_repo=request.anchor_repo,
-                    preview_slug_prefix=request.preview_slug_prefix,
-                    max_pages=request.max_pages,
+                    repository=preview_desired_state_request.repository,
+                    label=preview_desired_state_request.label,
+                    anchor_repo=preview_desired_state_request.anchor_repo,
+                    preview_slug_prefix=preview_desired_state_request.preview_slug_prefix,
+                    max_pages=preview_desired_state_request.max_pages,
                 )
                 preview_desired_state_id = _write_preview_desired_state_if_supported(
                     record_store=record_store,
@@ -5295,13 +5303,13 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == "/v1/previews/pr-feedback":
-                request = PreviewPrFeedbackEnvelope.model_validate(payload)
+                preview_pr_feedback_request = PreviewPrFeedbackEnvelope.model_validate(payload)
                 if not _allows_preview_pr_feedback_write(
                     authz_policy=authz_policy,
                     identity=identity,
-                    product=request.product,
-                    context=request.context,
-                    status=request.status,
+                    product=preview_pr_feedback_request.product,
+                    context=preview_pr_feedback_request.context,
+                    status=preview_pr_feedback_request.status,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5331,22 +5339,22 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = build_preview_pr_feedback_record(
                     control_plane_root=resolved_root,
-                    product=request.product,
-                    context=request.context,
-                    source=request.source,
+                    product=preview_pr_feedback_request.product,
+                    context=preview_pr_feedback_request.context,
+                    source=preview_pr_feedback_request.source,
                     requested_at=_utc_now_timestamp(),
-                    repository=request.repository,
-                    anchor_repo=request.anchor_repo,
-                    anchor_pr_number=request.anchor_pr_number,
-                    anchor_pr_url=request.anchor_pr_url,
-                    status=request.status,
-                    marker=request.marker,
-                    preview_url=request.preview_url,
-                    immutable_image_reference=request.immutable_image_reference,
-                    refresh_image_reference=request.refresh_image_reference,
-                    revision=request.revision,
-                    run_url=request.run_url,
-                    failure_summary=request.failure_summary,
+                    repository=preview_pr_feedback_request.repository,
+                    anchor_repo=preview_pr_feedback_request.anchor_repo,
+                    anchor_pr_number=preview_pr_feedback_request.anchor_pr_number,
+                    anchor_pr_url=preview_pr_feedback_request.anchor_pr_url,
+                    status=preview_pr_feedback_request.status,
+                    marker=preview_pr_feedback_request.marker,
+                    preview_url=preview_pr_feedback_request.preview_url,
+                    immutable_image_reference=preview_pr_feedback_request.immutable_image_reference,
+                    refresh_image_reference=preview_pr_feedback_request.refresh_image_reference,
+                    revision=preview_pr_feedback_request.revision,
+                    run_url=preview_pr_feedback_request.run_url,
+                    failure_summary=preview_pr_feedback_request.failure_summary,
                 )
                 preview_pr_feedback_id = _write_preview_pr_feedback_if_supported(
                     record_store=record_store,
@@ -5354,12 +5362,12 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_pr_feedback_id": preview_pr_feedback_id}
             elif path == "/v1/previews/lifecycle-cleanup":
-                request = PreviewLifecycleCleanupEnvelope.model_validate(payload)
+                preview_lifecycle_cleanup_request = PreviewLifecycleCleanupEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_lifecycle.cleanup",
-                    product=request.product,
-                    context=request.context,
+                    product=preview_lifecycle_cleanup_request.product,
+                    context=preview_lifecycle_cleanup_request.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5389,10 +5397,10 @@ def create_launchplane_service_app(
                     return idempotent_response
                 plan = _latest_preview_lifecycle_plan(
                     record_store=record_store,
-                    context_name=request.context,
-                    plan_id=request.plan_id,
+                    context_name=preview_lifecycle_cleanup_request.context,
+                    plan_id=preview_lifecycle_cleanup_request.plan_id,
                 )
-                if plan is None or plan.product != request.product:
+                if plan is None or plan.product != preview_lifecycle_cleanup_request.product:
                     return _json_response(
                         start_response=start_response,
                         status_code=404,
@@ -5405,10 +5413,10 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                cleanup_driver_id = "verireel" if request.product == "verireel" else ""
+                cleanup_driver_id = "verireel" if preview_lifecycle_cleanup_request.product == "verireel" else ""
                 cleanup_slug_template = "pr-{number}"
                 try:
-                    cleanup_profile = record_store.read_product_profile_record(request.product)
+                    cleanup_profile = record_store.read_product_profile_record(preview_lifecycle_cleanup_request.product)
                     cleanup_driver_id = cleanup_profile.driver_id
                     cleanup_slug_template = cleanup_profile.preview.slug_template
                 except FileNotFoundError:
@@ -5416,12 +5424,12 @@ def create_launchplane_service_app(
                 driver_result = build_preview_lifecycle_cleanup_record(
                     plan=plan,
                     requested_at=_utc_now_timestamp(),
-                    source=request.source,
-                    apply=request.apply,
-                    destroy_reason=request.destroy_reason,
+                    source=preview_lifecycle_cleanup_request.source,
+                    apply=preview_lifecycle_cleanup_request.apply,
+                    destroy_reason=preview_lifecycle_cleanup_request.destroy_reason,
                     control_plane_root=resolved_root,
                     record_store=record_store,
-                    timeout_seconds=request.timeout_seconds,
+                    timeout_seconds=preview_lifecycle_cleanup_request.timeout_seconds,
                     driver_id=cleanup_driver_id,
                     preview_slug_template=cleanup_slug_template,
                 )
@@ -5431,12 +5439,12 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id}
             else:
-                request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
+                preview_destroyed_request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_destroyed.write",
-                    product=request.product,
-                    context=request.destroy.context,
+                    product=preview_destroyed_request.product,
+                    context=preview_destroyed_request.destroy.context,
                 ):
                     return _json_response(
                         start_response=start_response,
@@ -5466,7 +5474,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 result = apply_launchplane_destroy_preview(
                     record_store=record_store,
-                    request=request.destroy,
+                    request=preview_destroyed_request.destroy,
                 )
         except (PermissionError, InvalidTokenError):
             return _json_response(
