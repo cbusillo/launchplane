@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from fnmatch import fnmatchcase
-from typing import Any, Literal
+from typing import Literal, Protocol, cast
 
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.driver_descriptor import (
     DriverActionDescriptor,
     DriverActionSafety,
@@ -15,9 +17,16 @@ from control_plane.contracts.driver_descriptor import (
     DriverSettingGroupDescriptor,
     DriverView,
 )
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
+from control_plane.contracts.preview_inventory_scan_record import PreviewInventoryScanRecord
+from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
+from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 
 
 PROVIDER_BOUNDARY_NOTE = (
@@ -29,6 +38,198 @@ PREVIEW_STALE_AFTER = timedelta(minutes=30)
 PREVIEW_CAPABILITY_IDS = {"preview_lifecycle", "previewable", "preview_inventory_managed"}
 
 
+class _ListProductProfileRecords(Protocol):
+    def __call__(
+        self, *, driver_id: str | None = None
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
+
+
+class _ReadLaneSummary(Protocol):
+    def __call__(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary: ...
+
+
+class _ReadEnvironmentInventory(Protocol):
+    def __call__(self, *, context_name: str, instance_name: str) -> EnvironmentInventory: ...
+
+
+class _ReadReleaseTupleRecord(Protocol):
+    def __call__(self, *, context_name: str, channel_name: str) -> ReleaseTupleRecord: ...
+
+
+class _ListDeploymentRecords(Protocol):
+    def __call__(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
+
+
+class _ListPromotionRecords(Protocol):
+    def __call__(
+        self, *, context_name: str = "", to_instance_name: str = "", limit: int | None = None
+    ) -> tuple[PromotionRecord, ...]: ...
+
+
+class _ListBackupGateRecords(Protocol):
+    def __call__(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[BackupGateRecord, ...]: ...
+
+
+class _ReadOdooInstanceOverrideRecord(Protocol):
+    def __call__(self, *, context_name: str, instance_name: str) -> OdooInstanceOverrideRecord: ...
+
+
+class _ListPreviewInventoryScanRecords(Protocol):
+    def __call__(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[PreviewInventoryScanRecord, ...]: ...
+
+
+class _ListPreviewSummaries(Protocol):
+    def __call__(
+        self, *, context_name: str = "", generation_limit: int | None = 1
+    ) -> tuple[LaunchplanePreviewSummary, ...]: ...
+
+
+class _ListPreviewRecords(Protocol):
+    def __call__(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[PreviewRecord, ...]: ...
+
+
+class _ListPreviewGenerationRecords(Protocol):
+    def __call__(
+        self, *, preview_id: str = "", limit: int | None = None
+    ) -> tuple[PreviewGenerationRecord, ...]: ...
+
+
+def _callable_store_method(record_store: object, method_name: str) -> object | None:
+    method = getattr(record_store, method_name, None)
+    if not callable(method):
+        return None
+    return cast(object, method)
+
+
+def _list_product_profile_records_method(
+    record_store: object,
+) -> _ListProductProfileRecords | None:
+    return cast(
+        _ListProductProfileRecords | None,
+        _callable_store_method(record_store, "list_product_profile_records"),
+    )
+
+
+def _read_lane_summary_method(record_store: object) -> _ReadLaneSummary | None:
+    return cast(
+        _ReadLaneSummary | None,
+        _callable_store_method(record_store, "read_lane_summary"),
+    )
+
+
+def _read_environment_inventory_method(
+    record_store: object,
+) -> _ReadEnvironmentInventory | None:
+    return cast(
+        _ReadEnvironmentInventory | None,
+        _callable_store_method(record_store, "read_environment_inventory"),
+    )
+
+
+def _read_release_tuple_record_method(record_store: object) -> _ReadReleaseTupleRecord | None:
+    return cast(
+        _ReadReleaseTupleRecord | None,
+        _callable_store_method(record_store, "read_release_tuple_record"),
+    )
+
+
+def _list_deployment_records_method(record_store: object) -> _ListDeploymentRecords | None:
+    return cast(
+        _ListDeploymentRecords | None,
+        _callable_store_method(record_store, "list_deployment_records"),
+    )
+
+
+def _list_promotion_records_method(record_store: object) -> _ListPromotionRecords | None:
+    return cast(
+        _ListPromotionRecords | None,
+        _callable_store_method(record_store, "list_promotion_records"),
+    )
+
+
+def _list_backup_gate_records_method(record_store: object) -> _ListBackupGateRecords | None:
+    return cast(
+        _ListBackupGateRecords | None,
+        _callable_store_method(record_store, "list_backup_gate_records"),
+    )
+
+
+def _read_odoo_instance_override_record_method(
+    record_store: object,
+) -> _ReadOdooInstanceOverrideRecord | None:
+    return cast(
+        _ReadOdooInstanceOverrideRecord | None,
+        _callable_store_method(record_store, "read_odoo_instance_override_record"),
+    )
+
+
+def _list_preview_inventory_scan_records_method(
+    record_store: object,
+) -> _ListPreviewInventoryScanRecords | None:
+    return cast(
+        _ListPreviewInventoryScanRecords | None,
+        _callable_store_method(record_store, "list_preview_inventory_scan_records"),
+    )
+
+
+def _list_preview_summaries_method(record_store: object) -> _ListPreviewSummaries | None:
+    return cast(
+        _ListPreviewSummaries | None,
+        _callable_store_method(record_store, "list_preview_summaries"),
+    )
+
+
+def _list_preview_records_method(record_store: object) -> _ListPreviewRecords | None:
+    return cast(
+        _ListPreviewRecords | None,
+        _callable_store_method(record_store, "list_preview_records"),
+    )
+
+
+def _list_preview_generation_records_method(
+    record_store: object,
+) -> _ListPreviewGenerationRecords | None:
+    return cast(
+        _ListPreviewGenerationRecords | None,
+        _callable_store_method(record_store, "list_preview_generation_records"),
+    )
+
+
+def _optional_read_environment_inventory(
+    method: _ReadEnvironmentInventory, *, context_name: str, instance_name: str
+) -> EnvironmentInventory | None:
+    try:
+        return method(context_name=context_name, instance_name=instance_name)
+    except FileNotFoundError:
+        return None
+
+
+def _optional_read_release_tuple_record(
+    method: _ReadReleaseTupleRecord, *, context_name: str, channel_name: str
+) -> ReleaseTupleRecord | None:
+    try:
+        return method(context_name=context_name, channel_name=channel_name)
+    except FileNotFoundError:
+        return None
+
+
+def _optional_read_odoo_instance_override_record(
+    method: _ReadOdooInstanceOverrideRecord, *, context_name: str, instance_name: str
+) -> OdooInstanceOverrideRecord | None:
+    try:
+        return method(context_name=context_name, instance_name=instance_name)
+    except FileNotFoundError:
+        return None
+
+
 def _action(
     action_id: str,
     label: str,
@@ -38,6 +239,8 @@ def _action(
     scope: DriverActionScope,
     route_path: str,
     method: Literal["GET", "POST"] = "POST",
+    authz_action: str = "",
+    operator_visible: bool = True,
     writes_records: tuple[str, ...] = (),
 ) -> DriverActionDescriptor:
     return DriverActionDescriptor(
@@ -48,6 +251,8 @@ def _action(
         scope=scope,
         method=method,
         route_path=route_path,
+        authz_action=authz_action,
+        operator_visible=operator_visible,
         writes_records=writes_records,
     )
 
@@ -105,6 +310,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/generic-web/deploy",
+            authz_action="generic_web_deploy.execute",
             writes_records=("deployment",),
         ),
         _action(
@@ -114,6 +320,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/generic-web/prod-promotion",
+            authz_action="generic_web_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory"),
         ),
         _action(
@@ -123,6 +330,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+            authz_action="generic_web_prod_promotion.dispatch",
             writes_records=(),
         ),
         _action(
@@ -132,6 +340,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="context",
             route_path="/v1/drivers/generic-web/preview-desired-state",
+            authz_action="preview_desired_state.discover",
             writes_records=("preview_desired_state",),
         ),
         _action(
@@ -141,6 +350,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="preview",
             route_path="/v1/drivers/generic-web/preview-refresh",
+            authz_action="preview_refresh.execute",
         ),
         _action(
             "preview_inventory",
@@ -149,6 +359,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="context",
             route_path="/v1/drivers/generic-web/preview-inventory",
+            authz_action="preview_inventory.read",
             writes_records=("preview_inventory_scan",),
         ),
         _action(
@@ -158,6 +369,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="read",
             scope="context",
             route_path="/v1/drivers/generic-web/preview-readiness",
+            authz_action="preview_readiness.evaluate",
         ),
         _action(
             "preview_destroy",
@@ -166,6 +378,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="preview",
             route_path="/v1/drivers/generic-web/preview-destroy",
+            authz_action="preview_destroy.execute",
             writes_records=("preview",),
         ),
     ),
@@ -210,6 +423,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/odoo/artifact-publish-inputs",
+            authz_action="odoo_artifact_publish_inputs.read",
         ),
         _action(
             "artifact_publish",
@@ -218,6 +432,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="instance",
             route_path="/v1/drivers/odoo/artifact-publish",
+            authz_action="odoo_artifact_publish.write",
             writes_records=("artifact_manifest",),
         ),
         _action(
@@ -227,6 +442,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/post-deploy",
+            authz_action="odoo_post_deploy.execute",
             writes_records=("odoo_instance_override",),
         ),
         _action(
@@ -236,6 +452,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="instance",
             route_path="/v1/drivers/odoo/prod-backup-gate",
+            authz_action="odoo_prod_backup_gate.execute",
             writes_records=("backup_gate",),
         ),
         _action(
@@ -245,6 +462,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/prod-promotion",
+            authz_action="odoo_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
@@ -254,6 +472,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="instance",
             route_path="/v1/drivers/odoo/prod-rollback",
+            authz_action="odoo_prod_rollback.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
     ),
@@ -322,7 +541,19 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/testing-deploy",
+            authz_action="verireel_testing_deploy.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
+        ),
+        _action(
+            "testing_verification",
+            "Record testing verification",
+            "Record VeriReel product smoke verification for a testing deployment.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/verireel/testing-verification",
+            authz_action="deployment.write",
+            operator_visible=False,
+            writes_records=("deployment",),
         ),
         _action(
             "stable_environment",
@@ -331,6 +562,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/verireel/stable-environment",
+            authz_action="verireel_stable_environment.read",
         ),
         _action(
             "runtime_verification",
@@ -339,6 +571,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/verireel/runtime-verification",
+            authz_action="verireel_stable_environment.read",
         ),
         _action(
             "app_maintenance",
@@ -347,6 +580,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/app-maintenance",
+            authz_action="verireel_app_maintenance.execute",
         ),
         _action(
             "prod_deploy",
@@ -355,6 +589,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-deploy",
+            authz_action="verireel_prod_deploy.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
         ),
         _action(
@@ -364,6 +599,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-backup-gate",
+            authz_action="verireel_prod_backup_gate.execute",
             writes_records=("backup_gate",),
         ),
         _action(
@@ -373,6 +609,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-promotion",
+            authz_action="verireel_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
@@ -382,6 +619,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-rollback",
+            authz_action="verireel_prod_rollback.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
@@ -391,6 +629,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="preview",
             route_path="/v1/drivers/verireel/preview-refresh",
+            authz_action="verireel_preview_refresh.execute",
             writes_records=("preview", "preview_generation"),
         ),
         _action(
@@ -400,6 +639,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="context",
             route_path="/v1/drivers/verireel/preview-inventory",
+            authz_action="verireel_preview_inventory.read",
         ),
         _action(
             "preview_destroy",
@@ -408,6 +648,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="preview",
             route_path="/v1/drivers/verireel/preview-destroy",
+            authz_action="verireel_preview_destroy.execute",
             writes_records=("preview", "preview_generation"),
         ),
         _action(
@@ -417,6 +658,8 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="preview",
             route_path="/v1/drivers/verireel/preview-verification",
+            authz_action="preview_generation.write",
+            operator_visible=False,
             writes_records=("preview", "preview_generation"),
         ),
     ),
@@ -494,8 +737,8 @@ def _descriptor_for_product_profile(
 def _product_profile_descriptors(
     *, record_store: object, descriptor: DriverDescriptor, context_name: str
 ) -> tuple[DriverDescriptor, ...]:
-    list_profiles = getattr(record_store, "list_product_profile_records", None)
-    if not callable(list_profiles):
+    list_profiles = _list_product_profile_records_method(record_store)
+    if list_profiles is None:
         return ()
     try:
         profiles = list_profiles(driver_id=descriptor.driver_id)
@@ -506,13 +749,6 @@ def _product_profile_descriptors(
         for profile in profiles
         if _product_profile_matches_context(profile=profile, context_name=context_name)
     )
-
-
-def _optional_call(method: Any, **kwargs: object) -> object | None:
-    try:
-        return method(**kwargs)
-    except FileNotFoundError:
-        return None
 
 
 def _parse_timestamp(value: str) -> datetime | None:
@@ -628,11 +864,9 @@ def _preview_inventory_provenance(
     context_name: str,
     preview_summaries: tuple[LaunchplanePreviewSummary, ...],
 ) -> DataProvenance:
-    if hasattr(record_store, "list_preview_inventory_scan_records"):
-        scans = getattr(record_store, "list_preview_inventory_scan_records")(
-            context_name=context_name,
-            limit=1,
-        )
+    list_scans = _list_preview_inventory_scan_records_method(record_store)
+    if list_scans is not None:
+        scans = list_scans(context_name=context_name, limit=1)
         latest_scan = next(iter(scans), None)
         if latest_scan is not None:
             status, stale_after = _freshness_status(
@@ -667,67 +901,60 @@ def _read_lane_summary(
 ) -> LaunchplaneLaneSummary | None:
     if not instance_name:
         return None
-    if hasattr(record_store, "read_lane_summary"):
-        summary = getattr(record_store, "read_lane_summary")(
+    read_summary = _read_lane_summary_method(record_store)
+    if read_summary is not None:
+        summary = read_summary(
             context_name=context_name,
             instance_name=instance_name,
         )
         return summary.model_copy(update={"provenance": _lane_provenance(summary)})
 
     inventory = None
-    if hasattr(record_store, "read_environment_inventory"):
-        inventory = _optional_call(
-            getattr(record_store, "read_environment_inventory"),
+    read_inventory = _read_environment_inventory_method(record_store)
+    if read_inventory is not None:
+        inventory = _optional_read_environment_inventory(
+            read_inventory,
             context_name=context_name,
             instance_name=instance_name,
         )
     release_tuple = None
-    if hasattr(record_store, "read_release_tuple_record"):
-        release_tuple = _optional_call(
-            getattr(record_store, "read_release_tuple_record"),
+    read_release_tuple = _read_release_tuple_record_method(record_store)
+    if read_release_tuple is not None:
+        release_tuple = _optional_read_release_tuple_record(
+            read_release_tuple,
             context_name=context_name,
             channel_name=instance_name,
         )
     latest_deployment = None
-    if hasattr(record_store, "list_deployment_records"):
+    list_deployments = _list_deployment_records_method(record_store)
+    if list_deployments is not None:
         latest_deployment = next(
-            iter(
-                getattr(record_store, "list_deployment_records")(
-                    context_name=context_name,
-                    instance_name=instance_name,
-                    limit=1,
-                )
-            ),
+            iter(list_deployments(context_name=context_name, instance_name=instance_name, limit=1)),
             None,
         )
     latest_promotion = None
-    if hasattr(record_store, "list_promotion_records"):
+    list_promotions = _list_promotion_records_method(record_store)
+    if list_promotions is not None:
         latest_promotion = next(
             iter(
-                getattr(record_store, "list_promotion_records")(
-                    context_name=context_name,
-                    to_instance_name=instance_name,
-                    limit=1,
-                )
+                list_promotions(context_name=context_name, to_instance_name=instance_name, limit=1)
             ),
             None,
         )
     latest_backup_gate = None
-    if hasattr(record_store, "list_backup_gate_records"):
+    list_backup_gates = _list_backup_gate_records_method(record_store)
+    if list_backup_gates is not None:
         latest_backup_gate = next(
             iter(
-                getattr(record_store, "list_backup_gate_records")(
-                    context_name=context_name,
-                    instance_name=instance_name,
-                    limit=1,
-                )
+                list_backup_gates(context_name=context_name, instance_name=instance_name, limit=1)
             ),
             None,
         )
     odoo_instance_override = None
-    if hasattr(record_store, "read_odoo_instance_override_record"):
-        odoo_instance_override = _optional_call(
-            getattr(record_store, "read_odoo_instance_override_record"),
+    read_odoo_instance_override = _read_odoo_instance_override_record_method(record_store)
+    if read_odoo_instance_override is not None:
+        odoo_instance_override = _optional_read_odoo_instance_override_record(
+            read_odoo_instance_override,
             context_name=context_name,
             instance_name=instance_name,
         )
@@ -748,23 +975,26 @@ def _read_lane_summary(
 def _list_preview_summaries(
     *, record_store: object, context_name: str
 ) -> tuple[LaunchplanePreviewSummary, ...]:
-    if hasattr(record_store, "list_preview_summaries"):
-        summaries = getattr(record_store, "list_preview_summaries")(
+    list_summaries = _list_preview_summaries_method(record_store)
+    if list_summaries is not None:
+        preview_summaries = list_summaries(
             context_name=context_name,
             generation_limit=1,
         )
         return tuple(
             summary.model_copy(update={"provenance": _preview_provenance(summary)})
-            for summary in summaries
+            for summary in preview_summaries
         )
-    if not hasattr(record_store, "list_preview_records"):
+    list_previews = _list_preview_records_method(record_store)
+    if list_previews is None:
         return ()
-    previews = getattr(record_store, "list_preview_records")(context_name=context_name, limit=10)
+    previews = list_previews(context_name=context_name, limit=10)
     summaries: list[LaunchplanePreviewSummary] = []
+    list_generations = _list_preview_generation_records_method(record_store)
     for preview in previews:
-        generations = ()
-        if hasattr(record_store, "list_preview_generation_records"):
-            generations = getattr(record_store, "list_preview_generation_records")(
+        generations: tuple[PreviewGenerationRecord, ...] = ()
+        if list_generations is not None:
+            generations = list_generations(
                 preview_id=preview.preview_id,
                 limit=1,
             )

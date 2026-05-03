@@ -14,13 +14,13 @@ class VeriReelStableEnvironmentRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    context: Literal["verireel"] = "verireel"
+    context: str = "verireel"
     instance: Literal["testing", "prod"]
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelStableEnvironmentRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel stable environment requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel stable environment requires context.")
         return self
 
 

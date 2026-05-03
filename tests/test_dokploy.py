@@ -6,6 +6,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
 import click
@@ -17,6 +18,7 @@ from control_plane.odoo_instance_overrides import ODOO_INSTANCE_OVERRIDES_PAYLOA
 from control_plane import secrets as control_plane_secrets
 from control_plane.cli import main
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.storage.postgres import PostgresRecordStore
@@ -75,7 +77,69 @@ def _seed_dokploy_target_records(
         )
 
 
+class _FakeDokployTargetStore:
+    def __init__(
+        self,
+        *,
+        target_records: tuple[DokployTargetRecord, ...],
+        target_id_records: tuple[DokployTargetIdRecord, ...],
+    ) -> None:
+        self.target_records = target_records
+        self.target_id_records = target_id_records
+
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]:
+        return self.target_records
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        return self.target_id_records
+
+
 class DokployConfigTests(unittest.TestCase):
+    def test_load_optional_source_of_truth_uses_structural_store_boundary(self) -> None:
+        target = control_plane_dokploy.DokployTargetDefinition(
+            context="verireel",
+            instance="prod",
+            target_id="placeholder",
+            target_type="application",
+            target_name="ver-prod-app",
+        )
+        source_of_truth = control_plane_dokploy.load_optional_dokploy_source_of_truth_from_store(
+            record_store=_FakeDokployTargetStore(
+                target_records=(
+                    control_plane_dokploy.build_dokploy_target_record_from_definition(
+                        target,
+                        updated_at="2026-05-01T00:00:00Z",
+                        source_label="fake-store",
+                    ),
+                ),
+                target_id_records=(
+                    DokployTargetIdRecord(
+                        context="verireel",
+                        instance="prod",
+                        target_id="target-ver-prod",
+                        updated_at="2026-05-01T00:00:00Z",
+                        source_label="fake-store",
+                    ),
+                ),
+            )
+        )
+
+        self.assertIsNotNone(source_of_truth)
+        assert source_of_truth is not None
+        self.assertEqual(len(source_of_truth.targets), 1)
+        self.assertEqual(source_of_truth.targets[0].target_id, "target-ver-prod")
+        self.assertEqual(source_of_truth.targets[0].target_name, "ver-prod-app")
+
+    def test_load_optional_source_of_truth_returns_none_for_empty_store(self) -> None:
+        source_of_truth = control_plane_dokploy.load_optional_dokploy_source_of_truth_from_store(
+            record_store=_FakeDokployTargetStore(
+                target_records=(),
+                target_id_records=(),
+            )
+        )
+
+        self.assertIsNone(source_of_truth)
+
     def test_application_log_payload_normalization_redacts_likely_secrets(self) -> None:
         lines = control_plane_dokploy.normalize_dokploy_log_payload(
             {
@@ -118,11 +182,13 @@ class DokployConfigTests(unittest.TestCase):
     def test_fetch_application_logs_calls_dokploy_read_logs_endpoint(self) -> None:
         requests: list[dict[str, object]] = []
 
+        def capture_request(**kwargs: object) -> dict[str, str]:
+            requests.append(kwargs)
+            return {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
+
         with patch(
             "control_plane.dokploy.dokploy_request",
-            side_effect=lambda **kwargs: (
-                requests.append(kwargs) or {"logs": "one\ntwo\nTHREE_TOKEN=secret"}
-            ),
+            side_effect=capture_request,
         ):
             lines = control_plane_dokploy.fetch_dokploy_application_logs(
                 host="https://dokploy.example.com",
@@ -272,9 +338,13 @@ target_name = "opw-testing"
     def test_update_application_env_includes_empty_build_fields_when_missing(self) -> None:
         requests: list[dict[str, object]] = []
 
+        def capture_request(**kwargs: object) -> dict[str, bool]:
+            requests.append(kwargs)
+            return {"ok": True}
+
         with patch(
             "control_plane.dokploy.dokploy_request",
-            side_effect=lambda **kwargs: requests.append(kwargs) or {"ok": True},
+            side_effect=capture_request,
         ):
             control_plane_dokploy.update_dokploy_target_env(
                 host="https://dokploy.example.com",
@@ -287,7 +357,7 @@ target_name = "opw-testing"
 
         self.assertEqual(len(requests), 1)
         self.assertEqual(requests[0]["path"], "/api/application.saveEnvironment")
-        payload = requests[0]["payload"]
+        payload = cast("dict[str, object]", requests[0]["payload"])
         self.assertIsInstance(payload, dict)
         self.assertEqual(payload["buildArgs"], "")
         self.assertEqual(payload["buildSecrets"], "")
@@ -1620,6 +1690,14 @@ protected_store_keys = ["yps-your-part-supplier"]
             schedule_payloads: list[dict[str, object]] = []
             request_paths: list[str] = []
 
+            def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
+                schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
+                return {"scheduleId": "schedule-123"}
+
+            def capture_request_path(**kwargs: object) -> dict[str, bool]:
+                request_paths.append(str(kwargs["path"]))
+                return {"ok": True}
+
             with (
                 patch(
                     "control_plane.dokploy.fetch_dokploy_target_payload",
@@ -1649,10 +1727,7 @@ protected_store_keys = ["yps-your-part-supplier"]
                 ),
                 patch(
                     "control_plane.dokploy.upsert_dokploy_schedule",
-                    side_effect=lambda **kwargs: (
-                        schedule_payloads.append(kwargs["schedule_payload"])
-                        or {"scheduleId": "schedule-123"}
-                    ),
+                    side_effect=capture_schedule_payload,
                 ),
                 patch(
                     "control_plane.dokploy.latest_deployment_for_schedule",
@@ -1664,9 +1739,7 @@ protected_store_keys = ["yps-your-part-supplier"]
                 ),
                 patch(
                     "control_plane.dokploy.dokploy_request",
-                    side_effect=lambda **kwargs: (
-                        request_paths.append(str(kwargs["path"])) or {"ok": True}
-                    ),
+                    side_effect=capture_request_path,
                 ),
             ):
                 control_plane_dokploy.run_compose_post_deploy_update(
@@ -1717,6 +1790,14 @@ protected_store_keys = ["yps-your-part-supplier"]
         schedule_payloads: list[dict[str, object]] = []
         request_paths: list[str] = []
 
+        def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
+            schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
+            return {"scheduleId": "schedule-123"}
+
+        def capture_request_path(**kwargs: object) -> dict[str, bool]:
+            request_paths.append(str(kwargs["path"]))
+            return {"ok": True}
+
         with (
             patch(
                 "control_plane.dokploy.fetch_dokploy_target_payload",
@@ -1724,10 +1805,7 @@ protected_store_keys = ["yps-your-part-supplier"]
             ),
             patch(
                 "control_plane.dokploy.upsert_dokploy_schedule",
-                side_effect=lambda **kwargs: (
-                    schedule_payloads.append(kwargs["schedule_payload"])
-                    or {"scheduleId": "schedule-123"}
-                ),
+                side_effect=capture_schedule_payload,
             ),
             patch(
                 "control_plane.dokploy.latest_deployment_for_schedule",
@@ -1739,9 +1817,7 @@ protected_store_keys = ["yps-your-part-supplier"]
             ),
             patch(
                 "control_plane.dokploy.dokploy_request",
-                side_effect=lambda **kwargs: (
-                    request_paths.append(str(kwargs["path"])) or {"ok": True}
-                ),
+                side_effect=capture_request_path,
             ),
         ):
             control_plane_dokploy.run_compose_odoo_backup_gate(
@@ -1879,8 +1955,7 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
             )
 
         self.assertEqual(len(update_payloads), 1)
-        payload = update_payloads[0]["payload"]
-        self.assertIsInstance(payload, dict)
+        payload = cast("dict[str, object]", update_payloads[0]["payload"])
         self.assertEqual(payload["sourceType"], "raw")
         self.assertEqual(payload["composePath"], "docker-compose.yml")
         self.assertEqual(payload["composeFile"], compose_file)
@@ -1997,9 +2072,10 @@ actions = ["launchplane_service_deploy.execute"]
 
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertEqual(len(captured_env_updates), 1)
-        self.assertIn(f"LAUNCHPLANE_POLICY_B64={policy_b64}", captured_env_updates[0]["env_text"])
-        self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", captured_env_updates[0]["env_text"])
-        self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", captured_env_updates[0]["env_text"])
+        env_text = str(captured_env_updates[0]["env_text"])
+        self.assertIn(f"LAUNCHPLANE_POLICY_B64={policy_b64}", env_text)
+        self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", env_text)
+        self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", env_text)
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "ok")
         self.assertTrue(payload["changed"])

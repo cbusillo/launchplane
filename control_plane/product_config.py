@@ -4,14 +4,13 @@ import json
 import os
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, cast
+from typing import Literal, Protocol, cast
 
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
 from control_plane.contracts.runtime_environment_record import ScalarValue
 from control_plane.contracts.secret_record import SecretScope
-from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -19,6 +18,14 @@ MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 ProductConfigMode = Literal["dry-run", "apply"]
 _VALID_SECRET_SCOPES: tuple[SecretScope, ...] = ("global", "context", "context_instance")
+
+
+class ProductConfigStore(control_plane_secrets.SecretWriteStore, Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None: ...
 
 
 class ProductConfigError(ValueError):
@@ -86,7 +93,7 @@ def summarize_runtime_environment_record(record: RuntimeEnvironmentRecord) -> di
 
 def apply_product_config_bundle(
     *,
-    record_store: PostgresRecordStore,
+    record_store: ProductConfigStore,
     payload: dict[str, object],
     mode: ProductConfigMode,
     actor: str,
@@ -402,7 +409,7 @@ def _require_product_config_master_key_if_needed(secrets: tuple[dict[str, object
 
 
 def _product_config_secret_current_action(
-    *, record_store: PostgresRecordStore, secret: dict[str, object]
+    *, record_store: control_plane_secrets.SecretWriteStore, secret: dict[str, object]
 ) -> tuple[str, str]:
     existing_record = record_store.find_secret_record(
         scope=str(secret["scope"]),
