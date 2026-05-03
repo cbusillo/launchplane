@@ -4,7 +4,7 @@ import base64
 import hashlib
 import os
 import uuid
-from typing import Literal
+from typing import Literal, Protocol
 
 import click
 from cryptography.fernet import Fernet, InvalidToken
@@ -28,6 +28,54 @@ SECRET_STATUS_CONFIGURED = "configured"
 
 SecretWriteAction = Literal["created", "rotated", "unchanged"]
 SecretBindingRelabelAction = Literal["relabelled", "unchanged"]
+
+
+class SecretReadStore(Protocol):
+    def read_secret_record(self, secret_id: str) -> SecretRecord: ...
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]: ...
+
+    def read_secret_version(self, version_id: str) -> SecretVersion: ...
+
+    def list_secret_versions(self, *, secret_id: str) -> tuple[SecretVersion, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]: ...
+
+
+class SecretWriteStore(SecretReadStore, Protocol):
+    def find_secret_record(
+        self,
+        *,
+        scope: str,
+        integration: str,
+        name: str,
+        context: str = "",
+        instance: str = "",
+    ) -> SecretRecord | None: ...
+
+    def write_secret_record(self, record: SecretRecord) -> None: ...
+
+    def write_secret_version(self, version: SecretVersion) -> None: ...
+
+    def write_secret_binding(self, binding: SecretBinding) -> None: ...
+
+    def write_secret_audit_event(self, event: SecretAuditEvent) -> None: ...
 
 
 def _secret_slug(value: str) -> str:
@@ -124,9 +172,7 @@ def _scope_matches_record(
     return record.context == context_name and record.instance == instance_name
 
 
-def _binding_for_secret(
-    record_store: PostgresRecordStore, *, secret_id: str
-) -> SecretBinding | None:
+def _binding_for_secret(record_store: SecretReadStore, *, secret_id: str) -> SecretBinding | None:
     for binding in record_store.list_secret_bindings(limit=None):
         if binding.secret_id == secret_id and binding.status == SECRET_STATUS_CONFIGURED:
             return binding
@@ -205,7 +251,7 @@ def overlay_runtime_environment_secret_values(
 
 def write_secret_value(
     *,
-    record_store: PostgresRecordStore,
+    record_store: SecretWriteStore,
     scope: SecretScope,
     integration: str,
     name: str,
@@ -316,7 +362,7 @@ def expected_secret_binding_id(*, secret_id: str, binding_key: str) -> str:
 
 def relabel_secret_binding(
     *,
-    record_store: PostgresRecordStore,
+    record_store: SecretWriteStore,
     binding_id: str,
     binding_key: str,
     actor: str = "",
@@ -407,7 +453,7 @@ def relabel_secret_binding(
     }
 
 
-def build_secret_status(record_store: PostgresRecordStore, *, secret_id: str) -> dict[str, object]:
+def build_secret_status(record_store: SecretReadStore, *, secret_id: str) -> dict[str, object]:
     record = record_store.read_secret_record(secret_id)
     versions = record_store.list_secret_versions(secret_id=secret_id)
     binding = _binding_for_secret(record_store, secret_id=secret_id)
@@ -457,7 +503,7 @@ def build_secret_status(record_store: PostgresRecordStore, *, secret_id: str) ->
 
 
 def list_secret_statuses(
-    record_store: PostgresRecordStore,
+    record_store: SecretReadStore,
     *,
     integration: str = "",
     context_name: str = "",

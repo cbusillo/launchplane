@@ -544,6 +544,15 @@ class PromotionEvidenceEnvelope(BaseModel):
         return self
 
 
+def _validate_driver_envelope_product(product: str, *, label: str) -> None:
+    if not product.strip():
+        raise ValueError(f"{label} requires product.")
+
+
+class ProductDriverMismatchError(ValueError):
+    pass
+
+
 class OdooPostDeployEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -553,8 +562,7 @@ class OdooPostDeployEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooPostDeployEnvelope":
-        if self.product.strip() != "odoo":
-            raise ValueError("Odoo post-deploy requires product 'odoo'.")
+        _validate_driver_envelope_product(self.product, label="Odoo post-deploy")
         return self
 
 
@@ -567,8 +575,7 @@ class OdooArtifactPublishEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooArtifactPublishEnvelope":
-        if self.product.strip() != "odoo":
-            raise ValueError("Odoo artifact publish requires product 'odoo'.")
+        _validate_driver_envelope_product(self.product, label="Odoo artifact publish")
         return self
 
 
@@ -581,8 +588,7 @@ class OdooArtifactPublishInputsEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooArtifactPublishInputsEnvelope":
-        if self.product.strip() != "odoo":
-            raise ValueError("Odoo artifact publish inputs require product 'odoo'.")
+        _validate_driver_envelope_product(self.product, label="Odoo artifact publish inputs")
         return self
 
 
@@ -595,8 +601,7 @@ class OdooProdRollbackEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdRollbackEnvelope":
-        if self.product.strip() != "odoo":
-            raise ValueError("Odoo prod rollback requires product 'odoo'.")
+        _validate_driver_envelope_product(self.product, label="Odoo prod rollback")
         return self
 
 
@@ -609,8 +614,7 @@ class OdooProdBackupGateEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdBackupGateEnvelope":
-        if self.product.strip() != "odoo":
-            raise ValueError("Odoo prod backup gate requires product 'odoo'.")
+        _validate_driver_envelope_product(self.product, label="Odoo prod backup gate")
         return self
 
 
@@ -623,8 +627,7 @@ class OdooProdPromotionEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdPromotionEnvelope":
-        if self.product.strip() != "odoo":
-            raise ValueError("Odoo prod promotion requires product 'odoo'.")
+        _validate_driver_envelope_product(self.product, label="Odoo prod promotion")
         return self
 
 
@@ -637,8 +640,7 @@ class VeriReelTestingDeployEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelTestingDeployEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel testing deploy requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel testing deploy")
         if self.deploy.instance != "testing":
             raise ValueError("VeriReel testing deploy requires instance 'testing'.")
         return self
@@ -677,8 +679,8 @@ class VeriReelTestingVerificationRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelTestingVerificationRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel testing verification requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel testing verification requires context.")
         if self.instance != "testing":
             raise ValueError("VeriReel testing verification requires instance 'testing'.")
         if not self.deployment_record_id.strip():
@@ -695,8 +697,7 @@ class VeriReelTestingVerificationEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelTestingVerificationEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel testing verification requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel testing verification")
         return self
 
 
@@ -709,8 +710,7 @@ class VeriReelProdDeployEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelProdDeployEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel prod deploy requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel prod deploy")
         if self.deploy.instance != "prod":
             raise ValueError("VeriReel prod deploy requires instance 'prod'.")
         return self
@@ -725,8 +725,7 @@ class VeriReelAppMaintenanceEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelAppMaintenanceEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel app maintenance requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel app maintenance")
         return self
 
 
@@ -739,8 +738,7 @@ class VeriReelStableEnvironmentEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelStableEnvironmentEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel stable environment requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel stable environment")
         return self
 
 
@@ -753,8 +751,7 @@ class VeriReelRuntimeVerificationEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelRuntimeVerificationEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel runtime verification requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel runtime verification")
         return self
 
 
@@ -767,8 +764,7 @@ class VeriReelProdPromotionEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelProdPromotionEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel prod promotion requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel prod promotion")
         return self
 
 
@@ -779,14 +775,9 @@ class VeriReelProdBackupGateEnvelope(BaseModel):
     product: str
     backup_gate: VeriReelProdBackupGateRequest
 
-
-class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
-    daemon_threads = True
-
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelProdBackupGateEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel prod backup gate requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel prod backup gate")
         return self
 
 
@@ -799,8 +790,7 @@ class VeriReelProdRollbackEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelProdRollbackEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel prod rollback requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel prod rollback")
         return self
 
 
@@ -813,8 +803,7 @@ class VeriReelPreviewRefreshEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelPreviewRefreshEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel preview refresh requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel preview refresh")
         return self
 
 
@@ -827,8 +816,7 @@ class VeriReelPreviewDestroyEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelPreviewDestroyEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel preview destroy requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel preview destroy")
         return self
 
 
@@ -845,10 +833,10 @@ class VeriReelPreviewVerificationRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelPreviewVerificationRequest":
-        if self.context != "verireel-testing":
-            raise ValueError("VeriReel preview verification requires context 'verireel-testing'.")
-        if self.anchor_repo != "verireel":
-            raise ValueError("VeriReel preview verification requires anchor_repo 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel preview verification requires context.")
+        if not self.anchor_repo.strip():
+            raise ValueError("VeriReel preview verification requires anchor_repo.")
         if self.verification_status.strip() not in {"pass", "fail"}:
             raise ValueError("VeriReel preview verification status must be 'pass' or 'fail'.")
         if not self.verified_at.strip():
@@ -865,8 +853,7 @@ class VeriReelPreviewVerificationEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelPreviewVerificationEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel preview verification requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel preview verification")
         return self
 
 
@@ -879,8 +866,7 @@ class VeriReelPreviewInventoryEnvelope(BaseModel):
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelPreviewInventoryEnvelope":
-        if self.product.strip() != "verireel":
-            raise ValueError("VeriReel preview inventory requires product 'verireel'.")
+        _validate_driver_envelope_product(self.product, label="VeriReel preview inventory")
         return self
 
 
@@ -1059,6 +1045,10 @@ class ProductConfigApplyEnvelope(BaseModel):
         if self.runtime_environment is not None:
             payload["runtime_environment"] = self.runtime_environment
         return payload
+
+
+class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
+    daemon_threads = True
 
 
 def _json_response(
@@ -1615,6 +1605,68 @@ def _product_profile_context_cutover_contexts_allowed(
         requested_contexts.add(preview_context.strip())
     requested_contexts.discard("")
     return requested_contexts.issubset(allowed_contexts)
+
+
+def _product_driver_compatible(
+    *, profile: LaunchplaneProductProfileRecord, expected_driver_id: str
+) -> bool:
+    expected = expected_driver_id.strip()
+    if profile.driver_id == expected:
+        return True
+    descriptor = read_driver_descriptor(profile.driver_id)
+    return descriptor.base_driver_id == expected
+
+
+def _require_product_driver(
+    *,
+    record_store: object,
+    product: str,
+    expected_driver_id: str,
+) -> LaunchplaneProductProfileRecord | None:
+    normalized_product = product.strip()
+    normalized_driver_id = expected_driver_id.strip()
+    if normalized_product == normalized_driver_id:
+        return None
+    read_profile = getattr(record_store, "read_product_profile_record", None)
+    if not callable(read_profile):
+        raise ValueError("Product driver validation requires product profile storage.")
+    profile = cast(LaunchplaneProductProfileRecord, read_profile(normalized_product))
+    if not _product_driver_compatible(profile=profile, expected_driver_id=normalized_driver_id):
+        raise ProductDriverMismatchError(
+            "Product profile is not compatible with the requested driver route."
+        )
+    return profile
+
+
+def _product_profile_has_lane(
+    *, profile: LaunchplaneProductProfileRecord, context: str, instance: str
+) -> bool:
+    normalized_context = context.strip()
+    normalized_instance = instance.strip()
+    return any(
+        lane.context.strip() == normalized_context and lane.instance.strip() == normalized_instance
+        for lane in profile.lanes
+    )
+
+
+def _require_product_driver_lane(
+    *,
+    record_store: object,
+    product: str,
+    expected_driver_id: str,
+    context: str,
+    instance: str,
+) -> LaunchplaneProductProfileRecord | None:
+    profile = _require_product_driver(
+        record_store=record_store,
+        product=product,
+        expected_driver_id=expected_driver_id,
+    )
+    if profile is None:
+        return None
+    if not _product_profile_has_lane(profile=profile, context=context, instance=instance):
+        raise ProductDriverMismatchError("Product profile does not own the requested driver lane.")
+    return profile
 
 
 def _safe_return_to(value: str) -> str:
@@ -3873,6 +3925,11 @@ def create_launchplane_service_app(
                 result = {}
             elif path == "/v1/drivers/odoo/post-deploy":
                 request = OdooPostDeployEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="odoo",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="odoo_post_deploy.execute",
@@ -3917,6 +3974,11 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/artifact-publish":
                 request = OdooArtifactPublishEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="odoo",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="odoo_artifact_publish.write",
@@ -3962,6 +4024,11 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/artifact-publish-inputs":
                 request = OdooArtifactPublishInputsEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="odoo",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="odoo_artifact_publish_inputs.read",
@@ -4001,6 +4068,11 @@ def create_launchplane_service_app(
                 driver_result = result
             elif path == "/v1/drivers/odoo/prod-backup-gate":
                 request = OdooProdBackupGateEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="odoo",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="odoo_prod_backup_gate.execute",
@@ -4048,6 +4120,11 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/prod-promotion":
                 request = OdooProdPromotionEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="odoo",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="odoo_prod_promotion.execute",
@@ -4099,6 +4176,11 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/prod-rollback":
                 request = OdooProdRollbackEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="odoo",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="odoo_prod_rollback.execute",
@@ -4144,6 +4226,13 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/verireel/testing-deploy":
                 request = VeriReelTestingDeployEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.deploy.context,
+                    instance=request.deploy.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_testing_deploy.execute",
@@ -4184,6 +4273,13 @@ def create_launchplane_service_app(
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == "/v1/drivers/verireel/testing-verification":
                 request = VeriReelTestingVerificationEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.verification.context,
+                    instance=request.verification.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="deployment.write",
@@ -4222,6 +4318,13 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/verireel/stable-environment":
                 request = VeriReelStableEnvironmentEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.environment.context,
+                    instance=request.environment.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_stable_environment.read",
@@ -4250,6 +4353,13 @@ def create_launchplane_service_app(
                 result = {}
             elif path == "/v1/drivers/verireel/runtime-verification":
                 request = VeriReelRuntimeVerificationEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.verification.context,
+                    instance=request.verification.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_stable_environment.read",
@@ -4278,6 +4388,11 @@ def create_launchplane_service_app(
                 result = {}
             elif path == "/v1/drivers/verireel/app-maintenance":
                 request = VeriReelAppMaintenanceEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_app_maintenance.execute",
@@ -4317,6 +4432,13 @@ def create_launchplane_service_app(
                 result = driver_result.model_dump(mode="json")
             elif path == "/v1/drivers/verireel/prod-deploy":
                 request = VeriReelProdDeployEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.deploy.context,
+                    instance=request.deploy.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_prod_deploy.execute",
@@ -4357,6 +4479,13 @@ def create_launchplane_service_app(
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == "/v1/drivers/verireel/prod-backup-gate":
                 request = VeriReelProdBackupGateEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.backup_gate.context,
+                    instance=request.backup_gate.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_prod_backup_gate.execute",
@@ -4398,6 +4527,20 @@ def create_launchplane_service_app(
                 result = {"backup_gate_record_id": driver_result.backup_record_id}
             elif path == "/v1/drivers/verireel/prod-promotion":
                 request = VeriReelProdPromotionEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.promotion.context,
+                    instance=request.promotion.from_instance,
+                )
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.promotion.context,
+                    instance=request.promotion.to_instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_prod_promotion.execute",
@@ -4441,6 +4584,13 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/verireel/prod-rollback":
                 request = VeriReelProdRollbackEnvelope.model_validate(payload)
+                _require_product_driver_lane(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                    context=request.rollback.context,
+                    instance=request.rollback.instance,
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_prod_rollback.execute",
@@ -4484,6 +4634,11 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/verireel/preview-refresh":
                 request = VeriReelPreviewRefreshEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_preview_refresh.execute",
@@ -4528,6 +4683,11 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/verireel/preview-inventory":
                 request = VeriReelPreviewInventoryEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_preview_inventory.read",
@@ -4562,6 +4722,11 @@ def create_launchplane_service_app(
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == "/v1/drivers/verireel/preview-destroy":
                 request = VeriReelPreviewDestroyEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="verireel_preview_destroy.execute",
@@ -4605,6 +4770,11 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/verireel/preview-verification":
                 request = VeriReelPreviewVerificationEnvelope.model_validate(payload)
+                _require_product_driver(
+                    record_store=record_store,
+                    product=request.product,
+                    expected_driver_id="verireel",
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_generation.write",
@@ -5224,6 +5394,19 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "invalid_request",
                         "message": "Request payload failed validation.",
+                    },
+                },
+            )
+        except ProductDriverMismatchError:
+            return _json_response(
+                start_response=start_response,
+                status_code=403,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "product_driver_mismatch",
+                        "message": "Product is not configured for the requested driver route.",
                     },
                 },
             )
