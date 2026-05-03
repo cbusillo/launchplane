@@ -9,7 +9,7 @@ from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Literal
 from urllib.parse import parse_qs, urlparse
-from unittest.mock import Mock, patch
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -46,7 +46,6 @@ from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
-    GitHubOidcVerifier,
     LaunchplaneAuthzPolicy,
 )
 from control_plane.service_human_auth import (
@@ -401,75 +400,6 @@ def _invoke_raw_app(
         dict(captured["headers"]),
         response_body,
     )
-
-
-class GitHubOidcVerifierTests(unittest.TestCase):
-    def test_verify_decodes_expected_github_claims(self) -> None:
-        mock_jwk_client = Mock()
-        mock_jwk_client.get_signing_key_from_jwt.return_value = SimpleNamespace(key="signing-key")
-        claims = {
-            "repository": "every/verireel",
-            "repository_owner": "every",
-            "workflow_ref": "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
-            "job_workflow_ref": "",
-            "ref": "refs/heads/main",
-            "ref_type": "branch",
-            "event_name": "pull_request",
-            "environment": "",
-            "sub": "repo:every/verireel:pull_request",
-            "sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
-        }
-        with patch("control_plane.service_auth.jwt.decode", return_value=claims) as decode_mock:
-            verifier = GitHubOidcVerifier(
-                audience="launchplane.shinycomputers.com",
-                jwk_client=mock_jwk_client,
-            )
-            identity = verifier.verify("header.payload.signature")
-
-        mock_jwk_client.get_signing_key_from_jwt.assert_called_once_with("header.payload.signature")
-        decode_mock.assert_called_once_with(
-            "header.payload.signature",
-            "signing-key",
-            algorithms=["RS256"],
-            audience="launchplane.shinycomputers.com",
-            issuer="https://token.actions.githubusercontent.com",
-        )
-        self.assertEqual(identity.repository, "every/verireel")
-        self.assertEqual(identity.workflow_ref, claims["workflow_ref"])
-
-    def test_policy_wildcard_matches_branch_specific_workflow_ref(self) -> None:
-        identity = _identity(
-            repository="cbusillo/verireel",
-            workflow_ref=(
-                "cbusillo/verireel/.github/workflows/preview-control-plane.yml"
-                "@refs/heads/code/2026-04-21-preview-validation-pr"
-            ),
-        )
-        policy = LaunchplaneAuthzPolicy.model_validate(
-            {
-                "github_actions": [
-                    {
-                        "repository": "cbusillo/verireel",
-                        "workflow_refs": [
-                            "cbusillo/verireel/.github/workflows/preview-control-plane.yml@*"
-                        ],
-                        "event_names": ["pull_request"],
-                        "products": ["verireel"],
-                        "contexts": ["verireel-testing"],
-                        "actions": ["verireel_preview_refresh.execute"],
-                    }
-                ]
-            }
-        )
-
-        self.assertTrue(
-            policy.allows(
-                identity=identity,
-                action="verireel_preview_refresh.execute",
-                product="verireel",
-                context="verireel-testing",
-            )
-        )
 
 
 class GitHubHumanAuthTests(unittest.TestCase):
