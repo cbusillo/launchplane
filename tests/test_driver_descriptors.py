@@ -137,15 +137,28 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_service_accepts_descriptor_post_driver_routes(self) -> None:
-        descriptor_post_routes = {
-            action.route_path
+        descriptor_post_route_metadata = {
+            action.route_path: (descriptor.driver_id, action.action_id, action.authz_action)
             for descriptor in list_driver_descriptors()
             for action in descriptor.actions
             if action.method == "POST" and action.route_path.startswith("/v1/drivers/")
         }
+        service_route_metadata = control_plane_service._driver_route_metadata_from_descriptors()
 
-        self.assertTrue(descriptor_post_routes)
-        self.assertLessEqual(descriptor_post_routes, control_plane_service._build_write_routes())
+        self.assertTrue(descriptor_post_route_metadata)
+        self.assertLessEqual(
+            set(descriptor_post_route_metadata), control_plane_service._build_write_routes()
+        )
+        for route_path, (
+            driver_id,
+            action_id,
+            authz_action,
+        ) in descriptor_post_route_metadata.items():
+            self.assertEqual(service_route_metadata[route_path].driver_id, driver_id)
+            self.assertEqual(service_route_metadata[route_path].action_id, action_id)
+            self.assertEqual(
+                control_plane_service._descriptor_driver_authz_action(route_path), authz_action
+            )
         self.assertIn(
             "/v1/drivers/launchplane/self-deploy",
             control_plane_service._build_write_routes(),

@@ -173,7 +173,9 @@ string for that route. Some service callback routes, such as verification
 writeback routes, are declared with `operator_visible=false`; they remain in the
 driver route authorization map but are not surfaced as operator actions.
 The HTTP service admits product-driver POST routes from descriptor action route
-paths so new drivers do not need a second hardcoded router allowlist entry.
+paths and reads product-driver handler authorization actions from descriptor
+route metadata, so new drivers do not need a second hardcoded router allowlist
+or authz-action entry.
 
 Preview read models are capability-driven. A driver that exposes
 `previewable`, `preview_inventory_managed`, legacy `preview_lifecycle`, or the
