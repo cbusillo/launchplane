@@ -137,9 +137,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             )
 
         self.assertEqual(view.drivers[0].driver_id, "custom-web")
-        self.assertEqual(view.drivers[0].preview_summaries[0].preview.preview_id, "preview-web-pr-7")
         self.assertEqual(
-            view.drivers[0].preview_inventory_provenance.detail,
+            view.drivers[0].preview_summaries[0].preview.preview_id, "preview-web-pr-7"
+        )
+        preview_inventory_provenance = view.drivers[0].preview_inventory_provenance
+        self.assertIsNotNone(preview_inventory_provenance)
+        assert preview_inventory_provenance is not None
+        self.assertEqual(
+            preview_inventory_provenance.detail,
             "Preview identity record exists, but no generation evidence is recorded.",
         )
 
