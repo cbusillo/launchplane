@@ -254,6 +254,46 @@ class ProductContextCutoverTests(unittest.TestCase):
         )
         self.assertEqual(repeated_payload["profile"]["action"], "unchanged")
 
+    def test_apply_preserves_distinct_preview_context_in_history(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "test.sqlite3")
+            )
+            try:
+                store.ensure_schema()
+                _seed_syo_source_records(store)
+                profile = store.read_product_profile_record("sellyouroutboard")
+                store.write_product_profile_record(
+                    profile.model_copy(
+                        update={
+                            "preview": profile.preview.model_copy(
+                                update={"context": "sellyouroutboard-preview"}
+                            )
+                        }
+                    )
+                )
+
+                apply_product_context_cutover(
+                    record_store=store,
+                    request=ProductContextCutoverRequest(
+                        product="sellyouroutboard",
+                        source_context="sellyouroutboard-testing",
+                        target_context="sellyouroutboard",
+                        mode="apply",
+                        display_name="SellYourOutboard",
+                        source_label="test:cutover",
+                    ),
+                )
+                updated_profile = store.read_product_profile_record("sellyouroutboard")
+            finally:
+                store.close()
+
+        self.assertEqual(
+            updated_profile.historical_contexts,
+            ("sellyouroutboard-testing", "sellyouroutboard-preview"),
+        )
+        self.assertEqual(updated_profile.preview.context, "sellyouroutboard")
+
     def test_legacy_cleanup_deletes_lookup_records_and_disables_source_secrets(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
