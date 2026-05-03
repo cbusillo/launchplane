@@ -5,6 +5,7 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import Literal
 from unittest.mock import patch
 
 import click
@@ -20,11 +21,19 @@ from control_plane.cli import (
     main,
 )
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.backup_gate_record import BackupGateRecord, BackupGateStatus
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import DeploymentEvidence
-from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.contracts.promotion_record import PromotionRequest
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    BackupGateEvidence,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+    PromotionRecord,
+    PromotionRequest,
+    ReleaseStatus,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.postgres import PostgresRecordStore
@@ -92,7 +101,7 @@ def _write_backup_gate_record(
     record_id: str = "backup-opw-prod-20260410T182231Z",
     context: str = "opw",
     instance: str = "prod",
-    status: str = "pass",
+    status: BackupGateStatus = "pass",
 ) -> None:
     backup_gate_dir = state_dir / "backup_gates"
     backup_gate_dir.mkdir(parents=True, exist_ok=True)
@@ -134,7 +143,7 @@ def _write_control_plane_dokploy_source_of_truth(repo_root: Path, payload: str) 
                 )
             )
             store.write_dokploy_target_id_record(
-                control_plane_dokploy.DokployTargetIdRecord(
+                DokployTargetIdRecord(
                     context=target.context,
                     instance=target.instance,
                     target_id=target.target_id,
@@ -172,6 +181,78 @@ def _runtime_environments_database_url(repo_root: Path) -> str:
     return f"sqlite+pysqlite:///{repo_root / 'launchplane.sqlite3'}"
 
 
+def _artifact_identity_reference(
+    artifact_id: str = "artifact-sha256-image456",
+    *,
+    manifest_version: int = 1,
+) -> ArtifactIdentityReference:
+    return ArtifactIdentityReference(
+        artifact_id=artifact_id,
+        manifest_version=manifest_version,
+    )
+
+
+def _healthcheck_evidence(
+    *,
+    verified: bool = False,
+    urls: tuple[str, ...] = ("https://prod.example.com/web/health",),
+    timeout_seconds: int = 45,
+    status: ReleaseStatus = "pending",
+) -> HealthcheckEvidence:
+    return HealthcheckEvidence(
+        verified=verified,
+        urls=urls,
+        timeout_seconds=timeout_seconds,
+        status=status,
+    )
+
+
+def _backup_gate_evidence(
+    *,
+    status: ReleaseStatus = "pass",
+    evidence: dict[str, str] | None = None,
+) -> BackupGateEvidence:
+    return BackupGateEvidence(
+        required=True,
+        status=status,
+        evidence=evidence if evidence is not None else {"snapshot": "snap-1"},
+    )
+
+
+def _deploy_evidence(
+    *,
+    target_name: str = "opw-prod",
+    target_type: Literal["compose", "application"] = "compose",
+    deploy_mode: str = "dokploy-compose-api",
+    deployment_id: str = "control-plane-dokploy",
+    status: ReleaseStatus = "pass",
+    started_at: str = "2026-04-11T18:22:31Z",
+    finished_at: str = "2026-04-11T18:22:31Z",
+) -> DeploymentEvidence:
+    return DeploymentEvidence(
+        target_name=target_name,
+        target_type=target_type,
+        deploy_mode=deploy_mode,
+        deployment_id=deployment_id,
+        status=status,
+        started_at=started_at,
+        finished_at=finished_at,
+    )
+
+
+def _post_deploy_update_evidence(
+    *,
+    attempted: bool = True,
+    status: ReleaseStatus = "pass",
+    detail: str = "Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
+) -> PostDeployUpdateEvidence:
+    return PostDeployUpdateEvidence(
+        attempted=attempted,
+        status=status,
+        detail=detail,
+    )
+
+
 class PromoteWorkflowTests(unittest.TestCase):
     def test_build_promotion_record_returns_pending_record(self) -> None:
         record = build_promotion_record(record_id="promotion-20260410-182231-opw-testing-prod",
@@ -188,17 +269,15 @@ class PromoteWorkflowTests(unittest.TestCase):
         request = PromotionRequest(artifact_id="artifact-sha256-image456",
                                    backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
                                    context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
-                                   target_type="compose", deploy_mode="dokploy-compose-api", destination_health={
-                "verified": False,
-                "urls": ["https://prod.example.com/web/health"],
-                "timeout_seconds": 45,
-                "status": "pending",
-            }, source_health={
-                "verified": True,
-                "urls": ["https://testing.example.com/web/health"],
-                "timeout_seconds": 30,
-                "status": "pass",
-            }, backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}})
+                                   target_type="compose", deploy_mode="dokploy-compose-api",
+                                   destination_health=_healthcheck_evidence(),
+                                   source_health=_healthcheck_evidence(
+                                       verified=True,
+                                       urls=("https://testing.example.com/web/health",),
+                                       timeout_seconds=30,
+                                       status="pass",
+                                   ),
+                                   backup_gate=_backup_gate_evidence())
 
         record = build_executed_promotion_record(
             request=request,
@@ -220,11 +299,11 @@ class PromoteWorkflowTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "backup_record_id"):
             PromotionRecord(
                 record_id="promotion-1",
-                artifact_identity={"artifact_id": "artifact-sha256-image456"},
+                artifact_identity=_artifact_identity_reference(),
                 context="opw",
                 from_instance="testing",
                 to_instance="prod",
-                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
+                backup_gate=_backup_gate_evidence(),
                 deploy=DeploymentEvidence(
                     target_name="opw-prod",
                     target_type="compose",
@@ -235,12 +314,8 @@ class PromoteWorkflowTests(unittest.TestCase):
     def test_build_deployment_record_marks_pending_health_for_async_ship(self) -> None:
         request = ShipRequest(context="opw", instance="prod", source_git_ref="abc123", target_name="opw-prod",
                               target_type="compose", deploy_mode="dokploy-compose-api",
-                              artifact_id="artifact-sha256-image456", wait=False, destination_health={
-                "verified": False,
-                "urls": ["https://prod.example.com/web/health"],
-                "timeout_seconds": 45,
-                "status": "pending",
-            })
+                              artifact_id="artifact-sha256-image456", wait=False,
+                              destination_health=_healthcheck_evidence())
 
         record = build_deployment_record(
             request=request,
@@ -252,7 +327,9 @@ class PromoteWorkflowTests(unittest.TestCase):
         )
 
         self.assertIsInstance(record, DeploymentRecord)
-        self.assertEqual(record.artifact_identity.artifact_id, "artifact-sha256-image456")
+        artifact_identity = record.artifact_identity
+        assert artifact_identity is not None
+        self.assertEqual(artifact_identity.artifact_id, "artifact-sha256-image456")
         self.assertEqual(record.deploy.status, "pending")
         self.assertEqual(record.post_deploy_update.status, "skipped")
         self.assertEqual(record.destination_health.status, "pending")
@@ -261,12 +338,7 @@ class PromoteWorkflowTests(unittest.TestCase):
     def test_build_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(self) -> None:
         request = ShipRequest(context="opw", instance="prod", source_git_ref="abc123",
                               artifact_id="artifact-sha256-image456", target_name="opw-prod", target_type="compose",
-                              deploy_mode="dokploy-compose-api", destination_health={
-                "verified": False,
-                "urls": ["https://prod.example.com/web/health"],
-                "timeout_seconds": 45,
-                "status": "pending",
-            })
+                              deploy_mode="dokploy-compose-api", destination_health=_healthcheck_evidence())
 
         record = build_deployment_record(
             request=request,
@@ -619,46 +691,33 @@ class PromoteCliTests(unittest.TestCase):
                                  backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
                                  context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
                                  target_type="compose", deploy_mode="dokploy-compose-api", health_timeout_seconds=45,
-                                 source_health={
-                                     "verified": True,
-                                     "urls": ["https://testing.example.com/web/health"],
-                                     "timeout_seconds": 30,
-                                     "status": "pass",
-                                 },
-                                 backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                                 destination_health={
-                                     "verified": False,
-                                     "urls": ["https://prod.example.com/web/health"],
-                                     "timeout_seconds": 45,
-                                     "status": "pending",
-                                 }).model_dump_json(indent=2),
+                                 source_health=_healthcheck_evidence(
+                                     verified=True,
+                                     urls=("https://testing.example.com/web/health",),
+                                     timeout_seconds=30,
+                                     status="pass",
+                                 ),
+                                 backup_gate=_backup_gate_evidence(),
+                                 destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             with patch(
                 "control_plane.cli._resolve_ship_request_for_promotion",
                 return_value=ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
                                          source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                                         deploy_mode="dokploy-compose-api", destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    }),
+                                         deploy_mode="dokploy-compose-api",
+                                         destination_health=_healthcheck_evidence()),
             ), patch(
                 "control_plane.cli._execute_ship",
                 return_value=(
                     state_dir / "deployments" / "deployment-1.json",
                     DeploymentRecord(record_id="deployment-1",
-                                     artifact_identity={"artifact_id": "artifact-sha256-image456"}, context="opw",
-                                     instance="prod", source_git_ref="abc123", deploy={
-                            "target_name": "opw-prod",
-                            "target_type": "compose",
-                            "deploy_mode": "dokploy-compose-api",
-                            "deployment_id": "control-plane-dokploy",
-                            "status": "pass",
-                            "started_at": "2026-04-10T18:22:31Z",
-                            "finished_at": "2026-04-10T18:24:00Z",
-                        }),
+                                     artifact_identity=_artifact_identity_reference(), context="opw",
+                                     instance="prod", source_git_ref="abc123",
+                                     deploy=_deploy_evidence(
+                                         started_at="2026-04-10T18:22:31Z",
+                                         finished_at="2026-04-10T18:24:00Z",
+                                     )),
                 ),
             ):
                 result = runner.invoke(
@@ -1414,7 +1473,7 @@ DOKPLOY_SHIP_MODE = "auto"
             input_file = repo_root / "deployment-record.json"
             record = DeploymentRecord(
                 record_id="deployment-20260411T182231Z-opw-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 context="opw",
                 instance="prod",
                 source_git_ref="def456",
@@ -1463,28 +1522,15 @@ DOKPLOY_SHIP_MODE = "auto"
             input_file = repo_root / "promotion-record.json"
             record = PromotionRecord(
                 record_id="promotion-20260411T182231Z-opw-testing-to-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 deployment_record_id="deployment-20260411T182231Z-opw-prod",
                 backup_record_id="backup-opw-prod-20260410T182231Z",
                 context="opw",
                 from_instance="testing",
                 to_instance="prod",
-                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                deploy={
-                    "target_name": "opw-prod",
-                    "target_type": "compose",
-                    "deploy_mode": "dokploy-compose-api",
-                    "deployment_id": "control-plane-dokploy",
-                    "status": "pass",
-                    "started_at": "2026-04-11T18:22:31Z",
-                    "finished_at": "2026-04-11T18:22:31Z",
-                },
-                destination_health={
-                    "verified": True,
-                    "urls": ["https://prod.example.com/web/health"],
-                    "timeout_seconds": 45,
-                    "status": "pass",
-                },
+                backup_gate=_backup_gate_evidence(),
+                deploy=_deploy_evidence(),
+                destination_health=_healthcheck_evidence(verified=True, status="pass"),
             )
             input_file.write_text(record.model_dump_json(indent=2), encoding="utf-8")
 
@@ -1517,7 +1563,7 @@ DOKPLOY_SHIP_MODE = "auto"
             deployment_dir.mkdir(parents=True, exist_ok=True)
             record = DeploymentRecord(
                 record_id="deployment-20260411T182231Z-opw-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 context="opw",
                 instance="prod",
                 source_git_ref="def456",
@@ -1574,7 +1620,7 @@ DOKPLOY_SHIP_MODE = "auto"
             promotion_dir.mkdir(parents=True, exist_ok=True)
             deployment_record = DeploymentRecord(
                 record_id="deployment-20260411T182231Z-opw-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 context="opw",
                 instance="prod",
                 source_git_ref="def456",
@@ -1595,28 +1641,15 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             promotion_record = PromotionRecord(
                 record_id="promotion-20260411T182231Z-opw-testing-to-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 deployment_record_id=deployment_record.record_id,
                 backup_record_id="backup-opw-prod-20260410T182231Z",
                 context="opw",
                 from_instance="testing",
                 to_instance="prod",
-                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                deploy={
-                    "target_name": "opw-prod",
-                    "target_type": "compose",
-                    "deploy_mode": "dokploy-compose-api",
-                    "deployment_id": "control-plane-dokploy",
-                    "status": "pass",
-                    "started_at": "2026-04-11T18:22:31Z",
-                    "finished_at": "2026-04-11T18:22:31Z",
-                },
-                destination_health={
-                    "verified": True,
-                    "urls": ["https://prod.example.com/web/health"],
-                    "timeout_seconds": 45,
-                    "status": "pass",
-                },
+                backup_gate=_backup_gate_evidence(),
+                deploy=_deploy_evidence(),
+                destination_health=_healthcheck_evidence(verified=True, status="pass"),
             )
             (deployment_dir / f"{deployment_record.record_id}.json").write_text(
                 deployment_record.model_dump_json(indent=2),
@@ -1657,21 +1690,13 @@ DOKPLOY_SHIP_MODE = "auto"
             promotion_dir.mkdir(parents=True, exist_ok=True)
             promotion_record = PromotionRecord(
                 record_id="promotion-20260411T182231Z-opw-testing-to-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 backup_record_id="backup-opw-prod-20260410T182231Z",
                 context="opw",
                 from_instance="testing",
                 to_instance="prod",
-                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                deploy={
-                    "target_name": "opw-prod",
-                    "target_type": "compose",
-                    "deploy_mode": "dokploy-compose-api",
-                    "deployment_id": "control-plane-dokploy",
-                    "status": "pass",
-                    "started_at": "2026-04-11T18:22:31Z",
-                    "finished_at": "2026-04-11T18:22:31Z",
-                },
+                backup_gate=_backup_gate_evidence(),
+                deploy=_deploy_evidence(),
             )
             (promotion_dir / f"{promotion_record.record_id}.json").write_text(
                 promotion_record.model_dump_json(indent=2),
@@ -1705,7 +1730,7 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_release_tuple_record(state_dir, artifact_id="artifact-2", tenant_sha="def4567")
             deployment_record = DeploymentRecord(
                 record_id="deployment-20260411T182231Z-opw-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 context="opw",
                 instance="prod",
                 source_git_ref="def456",
@@ -1726,22 +1751,14 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             promotion_record = PromotionRecord(
                 record_id="promotion-20260411T182231Z-opw-testing-to-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 deployment_record_id=deployment_record.record_id,
                 backup_record_id="backup-opw-prod-20260410T182231Z",
                 context="opw",
                 from_instance="testing",
                 to_instance="prod",
-                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                deploy={
-                    "target_name": "opw-prod",
-                    "target_type": "compose",
-                    "deploy_mode": "dokploy-compose-api",
-                    "deployment_id": "control-plane-dokploy",
-                    "status": "pass",
-                    "started_at": "2026-04-11T18:22:31Z",
-                    "finished_at": "2026-04-11T18:22:31Z",
-                },
+                backup_gate=_backup_gate_evidence(),
+                deploy=_deploy_evidence(),
             )
             (deployment_dir / f"{deployment_record.record_id}.json").write_text(
                 deployment_record.model_dump_json(indent=2),
@@ -1785,21 +1802,13 @@ DOKPLOY_SHIP_MODE = "auto"
             promotion_dir.mkdir(parents=True, exist_ok=True)
             promotion_record = PromotionRecord(
                 record_id="promotion-20260411T182231Z-opw-testing-to-prod",
-                artifact_identity={"artifact_id": "artifact-2", "manifest_version": 1},
+                artifact_identity=_artifact_identity_reference("artifact-2"),
                 backup_record_id="backup-opw-prod-20260410T182231Z",
                 context="opw",
                 from_instance="testing",
                 to_instance="prod",
-                backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                deploy={
-                    "target_name": "opw-prod",
-                    "target_type": "compose",
-                    "deploy_mode": "dokploy-compose-api",
-                    "deployment_id": "control-plane-dokploy",
-                    "status": "pass",
-                    "started_at": "2026-04-11T18:22:31Z",
-                    "finished_at": "2026-04-11T18:22:31Z",
-                },
+                backup_gate=_backup_gate_evidence(),
+                deploy=_deploy_evidence(),
             )
             (promotion_dir / f"{promotion_record.record_id}.json").write_text(
                 promotion_record.model_dump_json(indent=2),
@@ -1987,12 +1996,8 @@ DOKPLOY_SHIP_MODE = "auto"
             input_file.write_text(
                 ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
                             source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    }).model_dump_json(indent=2),
+                            deploy_mode="dokploy-compose-api",
+                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
@@ -2054,19 +2059,14 @@ DOKPLOY_SHIP_MODE = "auto"
                                  backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
                                  context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
                                  target_type="compose", deploy_mode="dokploy-compose-api", health_timeout_seconds=45,
-                                 source_health={
-                                     "verified": True,
-                                     "urls": ["https://testing.example.com/web/health"],
-                                     "timeout_seconds": 30,
-                                     "status": "pass",
-                                 },
-                                 backup_gate={"required": True, "status": "pass", "evidence": {"snapshot": "snap-1"}},
-                                 destination_health={
-                                     "verified": False,
-                                     "urls": ["https://prod.example.com/web/health"],
-                                     "timeout_seconds": 45,
-                                     "status": "pending",
-                                 }).model_dump_json(indent=2),
+                                 source_health=_healthcheck_evidence(
+                                     verified=True,
+                                     urls=("https://testing.example.com/web/health",),
+                                     timeout_seconds=30,
+                                     status="pass",
+                                 ),
+                                 backup_gate=_backup_gate_evidence(),
+                                 destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
@@ -2075,36 +2075,20 @@ DOKPLOY_SHIP_MODE = "auto"
                 return_value=ShipRequest(context="opw", instance="prod", source_git_ref="abc123",
                                          target_name="opw-prod", target_type="compose",
                                          deploy_mode="dokploy-compose-api", artifact_id="artifact-sha256-image456",
-                                         destination_health={
-                                             "verified": False,
-                                             "urls": ["https://prod.example.com/web/health"],
-                                             "timeout_seconds": 45,
-                                             "status": "pending",
-                                         }),
+                                         destination_health=_healthcheck_evidence()),
             ), patch(
                 "control_plane.cli._execute_ship",
                 return_value=(
                     state_dir / "deployments" / "deployment-1.json",
                     DeploymentRecord(record_id="deployment-1",
-                                     artifact_identity={"artifact_id": "artifact-sha256-image456"}, context="opw",
-                                     instance="prod", source_git_ref="abc123", deploy={
-                            "target_name": "opw-prod",
-                            "target_type": "compose",
-                            "deploy_mode": "dokploy-compose-api",
-                            "deployment_id": "control-plane-dokploy",
-                            "status": "pass",
-                            "started_at": "2026-04-10T18:22:31Z",
-                            "finished_at": "2026-04-10T18:24:00Z",
-                        }, post_deploy_update={
-                            "attempted": True,
-                            "status": "pass",
-                            "detail": "Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
-                        }, destination_health={
-                            "verified": True,
-                            "urls": ["https://prod.example.com/web/health"],
-                            "timeout_seconds": 45,
-                            "status": "pass",
-                        }),
+                                     artifact_identity=_artifact_identity_reference(), context="opw",
+                                     instance="prod", source_git_ref="abc123",
+                                     deploy=_deploy_evidence(
+                                         started_at="2026-04-10T18:22:31Z",
+                                         finished_at="2026-04-10T18:24:00Z",
+                                     ),
+                                     post_deploy_update=_post_deploy_update_evidence(),
+                                     destination_health=_healthcheck_evidence(verified=True, status="pass")),
                 ),
             ):
                 result = runner.invoke(
@@ -2146,12 +2130,7 @@ DOKPLOY_SHIP_MODE = "auto"
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    },
+                    destination_health=_healthcheck_evidence(),
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
@@ -2365,8 +2344,10 @@ target_id = "compose-123"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             self.assertEqual(len(captured_sync_calls), 1)
+            artifact_manifest = captured_sync_calls[0]["artifact_manifest"]
+            assert isinstance(artifact_manifest, ArtifactIdentityManifest)
             self.assertEqual(
-                captured_sync_calls[0]["artifact_manifest"].artifact_id,
+                artifact_manifest.artifact_id,
                 "artifact-sha256-image456",
             )
             deployment_files = sorted((state_dir / "deployments").glob("*.json"))
@@ -2398,12 +2379,8 @@ target_id = "compose-123"
             input_file.write_text(
                 ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
                             source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    }).model_dump_json(indent=2),
+                            deploy_mode="dokploy-compose-api",
+                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             post_deploy_updates: list[dict[str, object]] = []
@@ -2453,12 +2430,8 @@ target_id = "compose-123"
             input_file.write_text(
                 ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
                             source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    }).model_dump_json(indent=2),
+                            deploy_mode="dokploy-compose-api",
+                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
@@ -2517,15 +2490,12 @@ target_id = "compose-123"
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    destination_health={
-                        "verified": False,
-                        "urls": [
+                    destination_health=_healthcheck_evidence(
+                        urls=(
                             "https://prod-alt.example.com/web/health",
                             "https://prod.example.com/web/health",
-                        ],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    },
+                        ),
+                    ),
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
@@ -2594,15 +2564,12 @@ target_id = "compose-123"
                     target_name="opw-prod",
                     target_type="compose",
                     deploy_mode="dokploy-compose-api",
-                    destination_health={
-                        "verified": False,
-                        "urls": [
+                    destination_health=_healthcheck_evidence(
+                        urls=(
                             "https://prod-alt.example.com/web/health",
                             "https://prod.example.com/web/health",
-                        ],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    },
+                        ),
+                    ),
                 ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
@@ -2662,12 +2629,8 @@ target_id = "compose-123"
             input_file.write_text(
                 ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
                             source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    }).model_dump_json(indent=2),
+                            deploy_mode="dokploy-compose-api",
+                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
@@ -2721,12 +2684,8 @@ target_id = "compose-123"
             input_file.write_text(
                 ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
                             source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", destination_health={
-                        "verified": False,
-                        "urls": ["https://prod.example.com/web/health"],
-                        "timeout_seconds": 45,
-                        "status": "pending",
-                    }).model_dump_json(indent=2),
+                            deploy_mode="dokploy-compose-api",
+                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
