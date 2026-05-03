@@ -11,6 +11,8 @@ import secrets
 import warnings
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
+from cryptography.hazmat.primitives import hashes, hmac as cryptography_hmac
+
 if TYPE_CHECKING:
     from authlib.integrations.requests_client import (  # type: ignore[import-untyped]
         OAuth2Session as OAuth2SessionType,
@@ -337,11 +339,12 @@ class HumanSessionManager:
 
     def _sign_cookie_value(self, session_id: str) -> str:
         normalized_session_id = session_id.strip()
-        signature = hmac.new(
+        signer = cryptography_hmac.HMAC(
             self._config.session_secret.encode("utf-8"),
-            normalized_session_id.encode("utf-8"),
-            hashlib.sha256,
-        ).hexdigest()
+            hashes.SHA256(),
+        )
+        signer.update(normalized_session_id.encode("utf-8"))
+        signature = signer.finalize().hex()
         return f"{normalized_session_id}.{signature}"
 
     def _verify_cookie_value(self, cookie_session_id: str) -> str:
