@@ -17,11 +17,16 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationState,
     PreviewGenerationRecord,
     PreviewPullRequestSummary,
     PreviewSourceRecord,
 )
-from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_record import PreviewRecord, PreviewState
+from control_plane.contracts.preview_request_metadata import (
+    LaunchplaneCompanionPullRequestReference,
+    LaunchplanePreviewRequestParseStatus,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
@@ -30,7 +35,9 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
     PromotionRecord,
+    ReleaseStatus,
 )
+from control_plane.contracts.github_pull_request_event import PullRequestAction, PullRequestState
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.launchplane import (
@@ -63,7 +70,7 @@ def _preview_record(
     anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
     preview_label: str = "opw/tenant-opw/pr-123",
     canonical_url: str = "https://launchplane.example/previews/opw/tenant-opw/pr-123",
-    state: str = "active",
+    state: PreviewState = "active",
     active_generation_id: str = "hgen_01jabc_1",
     serving_generation_id: str = "hgen_01jabc_1",
     latest_generation_id: str = "hgen_01jabc_1",
@@ -108,12 +115,12 @@ def _generation_record(
     anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
     anchor_head_sha: str = "aaaa1111",
     sequence: int,
-    state: str,
+    state: PreviewGenerationState,
     manifest_fingerprint: str,
     artifact_id: str,
-    deploy_status: str = "pass",
-    verify_status: str = "pass",
-    overall_health_status: str = "pass",
+    deploy_status: ReleaseStatus = "pass",
+    verify_status: ReleaseStatus = "pass",
+    overall_health_status: ReleaseStatus = "pass",
     failure_stage: str = "",
     failure_summary: str = "",
     ready_at: str = "2026-04-13T12:12:00Z",
@@ -197,16 +204,16 @@ def _preview_enablement_record(
     anchor_pr_number: int = 123,
     anchor_pr_url: str = "https://github.com/every/tenant-opw/pull/123",
     anchor_head_sha: str = "aaaa1111",
-    action: str = "opened",
-    pr_state: str = "open",
+    action: PullRequestAction = "opened",
+    pr_state: PullRequestState = "open",
     updated_at: str = "2026-04-14T11:15:00Z",
     label_enabled: bool = False,
     action_label: str = "",
-    request_metadata_status: str = "missing",
+    request_metadata_status: LaunchplanePreviewRequestParseStatus = "missing",
     request_metadata_error: str = "",
     request_metadata_baseline_channel: str = "",
-    request_metadata_companions: tuple[dict[str, object], ...] = (),
-    request_metadata_companion_summaries: tuple[dict[str, object], ...] = (),
+    request_metadata_companions: tuple[LaunchplaneCompanionPullRequestReference, ...] = (),
+    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...] = (),
 ) -> PreviewEnablementRecord:
     return PreviewEnablementRecord(
         record_id=f"{context}-{anchor_repo}-pr-{anchor_pr_number}",
@@ -236,7 +243,7 @@ def _backup_gate_record(
     created_at: str = "2026-04-14T11:15:00Z",
     source: str = "prod-gate",
     required: bool = True,
-    status: str = "pass",
+    status: ReleaseStatus = "pass",
     evidence: dict[str, str] | None = None,
 ) -> BackupGateRecord:
     resolved_evidence = evidence if evidence is not None else {"snapshot": "s3://launchplane/opw/prod/2026-04-14"}
@@ -260,8 +267,8 @@ def _promotion_record(
     context: str = "opw",
     from_instance: str = "testing",
     to_instance: str = "prod",
-    deploy_status: str = "pass",
-    destination_health_status: str = "pass",
+    deploy_status: ReleaseStatus = "pass",
+    destination_health_status: ReleaseStatus = "pass",
 ) -> PromotionRecord:
     return PromotionRecord(
         record_id=record_id,
@@ -3895,15 +3902,17 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                     request_metadata_companions=(
-                        {"repo": "shared-addons", "pr_number": 456},
+                        LaunchplaneCompanionPullRequestReference(
+                            repo="shared-addons", pr_number=456
+                        ),
                     ),
                     request_metadata_companion_summaries=(
-                        {
-                            "repo": "shared-addons",
-                            "pr_number": 456,
-                            "head_sha": "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
-                            "pr_url": "https://github.com/every/shared-addons/pull/456",
-                        },
+                        PreviewPullRequestSummary(
+                            repo="shared-addons",
+                            pr_number=456,
+                            head_sha="bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
+                            pr_url="https://github.com/every/shared-addons/pull/456",
+                        ),
                     ),
                 )
             )
@@ -3961,7 +3970,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     request_metadata_status="valid",
                     request_metadata_baseline_channel="testing",
                     request_metadata_companions=(
-                        {"repo": "shared-addons", "pr_number": 456},
+                        LaunchplaneCompanionPullRequestReference(
+                            repo="shared-addons", pr_number=456
+                        ),
                     ),
                 )
             )
