@@ -7751,7 +7751,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             ],
                             "event_names": ["workflow_dispatch"],
                             "products": ["video-site"],
-                            "contexts": ["verireel"],
+                            "contexts": ["video-site"],
                             "actions": ["verireel_prod_rollback.execute"],
                         }
                     ]
@@ -7791,6 +7791,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     payload={
                         "product": "video-site",
                         "rollback": {
+                            "context": "video-site",
+                            "instance": "prod",
                             "promotion_record_id": "promotion-video-testing-to-prod-run-12345-attempt-1",
                             "backup_record_id": "backup-gate-video-prod-run-12345-attempt-1",
                         },
@@ -7803,6 +7805,87 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 "promotion-video-testing-to-prod-run-12345-attempt-1",
             )
             execute_mock.assert_called_once()
+
+    def test_verireel_driver_route_rejects_unowned_profile_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "video-site",
+                    "base_url": "https://testing.video.example",
+                    "health_url": "https://testing.video.example/api/health",
+                },
+                {
+                    "instance": "prod",
+                    "context": "video-site",
+                    "base_url": "https://video.example",
+                    "health_url": "https://video.example/api/health",
+                },
+            )
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["other-site"],
+                            "actions": ["verireel_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.execute_verireel_prod_rollback") as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-rollback",
+                    payload={
+                        "product": "video-site",
+                        "rollback": {
+                            "context": "other-site",
+                            "instance": "prod",
+                            "promotion_record_id": "promotion-video-testing-to-prod-run-12345-attempt-1",
+                            "backup_record_id": "backup-gate-video-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+            execute_mock.assert_not_called()
 
     def test_verireel_prod_rollback_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
