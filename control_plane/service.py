@@ -1102,6 +1102,38 @@ def _redirect_response(
     return [body]
 
 
+def _driver_route_authorization_response(
+    *,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    route_path: str,
+    product: str,
+    context: str,
+    denial_message: str,
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    trace_id: str,
+) -> list[bytes] | None:
+    if authz_policy.allows(
+        identity=identity,
+        action=_descriptor_driver_authz_action(route_path),
+        product=product,
+        context=context,
+    ):
+        return None
+    return _json_response(
+        start_response=start_response,
+        status_code=403,
+        payload={
+            "status": "rejected",
+            "trace_id": trace_id,
+            "error": {
+                "code": "authorization_denied",
+                "message": denial_message,
+            },
+        },
+    )
+
+
 def _http_status_text(status_code: int) -> str:
     return {
         200: "OK",
@@ -3612,27 +3644,21 @@ def create_launchplane_service_app(
                     )
                 profile = resolved_driver_context.profile
                 lane = resolved_driver_context.lane
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=lane.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the generic web deploy driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the generic web deploy driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -3671,27 +3697,21 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=destination_lane.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the generic web prod promotion driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the generic web prod promotion driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -3723,27 +3743,21 @@ def create_launchplane_service_app(
             elif path == "/v1/drivers/generic-web/prod-promotion-workflow":
                 request = GenericWebPromotionWorkflowEnvelope.model_validate(payload)
                 profile = record_store.read_product_profile_record(request.product)
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=request.workflow.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Caller cannot dispatch the generic web prod promotion workflow"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Caller cannot dispatch the generic web prod promotion workflow"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -3767,27 +3781,21 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot discover generic web preview desired state"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot discover generic web preview desired state"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -3817,27 +3825,21 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot read generic web preview inventory"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot read generic web preview inventory"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 driver_result = execute_generic_web_preview_inventory(
                     control_plane_root=resolved_root,
                     record_store=record_store,
@@ -3857,27 +3859,21 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot refresh generic web preview state"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot refresh generic web preview state"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -3902,27 +3898,21 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot evaluate generic web preview readiness"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot evaluate generic web preview readiness"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 driver_result = evaluate_generic_web_preview_readiness(
                     control_plane_root=resolved_root,
                     record_store=record_store,
@@ -3937,27 +3927,21 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot destroy generic web preview state"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot destroy generic web preview state"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
