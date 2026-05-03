@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 import unittest
 
 from control_plane.contracts.preview_record import PreviewRecord
@@ -281,6 +282,28 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         actions = {action.action_id: action for action in overview.available_actions}
         self.assertFalse(actions["prod_promotion_workflow"].enabled)
         self.assertFalse(actions["prod_promotion"].enabled)
+
+    def test_product_site_overview_hides_generic_web_prod_workflow_without_prod_lane(
+        self,
+    ) -> None:
+        payload = _site_profile_payload(preview_enabled=False)
+        lanes = cast("tuple[dict[str, object], ...]", payload["lanes"])
+        payload["lanes"] = tuple(lane for lane in lanes if lane["instance"] != "prod")
+        profile = LaunchplaneProductProfileRecord.model_validate(payload)
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=lambda *_: True,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertFalse(actions["prod_promotion_workflow"].enabled)
+        self.assertFalse(actions["prod_promotion"].enabled)
+        self.assertIn(
+            "prod lane",
+            actions["prod_promotion_workflow"].disabled_reasons[0],
+        )
 
     def test_product_site_overview_hides_prod_actions_when_no_prod_lane_exists(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
