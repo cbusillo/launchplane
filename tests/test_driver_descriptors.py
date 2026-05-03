@@ -234,6 +234,50 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     execution_metadata.denial_message,
                 )
 
+    def test_odoo_artifact_execution_metadata_matches_descriptors(self) -> None:
+        descriptor = read_driver_descriptor("odoo")
+        actions = {action.action_id: action for action in descriptor.actions}
+        route_metadata_by_action: dict[
+            str,
+            tuple[
+                control_plane_service._DriverRouteExecutionMetadata[Any],
+                type[Any],
+                str,
+            ],
+        ] = {
+            "artifact_publish_inputs": (
+                control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+                control_plane_service.OdooArtifactPublishInputsEnvelope,
+                "artifact publish inputs",
+            ),
+            "artifact_publish": (
+                control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE,
+                control_plane_service.OdooArtifactPublishEnvelope,
+                "artifact publish evidence",
+            ),
+            "post_deploy": (
+                control_plane_service._ODOO_POST_DEPLOY_ROUTE,
+                control_plane_service.OdooPostDeployEnvelope,
+                "post-deploy driver",
+            ),
+        }
+
+        for action_id, (
+            execution_metadata,
+            envelope_model,
+            denial_message_fragment,
+        ) in route_metadata_by_action.items():
+            with self.subTest(action_id=action_id):
+                self.assertEqual(
+                    execution_metadata.route_path,
+                    actions[action_id].route_path,
+                )
+                self.assertIs(execution_metadata.envelope_model, envelope_model)
+                self.assertIn(
+                    denial_message_fragment,
+                    execution_metadata.denial_message,
+                )
+
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
             driver_id="custom-web",
