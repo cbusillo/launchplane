@@ -5,6 +5,7 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
+import hmac
 import os
 import secrets
 import warnings
@@ -124,9 +125,7 @@ def load_github_oauth_config_from_env() -> GitHubOAuthConfig | None:
     cookie_secure = secure_env not in {"0", "false", "no"}
     bootstrap_admin_emails = frozenset(
         email.lower()
-        for email in _split_env_values(
-            os.environ.get("LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS", "")
-        )
+        for email in _split_env_values(os.environ.get("LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS", ""))
     )
     return GitHubOAuthConfig(
         client_id=client_id,
@@ -337,11 +336,23 @@ class HumanSessionManager:
         )
 
     def _sign_cookie_value(self, session_id: str) -> str:
-        return session_id
+        normalized_session_id = session_id.strip()
+        signature = hmac.new(
+            self._config.session_secret.encode("utf-8"),
+            normalized_session_id.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{normalized_session_id}.{signature}"
 
     def _verify_cookie_value(self, cookie_session_id: str) -> str:
-        session_id = cookie_session_id.strip().partition(".")[0]
+        session_id, separator, signature = cookie_session_id.strip().partition(".")
+        if not separator or not signature:
+            return ""
         if not session_id or any(character.isspace() for character in session_id):
+            return ""
+        expected_cookie_value = self._sign_cookie_value(session_id)
+        _expected_session_id, _separator, expected_signature = expected_cookie_value.partition(".")
+        if not hmac.compare_digest(signature, expected_signature):
             return ""
         return session_id
 
