@@ -54,7 +54,10 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.contracts.product_environment_read_model import (
     build_product_activity_read_model,
     build_product_environment_detail,
@@ -108,7 +111,6 @@ from control_plane.workflows.evidence_ingestion import (
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     execute_generic_web_deploy,
-    resolve_generic_web_profile_lane,
 )
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
@@ -214,6 +216,12 @@ class _DriverRouteMetadata:
     method: str
     authz_action: str
     operator_visible: bool
+
+
+@dataclass(frozen=True)
+class _ResolvedProductDriverContext:
+    profile: LaunchplaneProductProfileRecord | None
+    lane: ProductLaneProfile | None = None
 
 
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
@@ -1688,16 +1696,34 @@ def _product_driver_compatible(
     return descriptor.base_driver_id == expected
 
 
-def _require_product_driver(
+def _find_product_profile_lane(
+    *, profile: LaunchplaneProductProfileRecord, context: str, instance: str
+) -> ProductLaneProfile | None:
+    normalized_context = context.strip()
+    normalized_instance = instance.strip()
+    for lane in profile.lanes:
+        lane_context = lane.context.strip()
+        lane_instance = lane.instance.strip()
+        if (
+            (not normalized_context or lane_context == normalized_context)
+            and (not normalized_instance or lane_instance == normalized_instance)
+        ):
+            return lane
+    return None
+
+
+def _resolve_product_driver_context(
     *,
     record_store: object,
     product: str,
-    expected_driver_id: str,
-) -> LaunchplaneProductProfileRecord | None:
+    driver_id: str,
+    context: str = "",
+    instance: str = "",
+) -> _ResolvedProductDriverContext:
     normalized_product = product.strip()
-    normalized_driver_id = expected_driver_id.strip()
+    normalized_driver_id = driver_id.strip()
     if normalized_product == normalized_driver_id:
-        return None
+        return _ResolvedProductDriverContext(profile=None)
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
         raise ValueError("Product driver validation requires product profile storage.")
@@ -1706,38 +1732,29 @@ def _require_product_driver(
         raise ProductDriverMismatchError(
             "Product profile is not compatible with the requested driver route."
         )
-    return profile
+    if context.strip() or instance.strip():
+        lane = _find_product_profile_lane(profile=profile, context=context, instance=instance)
+        if lane is None:
+            raise ProductDriverMismatchError("Product profile does not own the requested driver lane.")
+        return _ResolvedProductDriverContext(profile=profile, lane=lane)
+    return _ResolvedProductDriverContext(profile=profile)
 
 
-def _product_profile_has_lane(
-    *, profile: LaunchplaneProductProfileRecord, context: str, instance: str
-) -> bool:
-    normalized_context = context.strip()
-    normalized_instance = instance.strip()
-    return any(
-        lane.context.strip() == normalized_context and lane.instance.strip() == normalized_instance
-        for lane in profile.lanes
-    )
-
-
-def _require_product_driver_lane(
+def _resolve_descriptor_product_driver_context(
     *,
     record_store: object,
+    route_path: str,
     product: str,
-    expected_driver_id: str,
-    context: str,
-    instance: str,
-) -> LaunchplaneProductProfileRecord | None:
-    profile = _require_product_driver(
+    context: str = "",
+    instance: str = "",
+) -> _ResolvedProductDriverContext:
+    return _resolve_product_driver_context(
         record_store=record_store,
         product=product,
-        expected_driver_id=expected_driver_id,
+        driver_id=_driver_route_metadata_from_descriptors()[route_path].driver_id,
+        context=context,
+        instance=instance,
     )
-    if profile is None:
-        return None
-    if not _product_profile_has_lane(profile=profile, context=context, instance=instance):
-        raise ProductDriverMismatchError("Product profile does not own the requested driver lane.")
-    return profile
 
 
 def _safe_return_to(value: str) -> str:
@@ -3583,10 +3600,18 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/generic-web/deploy":
                 request = GenericWebDeployEnvelope.model_validate(payload)
-                profile, lane = resolve_generic_web_profile_lane(
+                resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
-                    request=request.deploy,
+                    route_path=path,
+                    product=request.deploy.product,
+                    instance=request.deploy.instance,
                 )
+                if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
+                    raise ProductDriverMismatchError(
+                        "Generic web deploy requires a product profile lane."
+                    )
+                profile = resolved_driver_context.profile
+                lane = resolved_driver_context.lane
                 if not authz_policy.allows(
                     identity=identity,
                     action=_descriptor_driver_authz_action(path),
@@ -3953,10 +3978,10 @@ def create_launchplane_service_app(
                 result = {}
             elif path == "/v1/drivers/odoo/post-deploy":
                 request = OdooPostDeployEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="odoo",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4002,10 +4027,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/artifact-publish":
                 request = OdooArtifactPublishEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="odoo",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4052,10 +4077,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/artifact-publish-inputs":
                 request = OdooArtifactPublishInputsEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="odoo",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4096,10 +4121,10 @@ def create_launchplane_service_app(
                 driver_result = result
             elif path == "/v1/drivers/odoo/prod-backup-gate":
                 request = OdooProdBackupGateEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="odoo",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4148,10 +4173,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/prod-promotion":
                 request = OdooProdPromotionEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="odoo",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4204,10 +4229,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/odoo/prod-rollback":
                 request = OdooProdRollbackEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="odoo",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4254,10 +4279,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/verireel/testing-deploy":
                 request = VeriReelTestingDeployEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.deploy.context,
                     instance=request.deploy.instance,
                 )
@@ -4301,10 +4326,10 @@ def create_launchplane_service_app(
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == "/v1/drivers/verireel/testing-verification":
                 request = VeriReelTestingVerificationEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.verification.context,
                     instance=request.verification.instance,
                 )
@@ -4346,10 +4371,10 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/verireel/stable-environment":
                 request = VeriReelStableEnvironmentEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.environment.context,
                     instance=request.environment.instance,
                 )
@@ -4381,10 +4406,10 @@ def create_launchplane_service_app(
                 result = {}
             elif path == "/v1/drivers/verireel/runtime-verification":
                 request = VeriReelRuntimeVerificationEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.verification.context,
                     instance=request.verification.instance,
                 )
@@ -4416,10 +4441,10 @@ def create_launchplane_service_app(
                 result = {}
             elif path == "/v1/drivers/verireel/app-maintenance":
                 request = VeriReelAppMaintenanceEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4460,10 +4485,10 @@ def create_launchplane_service_app(
                 result = driver_result.model_dump(mode="json")
             elif path == "/v1/drivers/verireel/prod-deploy":
                 request = VeriReelProdDeployEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.deploy.context,
                     instance=request.deploy.instance,
                 )
@@ -4507,10 +4532,10 @@ def create_launchplane_service_app(
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == "/v1/drivers/verireel/prod-backup-gate":
                 request = VeriReelProdBackupGateEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.backup_gate.context,
                     instance=request.backup_gate.instance,
                 )
@@ -4555,17 +4580,17 @@ def create_launchplane_service_app(
                 result = {"backup_gate_record_id": driver_result.backup_record_id}
             elif path == "/v1/drivers/verireel/prod-promotion":
                 request = VeriReelProdPromotionEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.promotion.context,
                     instance=request.promotion.from_instance,
                 )
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.promotion.context,
                     instance=request.promotion.to_instance,
                 )
@@ -4612,10 +4637,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/verireel/prod-rollback":
                 request = VeriReelProdRollbackEnvelope.model_validate(payload)
-                _require_product_driver_lane(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                     context=request.rollback.context,
                     instance=request.rollback.instance,
                 )
@@ -4662,10 +4687,10 @@ def create_launchplane_service_app(
                 }
             elif path == "/v1/drivers/verireel/preview-refresh":
                 request = VeriReelPreviewRefreshEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4711,10 +4736,10 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/verireel/preview-inventory":
                 request = VeriReelPreviewInventoryEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4750,10 +4775,10 @@ def create_launchplane_service_app(
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == "/v1/drivers/verireel/preview-destroy":
                 request = VeriReelPreviewDestroyEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -4798,10 +4823,10 @@ def create_launchplane_service_app(
                 )
             elif path == "/v1/drivers/verireel/preview-verification":
                 request = VeriReelPreviewVerificationEnvelope.model_validate(payload)
-                _require_product_driver(
+                _resolve_descriptor_product_driver_context(
                     record_store=record_store,
+                    route_path=path,
                     product=request.product,
-                    expected_driver_id="verireel",
                 )
                 if not authz_policy.allows(
                     identity=identity,
