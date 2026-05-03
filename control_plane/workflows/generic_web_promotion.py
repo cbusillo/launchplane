@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -11,6 +11,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetType
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -24,6 +26,7 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployStore,
     GenericWebDeployRequest,
     execute_generic_web_deploy,
     resolve_generic_web_profile_lane,
@@ -33,6 +36,16 @@ from control_plane.workflows.promote import generate_promotion_record_id
 from control_plane.workflows.ship import utc_now_timestamp
 
 DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS = 60
+
+
+class GenericWebPromotionStore(GenericWebDeployStore, Protocol):
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
+
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
+
+    def write_promotion_record(self, record: PromotionRecord) -> object: ...
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
 
 class GenericWebProdPromotionRequest(BaseModel):
@@ -98,14 +111,14 @@ class GenericWebProdPromotionResult(BaseModel):
     source_health_status: ReleaseStatus = "skipped"
     destination_health_status: ReleaseStatus = "skipped"
     target_name: str = ""
-    target_type: str = ""
+    target_type: DokployTargetType | Literal[""] = ""
     target_id: str = ""
     dry_run: bool = False
     error_message: str = ""
 
 
 def resolve_generic_web_promotion_lanes(
-    *, record_store: object, request: GenericWebProdPromotionRequest
+    *, record_store: GenericWebPromotionStore, request: GenericWebProdPromotionRequest
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile, ProductLaneProfile]:
     source_profile, source_lane = resolve_generic_web_profile_lane(
         record_store=record_store,
@@ -138,7 +151,7 @@ def resolve_generic_web_promotion_lanes(
 def execute_generic_web_prod_promotion(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebPromotionStore,
     request: GenericWebProdPromotionRequest,
 ) -> GenericWebProdPromotionResult:
     profile, source_lane, destination_lane = resolve_generic_web_promotion_lanes(
@@ -308,7 +321,7 @@ def execute_generic_web_prod_promotion(
 
 
 def _resolve_backup_gate(
-    *, record_store: object, request: GenericWebProdPromotionRequest, context: str
+    *, record_store: GenericWebPromotionStore, request: GenericWebProdPromotionRequest, context: str
 ) -> BackupGateEvidence:
     if not request.backup_record_id:
         return BackupGateEvidence(required=request.backup_required, status="skipped", evidence={})
@@ -436,7 +449,9 @@ def _mark_health_skipped(evidence: HealthcheckEvidence) -> HealthcheckEvidence:
     )
 
 
-def _read_deployment_record(*, record_store: object, deployment_record_id: str) -> DeploymentRecord:
+def _read_deployment_record(
+    *, record_store: GenericWebPromotionStore, deployment_record_id: str
+) -> DeploymentRecord:
     try:
         return record_store.read_deployment_record(deployment_record_id)
     except FileNotFoundError as exc:
@@ -447,7 +462,7 @@ def _read_deployment_record(*, record_store: object, deployment_record_id: str) 
 
 def _write_deployment_health(
     *,
-    record_store: object,
+    record_store: GenericWebPromotionStore,
     deployment_record: DeploymentRecord,
     destination_health: HealthcheckEvidence,
 ) -> DeploymentRecord:
@@ -472,7 +487,7 @@ def _build_promotion_record(
     deployment_record: DeploymentRecord | None,
     deployment_status: ReleaseStatus,
     target_name: str,
-    target_type: str,
+    target_type: DokployTargetType,
     deployment_record_id: str,
 ) -> PromotionRecord:
     target_deploy_mode = "dokploy-application-api"
