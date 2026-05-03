@@ -1,10 +1,24 @@
+from __future__ import annotations
+
+from typing import Protocol
+
 import click
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import PromotionRecord
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.inventory import build_environment_inventory, inventory_record_id
 from control_plane.workflows.ship import utc_now_timestamp
+
+
+class EvidenceIngestionStore(Protocol):
+    def write_deployment_record(self, record: DeploymentRecord) -> object: ...
+
+    def read_deployment_record(self, deployment_record_id: str) -> DeploymentRecord: ...
+
+    def write_promotion_record(self, record: PromotionRecord) -> object: ...
+
+    def write_environment_inventory(self, inventory: EnvironmentInventory) -> object: ...
 
 
 def _artifact_id_or_empty(artifact_identity: object) -> str:
@@ -18,7 +32,7 @@ def _artifact_id_or_empty(artifact_identity: object) -> str:
 
 def _write_environment_inventory(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: EvidenceIngestionStore,
     deployment_record: DeploymentRecord,
     promotion_record_id: str = "",
     promoted_from_instance: str = "",
@@ -38,7 +52,7 @@ def _write_environment_inventory(
 
 def apply_deployment_evidence(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: EvidenceIngestionStore,
     deployment_record: DeploymentRecord,
 ) -> dict[str, str]:
     record_store.write_deployment_record(deployment_record)
@@ -52,7 +66,7 @@ def apply_deployment_evidence(
 
 def apply_promotion_evidence(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: EvidenceIngestionStore,
     promotion_record: PromotionRecord,
 ) -> dict[str, str]:
     record_store.write_promotion_record(promotion_record)
