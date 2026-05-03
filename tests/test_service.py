@@ -2465,6 +2465,66 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["profile"].driver_id, "verireel")
         self.assertEqual(kwargs["lane"].instance, "testing")
 
+    def test_generic_web_deploy_route_resolves_literal_generic_web_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=root / "state")
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload("generic-web"))
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["generic-web"],
+                            "contexts": ["generic-web-testing"],
+                            "actions": ["generic_web_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = SimpleNamespace(deployment_record_id="deployment-generic-web-testing")
+
+            with patch(
+                "control_plane.service.execute_generic_web_deploy",
+                return_value=driver_result,
+            ) as deploy:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload={
+                        "schema_version": 1,
+                        "product": "generic-web",
+                        "deploy": {
+                            "schema_version": 1,
+                            "product": "generic-web",
+                            "instance": "testing",
+                            "artifact_id": "ghcr.io/cbusillo/generic-web@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-deploy-literal-driver"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-generic-web-testing")
+        deploy.assert_called_once()
+        _, kwargs = deploy.call_args
+        self.assertEqual(kwargs["profile"].product, "generic-web")
+        self.assertEqual(kwargs["lane"].context, "generic-web-testing")
+
     def test_generic_web_deploy_route_rejects_wrong_product_context(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

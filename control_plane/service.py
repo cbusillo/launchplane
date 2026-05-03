@@ -1751,10 +1751,11 @@ def _resolve_product_driver_context(
     driver_id: str,
     context: str = "",
     instance: str = "",
+    require_profile: bool = False,
 ) -> _ResolvedProductDriverContext:
     normalized_product = product.strip()
     normalized_driver_id = driver_id.strip()
-    if normalized_product == normalized_driver_id:
+    if normalized_product == normalized_driver_id and not require_profile:
         return _ResolvedProductDriverContext(profile=None)
     read_profile = getattr(record_store, "read_product_profile_record", None)
     if not callable(read_profile):
@@ -1779,6 +1780,7 @@ def _resolve_descriptor_product_driver_context(
     product: str,
     context: str = "",
     instance: str = "",
+    require_profile: bool = False,
 ) -> _ResolvedProductDriverContext:
     return _resolve_product_driver_context(
         record_store=record_store,
@@ -1786,6 +1788,7 @@ def _resolve_descriptor_product_driver_context(
         driver_id=_driver_route_metadata_from_descriptors()[route_path].driver_id,
         context=context,
         instance=instance,
+        require_profile=require_profile,
     )
 
 
@@ -3637,6 +3640,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.deploy.product,
                     instance=request.deploy.instance,
+                    require_profile=True,
                 )
                 if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
                     raise ProductDriverMismatchError(
