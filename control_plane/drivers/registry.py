@@ -239,6 +239,8 @@ def _action(
     scope: DriverActionScope,
     route_path: str,
     method: Literal["GET", "POST"] = "POST",
+    authz_action: str = "",
+    operator_visible: bool = True,
     writes_records: tuple[str, ...] = (),
 ) -> DriverActionDescriptor:
     return DriverActionDescriptor(
@@ -249,6 +251,8 @@ def _action(
         scope=scope,
         method=method,
         route_path=route_path,
+        authz_action=authz_action,
+        operator_visible=operator_visible,
         writes_records=writes_records,
     )
 
@@ -306,6 +310,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/generic-web/deploy",
+            authz_action="generic_web_deploy.execute",
             writes_records=("deployment",),
         ),
         _action(
@@ -315,6 +320,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/generic-web/prod-promotion",
+            authz_action="generic_web_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory"),
         ),
         _action(
@@ -324,6 +330,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+            authz_action="generic_web_prod_promotion.dispatch",
             writes_records=(),
         ),
         _action(
@@ -333,6 +340,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="context",
             route_path="/v1/drivers/generic-web/preview-desired-state",
+            authz_action="preview_desired_state.discover",
             writes_records=("preview_desired_state",),
         ),
         _action(
@@ -342,6 +350,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="preview",
             route_path="/v1/drivers/generic-web/preview-refresh",
+            authz_action="preview_refresh.execute",
         ),
         _action(
             "preview_inventory",
@@ -350,6 +359,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="context",
             route_path="/v1/drivers/generic-web/preview-inventory",
+            authz_action="preview_inventory.read",
             writes_records=("preview_inventory_scan",),
         ),
         _action(
@@ -359,6 +369,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="read",
             scope="context",
             route_path="/v1/drivers/generic-web/preview-readiness",
+            authz_action="preview_readiness.evaluate",
         ),
         _action(
             "preview_destroy",
@@ -367,6 +378,7 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="preview",
             route_path="/v1/drivers/generic-web/preview-destroy",
+            authz_action="preview_destroy.execute",
             writes_records=("preview",),
         ),
     ),
@@ -411,6 +423,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/odoo/artifact-publish-inputs",
+            authz_action="odoo_artifact_publish_inputs.read",
         ),
         _action(
             "artifact_publish",
@@ -419,6 +432,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="instance",
             route_path="/v1/drivers/odoo/artifact-publish",
+            authz_action="odoo_artifact_publish.write",
             writes_records=("artifact_manifest",),
         ),
         _action(
@@ -428,6 +442,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/post-deploy",
+            authz_action="odoo_post_deploy.execute",
             writes_records=("odoo_instance_override",),
         ),
         _action(
@@ -437,6 +452,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="instance",
             route_path="/v1/drivers/odoo/prod-backup-gate",
+            authz_action="odoo_prod_backup_gate.execute",
             writes_records=("backup_gate",),
         ),
         _action(
@@ -446,6 +462,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/odoo/prod-promotion",
+            authz_action="odoo_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
@@ -455,6 +472,7 @@ ODOO_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="instance",
             route_path="/v1/drivers/odoo/prod-rollback",
+            authz_action="odoo_prod_rollback.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
     ),
@@ -523,7 +541,19 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/testing-deploy",
+            authz_action="verireel_testing_deploy.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
+        ),
+        _action(
+            "testing_verification",
+            "Record testing verification",
+            "Record VeriReel product smoke verification for a testing deployment.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/verireel/testing-verification",
+            authz_action="deployment.write",
+            operator_visible=False,
+            writes_records=("deployment",),
         ),
         _action(
             "stable_environment",
@@ -532,6 +562,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/verireel/stable-environment",
+            authz_action="verireel_stable_environment.read",
         ),
         _action(
             "runtime_verification",
@@ -540,6 +571,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="instance",
             route_path="/v1/drivers/verireel/runtime-verification",
+            authz_action="verireel_stable_environment.read",
         ),
         _action(
             "app_maintenance",
@@ -548,6 +580,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/app-maintenance",
+            authz_action="verireel_app_maintenance.execute",
         ),
         _action(
             "prod_deploy",
@@ -556,6 +589,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-deploy",
+            authz_action="verireel_prod_deploy.execute",
             writes_records=("deployment", "inventory", "release_tuple"),
         ),
         _action(
@@ -565,6 +599,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-backup-gate",
+            authz_action="verireel_prod_backup_gate.execute",
             writes_records=("backup_gate",),
         ),
         _action(
@@ -574,6 +609,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-promotion",
+            authz_action="verireel_prod_promotion.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
@@ -583,6 +619,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="instance",
             route_path="/v1/drivers/verireel/prod-rollback",
+            authz_action="verireel_prod_rollback.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
         _action(
@@ -592,6 +629,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="mutation",
             scope="preview",
             route_path="/v1/drivers/verireel/preview-refresh",
+            authz_action="verireel_preview_refresh.execute",
             writes_records=("preview", "preview_generation"),
         ),
         _action(
@@ -601,6 +639,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="read",
             scope="context",
             route_path="/v1/drivers/verireel/preview-inventory",
+            authz_action="verireel_preview_inventory.read",
         ),
         _action(
             "preview_destroy",
@@ -609,6 +648,7 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="destructive",
             scope="preview",
             route_path="/v1/drivers/verireel/preview-destroy",
+            authz_action="verireel_preview_destroy.execute",
             writes_records=("preview", "preview_generation"),
         ),
         _action(
@@ -618,6 +658,8 @@ VERIREEL_DRIVER = DriverDescriptor(
             safety="safe_write",
             scope="preview",
             route_path="/v1/drivers/verireel/preview-verification",
+            authz_action="preview_generation.write",
+            operator_visible=False,
             writes_records=("preview", "preview_generation"),
         ),
     ),
