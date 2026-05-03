@@ -7,7 +7,10 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from control_plane import release_tuples as control_plane_release_tuples
+from control_plane.contracts.artifact_identity import ArtifactAddonSelector
+from control_plane.contracts.artifact_identity import ArtifactAddonSource
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.artifact_identity import ArtifactImageReference
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -32,12 +35,31 @@ def _write_release_tuple_records(
     return database_url
 
 
+def _artifact_image_reference() -> ArtifactImageReference:
+    return ArtifactImageReference(
+        repository="ghcr.io/cbusillo/odoo-private",
+        digest="sha256:image456",
+    )
+
+
+class _FakeReleaseTupleStore:
+    def __init__(self, records: tuple[ReleaseTupleRecord, ...]) -> None:
+        self.records = records
+
+    def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]:
+        return self.records
+
+
 class ReleaseTupleTests(unittest.TestCase):
     def test_should_mint_release_tuple_only_for_stable_remote_channels(self) -> None:
-        self.assertTrue(control_plane_release_tuples.should_mint_release_tuple_for_channel("testing"))
+        self.assertTrue(
+            control_plane_release_tuples.should_mint_release_tuple_for_channel("testing")
+        )
         self.assertTrue(control_plane_release_tuples.should_mint_release_tuple_for_channel("prod"))
         self.assertFalse(control_plane_release_tuples.should_mint_release_tuple_for_channel("dev"))
-        self.assertFalse(control_plane_release_tuples.should_mint_release_tuple_for_channel("preview"))
+        self.assertFalse(
+            control_plane_release_tuples.should_mint_release_tuple_for_channel("preview")
+        )
 
     def test_resolve_release_tuple_reads_context_channel_repo_refs_from_database(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -91,8 +113,7 @@ class ReleaseTupleTests(unittest.TestCase):
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
                 with self.assertRaisesRegex(Exception, "No Launchplane release tuple records"):
-                    control_plane_release_tuples.load_release_tuple_catalog(
-                    )
+                    control_plane_release_tuples.load_release_tuple_catalog()
 
     def test_load_release_tuple_catalog_reads_database_records_only(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -122,11 +143,42 @@ class ReleaseTupleTests(unittest.TestCase):
             )
 
             with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
-                catalog = control_plane_release_tuples.load_release_tuple_catalog(
-                )
+                catalog = control_plane_release_tuples.load_release_tuple_catalog()
 
         self.assertEqual(catalog.contexts["opw"].channels["testing"].tuple_id, "opw-testing-db")
         self.assertEqual(catalog.contexts["opw"].channels["prod"].tuple_id, "opw-prod-db")
+
+    def test_load_optional_catalog_uses_structural_store_boundary(self) -> None:
+        catalog = control_plane_release_tuples.load_optional_release_tuple_catalog_from_store(
+            record_store=_FakeReleaseTupleStore(
+                records=(
+                    ReleaseTupleRecord(
+                        tuple_id="verireel-testing-db",
+                        context="verireel",
+                        channel="testing",
+                        artifact_id="artifact-testing",
+                        repo_shas={"verireel": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},
+                        provenance="ship",
+                        minted_at="2026-04-21T18:00:00Z",
+                    ),
+                )
+            ),
+            source_label="fake release tuple store",
+        )
+
+        self.assertIsNotNone(catalog)
+        assert catalog is not None
+        self.assertEqual(
+            catalog.contexts["verireel"].channels["testing"].tuple_id,
+            "verireel-testing-db",
+        )
+
+    def test_load_optional_catalog_returns_none_for_empty_store(self) -> None:
+        catalog = control_plane_release_tuples.load_optional_release_tuple_catalog_from_store(
+            record_store=_FakeReleaseTupleStore(records=()),
+        )
+
+        self.assertIsNone(catalog)
 
     def test_resolve_release_tuple_fails_closed_when_channel_missing(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -181,7 +233,9 @@ class ReleaseTupleTests(unittest.TestCase):
                 )
             )
 
-    def test_build_release_tuple_catalog_from_records_rejects_non_stable_remote_channels(self) -> None:
+    def test_build_release_tuple_catalog_from_records_rejects_non_stable_remote_channels(
+        self,
+    ) -> None:
         with self.assertRaisesRegex(Exception, "stable remote channels"):
             control_plane_release_tuples.build_release_tuple_catalog_from_records(
                 (
@@ -203,23 +257,22 @@ class ReleaseTupleTests(unittest.TestCase):
             source_commit="abc1234",
             enterprise_base_digest="sha256:enterprise123",
             addon_sources=(
-                {
-                    "repository": "cbusillo/odoo-shared-addons",
-                    "ref": "def5678",
-                },
+                ArtifactAddonSource(
+                    repository="cbusillo/odoo-shared-addons",
+                    ref="def5678",
+                ),
             ),
-            image={
-                "repository": "ghcr.io/cbusillo/odoo-private",
-                "digest": "sha256:image456",
-            },
+            image=_artifact_image_reference(),
         )
 
-        release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
-            context_name="opw",
-            channel_name="testing",
-            artifact_manifest=manifest,
-            deployment_record_id="deployment-1",
-            minted_at="2026-04-10T18:24:00Z",
+        release_tuple = (
+            control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+                context_name="opw",
+                channel_name="testing",
+                artifact_manifest=manifest,
+                deployment_record_id="deployment-1",
+                minted_at="2026-04-10T18:24:00Z",
+            )
         )
 
         self.assertEqual(release_tuple.tuple_id, "opw-testing-artifact-sha256-image456")
@@ -233,44 +286,47 @@ class ReleaseTupleTests(unittest.TestCase):
             source_commit="abc1234",
             enterprise_base_digest="sha256:enterprise123",
             addon_sources=(
-                {
-                    "repository": "cbusillo/disable_odoo_online",
-                    "ref": "def5678",
-                },
+                ArtifactAddonSource(
+                    repository="cbusillo/disable_odoo_online",
+                    ref="def5678",
+                ),
             ),
             addon_selectors=(
-                {
-                    "repository": "cbusillo/disable_odoo_online",
-                    "selector": "main",
-                    "resolved_ref": "def5678",
-                },
+                ArtifactAddonSelector(
+                    repository="cbusillo/disable_odoo_online",
+                    selector="main",
+                    resolved_ref="def5678",
+                ),
             ),
-            image={
-                "repository": "ghcr.io/cbusillo/odoo-private",
-                "digest": "sha256:image456",
-            },
+            image=_artifact_image_reference(),
         )
 
-        release_tuple = control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
-            context_name="opw",
-            channel_name="testing",
-            artifact_manifest=manifest,
-            deployment_record_id="deployment-1",
-            minted_at="2026-04-10T18:24:00Z",
+        release_tuple = (
+            control_plane_release_tuples.build_release_tuple_record_from_artifact_manifest(
+                context_name="opw",
+                channel_name="testing",
+                artifact_manifest=manifest,
+                deployment_record_id="deployment-1",
+                minted_at="2026-04-10T18:24:00Z",
+            )
         )
 
-        self.assertEqual(release_tuple.repo_shas, {"tenant-opw": "abc1234", "disable_odoo_online": "def5678"})
+        self.assertEqual(
+            release_tuple.repo_shas, {"tenant-opw": "abc1234", "disable_odoo_online": "def5678"}
+        )
 
     def test_build_release_tuple_record_rejects_branch_refs(self) -> None:
         manifest = ArtifactIdentityManifest(
             artifact_id="artifact-sha256-image456",
             source_commit="abc1234",
             enterprise_base_digest="sha256:enterprise123",
-            addon_sources=({"repository": "cbusillo/odoo-shared-addons", "ref": "main"},),
-            image={
-                "repository": "ghcr.io/cbusillo/odoo-private",
-                "digest": "sha256:image456",
-            },
+            addon_sources=(
+                ArtifactAddonSource(
+                    repository="cbusillo/odoo-shared-addons",
+                    ref="main",
+                ),
+            ),
+            image=_artifact_image_reference(),
         )
 
         with self.assertRaisesRegex(Exception, "must be a 7-40 character hexadecimal git sha"):
@@ -285,15 +341,12 @@ class ReleaseTupleTests(unittest.TestCase):
             source_commit="abc1234",
             enterprise_base_digest="sha256:enterprise123",
             addon_sources=(
-                {
-                    "repository": "cbusillo/odoo-shared-addons",
-                    "ref": "def5678",
-                },
+                ArtifactAddonSource(
+                    repository="cbusillo/odoo-shared-addons",
+                    ref="def5678",
+                ),
             ),
-            image={
-                "repository": "ghcr.io/cbusillo/odoo-private",
-                "digest": "sha256:image456",
-            },
+            image=_artifact_image_reference(),
         )
 
         with self.assertRaisesRegex(Exception, "stable remote channels"):
