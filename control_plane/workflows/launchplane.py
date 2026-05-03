@@ -4,6 +4,7 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from typing import Protocol, TypedDict, get_args
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -13,7 +14,10 @@ from pydantic import ValidationError
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import release_tuples as control_plane_release_tuples
-from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
+from control_plane.contracts.github_pull_request_event import (
+    GitHubPullRequestEvent,
+    PullRequestAction,
+)
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
     PreviewGenerationState,
@@ -53,13 +57,36 @@ LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
     rf"```{re.escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     flags=re.IGNORECASE | re.DOTALL,
 )
-GITHUB_PULL_REQUEST_URL_PATTERN = re.compile(r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$")
+GITHUB_PULL_REQUEST_URL_PATTERN = re.compile(
+    r"^/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)/?$"
+)
 LAUNCHPLANE_PR_FEEDBACK_COMMENT_MARKER = "<!-- launchplane-control-plane:pr-feedback -->"
+
+
+class PreviewMutationRecordStore(Protocol):
+    def list_preview_records(
+        self,
+        *,
+        context_name: str = "",
+        anchor_repo: str = "",
+        anchor_pr_number: int | None = None,
+        limit: int | None = None,
+    ) -> tuple[PreviewRecord, ...]: ...
+
+    def list_preview_generation_records(
+        self, *, preview_id: str = "", limit: int | None = None
+    ) -> tuple[PreviewGenerationRecord, ...]: ...
+
+
+class GitHubPullRequestReference(TypedDict):
+    owner: str
+    repo: str
+    pr_number: int
 
 
 def find_preview_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
@@ -143,7 +170,7 @@ def build_pull_request_event_action_payload(
         request_metadata=request_metadata,
         resolved_manifest=resolved_manifest,
     )
-    payload = {
+    payload: dict[str, object] = {
         "event": event.model_dump(mode="json"),
         "decision": {
             "action": action,
@@ -155,8 +182,12 @@ def build_pull_request_event_action_payload(
             "manifest_resolved": resolved_manifest is not None,
         },
         "request_metadata": request_metadata.model_dump(mode="json"),
-        "manifest": resolved_manifest.model_dump(mode="json") if resolved_manifest is not None else None,
-        "mutation": mutation_intent.model_dump(mode="json") if mutation_intent is not None else None,
+        "manifest": resolved_manifest.model_dump(mode="json")
+        if resolved_manifest is not None
+        else None,
+        "mutation": mutation_intent.model_dump(mode="json")
+        if mutation_intent is not None
+        else None,
         "preview": (
             {
                 "preview_id": preview.preview_id,
@@ -193,7 +224,7 @@ def adapt_github_webhook_pull_request_event(
         )
 
     action = _require_webhook_string(webhook_payload, "action")
-    if action not in GitHubPullRequestEvent.model_fields["action"].annotation.__args__:
+    if action not in get_args(PullRequestAction):
         raise click.ClickException(
             f"Launchplane does not support GitHub pull_request action {action!r}."
         )
@@ -231,7 +262,9 @@ def adapt_github_webhook_pull_request_event(
         raise click.ClickException(f"Invalid adapted GitHub pull request event: {exc}") from exc
 
 
-def resolve_launchplane_github_webhook_secret(*, control_plane_root: Path, context_name: str) -> str:
+def resolve_launchplane_github_webhook_secret(
+    *, control_plane_root: Path, context_name: str
+) -> str:
     try:
         context_values = control_plane_runtime_environments.resolve_runtime_context_values(
             control_plane_root=control_plane_root,
@@ -242,7 +275,9 @@ def resolve_launchplane_github_webhook_secret(*, control_plane_root: Path, conte
     return context_values.get(LAUNCHPLANE_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
 
 
-def verify_github_webhook_signature(*, payload_bytes: bytes, signature_header: str, secret: str) -> None:
+def verify_github_webhook_signature(
+    *, payload_bytes: bytes, signature_header: str, secret: str
+) -> None:
     normalized_signature = signature_header.strip()
     if not normalized_signature:
         raise click.ClickException("GitHub webhook signature header is required.")
@@ -254,7 +289,9 @@ def verify_github_webhook_signature(*, payload_bytes: bytes, signature_header: s
     if not signature_value:
         raise click.ClickException("GitHub webhook signature is missing the sha256 digest value.")
     if not secret.strip():
-        raise click.ClickException("GitHub webhook verification requires a configured shared secret.")
+        raise click.ClickException(
+            "GitHub webhook verification requires a configured shared secret."
+        )
 
     expected_signature = hmac.new(
         secret.encode("utf-8"),
@@ -419,7 +456,9 @@ def deliver_pull_request_feedback(
         anchor_repo=event.repo,
         anchor_pr_number=event.pr_number,
     )
-    effective_context = current_preview.context if current_preview is not None else resolved_context.strip()
+    effective_context = (
+        current_preview.context if current_preview is not None else resolved_context.strip()
+    )
     if not effective_context:
         return {
             "delivered": False,
@@ -453,7 +492,9 @@ def deliver_pull_request_feedback(
     if existing_comment is not None:
         comment_id = existing_comment.get("id")
         if not isinstance(comment_id, int):
-            raise click.ClickException("Existing Launchplane PR feedback comment is missing a numeric id.")
+            raise click.ClickException(
+                "Existing Launchplane PR feedback comment is missing a numeric id."
+            )
         updated_comment = update_github_issue_comment(
             owner=github_reference["owner"],
             repo=github_reference["repo"],
@@ -703,9 +744,7 @@ def _render_pull_request_feedback_markdown(
     companions = source_summary.get("companions")
     if isinstance(companions, list) and companions:
         companion_summary = ", ".join(
-            _format_feedback_pr_summary(item)
-            for item in companions
-            if isinstance(item, dict)
+            _format_feedback_pr_summary(item) for item in companions if isinstance(item, dict)
         )
         lines.append(f"- Companion inputs: {companion_summary}")
 
@@ -757,7 +796,9 @@ def _optional_webhook_string(payload: dict[str, object], key: str) -> str:
 def _require_webhook_int(payload: dict[str, object], key: str) -> int:
     value = payload.get(key)
     if not isinstance(value, int) or value < 1:
-        raise click.ClickException(f"GitHub webhook payload requires positive integer field {key!r}.")
+        raise click.ClickException(
+            f"GitHub webhook payload requires positive integer field {key!r}."
+        )
     return value
 
 
@@ -800,13 +841,12 @@ def _webhook_occurred_at(*, action: str, pull_request_payload: dict[str, object]
             or _optional_webhook_string(pull_request_payload, "merged_at")
             or _optional_webhook_string(pull_request_payload, "updated_at")
         )
-    return (
-        _optional_webhook_string(pull_request_payload, "updated_at")
-        or _optional_webhook_string(pull_request_payload, "created_at")
+    return _optional_webhook_string(pull_request_payload, "updated_at") or _optional_webhook_string(
+        pull_request_payload, "created_at"
     )
 
 
-def github_pull_request_reference(pr_url: str) -> dict[str, object] | None:
+def github_pull_request_reference(pr_url: str) -> GitHubPullRequestReference | None:
     parsed_url = urlparse(pr_url)
     if parsed_url.netloc.strip().lower() != "github.com":
         return None
@@ -1024,7 +1064,9 @@ def build_pull_request_event_mutation_intent(
 def parse_preview_request_metadata(*, pr_body: str) -> LaunchplanePreviewRequestParseResult:
     if not pr_body.strip():
         return LaunchplanePreviewRequestParseResult(status="missing")
-    block_matches = [match.group("body") for match in LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN.finditer(pr_body)]
+    block_matches = [
+        match.group("body") for match in LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN.finditer(pr_body)
+    ]
     if not block_matches:
         return LaunchplanePreviewRequestParseResult(status="missing")
     if len(block_matches) > 1:
@@ -1078,7 +1120,8 @@ def resolve_pull_request_event_manifest(
             *[
                 PreviewSourceRecord(repo=repo_name, git_sha=git_sha, selection="baseline")
                 for repo_name, git_sha in sorted(release_tuple.repo_shas.items())
-                if repo_name != event.repo and repo_name not in {item.repo for item in (companion_sources or ())}
+                if repo_name != event.repo
+                and repo_name not in {item.repo for item in (companion_sources or ())}
             ],
         ]
     )
@@ -1146,21 +1189,21 @@ def _resolve_companion_sources(
         (companion.repo.strip(), companion.pr_number) for companion in metadata.companions
     )
     if snapshot_by_key and set(snapshot_by_key) == set(requested_keys):
-        sources: list[PreviewSourceRecord] = []
-        summaries: list[PreviewPullRequestSummary] = []
+        snapshot_sources: list[PreviewSourceRecord] = []
+        snapshot_summaries: list[PreviewPullRequestSummary] = []
         for companion in metadata.companions:
             summary = snapshot_by_key.get((companion.repo.strip(), companion.pr_number))
             if summary is None:
                 return None, None
-            sources.append(
+            snapshot_sources.append(
                 PreviewSourceRecord(
                     repo=summary.repo,
                     git_sha=summary.head_sha,
                     selection="companion",
                 )
             )
-            summaries.append(summary)
-        return tuple(sources), tuple(summaries)
+            snapshot_summaries.append(summary)
+        return tuple(snapshot_sources), tuple(snapshot_summaries)
 
     github_owner = github_pr_owner(pr_url=anchor_pr_url)
     github_token = resolve_launchplane_github_token(
@@ -1210,7 +1253,9 @@ def resolve_launchplane_github_token(*, control_plane_root: Path, context_name: 
     return context_values.get(LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY, "").strip()
 
 
-def fetch_github_pull_request_head(*, owner: str, repo: str, pr_number: int, token: str) -> tuple[str, str]:
+def fetch_github_pull_request_head(
+    *, owner: str, repo: str, pr_number: int, token: str
+) -> tuple[str, str]:
     payload = github_api_request(
         path=f"/repos/{owner}/{repo}/pulls/{pr_number}",
         token=token,
@@ -1432,7 +1477,7 @@ def build_preview_generation_record(
 def build_preview_record_from_request(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     request: PreviewMutationRequest,
 ) -> PreviewRecord:
     existing_preview = find_preview_record(
@@ -1495,7 +1540,7 @@ def build_preview_record_from_request(
 
 def build_preview_generation_record_from_request(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     request: PreviewGenerationMutationRequest,
 ) -> PreviewGenerationRecord:
     preview = find_preview_record(
@@ -1509,7 +1554,9 @@ def build_preview_generation_record_from_request(
             f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
         )
 
-    existing_generations = record_store.list_preview_generation_records(preview_id=preview.preview_id)
+    existing_generations = record_store.list_preview_generation_records(
+        preview_id=preview.preview_id
+    )
     existing_generation = next(
         (
             record
@@ -1688,19 +1735,29 @@ def build_preview_status_payload(
             "active_generation_id": preview.active_generation_id,
             "serving_generation_id": preview.serving_generation_id,
             "latest_generation_id": preview.latest_generation_id,
-            "artifact_id": evidence_generation.artifact_id if evidence_generation is not None else "",
+            "artifact_id": evidence_generation.artifact_id
+            if evidence_generation is not None
+            else "",
             "manifest_fingerprint": (
-                input_generation.resolved_manifest_fingerprint if input_generation is not None else ""
+                input_generation.resolved_manifest_fingerprint
+                if input_generation is not None
+                else ""
             ),
             "expires_at": evidence_generation.expires_at if evidence_generation is not None else "",
             "destroy_after": preview.destroy_after,
         },
         "health_summary": {
             "overall_health_status": (
-                evidence_generation.overall_health_status if evidence_generation is not None else "pending"
+                evidence_generation.overall_health_status
+                if evidence_generation is not None
+                else "pending"
             ),
-            "deploy_status": evidence_generation.deploy_status if evidence_generation is not None else "pending",
-            "verify_status": evidence_generation.verify_status if evidence_generation is not None else "pending",
+            "deploy_status": evidence_generation.deploy_status
+            if evidence_generation is not None
+            else "pending",
+            "verify_status": evidence_generation.verify_status
+            if evidence_generation is not None
+            else "pending",
             "serving_matches_latest": serving_matches_latest,
             "status_summary": _status_summary(
                 preview=preview,
@@ -1727,7 +1784,9 @@ def build_preview_status_payload(
                 input_generation.baseline_release_tuple_id if input_generation is not None else ""
             ),
             "resolved_manifest_fingerprint": (
-                input_generation.resolved_manifest_fingerprint if input_generation is not None else ""
+                input_generation.resolved_manifest_fingerprint
+                if input_generation is not None
+                else ""
             ),
             "source_map": (
                 [item.model_dump(mode="json") for item in input_generation.source_map]
@@ -1784,12 +1843,18 @@ def build_preview_inventory_payload(
                 "destroy_reason": preview.destroy_reason,
                 "serving_generation_id": preview.serving_generation_id,
                 "latest_generation_id": preview.latest_generation_id,
-                "artifact_id": evidence_generation.artifact_id if evidence_generation is not None else "",
+                "artifact_id": evidence_generation.artifact_id
+                if evidence_generation is not None
+                else "",
                 "manifest_fingerprint": (
-                    input_generation.resolved_manifest_fingerprint if input_generation is not None else ""
+                    input_generation.resolved_manifest_fingerprint
+                    if input_generation is not None
+                    else ""
                 ),
                 "overall_health_status": (
-                    evidence_generation.overall_health_status if evidence_generation is not None else "pending"
+                    evidence_generation.overall_health_status
+                    if evidence_generation is not None
+                    else "pending"
                 ),
                 "status_summary": _status_summary(
                     preview=preview,
