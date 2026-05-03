@@ -991,11 +991,8 @@ _VERIREEL_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class VeriReelPreviewRefreshEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelPreviewRefreshEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     refresh: VeriReelPreviewRefreshRequest
 
     @model_validator(mode="after")
@@ -1004,11 +1001,8 @@ class VeriReelPreviewRefreshEnvelope(BaseModel):
         return self
 
 
-class VeriReelPreviewDestroyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelPreviewDestroyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     destroy: VeriReelPreviewDestroyRequest
 
     @model_validator(mode="after")
@@ -1041,11 +1035,8 @@ class VeriReelPreviewVerificationRequest(BaseModel):
         return self
 
 
-class VeriReelPreviewVerificationEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelPreviewVerificationEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     verification: VeriReelPreviewVerificationRequest
 
     @model_validator(mode="after")
@@ -1054,17 +1045,54 @@ class VeriReelPreviewVerificationEnvelope(BaseModel):
         return self
 
 
-class VeriReelPreviewInventoryEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelPreviewInventoryEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     inventory: VeriReelPreviewInventoryRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelPreviewInventoryEnvelope":
         _validate_driver_envelope_product(self.product, label="VeriReel preview inventory")
         return self
+
+
+_VERIREEL_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/preview-refresh",
+    envelope_model=VeriReelPreviewRefreshEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel preview refresh driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/preview-inventory",
+    envelope_model=VeriReelPreviewInventoryEnvelope,
+    denial_message=(
+        "Workflow cannot read the VeriReel preview inventory"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/preview-destroy",
+    envelope_model=VeriReelPreviewDestroyEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel preview destroy driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/preview-verification",
+    envelope_model=VeriReelPreviewVerificationEnvelope,
+    denial_message=(
+        "Workflow cannot write VeriReel preview verification"
+        " for the requested product/context."
+    ),
+)
 
 
 class LaunchplaneSelfDeployRequest(BaseModel):
@@ -4719,8 +4747,8 @@ def create_launchplane_service_app(
                     "promotion_record_id": driver_result.promotion_record_id,
                     "backup_record_id": driver_result.backup_record_id,
                 }
-            elif path == "/v1/drivers/verireel/preview-refresh":
-                request = VeriReelPreviewRefreshEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path:
+                request = _VERIREEL_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4732,10 +4760,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.refresh.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel preview refresh driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PREVIEW_REFRESH_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4762,8 +4787,10 @@ def create_launchplane_service_app(
                     request=request.refresh,
                     driver_result=driver_result,
                 )
-            elif path == "/v1/drivers/verireel/preview-inventory":
-                request = VeriReelPreviewInventoryEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path:
+                request = _VERIREEL_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4775,10 +4802,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.inventory.context,
-                    denial_message=(
-                        "Workflow cannot read the VeriReel preview inventory"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PREVIEW_INVENTORY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4795,8 +4819,8 @@ def create_launchplane_service_app(
                     preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
-            elif path == "/v1/drivers/verireel/preview-destroy":
-                request = VeriReelPreviewDestroyEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path:
+                request = _VERIREEL_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4808,10 +4832,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.destroy.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel preview destroy driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PREVIEW_DESTROY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4837,8 +4858,10 @@ def create_launchplane_service_app(
                     request=request.destroy,
                     driver_result=driver_result,
                 )
-            elif path == "/v1/drivers/verireel/preview-verification":
-                request = VeriReelPreviewVerificationEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path:
+                request = _VERIREEL_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4850,10 +4873,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.verification.context,
-                    denial_message=(
-                        "Workflow cannot write VeriReel preview verification"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PREVIEW_VERIFICATION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
