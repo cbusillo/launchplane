@@ -337,5 +337,126 @@ class HumanSessionBoundaryTests(unittest.TestCase):
         self.assertIsNone(store.read_session("expired-session"))
 
 
+class GitHubOidcVerifierHardeningTests(unittest.TestCase):
+    def test_verifier_requires_non_empty_configuration(self) -> None:
+        with self.assertRaises(ValueError):
+            GitHubOidcVerifier(audience=" ", jwk_client=Mock())
+        with self.assertRaises(ValueError):
+            GitHubOidcVerifier(audience="launchplane", issuer=" ", jwk_client=Mock())
+        with self.assertRaises(ValueError):
+            GitHubOidcVerifier(audience="launchplane", jwks_url=" ")
+
+    def test_verify_returns_normalized_github_actions_identity(self) -> None:
+        jwk_client = Mock()
+        jwk_client.get_signing_key_from_jwt.return_value = SimpleNamespace(key="signing-key")
+        claims = {
+            "repository": " cbusillo/site ",
+            "repository_owner": " cbusillo ",
+            "workflow_ref": " cbusillo/site/.github/workflows/deploy.yml@refs/heads/main ",
+            "event_name": "workflow_dispatch",
+        }
+
+        with patch("control_plane.service_auth.jwt.decode", return_value=claims):
+            identity = GitHubOidcVerifier(audience=" launchplane ", jwk_client=jwk_client).verify(
+                " token "
+            )
+
+        jwk_client.get_signing_key_from_jwt.assert_called_once_with("token")
+        self.assertEqual(identity.repository, "cbusillo/site")
+        self.assertEqual(
+            identity.workflow_ref, "cbusillo/site/.github/workflows/deploy.yml@refs/heads/main"
+        )
+        self.assertEqual(identity.raw_claims, claims)
+
+
+class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
+    def test_actions_policy_matches_patterns_and_scopes(self) -> None:
+        rule = GitHubActionsPolicyRule(
+            repository="cbusillo/site",
+            workflow_refs=("cbusillo/site/.github/workflows/*.yml@refs/heads/main",),
+            event_names=("workflow_dispatch",),
+            refs=("refs/heads/main",),
+            environments=("production",),
+            products=("site",),
+            contexts=("site-prod",),
+            actions=("generic_web_prod_promotion.execute",),
+        )
+
+        self.assertTrue(
+            rule.allows(
+                identity=_actions_identity(
+                    repository="cbusillo/site",
+                    workflow_ref="cbusillo/site/.github/workflows/deploy.yml@refs/heads/main",
+                    event_name="workflow_dispatch",
+                    ref="refs/heads/main",
+                    environment="production",
+                ),
+                action="generic_web_prod_promotion.execute",
+                product="site",
+                context="site-prod",
+            )
+        )
+
+    def test_human_policy_matches_team_and_role_scope(self) -> None:
+        rule = GitHubHumanPolicyRule(
+            organizations=("cbusillo",),
+            teams=("cbusillo/platform",),
+            roles=("admin",),
+            products=("site",),
+            contexts=("site-prod",),
+            actions=("driver.execute",),
+        )
+
+        self.assertTrue(
+            rule.allows(
+                identity=_human_identity(
+                    login="operator",
+                    teams=frozenset({"cbusillo/platform"}),
+                    role="admin",
+                ),
+                action="driver.execute",
+                product="site",
+                context="site-prod",
+            )
+        )
+
+    def test_launchplane_policy_dispatches_by_identity_type(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/site",
+                    workflow_refs=("*",),
+                    products=("site",),
+                    actions=("driver.execute",),
+                ),
+            ),
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    teams=("launchplane-admins",),
+                    roles=("admin",),
+                    products=("site",),
+                    actions=("driver.execute",),
+                ),
+            ),
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=_actions_identity(repository="cbusillo/site"),
+                action="driver.execute",
+                product="site",
+                context="",
+            )
+        )
+        self.assertTrue(
+            policy.allows(
+                identity=_human_identity(teams=frozenset({"launchplane-admins"}), role="admin"),
+                action="driver.execute",
+                product="site",
+                context="",
+            )
+        )
+
+
 if __name__ == "__main__":
     unittest.main()
