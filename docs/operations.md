@@ -131,6 +131,10 @@ matching target-context record already exists, and managed secret records and
 bindings are disabled rather than deleted. Run with `dry_run=false` only when
 `blocked=false`. Inventory records, release tuples, deployments, promotions,
 backup gates, and preview history are preserved as historical evidence.
+Launchplane keeps the legacy context in the product profile's
+`historical_contexts` metadata after cutover so product activity queries still
+show pre-cutover evidence while deploy and config authority use the current lane
+contexts.
 
 Render an explicit emergency bootstrap policy or import a policy into DB-backed
 records with:

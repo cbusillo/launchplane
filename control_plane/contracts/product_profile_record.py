@@ -73,7 +73,9 @@ class ProductPreviewProfile(BaseModel):
             for raw_key in raw_keys:
                 key = raw_key.strip()
                 if not key:
-                    raise ValueError(f"product preview profile {field_name} values must be non-empty")
+                    raise ValueError(
+                        f"product preview profile {field_name} values must be non-empty"
+                    )
                 if key in keys:
                     raise ValueError(f"product preview profile {field_name} values must be unique")
                 keys.append(key)
@@ -82,7 +84,9 @@ class ProductPreviewProfile(BaseModel):
         omitted = set(normalized["omitted_env_keys"])
         overlap = sorted(copied & omitted)
         if overlap:
-            raise ValueError("product preview profile cannot both copy and omit env keys: " + ", ".join(overlap))
+            raise ValueError(
+                "product preview profile cannot both copy and omit env keys: " + ", ".join(overlap)
+            )
         for raw_key, raw_value in self.override_env.items():
             key = raw_key.strip()
             if not key:
@@ -116,7 +120,9 @@ class ProductPromotionWorkflowProfile(BaseModel):
         if not self.bump_input.strip():
             raise ValueError("product promotion workflow requires bump_input")
         if self.default_bump.strip() not in {"patch", "minor", "major"}:
-            raise ValueError("product promotion workflow default_bump must be patch, minor, or major")
+            raise ValueError(
+                "product promotion workflow default_bump must be patch, minor, or major"
+            )
         return self
 
 
@@ -132,6 +138,7 @@ class LaunchplaneProductProfileRecord(BaseModel):
     runtime_port: int = Field(ge=1, le=65535)
     health_path: str
     lanes: tuple[ProductLaneProfile, ...] = ()
+    historical_contexts: tuple[str, ...] = ()
     preview: ProductPreviewProfile = Field(default_factory=ProductPreviewProfile)
     promotion_workflow: ProductPromotionWorkflowProfile = Field(
         default_factory=ProductPromotionWorkflowProfile
@@ -155,4 +162,12 @@ class LaunchplaneProductProfileRecord(BaseModel):
             raise ValueError("product profile requires updated_at")
         if not self.source.strip():
             raise ValueError("product profile requires source")
+        normalized_historical_contexts: list[str] = []
+        for raw_context in self.historical_contexts:
+            context = raw_context.strip()
+            if not context:
+                raise ValueError("product profile historical_contexts values must be non-empty")
+            if context not in normalized_historical_contexts:
+                normalized_historical_contexts.append(context)
+        self.historical_contexts = tuple(normalized_historical_contexts)
         return self
