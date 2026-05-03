@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from typing import cast
 from unittest.mock import patch
 
 import click
@@ -345,8 +346,8 @@ class GenericWebPreviewTests(unittest.TestCase):
         )
         requests: list[dict[str, object]] = []
 
-        def _fake_dokploy_request(**kwargs):
-            requests.append(kwargs)
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
             path = kwargs["path"]
             if path == "/api/project.all":
                 return [{"environments": [{"applications": []}]}]
@@ -358,7 +359,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                 return {"domainId": "domain-preview"}
             return {}
 
-        def _fake_fetch(**kwargs):
+        def _fake_fetch(**kwargs: object) -> dict[str, object]:
             target_id = kwargs["target_id"]
             if target_id == "app-testing":
                 return {
@@ -438,11 +439,13 @@ class GenericWebPreviewTests(unittest.TestCase):
         update_application = [
             request for request in requests if request["path"] == "/api/application.update"
         ][0]
-        self.assertEqual(update_application["payload"]["endpointSpecSwarm"], {"Mode": "dnsrr"})
+        update_application_payload = cast("dict[str, object]", update_application["payload"])
+        self.assertEqual(update_application_payload["endpointSpecSwarm"], {"Mode": "dnsrr"})
         save_environment = [
             request for request in requests if request["path"] == "/api/application.saveEnvironment"
         ][0]
-        env_text = str(save_environment["payload"]["env"])
+        save_environment_payload = cast("dict[str, object]", save_environment["payload"])
+        env_text = str(save_environment_payload["env"])
         self.assertIn("SMTP_FROM=hello@example.com", env_text)
         self.assertIn("PUBLIC_URL=https://preview-42.example.test", env_text)
         self.assertIn("PUBLIC_DOMAIN=preview-42.example.test", env_text)
@@ -454,8 +457,8 @@ class GenericWebPreviewTests(unittest.TestCase):
         store = _GenericWebPreviewStore(_profile())
         requests: list[dict[str, object]] = []
 
-        def _fake_dokploy_request(**kwargs):
-            requests.append(kwargs)
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
             path = kwargs["path"]
             if path == "/api/project.all":
                 return [
