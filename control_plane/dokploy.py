@@ -5,7 +5,7 @@ import shlex
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.parse import urlencode
@@ -71,6 +71,12 @@ _DOKPLOY_LOG_SEARCH_PATTERN = re.compile(r"^[a-zA-Z0-9 ._-]{0,500}$")
 type JsonPrimitive = str | int | float | bool | None
 type JsonValue = JsonPrimitive | dict[str, "JsonValue"] | list["JsonValue"]
 type JsonObject = dict[str, JsonValue]
+
+
+class DokployTargetRecordStore(Protocol):
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]: ...
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
 
 
 def render_odoo_raw_compose_file(*, image_reference: str) -> str:
@@ -547,6 +553,16 @@ def build_dokploy_source_of_truth_from_records(
     return DokploySourceOfTruth.model_validate({"schema_version": 1, "targets": targets_payload})
 
 
+def load_optional_dokploy_source_of_truth_from_store(
+    *, record_store: DokployTargetRecordStore
+) -> DokploySourceOfTruth | None:
+    target_records = record_store.list_dokploy_target_records()
+    if not target_records:
+        return None
+    target_id_records = record_store.list_dokploy_target_id_records()
+    return build_dokploy_source_of_truth_from_records(target_records, target_id_records)
+
+
 def _load_optional_dokploy_source_of_truth_from_database(
     *, database_url: str
 ) -> DokploySourceOfTruth | None:
@@ -554,10 +570,7 @@ def _load_optional_dokploy_source_of_truth_from_database(
     try:
         record_store = PostgresRecordStore(database_url=database_url)
         record_store.ensure_schema()
-        target_records = record_store.list_dokploy_target_records()
-        if not target_records:
-            return None
-        target_id_records = record_store.list_dokploy_target_id_records()
+        return load_optional_dokploy_source_of_truth_from_store(record_store=record_store)
     except click.ClickException:
         raise
     except Exception as error:
@@ -570,7 +583,6 @@ def _load_optional_dokploy_source_of_truth_from_database(
                 record_store.close()
         except Exception:
             pass
-    return build_dokploy_source_of_truth_from_records(target_records, target_id_records)
 
 
 def read_dokploy_config(*, control_plane_root: Path) -> tuple[str, str]:
@@ -876,9 +888,9 @@ def update_dokploy_target_source(
     custom_git_ssh_key_id = str(target_payload.get("customGitSSHKeyId") or "").strip()
     trigger_type = str(target_payload.get("triggerType") or "push").strip() or "push"
     raw_watch_paths = target_payload.get("watchPaths")
-    watch_paths = list(target_definition.watch_paths) or (
-        list(raw_watch_paths) if isinstance(raw_watch_paths, list) else []
-    )
+    watch_paths = list(target_definition.watch_paths) or _string_items(raw_watch_paths)
+    watch_path_values: list[JsonValue] = []
+    watch_path_values.extend(watch_paths)
     auto_deploy = bool(target_payload.get("autoDeploy"))
     enable_submodules = (
         target_definition.enable_submodules
@@ -926,7 +938,7 @@ def update_dokploy_target_source(
         "customGitBranch": custom_git_branch,
         "enableSubmodules": enable_submodules,
         "triggerType": trigger_type,
-        "watchPaths": watch_paths,
+        "watchPaths": watch_path_values,
     }
     if custom_git_ssh_key_id:
         payload["customGitSSHKeyId"] = custom_git_ssh_key_id
@@ -1522,9 +1534,29 @@ def dokploy_request(
     if not raw_payload:
         return {}
     try:
-        return json.loads(raw_payload)
+        return _normalize_json_value(json.loads(raw_payload))
     except json.JSONDecodeError:
         return {"raw": raw_payload.decode("utf-8", errors="replace")}
+
+
+def _string_items(value: JsonValue | None) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _normalize_json_value(value: object) -> JsonValue:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, list):
+        return [_normalize_json_value(item) for item in value]
+    if isinstance(value, dict):
+        normalized: JsonObject = {}
+        for key_name, item in value.items():
+            if isinstance(key_name, str):
+                normalized[key_name] = _normalize_json_value(item)
+        return normalized
+    return str(value)
 
 
 def as_json_object(value: JsonValue) -> JsonObject | None:
