@@ -13,6 +13,10 @@ from control_plane.dokploy import (
     DokployTargetDefinition,
     protected_shopify_store_keys_for_target_definition,
 )
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetShopifyPolicy,
+)
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooConfigParameterOverride,
@@ -333,11 +337,11 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
                     context="opw",
                     instance="testing",
                     target_id="compose-123",
-                    policies={
-                        "shopify": {
-                            "protected_store_keys": ["yps-your-part-supplier"],
-                        }
-                    },
+                    policies=DokployTargetPolicies(
+                        shopify=DokployTargetShopifyPolicy(
+                            protected_store_keys=("yps-your-part-supplier",)
+                        )
+                    ),
                 )
             ),
             ("yps-your-part-supplier",),
