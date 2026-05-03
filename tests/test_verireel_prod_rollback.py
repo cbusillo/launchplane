@@ -20,13 +20,11 @@ from control_plane.workflows.verireel_prod_rollback import (
     VeriReelProdRollbackRequest,
     VeriReelProdRollbackWorkerRequest,
     VeriReelProdRollbackWorkerResult,
+    _resolve_rollout_base_urls,
     _run_delegated_worker,
     execute_verireel_prod_rollback,
 )
-from control_plane.workflows.verireel_prod_promotion import (
-    VeriReelRolloutVerificationResult,
-    _resolve_rollout_base_urls,
-)
+from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 
 
 class VeriReelProdRollbackWorkflowTests(unittest.TestCase):

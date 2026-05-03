@@ -7,13 +7,13 @@ import click
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.verireel_prod_promotion import (
     VeriReelProdPromotionRequest,
-    VeriReelRolloutVerificationResult,
     execute_verireel_prod_promotion,
 )
+from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 
 
@@ -40,7 +40,9 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-verireel-prod-run-12345-attempt-1",
-                    artifact_identity={"artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890"},
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890"
+                    ),
                     context="verireel",
                     instance="prod",
                     source_git_ref="abcdef1234567890",
@@ -60,14 +62,16 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                     ),
                 )
             )
-            request = VeriReelProdPromotionRequest(
-                artifact_id="ghcr.io/every/verireel-app:sha-abcdef1234567890",
-                source_git_ref="abcdef1234567890",
-                backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
-                promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
-                source_health_status="success",
-                expected_build_revision="abcdef1234567890",
-                expected_build_tag="sha-abcdef1234567890",
+            request = VeriReelProdPromotionRequest.model_validate(
+                {
+                    "artifact_id": "ghcr.io/every/verireel-app:sha-abcdef1234567890",
+                    "source_git_ref": "abcdef1234567890",
+                    "backup_record_id": "backup-gate-verireel-prod-run-12345-attempt-1",
+                    "promotion_record_id": "promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                    "source_health_status": "success",
+                    "expected_build_revision": "abcdef1234567890",
+                    "expected_build_tag": "sha-abcdef1234567890",
+                }
             )
 
             with patch(
