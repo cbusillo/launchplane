@@ -3,6 +3,7 @@ from pathlib import Path
 import click
 
 from control_plane.contracts.preview_pr_feedback_record import (
+    PreviewPrFeedbackDeliveryStatus,
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
     build_preview_pr_feedback_id,
@@ -188,7 +189,7 @@ def build_preview_pr_feedback_record(
         run_url=run_url.strip(),
         failure_summary=failure_summary.strip(),
     )
-    delivery_status = "skipped"
+    delivery_status: PreviewPrFeedbackDeliveryStatus = "skipped"
     delivery_action = ""
     comment_id = 0
     comment_url = ""
