@@ -54,7 +54,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
-from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentRecord,
+    RuntimeEnvironmentScope,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -214,7 +217,7 @@ def _dokploy_target_record(*, context: str = "opw", instance: str = "prod") -> D
 
 def _runtime_environment_record(
     *,
-    scope: str = "instance",
+    scope: RuntimeEnvironmentScope = "instance",
     context: str = "opw",
     instance: str = "local",
     env: dict[str, str | int | float | bool] | None = None,
@@ -611,7 +614,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(store.backend_name, "postgres")
         self.assertEqual(loaded_record.context, "opw")
-        self.assertEqual(loaded_record.resolved_target.target_id, "compose-123")
+        resolved_target = loaded_record.resolved_target
+        assert resolved_target is not None
+        self.assertEqual(resolved_target.target_id, "compose-123")
 
     def test_list_preview_records_filters_and_limits(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -703,15 +708,19 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
             store.close()
 
+        latest_generation = summary.latest_generation
+        assert latest_generation is not None
         self.assertEqual(summary.preview.preview_id, preview.preview_id)
         self.assertEqual(
-            summary.latest_generation.generation_id,
+            latest_generation.generation_id,
             "preview-verireel-testing-verireel-pr-123-generation-0002",
         )
         self.assertEqual(len(summary.recent_generations), 2)
         self.assertEqual(len(listed_summaries), 1)
         self.assertEqual(len(listed_summaries[0].recent_generations), 1)
-        self.assertEqual(listed_summaries[0].latest_generation.sequence, 2)
+        listed_latest_generation = listed_summaries[0].latest_generation
+        assert listed_latest_generation is not None
+        self.assertEqual(listed_latest_generation.sequence, 2)
 
     def test_preview_inventory_scan_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1180,17 +1189,29 @@ class PostgresRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(summary.context, "opw")
         self.assertEqual(summary.instance, "testing")
+        inventory = summary.inventory
+        assert inventory is not None
+        inventory_artifact_identity = inventory.artifact_identity
+        assert inventory_artifact_identity is not None
         self.assertEqual(
-            summary.inventory.artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4"
+            inventory_artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4"
         )
-        self.assertEqual(summary.release_tuple.channel, "testing")
+        release_tuple = summary.release_tuple
+        assert release_tuple is not None
+        self.assertEqual(release_tuple.channel, "testing")
+        latest_deployment = summary.latest_deployment
+        assert latest_deployment is not None
         self.assertEqual(
-            summary.latest_deployment.record_id, "deployment-20260420T153000Z-opw-testing"
+            latest_deployment.record_id, "deployment-20260420T153000Z-opw-testing"
         )
         self.assertIsNone(summary.latest_promotion)
         self.assertIsNone(summary.latest_backup_gate)
-        self.assertEqual(summary.dokploy_target_id.target_id, "compose-123")
-        self.assertEqual(summary.dokploy_target.target_name, "opw-testing")
+        dokploy_target_id = summary.dokploy_target_id
+        assert dokploy_target_id is not None
+        self.assertEqual(dokploy_target_id.target_id, "compose-123")
+        dokploy_target = summary.dokploy_target
+        assert dokploy_target is not None
+        self.assertEqual(dokploy_target.target_name, "opw-testing")
         self.assertEqual(
             [
                 (record.scope, record.context, record.instance)
@@ -1198,7 +1219,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
             ],
             [("global", "", ""), ("context", "opw", ""), ("instance", "opw", "testing")],
         )
-        self.assertEqual(summary.odoo_instance_override.config_parameters[0].key, "web.base.url")
+        odoo_instance_override = summary.odoo_instance_override
+        assert odoo_instance_override is not None
+        self.assertEqual(odoo_instance_override.config_parameters[0].key, "web.base.url")
         self.assertEqual(summary.secret_bindings[0].binding_key, "DOKPLOY_TOKEN")
 
     def test_write_read_and_list_odoo_instance_override_records(self) -> None:
