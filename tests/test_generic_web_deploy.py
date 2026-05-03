@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 import click
 
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -21,14 +22,14 @@ from control_plane.workflows.generic_web_deploy import (
 class _GenericWebDeployStore:
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
-        self.deployments = []
+        self.deployments: list[DeploymentRecord] = []
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
             raise FileNotFoundError(product)
         return self.profile
 
-    def write_deployment_record(self, record) -> None:
+    def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployments.append(record)
 
 
@@ -113,7 +114,10 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.target_id, "target-123")
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "pass")
-        self.assertEqual(store.deployments[0].resolved_target.target_name, "sellyouroutboard-testing-app")
+        self.assertIsNotNone(store.deployments[0].resolved_target)
+        resolved_target = store.deployments[0].resolved_target
+        assert resolved_target is not None
+        self.assertEqual(resolved_target.target_name, "sellyouroutboard-testing-app")
         deploy.assert_called_once()
 
     def test_execute_generic_web_deploy_records_failure_when_provider_fails(self) -> None:
