@@ -645,11 +645,8 @@ class ProductDriverMismatchError(ValueError):
     pass
 
 
-class OdooPostDeployEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OdooPostDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     post_deploy: OdooPostDeployRequest
 
     @model_validator(mode="after")
@@ -658,11 +655,8 @@ class OdooPostDeployEnvelope(BaseModel):
         return self
 
 
-class OdooArtifactPublishEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     publish: OdooArtifactPublishEvidenceRequest
 
     @model_validator(mode="after")
@@ -671,17 +665,44 @@ class OdooArtifactPublishEnvelope(BaseModel):
         return self
 
 
-class OdooArtifactPublishInputsEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OdooArtifactPublishInputsEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     inputs: OdooArtifactPublishInputsRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooArtifactPublishInputsEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo artifact publish inputs")
         return self
+
+
+_ODOO_POST_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/post-deploy",
+    envelope_model=OdooPostDeployEnvelope,
+    denial_message=(
+        "Workflow cannot execute the Odoo post-deploy driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_ODOO_ARTIFACT_PUBLISH_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/artifact-publish",
+    envelope_model=OdooArtifactPublishEnvelope,
+    denial_message=(
+        "Workflow cannot write Odoo artifact publish evidence"
+        " for the requested product/context."
+    ),
+)
+
+
+_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/artifact-publish-inputs",
+    envelope_model=OdooArtifactPublishInputsEnvelope,
+    denial_message=(
+        "Workflow cannot read Odoo artifact publish inputs"
+        " for the requested product/context."
+    ),
+)
 
 
 class OdooProdRollbackEnvelope(BaseModel):
@@ -4030,8 +4051,8 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
-            elif path == "/v1/drivers/odoo/post-deploy":
-                request = OdooPostDeployEnvelope.model_validate(payload)
+            elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
+                request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4043,10 +4064,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.post_deploy.context,
-                    denial_message=(
-                        "Workflow cannot execute the Odoo post-deploy driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_ODOO_POST_DEPLOY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4073,8 +4091,8 @@ def create_launchplane_service_app(
                         f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
                     )
                 }
-            elif path == "/v1/drivers/odoo/artifact-publish":
-                request = OdooArtifactPublishEnvelope.model_validate(payload)
+            elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
+                request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4086,10 +4104,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.publish.context,
-                    denial_message=(
-                        "Workflow cannot write Odoo artifact publish evidence"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_ODOO_ARTIFACT_PUBLISH_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4117,8 +4132,10 @@ def create_launchplane_service_app(
                     "image_digest": driver_result.image_digest,
                     "source_commit": driver_result.source_commit,
                 }
-            elif path == "/v1/drivers/odoo/artifact-publish-inputs":
-                request = OdooArtifactPublishInputsEnvelope.model_validate(payload)
+            elif path == _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path:
+                request = _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4130,10 +4147,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.inputs.context,
-                    denial_message=(
-                        "Workflow cannot read Odoo artifact publish inputs"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
