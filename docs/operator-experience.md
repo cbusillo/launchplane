@@ -58,6 +58,19 @@ Low-level records remain useful for diagnostics, but diagnostics are secondary.
 Normal operators should not need to choose a raw context or understand provider
 lookup rows before taking safe action.
 
+The first product/site read endpoints are:
+
+- `GET /v1/products`
+- `GET /v1/products/{product}`
+- `GET /v1/products/{product}/environments/{environment}`
+
+These endpoints are profile and driver driven. A standard `generic-web` site
+should appear in the read model from Launchplane records alone: product profile,
+lane profiles, target records, runtime-environment records, managed secret
+bindings, authz policy, and evidence records. The shared read model must not add
+product-specific top-level fields; driver-specific data belongs behind driver
+descriptor actions, capabilities, panels, or a driver-namespaced extension.
+
 ## Promotion Safety
 
 Browser sessions may dry-run generic-web promotion directly. Live promotion from

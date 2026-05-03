@@ -239,6 +239,40 @@ def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dic
     return payload
 
 
+def _generic_site_profile_payload(product: str = "example-site") -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": product,
+        "display_name": "Example Site",
+        "repository": f"every/{product}",
+        "driver_id": "generic-web",
+        "image": {"repository": f"ghcr.io/every/{product}"},
+        "runtime_port": 3000,
+        "health_path": "/healthz",
+        "lanes": (
+            {
+                "instance": "testing",
+                "context": product,
+                "base_url": f"https://testing.{product}.example",
+                "health_url": f"https://testing.{product}.example/healthz",
+            },
+            {
+                "instance": "prod",
+                "context": product,
+                "base_url": f"https://{product}.example",
+                "health_url": f"https://{product}.example/healthz",
+            },
+        ),
+        "preview": {
+            "enabled": True,
+            "context": product,
+            "slug_template": "pr-{number}",
+        },
+        "updated_at": "2026-05-02T22:30:00Z",
+        "source": "test",
+    }
+
+
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
@@ -1241,6 +1275,156 @@ class LaunchplaneServiceTests(unittest.TestCase):
             [profile["product"] for profile in list_payload["profiles"]],
             ["sellyouroutboard"],
         )
+
+    def test_product_overview_endpoint_is_generic_web_profile_driven(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane", "example-site"],
+                            "contexts": ["launchplane", "example-site"],
+                            "actions": [
+                                "product_environment.read",
+                                "generic_web_prod_promotion.dispatch",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products/example-site",
+            )
+
+        self.assertEqual(status_code, 200)
+        product = payload["product"]
+        response_text = json.dumps(payload)
+        self.assertEqual(product["product"], "example-site")
+        self.assertEqual(product["driver_id"], "generic-web")
+        self.assertEqual(
+            [environment["environment"] for environment in product["environments"]],
+            ["testing", "prod"],
+        )
+        actions = {action["action_id"]: action for action in product["available_actions"]}
+        self.assertTrue(actions["prod_promotion_workflow"]["enabled"])
+        self.assertFalse(actions["prod_backup_gate"]["enabled"])
+        self.assertEqual(actions["prod_backup_gate"]["trust_state"], "unsupported")
+        self.assertNotIn("sellyouroutboard", response_text)
+
+    def test_product_environment_detail_redacts_runtime_and_secret_values(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="example-site",
+                    instance="prod",
+                    target_type="application",
+                    target_name="example-site-prod",
+                    updated_at="2026-05-02T22:31:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="example-site",
+                    instance="prod",
+                    target_id="app-prod-123",
+                    updated_at="2026-05-02T22:31:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="example-site",
+                    instance="prod",
+                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+            )
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="SMTP_PASSWORD",
+                    plaintext_value="super-secret-password",
+                    binding_key="SMTP_PASSWORD",
+                    context_name="example-site",
+                    instance_name="prod",
+                    actor="test",
+                )
+            store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["example-site"],
+                            "contexts": ["example-site"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products/example-site/environments/prod",
+            )
+
+        response_text = json.dumps(payload)
+        self.assertEqual(status_code, 200)
+        environment = payload["environment"]
+        self.assertEqual(environment["target"]["target_name"], "example-site-prod")
+        self.assertTrue(environment["target"]["target_id_recorded"])
+        self.assertEqual(environment["runtime_settings"][0]["env_keys"], ["INTERNAL_CALLBACK_URL"])
+        self.assertEqual(environment["managed_secrets"][0]["binding_key"], "SMTP_PASSWORD")
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+        self.assertNotIn("super-secret-password", response_text)
 
     def test_product_context_cutover_endpoint_updates_profile_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
