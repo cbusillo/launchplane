@@ -153,7 +153,9 @@ records and Dokploy target lookups, and can disable legacy managed secret record
 and bindings. It should not delete inventory records, release tuples,
 deployments, promotions, backup gates, or preview history; those records are
 historical evidence and should continue to describe the route that produced
-them.
+them. Product profiles retain legacy route names in `historical_contexts` after
+cutover so product activity read models can continue to include that preserved
+evidence without making the legacy context current authority again.
 
 Before changing a product profile or deleting legacy rows, audit both route
 families with:
