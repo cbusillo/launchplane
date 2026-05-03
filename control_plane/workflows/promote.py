@@ -1,5 +1,6 @@
 from datetime import UTC, datetime
 
+from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -8,6 +9,7 @@ from control_plane.contracts.promotion_record import (
     PostDeployUpdateEvidence,
     PromotionRequest,
     PromotionRecord,
+    ReleaseStatus,
 )
 
 
@@ -21,7 +23,7 @@ def build_promotion_record(
     from_instance_name: str,
     to_instance_name: str,
     target_name: str,
-    target_type: str,
+    target_type: DokployTargetType,
     deploy_mode: str,
     deployment_id: str = "",
     source_health: HealthcheckEvidence | None = None,
@@ -54,7 +56,12 @@ def generate_promotion_record_id(*, context_name: str, from_instance_name: str, 
     return f"promotion-{timestamp}-{context_name}-{from_instance_name}-to-{to_instance_name}"
 
 
-def _resolve_post_deploy_update(status_target_type: str, *, wait: bool, deployment_status: str) -> PostDeployUpdateEvidence:
+def _resolve_post_deploy_update(
+    status_target_type: DokployTargetType,
+    *,
+    wait: bool,
+    deployment_status: ReleaseStatus,
+) -> PostDeployUpdateEvidence:
     if not wait or status_target_type != "compose":
         return PostDeployUpdateEvidence()
     if deployment_status == "pending":
@@ -76,7 +83,7 @@ def _resolve_destination_health(
     destination_health: HealthcheckEvidence,
     *,
     wait: bool,
-    deployment_status: str,
+    deployment_status: ReleaseStatus,
 ) -> HealthcheckEvidence:
     if destination_health.status == "skipped":
         return destination_health
@@ -99,7 +106,7 @@ def build_executed_promotion_record(
     request: PromotionRequest,
     record_id: str,
     deployment_id: str,
-    deployment_status: str,
+    deployment_status: ReleaseStatus,
     deployment_record_id: str = "",
 ) -> PromotionRecord:
     return PromotionRecord(
