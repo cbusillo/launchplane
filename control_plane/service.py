@@ -219,6 +219,13 @@ class _DriverRouteMetadata:
 
 
 @dataclass(frozen=True)
+class _DriverRouteExecutionMetadata:
+    route_path: str
+    envelope_model: type[BaseModel]
+    denial_message: str
+
+
+@dataclass(frozen=True)
 class _ResolvedProductDriverContext:
     profile: LaunchplaneProductProfileRecord | None
     lane: ProductLaneProfile | None = None
@@ -399,6 +406,16 @@ class GenericWebPreviewReadinessEnvelope(BaseModel):
         if self.product.strip() != self.readiness.product.strip():
             raise ValueError("generic web preview readiness requires matching product values")
         return self
+
+
+_GENERIC_WEB_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/preview-readiness",
+    envelope_model=GenericWebPreviewReadinessEnvelope,
+    denial_message=(
+        "Workflow cannot evaluate generic web preview readiness"
+        " for the requested product/context."
+    ),
+)
 
 
 class GenericWebPreviewDestroyEnvelope(BaseModel):
@@ -3896,8 +3913,11 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
-            elif path == "/v1/drivers/generic-web/preview-readiness":
-                request = GenericWebPreviewReadinessEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path:
+                request = cast(
+                    GenericWebPreviewReadinessEnvelope,
+                    _GENERIC_WEB_PREVIEW_READINESS_ROUTE.envelope_model.model_validate(payload),
+                )
                 profile = resolve_generic_web_preview_profile(
                     record_store=record_store,
                     product=request.product,
@@ -3908,10 +3928,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                    denial_message=(
-                        "Workflow cannot evaluate generic web preview readiness"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PREVIEW_READINESS_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
