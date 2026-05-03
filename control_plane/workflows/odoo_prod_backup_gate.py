@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -9,11 +9,23 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.storage.filesystem import FilesystemRecordStore
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.workflows.ship import utc_now_timestamp
 
-SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
 BACKUP_GATE_SOURCE = "launchplane-odoo-prod-backup-gate"
+
+
+class OdooProdBackupGateStore(Protocol):
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
+
+    def write_backup_gate_record(self, record: BackupGateRecord) -> None: ...
 
 
 class OdooProdBackupGateRequest(BaseModel):
@@ -30,11 +42,8 @@ class OdooProdBackupGateRequest(BaseModel):
         self.context = self.context.strip().lower()
         self.instance = self.instance.strip().lower()
         self.backup_record_id = self.backup_record_id.strip()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo prod backup gate supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo prod backup gate requires context.")
         if self.instance != "prod":
             raise ValueError("Odoo prod backup gate requires instance 'prod'.")
         if not self.backup_record_id:
@@ -58,7 +67,7 @@ class OdooProdBackupGateResult(BaseModel):
 
 def _read_target_definition(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdBackupGateStore,
     request: OdooProdBackupGateRequest,
 ) -> control_plane_dokploy.DokployTargetDefinition:
     try:
@@ -86,6 +95,25 @@ def _read_target_definition(
             f"Configured={target_definition.target_type}."
         )
     return target_definition
+
+
+def _require_record_store(record_store: object) -> OdooProdBackupGateStore:
+    required_methods = (
+        "read_dokploy_target_record",
+        "read_dokploy_target_id_record",
+        "write_backup_gate_record",
+    )
+    missing_methods = tuple(
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    )
+    if missing_methods:
+        raise click.ClickException(
+            "Odoo prod backup gate requires a DB-backed Launchplane record store. "
+            f"Missing methods: {', '.join(missing_methods)}."
+        )
+    return cast(OdooProdBackupGateStore, record_store)
 
 
 def _runtime_values(
@@ -134,7 +162,7 @@ def _backup_paths(*, runtime_values: dict[str, str], backup_record_id: str) -> d
 
 def _write_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdBackupGateStore,
     request: OdooProdBackupGateRequest,
     status: Literal["pending", "pass", "fail"],
     evidence: dict[str, str] | None = None,
@@ -156,17 +184,18 @@ def _write_backup_gate_record(
 def execute_odoo_prod_backup_gate(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: object,
     request: OdooProdBackupGateRequest,
 ) -> OdooProdBackupGateResult:
-    target_definition = _read_target_definition(record_store=record_store, request=request)
+    typed_record_store = _require_record_store(record_store)
+    target_definition = _read_target_definition(record_store=typed_record_store, request=request)
     runtime_values = _runtime_values(control_plane_root=control_plane_root, request=request)
     evidence = _backup_paths(
         runtime_values=runtime_values,
         backup_record_id=request.backup_record_id,
     )
     _write_backup_gate_record(
-        record_store=record_store,
+        record_store=typed_record_store,
         request=request,
         status="pending",
         evidence={},
@@ -187,7 +216,7 @@ def execute_odoo_prod_backup_gate(
         )
     except (click.ClickException, OSError) as error:
         _write_backup_gate_record(
-            record_store=record_store,
+            record_store=typed_record_store,
             request=request,
             status="fail",
             evidence={**evidence, "error_message": str(error)},
@@ -204,7 +233,7 @@ def execute_odoo_prod_backup_gate(
             error_message=str(error),
         )
     _write_backup_gate_record(
-        record_store=record_store,
+        record_store=typed_record_store,
         request=request,
         status="pass",
         evidence=evidence,

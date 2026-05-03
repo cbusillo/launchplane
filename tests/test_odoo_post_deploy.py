@@ -1,6 +1,7 @@
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
 from control_plane.contracts.odoo_instance_override_record import (
@@ -83,7 +84,9 @@ class OdooPostDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.override_status, "pass")
             self.assertTrue(result.override_payload_rendered)
             self.assertEqual(len(captured_runs), 1)
-            workflow_environment = captured_runs[0]["workflow_environment_overrides"]
+            workflow_environment = cast(
+                "dict[str, str]", captured_runs[0]["workflow_environment_overrides"]
+            )
             self.assertIn("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", workflow_environment)
             self.assertNotIn("ENV_OVERRIDE_CONFIG_PARAM__WEB__BASE__URL", workflow_environment)
             updated_record = store.read_odoo_instance_override_record(

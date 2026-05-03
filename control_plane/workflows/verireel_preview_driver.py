@@ -46,10 +46,10 @@ class VeriReelPreviewRefreshRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelPreviewRefreshRequest":
-        if self.context != "verireel-testing":
-            raise ValueError("VeriReel preview refresh requires context 'verireel-testing'.")
-        if self.anchor_repo != "verireel":
-            raise ValueError("VeriReel preview refresh requires anchor_repo 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel preview refresh requires context.")
+        if not self.anchor_repo.strip():
+            raise ValueError("VeriReel preview refresh requires anchor_repo.")
         if not self.anchor_pr_url.strip():
             raise ValueError("VeriReel preview refresh requires anchor_pr_url.")
         if not self.anchor_head_sha.strip():
@@ -80,10 +80,10 @@ class VeriReelPreviewDestroyRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelPreviewDestroyRequest":
-        if self.context != "verireel-testing":
-            raise ValueError("VeriReel preview destroy requires context 'verireel-testing'.")
-        if self.anchor_repo != "verireel":
-            raise ValueError("VeriReel preview destroy requires anchor_repo 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel preview destroy requires context.")
+        if not self.anchor_repo.strip():
+            raise ValueError("VeriReel preview destroy requires anchor_repo.")
         if not self.preview_slug.strip():
             raise ValueError("VeriReel preview destroy requires preview_slug.")
         if self.preview_slug.strip() != _expected_preview_slug(self.anchor_pr_number):
@@ -127,8 +127,8 @@ class VeriReelPreviewInventoryRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelPreviewInventoryRequest":
-        if self.context != "verireel-testing":
-            raise ValueError("VeriReel preview inventory requires context 'verireel-testing'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel preview inventory requires context.")
         return self
 
 
@@ -222,7 +222,9 @@ def _resolve_preview_base_url(*, control_plane_root: Path, context_name: str) ->
     return preview_base_url
 
 
-def _resolve_preview_url(*, control_plane_root: Path, request: VeriReelPreviewRefreshRequest) -> str:
+def _resolve_preview_url(
+    *, control_plane_root: Path, request: VeriReelPreviewRefreshRequest
+) -> str:
     if request.preview_url.strip():
         return request.preview_url.strip()
     return _preview_url_from_base_url(
@@ -376,7 +378,9 @@ def execute_verireel_preview_inventory(
         path="/api/project.all",
     )
     if not isinstance(raw_projects, list):
-        raise click.ClickException("Dokploy project inventory returned an invalid response payload.")
+        raise click.ClickException(
+            "Dokploy project inventory returned an invalid response payload."
+        )
     preview_items: list[VeriReelPreviewInventoryItem] = []
     for raw_project in raw_projects:
         project = control_plane_dokploy.as_json_object(raw_project)
@@ -400,7 +404,9 @@ def execute_verireel_preview_inventory(
                 preview_slug = _preview_slug_from_application_name(application_name)
                 if not preview_slug:
                     continue
-                application_id = str(application.get("applicationId") or application.get("id") or "").strip()
+                application_id = str(
+                    application.get("applicationId") or application.get("id") or ""
+                ).strip()
                 if not application_id:
                     continue
                 preview_items.append(
@@ -1227,7 +1233,9 @@ def execute_verireel_preview_destroy(
         raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
 
     started_at = utc_now_timestamp()
-    preview_url = _resolve_preview_url_for_destroy(control_plane_root=control_plane_root, request=request)
+    preview_url = _resolve_preview_url_for_destroy(
+        control_plane_root=control_plane_root, request=request
+    )
     application_name = _preview_application_name(request.preview_slug)
     application = _find_application_by_name(
         host=host, token=token, application_name=application_name
