@@ -3022,6 +3022,71 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
         dispatch_mock.assert_not_called()
 
+    def test_generic_web_promotion_workflow_rejects_token_unowned_context_before_authz(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["unowned-context"],
+                            "actions": ["generic_web_prod_promotion.dispatch"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.dispatch_generic_web_promotion_workflow"
+            ) as dispatch_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion-workflow",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "workflow": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "context": "unowned-context",
+                            "dry_run": False,
+                        },
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+        dispatch_mock.assert_not_called()
+
     def test_generic_web_product_profile_appears_in_driver_view(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
