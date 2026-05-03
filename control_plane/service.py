@@ -4,7 +4,6 @@ import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
-import io
 import json
 import logging
 import mimetypes
@@ -13,9 +12,10 @@ import secrets
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import Callable, Generic, TypeVar, cast
+from typing import BinaryIO, Callable, Generic, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
+from wsgiref.types import WSGIApplication
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -127,6 +127,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
+    GenericWebPreviewStore,
     discover_generic_web_preview_desired_state,
     evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
@@ -225,6 +226,22 @@ class _ProductRouteEnvelope(BaseModel):
 
 
 _DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=_ProductRouteEnvelope)
+
+
+class _IdempotencyCapableStore(Protocol):
+    def read_idempotency_record(
+        self,
+        *,
+        scope: str,
+        route_path: str,
+        idempotency_key: str,
+    ) -> LaunchplaneIdempotencyRecord: ...
+
+    def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
+
+
+_StartResponse = Callable[[str, list[tuple[str, str]]], None]
+_WsgiApp = Callable[[dict[str, object], _StartResponse], list[bytes]]
 
 
 @dataclass(frozen=True)
@@ -1296,7 +1313,7 @@ class ThreadingWSGIServer(ThreadingMixIn, WSGIServer):
 
 def _json_response(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     status_code: int,
     payload: dict[str, object],
     headers: list[tuple[str, str]] | None = None,
@@ -1314,7 +1331,7 @@ def _json_response(
 
 def _redirect_response(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     location: str,
     headers: list[tuple[str, str]] | None = None,
 ) -> list[bytes]:
@@ -1333,7 +1350,7 @@ def _driver_route_authorization_response(
     product: str,
     context: str,
     denial_message: str,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
 ) -> list[bytes] | None:
     """Authorize descriptor routes against normalized product/context values."""
@@ -1369,7 +1386,7 @@ def _resolve_and_authorize_descriptor_route(
     identity: LaunchplaneIdentity,
     product: str,
     authorization_context: str,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
     descriptor_context: str = "",
     descriptor_instance: str = "",
@@ -1400,10 +1417,10 @@ def _authorize_generic_web_preview_route(
     *,
     route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
     payload: dict[str, object],
-    record_store: object,
+    record_store: GenericWebPreviewStore,
     authz_policy: LaunchplaneAuthzPolicy,
     identity: LaunchplaneIdentity,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
 ) -> tuple[_DriverRouteEnvelopeT, LaunchplaneProductProfileRecord, list[bytes] | None]:
     request = route_metadata.envelope_model.model_validate(payload)
@@ -1448,7 +1465,7 @@ def _utc_now_timestamp() -> str:
 
 def _not_found_response(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
     path: str,
 ) -> list[bytes]:
@@ -1465,7 +1482,7 @@ def _not_found_response(
 
 def _ui_static_response(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     status_code: int,
     content: bytes,
     content_type: str,
@@ -1485,7 +1502,7 @@ def _ui_static_response(
 
 def _ui_file_response(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     file_path: Path,
     cache_control: str,
 ) -> list[bytes]:
@@ -1501,7 +1518,7 @@ def _ui_file_response(
 
 def _serve_ui_route(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
     path: str,
     ui_static_root: Path,
@@ -1675,17 +1692,17 @@ def _build_write_routes() -> frozenset[str]:
     return frozenset(launchplane_write_routes | set(_driver_write_routes_from_descriptors()))
 
 
-def _secret_capable_store(record_store: object):
+def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretReadStore | None:
     if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
-        return record_store
+        return cast(control_plane_secrets.SecretReadStore, record_store)
     return None
 
 
-def _idempotency_capable_store(record_store: object):
+def _idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
     if hasattr(record_store, "read_idempotency_record") and hasattr(
         record_store, "write_idempotency_record"
     ):
-        return record_store
+        return cast(_IdempotencyCapableStore, record_store)
     return None
 
 
@@ -1781,7 +1798,7 @@ def _accepted_payload(
 
 def _replay_idempotent_response(
     *,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
     stored_record: LaunchplaneIdempotencyRecord,
 ) -> list[bytes]:
@@ -1856,7 +1873,7 @@ def _check_idempotent_request(
     route_path: str,
     idempotency_key: str,
     request_fingerprint: str,
-    start_response: Callable[[str, list[tuple[str, str]]], None],
+    start_response: _StartResponse,
     trace_id: str,
 ) -> list[bytes] | None:
     stored_record = _read_idempotency_record(
@@ -1891,11 +1908,8 @@ def _check_idempotent_request(
 
 def _read_json_request(environ: dict[str, object]) -> dict[str, object]:
     content_length = int(str(environ.get("CONTENT_LENGTH", "0") or "0"))
-    body_stream = environ.get("wsgi.input")
-    if not isinstance(body_stream, io.BytesIO):
-        body_bytes = body_stream.read(content_length) if body_stream is not None else b""
-    else:
-        body_bytes = body_stream.read(content_length)
+    body_stream = cast(BinaryIO | None, environ.get("wsgi.input"))
+    body_bytes = body_stream.read(content_length) if body_stream is not None else b""
     if not body_bytes:
         raise ValueError("Request body is required.")
     try:
@@ -2671,7 +2685,7 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
-):
+) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
     record_store = build_record_store(state_dir=state_dir, database_url=database_url)
@@ -2706,7 +2720,7 @@ def create_launchplane_service_app(
 
     def app(
         environ: dict[str, object],
-        start_response: Callable[[str, list[tuple[str, str]]], None],
+        start_response: _StartResponse,
     ) -> list[bytes]:
         nonlocal authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source
 
@@ -2827,8 +2841,8 @@ def create_launchplane_service_app(
                 headers=[("Set-Cookie", clear_cookie)],
             )
         if method == "GET" and path == "/v1/auth/session":
-            human_identity = _session_identity(environ=environ, session_manager=session_manager)
-            if human_identity is None:
+            session_identity = _session_identity(environ=environ, session_manager=session_manager)
+            if session_identity is None:
                 return _json_response(
                     start_response=start_response,
                     status_code=401,
@@ -2848,7 +2862,7 @@ def create_launchplane_service_app(
                 payload={
                     "status": "ok",
                     "trace_id": request_trace_id,
-                    "identity": _human_identity_payload(human_identity),
+                    "identity": _human_identity_payload(session_identity),
                 },
             )
         if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
@@ -3250,7 +3264,7 @@ def create_launchplane_service_app(
                         str(
                             (
                                 query.get("lines")
-                                or [control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT]
+                                or [str(control_plane_dokploy.DEFAULT_DOKPLOY_LOG_LINE_COUNT)]
                             )[0]
                         )
                     )
@@ -4278,7 +4292,7 @@ def create_launchplane_service_app(
                 if idempotent_response is not None:
                     return idempotent_response
                 driver_result = ingest_odoo_artifact_publish_evidence(
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=odoo_publish_request.publish,
                 )
                 result = {
@@ -4387,7 +4401,7 @@ def create_launchplane_service_app(
                     control_plane_root=resolved_root,
                     state_dir=state_dir,
                     database_url=database_url,
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=odoo_promotion_request.promotion,
                 )
                 result = {
@@ -4470,7 +4484,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=verireel_testing_deploy_request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
@@ -4639,7 +4653,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_stable_deploy(
                     control_plane_root=resolved_root,
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=verireel_prod_deploy_request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
@@ -4679,7 +4693,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_prod_backup_gate(
                     control_plane_root=resolved_root,
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=verireel_prod_backup_gate_request.backup_gate,
                     run_async=True,
                 )
@@ -4725,7 +4739,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_prod_promotion(
                     control_plane_root=resolved_root,
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=verireel_prod_promotion_request.promotion,
                 )
                 result = {
@@ -4766,7 +4780,7 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_prod_rollback(
                     control_plane_root=resolved_root,
-                    record_store=record_store,
+                    record_store=cast(FilesystemRecordStore, record_store),
                     request=verireel_prod_rollback_request.rollback,
                 )
                 result = {
@@ -5604,6 +5618,11 @@ def serve_launchplane_service(
         authz_policy=authz_policy,
         database_url=database_url,
     )
-    with make_server(host, port, application, server_class=ThreadingWSGIServer) as server:
+    with make_server(
+        host,
+        port,
+        cast(WSGIApplication, application),
+        server_class=ThreadingWSGIServer,
+    ) as server:
         click.echo(f"Launchplane service listening on http://{host}:{port}")
         server.serve_forever()
