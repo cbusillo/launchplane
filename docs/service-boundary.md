@@ -403,6 +403,14 @@ target identifiers remain evidence metadata; runtime values, secret plaintext,
 secret ciphertext, and product-specific driver payloads are not exposed as
 shared top-level fields.
 
+Preview-related product actions are only shown when the product profile enables
+previews. That includes generic-web preview discovery and inventory actions,
+not just refresh and destroy operations.
+
+Prod-scoped product actions are only shown when the product profile actually
+defines a prod lane. Generic-web prod promotion is additionally hidden unless
+the testing and prod lanes share the same context.
+
 Product context cutover audit is read-only and uses `product_profile.read` for
 the requested product in the Launchplane service context. It returns redacted
 current-authority metadata for source, target, and optional preview contexts:

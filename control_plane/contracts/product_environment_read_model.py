@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
-from typing import Protocol
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from control_plane.contracts.data_provenance import DataProvenance, FreshnessStatus
 from control_plane.contracts.driver_descriptor import DriverActionDescriptor, DriverDescriptor
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.preview_record import PreviewRecord
+from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -18,6 +20,7 @@ from control_plane.drivers.registry import build_driver_context_view, read_drive
 
 
 ActionAllowed = Callable[[str, str, str], bool]
+ProductSecretBindingTrustState = FreshnessStatus | Literal["disabled"]
 
 
 class ProductReadModelStore(Protocol):
@@ -40,15 +43,15 @@ ACTION_AUTHZ_BY_ROUTE = {
     "/v1/drivers/generic-web/preview-readiness": "preview_readiness.evaluate",
     "/v1/drivers/generic-web/preview-destroy": "preview_destroy.execute",
     "/v1/drivers/odoo/artifact-publish-inputs": "odoo_artifact_publish_inputs.read",
-    "/v1/drivers/odoo/artifact-publish": "odoo_artifact_publish.execute",
+    "/v1/drivers/odoo/artifact-publish": "odoo_artifact_publish.write",
     "/v1/drivers/odoo/post-deploy": "odoo_post_deploy.execute",
     "/v1/drivers/odoo/prod-backup-gate": "odoo_prod_backup_gate.execute",
     "/v1/drivers/odoo/prod-promotion": "odoo_prod_promotion.execute",
     "/v1/drivers/odoo/prod-rollback": "odoo_prod_rollback.execute",
     "/v1/drivers/verireel/testing-deploy": "verireel_testing_deploy.execute",
-    "/v1/drivers/verireel/testing-verification": "verireel_testing_verification.execute",
+    "/v1/drivers/verireel/testing-verification": "deployment.write",
     "/v1/drivers/verireel/stable-environment": "verireel_stable_environment.read",
-    "/v1/drivers/verireel/runtime-verification": "verireel_runtime_verification.evaluate",
+    "/v1/drivers/verireel/runtime-verification": "verireel_stable_environment.read",
     "/v1/drivers/verireel/app-maintenance": "verireel_app_maintenance.execute",
     "/v1/drivers/verireel/prod-deploy": "verireel_prod_deploy.execute",
     "/v1/drivers/verireel/prod-backup-gate": "verireel_prod_backup_gate.execute",
@@ -57,7 +60,13 @@ ACTION_AUTHZ_BY_ROUTE = {
     "/v1/drivers/verireel/preview-refresh": "verireel_preview_refresh.execute",
     "/v1/drivers/verireel/preview-inventory": "verireel_preview_inventory.read",
     "/v1/drivers/verireel/preview-destroy": "verireel_preview_destroy.execute",
-    "/v1/drivers/verireel/preview-verification": "verireel_preview_verification.write",
+    "/v1/drivers/verireel/preview-verification": "preview_generation.write",
+}
+
+PREVIEW_PROFILE_REQUIRED_ACTION_IDS = {
+    "preview_desired_state",
+    "preview_inventory",
+    "preview_readiness",
 }
 
 OPERATOR_ACTION_IDS = {
@@ -115,7 +124,7 @@ class ProductSecretBindingSummary(BaseModel):
     instance: str
     status: str
     updated_at: str
-    trust_state: FreshnessStatus
+    trust_state: ProductSecretBindingTrustState
 
 
 class ProductTargetSummary(BaseModel):
@@ -225,14 +234,14 @@ def build_product_site_overview(
         for lane in profile.lanes
     )
     preview_summary = _build_preview_summary(record_store=record_store, profile=profile)
-    action_context = profile.preview.context or _first_lane_context(profile) or "launchplane"
     available_actions = _action_availability(
         descriptor=descriptor,
+        profile=profile,
         product=profile.product,
-        context=action_context,
         previews_enabled=profile.preview.enabled,
         action_allowed=action_allowed,
         include_unsupported=True,
+        context_resolver=_product_action_context_resolver(profile=profile),
     )
     warnings = tuple(warning for warning in (descriptor_warning,) if warning)
     trust_state = _combine_trust_states(
@@ -288,11 +297,12 @@ def build_product_environment_detail(
         managed_secrets=_secret_binding_summaries(lane_summary),
         available_actions=_action_availability(
             descriptor=descriptor,
+            profile=profile,
             product=profile.product,
-            context=lane.context,
             previews_enabled=profile.preview.enabled,
             action_allowed=action_allowed,
             include_unsupported=True,
+            context_resolver=_lane_context_resolver(context=lane.context),
         ),
         warnings=warnings,
         trust_state=provenance.freshness_status,
@@ -323,6 +333,104 @@ def _profile_provenance(profile: LaunchplaneProductProfileRecord) -> DataProvena
 def _first_lane_context(profile: LaunchplaneProductProfileRecord) -> str:
     first_lane = next(iter(profile.lanes), None)
     return first_lane.context if first_lane is not None else ""
+
+
+def _profile_anchor_repo(profile: LaunchplaneProductProfileRecord) -> str:
+    _owner, separator, repo = profile.repository.strip().partition("/")
+    if separator and repo.strip() and "/" not in repo.strip():
+        return repo.strip()
+    return profile.repository.strip()
+
+
+def _lane_context_for_instance(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    preferred_instances: tuple[str, ...],
+) -> str:
+    for preferred_instance in preferred_instances:
+        for lane in profile.lanes:
+            if lane.instance == preferred_instance and lane.context.strip():
+                return lane.context
+    return ""
+
+
+def _lane_context_if_present(*, profile: LaunchplaneProductProfileRecord, instance: str) -> str:
+    for lane in profile.lanes:
+        if lane.instance == instance and lane.context.strip():
+            return lane.context
+    return ""
+
+
+def _generic_web_prod_promotion_supported(profile: LaunchplaneProductProfileRecord) -> bool:
+    testing_context = _lane_context_if_present(profile=profile, instance="testing")
+    prod_context = _lane_context_if_present(profile=profile, instance="prod")
+    return bool(testing_context and prod_context and testing_context == prod_context)
+
+
+def _prod_lane_supported(profile: LaunchplaneProductProfileRecord) -> bool:
+    return bool(_lane_context_if_present(profile=profile, instance="prod"))
+
+
+def _product_action_authorization_context(
+    *, profile: LaunchplaneProductProfileRecord, action: DriverActionDescriptor
+) -> str:
+    if action.scope == "preview" or action.action_id.startswith("preview_"):
+        preview_context = profile.preview.context.strip()
+        if preview_context:
+            return preview_context
+        return _lane_context_for_instance(profile=profile, preferred_instances=("prod", "testing"))
+    if action.action_id in {"testing_deploy", "testing_verification"}:
+        return _lane_context_for_instance(profile=profile, preferred_instances=("testing", "prod"))
+    if action.route_path == "/v1/drivers/generic-web/prod-promotion":
+        if _generic_web_prod_promotion_supported(profile):
+            return _lane_context_if_present(profile=profile, instance="prod")
+        return ""
+    if action.route_path in {
+        "/v1/drivers/odoo/prod-backup-gate",
+        "/v1/drivers/odoo/prod-promotion",
+        "/v1/drivers/odoo/prod-rollback",
+        "/v1/drivers/verireel/prod-deploy",
+        "/v1/drivers/verireel/prod-backup-gate",
+        "/v1/drivers/verireel/prod-promotion",
+        "/v1/drivers/verireel/prod-rollback",
+    }:
+        if _prod_lane_supported(profile):
+            return _lane_context_if_present(profile=profile, instance="prod")
+        return ""
+    if action.action_id == "prod_promotion_workflow":
+        return _lane_context_for_instance(profile=profile, preferred_instances=("prod", "testing"))
+    if action.action_id == "prod_promotion":
+        return _lane_context_if_present(profile=profile, instance="prod")
+    if action.action_id == "prod_backup_gate" or action.action_id == "prod_rollback":
+        return _lane_context_if_present(profile=profile, instance="prod")
+    if action.action_id in {"stable_environment", "runtime_verification", "app_maintenance"}:
+        return _lane_context_for_instance(profile=profile, preferred_instances=("prod", "testing"))
+    if action.action_id == "stable_deploy":
+        return _lane_context_for_instance(profile=profile, preferred_instances=("testing", "prod"))
+    if action.scope == "context":
+        preview_context = profile.preview.context.strip()
+        if preview_context and profile.preview.enabled:
+            return preview_context
+        return ""
+    if action.scope == "instance":
+        return _lane_context_for_instance(profile=profile, preferred_instances=("prod", "testing"))
+    return ""
+
+
+def _product_action_context_resolver(
+    *, profile: LaunchplaneProductProfileRecord
+) -> Callable[[DriverActionDescriptor], str]:
+    def resolve(action: DriverActionDescriptor) -> str:
+        return _product_action_authorization_context(profile=profile, action=action)
+
+    return resolve
+
+
+def _lane_context_resolver(*, context: str) -> Callable[[DriverActionDescriptor], str]:
+    def resolve(_action: DriverActionDescriptor) -> str:
+        return context
+
+    return resolve
 
 
 def _find_lane(*, profile: LaunchplaneProductProfileRecord, environment: str) -> ProductLaneProfile:
@@ -360,11 +468,12 @@ def _build_environment_summary(
         provenance=provenance,
         available_actions=_action_availability(
             descriptor=descriptor,
+            profile=profile,
             product=profile.product,
-            context=lane.context,
             previews_enabled=profile.preview.enabled,
             action_allowed=action_allowed,
             include_unsupported=False,
+            context_resolver=_lane_context_resolver(context=lane.context),
         ),
     )
 
@@ -399,34 +508,61 @@ def _build_preview_summary(
 ) -> ProductPreviewSummary:
     if not profile.preview.enabled:
         return ProductPreviewSummary(enabled=False)
-    summaries = ()
+    summaries: tuple[LaunchplanePreviewSummary | PreviewRecord, ...] = ()
     list_preview_summaries = getattr(record_store, "list_preview_summaries", None)
     list_preview_records = getattr(record_store, "list_preview_records", None)
+    anchor_repo = _profile_anchor_repo(profile)
     if callable(list_preview_summaries):
         summaries = list_preview_summaries(
             context_name=profile.preview.context,
+            anchor_repo=anchor_repo,
+            preview_limit=None,
             generation_limit=1,
         )
     elif callable(list_preview_records):
-        summaries = tuple(list_preview_records(context_name=profile.preview.context, limit=10))
-    latest = next(iter(summaries), None)
+        summaries = tuple(
+            list_preview_records(
+                context_name=profile.preview.context,
+                anchor_repo=anchor_repo,
+                limit=None,
+            )
+        )
+    filtered_summaries: list[LaunchplanePreviewSummary | PreviewRecord] = []
+    for summary in summaries:
+        if isinstance(summary, LaunchplanePreviewSummary):
+            preview = summary.preview
+        else:
+            preview = summary
+        if preview.context != profile.preview.context:
+            continue
+        if preview.anchor_repo != anchor_repo:
+            continue
+        if preview.state == "destroyed":
+            continue
+        filtered_summaries.append(summary)
+    summaries = tuple(filtered_summaries)
+    latest_summary = next(iter(summaries), None)
     latest_preview_id = ""
     provenance = DataProvenance(
         source_kind="record",
         freshness_status="missing",
         detail="Launchplane has not recorded previews for this product profile.",
     )
-    if latest is not None:
-        preview = getattr(latest, "preview", latest)
+    if latest_summary is not None:
+        if isinstance(latest_summary, LaunchplanePreviewSummary):
+            preview = latest_summary.preview
+            provenance = latest_summary.provenance
+        else:
+            preview = latest_summary
+            provenance = DataProvenance(
+                source_kind="record",
+                source_record_id=preview.preview_id,
+                recorded_at=preview.updated_at,
+                refreshed_at=preview.updated_at,
+                freshness_status="recorded",
+                detail="Launchplane preview identity record.",
+            )
         latest_preview_id = preview.preview_id
-        provenance = getattr(latest, "provenance", None) or DataProvenance(
-            source_kind="record",
-            source_record_id=preview.preview_id,
-            recorded_at=preview.updated_at,
-            refreshed_at=preview.updated_at,
-            freshness_status="recorded",
-            detail="Launchplane preview identity record.",
-        )
     return ProductPreviewSummary(
         enabled=True,
         context=profile.preview.context,
@@ -441,11 +577,12 @@ def _build_preview_summary(
 def _action_availability(
     *,
     descriptor: DriverDescriptor | None,
+    profile: LaunchplaneProductProfileRecord,
     product: str,
-    context: str,
     previews_enabled: bool,
     action_allowed: ActionAllowed,
     include_unsupported: bool,
+    context_resolver: Callable[[DriverActionDescriptor], str],
 ) -> tuple[ProductActionAvailability, ...]:
     descriptor_actions = {
         action.action_id: action
@@ -474,8 +611,9 @@ def _action_availability(
         availability.append(
             _availability_for_descriptor_action(
                 action=descriptor_action,
+                profile=profile,
                 product=product,
-                context=context,
+                authorization_context=context_resolver(descriptor_action),
                 previews_enabled=previews_enabled,
                 action_allowed=action_allowed,
             )
@@ -486,16 +624,22 @@ def _action_availability(
 def _availability_for_descriptor_action(
     *,
     action: DriverActionDescriptor,
+    profile: LaunchplaneProductProfileRecord,
     product: str,
-    context: str,
+    authorization_context: str,
     previews_enabled: bool,
     action_allowed: ActionAllowed,
 ) -> ProductActionAvailability:
     disabled_reasons: list[str] = []
-    if action.scope == "preview" and not previews_enabled:
+    if not previews_enabled and (
+        action.scope == "preview" or action.action_id in PREVIEW_PROFILE_REQUIRED_ACTION_IDS
+    ):
         disabled_reasons.append("Product previews are not enabled.")
+    support_reason = _action_support_reason(profile=profile, action=action)
+    if support_reason:
+        disabled_reasons.append(support_reason)
     authz_action = ACTION_AUTHZ_BY_ROUTE.get(action.route_path, action.action_id)
-    if not action_allowed(authz_action, product, context):
+    if not action_allowed(authz_action, product, authorization_context):
         disabled_reasons.append("Caller is not authorized for this action.")
     return ProductActionAvailability(
         action_id=action.action_id,
@@ -510,6 +654,27 @@ def _availability_for_descriptor_action(
         disabled_reasons=tuple(disabled_reasons),
         trust_state="recorded",
     )
+
+
+def _action_support_reason(
+    *, profile: LaunchplaneProductProfileRecord, action: DriverActionDescriptor
+) -> str:
+    if action.route_path == "/v1/drivers/generic-web/prod-promotion":
+        if not _generic_web_prod_promotion_supported(profile):
+            return "Generic web prod promotion requires testing and prod lanes to share a context."
+        return ""
+    if action.route_path in {
+        "/v1/drivers/odoo/prod-backup-gate",
+        "/v1/drivers/odoo/prod-promotion",
+        "/v1/drivers/odoo/prod-rollback",
+        "/v1/drivers/verireel/prod-deploy",
+        "/v1/drivers/verireel/prod-backup-gate",
+        "/v1/drivers/verireel/prod-promotion",
+        "/v1/drivers/verireel/prod-rollback",
+    }:
+        if not _prod_lane_supported(profile):
+            return "Product profile does not define a prod lane."
+    return ""
 
 
 def _runtime_setting_summaries(
@@ -553,7 +718,7 @@ def _secret_binding_summary(binding: SecretBinding) -> ProductSecretBindingSumma
         instance=binding.instance,
         status=binding.status,
         updated_at=binding.updated_at,
-        trust_state="recorded" if binding.status == "configured" else "missing",
+        trust_state="recorded" if binding.status == "configured" else "disabled",
     )
 
 
