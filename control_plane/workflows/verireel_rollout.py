@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -43,7 +43,7 @@ class VeriReelRolloutVerificationRequest(BaseModel):
 class VeriReelRolloutVerificationResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    status: str
+    status: ReleaseStatus
     base_url: str = ""
     health_urls: tuple[str, ...] = ()
     started_at: str = ""

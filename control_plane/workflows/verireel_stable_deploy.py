@@ -9,7 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.dokploy_target_record import DokployTargetType
+from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
@@ -67,9 +68,9 @@ class VeriReelStableDeployResult(BaseModel):
     deploy_started_at: str
     deploy_finished_at: str
     target_name: str
-    target_type: str
+    target_type: DokployTargetType
     target_id: str
-    rollout_status: str = "skipped"
+    rollout_status: ReleaseStatus = "skipped"
     rollout_base_url: str = ""
     rollout_health_urls: tuple[str, ...] = ()
     rollout_started_at: str = ""
@@ -92,7 +93,7 @@ def _expected_build_tag(request: VeriReelStableDeployRequest) -> str:
     return request.expected_build_tag.strip() or _artifact_tag(request.artifact_id)
 
 
-def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
+def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: DokployTargetType) -> str:
     if configured_ship_mode == "auto":
         return f"dokploy-{target_type}-api"
     return f"dokploy-{configured_ship_mode}-api"

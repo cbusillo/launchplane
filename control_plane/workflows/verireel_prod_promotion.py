@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -93,14 +94,14 @@ class VeriReelProdPromotionResult(BaseModel):
     promotion_record_id: str
     deployment_record_id: str = ""
     backup_record_id: str
-    deploy_status: str
-    rollout_status: str = "skipped"
-    migration_status: str = "skipped"
-    health_status: str = "skipped"
+    deploy_status: ReleaseStatus
+    rollout_status: ReleaseStatus = "skipped"
+    migration_status: ReleaseStatus = "skipped"
+    health_status: ReleaseStatus = "skipped"
     deploy_started_at: str = ""
     deploy_finished_at: str = ""
     target_name: str
-    target_type: str
+    target_type: DokployTargetType
     target_id: str
     error_message: str = ""
 
@@ -109,7 +110,7 @@ def _default_target_name() -> str:
     return "ver-prod-app"
 
 
-def _default_target_type() -> str:
+def _default_target_type() -> DokployTargetType:
     return "application"
 
 
@@ -176,11 +177,11 @@ def _build_promotion_record(
     deployment_record_id: str,
     target_id: str,
     target_name: str,
-    target_type: str,
-    deploy_status: str,
+    target_type: DokployTargetType,
+    deploy_status: ReleaseStatus,
     deploy_started_at: str,
     deploy_finished_at: str,
-    migration_status: str,
+    migration_status: ReleaseStatus,
     migration_detail: str,
     health_result: VeriReelRolloutVerificationResult | None,
 ) -> PromotionRecord:
@@ -227,7 +228,7 @@ def _build_promotion_record(
 def _build_post_deploy_update(
     *,
     instance_name: str,
-    migration_status: str,
+    migration_status: ReleaseStatus,
     migration_detail: str,
 ) -> PostDeployUpdateEvidence:
     if migration_status == "skipped":
@@ -273,13 +274,13 @@ def _write_failed_promotion_record(
     backup_gate_record: BackupGateRecord | None,
     error_message: str,
     deployment_record_id: str = "",
-    deploy_status: str = "fail",
+    deploy_status: ReleaseStatus = "fail",
     deploy_started_at: str = "",
     deploy_finished_at: str = "",
     target_name: str | None = None,
-    target_type: str | None = None,
+    target_type: DokployTargetType | None = None,
     target_id: str = "",
-    migration_status: str = "skipped",
+    migration_status: ReleaseStatus = "skipped",
     migration_detail: str = "",
     health_result: VeriReelRolloutVerificationResult | None = None,
 ) -> None:
@@ -360,7 +361,7 @@ def _resolve_application_id(
     *,
     control_plane_root: Path,
     request: VeriReelProdPromotionRequest,
-    target_type: str,
+    target_type: DokployTargetType,
     target_id: str,
 ) -> str:
     if target_type == "application" and target_id.strip():
@@ -386,7 +387,7 @@ def _resolve_application_id(
 
 def _find_application_schedule(
     *, host: str, token: str, application_id: str, schedule_name: str
-) -> dict[str, object] | None:
+) -> control_plane_dokploy.JsonObject | None:
     for schedule in control_plane_dokploy.list_dokploy_schedules(
         host=host,
         token=token,
@@ -394,7 +395,7 @@ def _find_application_schedule(
         schedule_type="application",
     ):
         if str(schedule.get("name") or "").strip() == schedule_name:
-            return dict(schedule)
+            return schedule
     return None
 
 
@@ -412,7 +413,7 @@ def _upsert_application_schedule(
         application_id=application_id,
         schedule_name=schedule_name,
     )
-    payload: dict[str, object] = {
+    payload: control_plane_dokploy.JsonObject = {
         "name": schedule_name,
         "cronExpression": control_plane_dokploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
         "scheduleType": "application",
@@ -431,15 +432,16 @@ def _upsert_application_schedule(
             payload=payload,
         )
     else:
+        update_payload: control_plane_dokploy.JsonObject = {
+            "scheduleId": control_plane_dokploy.schedule_key(existing_schedule),
+            **payload,
+        }
         control_plane_dokploy.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.update",
             method="POST",
-            payload={
-                "scheduleId": control_plane_dokploy.schedule_key(existing_schedule),
-                **payload,
-            },
+            payload=update_payload,
         )
     resolved_schedule = _find_application_schedule(
         host=host,
@@ -512,7 +514,7 @@ def _run_prisma_migrations(
     *,
     control_plane_root: Path,
     request: VeriReelProdPromotionRequest,
-    target_type: str,
+    target_type: DokployTargetType,
     target_id: str,
 ) -> None:
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
@@ -569,7 +571,7 @@ def execute_verireel_prod_promotion(
         record_store=record_store,
         request=VeriReelStableDeployRequest(
             context=request.context,
-            instance=request.to_instance,
+            instance="prod",
             artifact_id=request.artifact_id,
             source_git_ref=request.source_git_ref,
             expected_build_revision=request.expected_build_revision,

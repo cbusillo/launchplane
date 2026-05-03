@@ -7,8 +7,9 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
     HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+    ReleaseStatus,
 )
-from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 from control_plane.contracts.ship_request import ShipRequest
 
 
@@ -25,7 +26,7 @@ def _resolve_destination_health(
     destination_health: HealthcheckEvidence,
     *,
     wait: bool,
-    deployment_status: str,
+    deployment_status: ReleaseStatus,
 ) -> HealthcheckEvidence:
     if destination_health.status == "skipped":
         return destination_health
@@ -52,7 +53,7 @@ def _resolve_destination_health(
 def _resolve_post_deploy_update(
     request: ShipRequest,
     *,
-    deployment_status: str,
+    deployment_status: ReleaseStatus,
 ) -> PostDeployUpdateEvidence:
     if not request.wait or request.target_type != "compose":
         return PostDeployUpdateEvidence()
@@ -84,7 +85,7 @@ def build_deployment_record(
     request: ShipRequest,
     record_id: str,
     deployment_id: str,
-    deployment_status: str,
+    deployment_status: ReleaseStatus,
     started_at: str,
     finished_at: str,
     resolved_target: ResolvedTargetEvidence | None = None,

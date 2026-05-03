@@ -1,5 +1,6 @@
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 
 
@@ -12,7 +13,7 @@ class ShipRequest(BaseModel):
     instance: str
     source_git_ref: str
     target_name: str
-    target_type: str
+    target_type: DokployTargetType
     deploy_mode: str
     wait: bool = True
     timeout_seconds: int | None = Field(default=None, ge=1)
