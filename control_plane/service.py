@@ -835,11 +835,8 @@ class VeriReelTestingVerificationEnvelope(BaseModel):
         return self
 
 
-class VeriReelProdDeployEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelProdDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     deploy: VeriReelStableDeployRequest
 
     @model_validator(mode="after")
@@ -889,11 +886,8 @@ class VeriReelRuntimeVerificationEnvelope(BaseModel):
         return self
 
 
-class VeriReelProdPromotionEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelProdPromotionEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     promotion: VeriReelProdPromotionRequest
 
     @model_validator(mode="after")
@@ -902,11 +896,8 @@ class VeriReelProdPromotionEnvelope(BaseModel):
         return self
 
 
-class VeriReelProdBackupGateEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelProdBackupGateEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     backup_gate: VeriReelProdBackupGateRequest
 
     @model_validator(mode="after")
@@ -915,17 +906,54 @@ class VeriReelProdBackupGateEnvelope(BaseModel):
         return self
 
 
-class VeriReelProdRollbackEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelProdRollbackEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     rollback: VeriReelProdRollbackRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelProdRollbackEnvelope":
         _validate_driver_envelope_product(self.product, label="VeriReel prod rollback")
         return self
+
+
+_VERIREEL_PROD_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/prod-deploy",
+    envelope_model=VeriReelProdDeployEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel prod deploy driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/prod-backup-gate",
+    envelope_model=VeriReelProdBackupGateEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel prod backup gate driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/prod-promotion",
+    envelope_model=VeriReelProdPromotionEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel prod promotion driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/prod-rollback",
+    envelope_model=VeriReelProdRollbackEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel prod rollback driver"
+        " for the requested product/context."
+    ),
+)
 
 
 class VeriReelPreviewRefreshEnvelope(BaseModel):
@@ -4497,8 +4525,8 @@ def create_launchplane_service_app(
                     request=request.maintenance,
                 )
                 result = driver_result.model_dump(mode="json")
-            elif path == "/v1/drivers/verireel/prod-deploy":
-                request = VeriReelProdDeployEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PROD_DEPLOY_ROUTE.route_path:
+                request = _VERIREEL_PROD_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4512,10 +4540,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.deploy.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel prod deploy driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PROD_DEPLOY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4538,8 +4563,10 @@ def create_launchplane_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
-            elif path == "/v1/drivers/verireel/prod-backup-gate":
-                request = VeriReelProdBackupGateEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path:
+                request = _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4553,10 +4580,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.backup_gate.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel prod backup gate driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PROD_BACKUP_GATE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4580,8 +4604,8 @@ def create_launchplane_service_app(
                     run_async=True,
                 )
                 result = {"backup_gate_record_id": driver_result.backup_record_id}
-            elif path == "/v1/drivers/verireel/prod-promotion":
-                request = VeriReelProdPromotionEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PROD_PROMOTION_ROUTE.route_path:
+                request = _VERIREEL_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4602,10 +4626,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.promotion.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel prod promotion driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PROD_PROMOTION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4631,8 +4652,8 @@ def create_launchplane_service_app(
                     "promotion_record_id": driver_result.promotion_record_id,
                     "deployment_record_id": driver_result.deployment_record_id,
                 }
-            elif path == "/v1/drivers/verireel/prod-rollback":
-                request = VeriReelProdRollbackEnvelope.model_validate(payload)
+            elif path == _VERIREEL_PROD_ROLLBACK_ROUTE.route_path:
+                request = _VERIREEL_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4646,10 +4667,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.rollback.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel prod rollback driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_PROD_ROLLBACK_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
