@@ -113,9 +113,9 @@ Machine callers should authenticate with GitHub Actions OIDC.
 
 Human browser callers authenticate with GitHub OAuth. Launchplane owns the
 browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
-session cookie. Sessions are backed by the Launchplane database when
-`LAUNCHPLANE_DATABASE_URL` is configured. GitHub access tokens stay server-side
-and are not exposed to the React operator UI.
+session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
+the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
+access tokens stay server-side and are not exposed to the React operator UI.
 
 Launchplane should verify:
 

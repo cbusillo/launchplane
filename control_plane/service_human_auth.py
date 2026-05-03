@@ -5,10 +5,13 @@ from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 import base64
 import hashlib
+import hmac
 import os
 import secrets
 import warnings
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
+
+from cryptography.hazmat.primitives import hashes, hmac as cryptography_hmac
 
 if TYPE_CHECKING:
     from authlib.integrations.requests_client import (  # type: ignore[import-untyped]
@@ -124,9 +127,7 @@ def load_github_oauth_config_from_env() -> GitHubOAuthConfig | None:
     cookie_secure = secure_env not in {"0", "false", "no"}
     bootstrap_admin_emails = frozenset(
         email.lower()
-        for email in _split_env_values(
-            os.environ.get("LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS", "")
-        )
+        for email in _split_env_values(os.environ.get("LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS", ""))
     )
     return GitHubOAuthConfig(
         client_id=client_id,
@@ -155,7 +156,7 @@ class GitHubOAuthClient:
     ) -> OAuth2SessionType:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from authlib.integrations.requests_client import OAuth2Session  # type: ignore[import-untyped]
+            from authlib.integrations.requests_client import OAuth2Session
 
         return OAuth2Session(
             client_id=client_id,
@@ -213,7 +214,7 @@ class GitHubOAuthClient:
         )
         teams = frozenset(_team_names(team_payload))
         if self._config.bootstrap_admin_emails.intersection(email_candidates):
-            role: str | None = "admin"
+            role: Literal["read_only", "admin"] | None = "admin"
         else:
             role = authz_policy.human_role_for(
                 login=login,
@@ -337,11 +338,24 @@ class HumanSessionManager:
         )
 
     def _sign_cookie_value(self, session_id: str) -> str:
-        return session_id
+        normalized_session_id = session_id.strip()
+        signer = cryptography_hmac.HMAC(
+            self._config.session_secret.encode("utf-8"),
+            hashes.SHA256(),
+        )
+        signer.update(normalized_session_id.encode("utf-8"))
+        signature = signer.finalize().hex()
+        return f"{normalized_session_id}.{signature}"
 
     def _verify_cookie_value(self, cookie_session_id: str) -> str:
-        session_id = cookie_session_id.strip().partition(".")[0]
+        session_id, separator, signature = cookie_session_id.strip().partition(".")
+        if not separator or not signature:
+            return ""
         if not session_id or any(character.isspace() for character in session_id):
+            return ""
+        expected_cookie_value = self._sign_cookie_value(session_id)
+        _expected_session_id, _separator, expected_signature = expected_cookie_value.partition(".")
+        if not hmac.compare_digest(signature, expected_signature):
             return ""
         return session_id
 
