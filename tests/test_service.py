@@ -4,10 +4,11 @@ import io
 import json
 import os
 import unittest
+from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
-from typing import Literal
+from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
@@ -39,6 +40,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
+    HealthcheckEvidence,
     PromotionRecord,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
@@ -80,6 +82,9 @@ from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import GenericWebPreviewDestroyResult
+
+StartResponse = Callable[[str, list[tuple[str, str]]], None]
+WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
 
 
 class _StubVerifier:
@@ -184,7 +189,7 @@ def _github_oauth_config() -> GitHubOAuthConfig:
     )
 
 
-def _signed_in_cookie(app) -> str:
+def _signed_in_cookie(app: WsgiApp) -> str:
     _, login_headers, _ = _invoke_raw_app(app, method="GET", path="/auth/github/login")
     state = parse_qs(urlparse(login_headers["Location"]).query)["state"][0]
     _, callback_headers, _ = _invoke_raw_app(
@@ -226,7 +231,7 @@ def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, obj
 
 def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dict[str, object]:
     payload = _product_profile_payload(product)
-    lanes = list(payload["lanes"])
+    lanes = list(cast(tuple[dict[str, object], ...], payload["lanes"]))
     lanes.append(
         {
             "instance": "prod",
@@ -237,6 +242,23 @@ def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dic
     )
     payload["lanes"] = tuple(lanes)
     return payload
+
+
+def _product_profile_lanes(payload: dict[str, object]) -> tuple[dict[str, object], ...]:
+    return cast(tuple[dict[str, object], ...], payload["lanes"])
+
+
+def _product_config_secrets(payload: dict[str, object]) -> list[dict[str, object]]:
+    return cast(list[dict[str, object]], payload["secrets"])
+
+
+def _passed_healthcheck_evidence(url: str) -> HealthcheckEvidence:
+    return HealthcheckEvidence(
+        verified=True,
+        urls=(url,),
+        timeout_seconds=45,
+        status="pass",
+    )
 
 
 def _generic_site_profile_payload(product: str = "example-site") -> dict[str, object]:
@@ -340,15 +362,15 @@ def _product_config_payload() -> dict[str, object]:
 
 
 def _invoke_app(
-    app,
+    app: WsgiApp,
     *,
     method: str,
     path: str,
     query_string: str = "",
-    payload: dict[str, object] | None = None,
+    payload: Mapping[str, object] | None = None,
     authorization: str = "Bearer valid-token",
     headers: dict[str, str] | None = None,
-):
+) -> tuple[int, dict[str, Any]]:
     body_bytes = json.dumps(payload).encode("utf-8") if payload is not None else b""
     environ = {
         "REQUEST_METHOD": method,
@@ -360,25 +382,27 @@ def _invoke_app(
     }
     for header_name, header_value in (headers or {}).items():
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
-    captured: dict[str, object] = {}
+    captured_status = ""
 
     def start_response(status: str, headers: list[tuple[str, str]]) -> None:
-        captured["status"] = status
-        captured["headers"] = headers
+        nonlocal captured_status
+        captured_status = status
 
     response_body = b"".join(app(environ, start_response))
-    return int(str(captured["status"]).split(" ", 1)[0]), json.loads(response_body.decode("utf-8"))
+    response_payload = json.loads(response_body.decode("utf-8"))
+    assert isinstance(response_payload, dict)
+    return int(captured_status.split(" ", 1)[0]), cast(dict[str, Any], response_payload)
 
 
 def _invoke_raw_app(
-    app,
+    app: WsgiApp,
     *,
     method: str,
     path: str,
     authorization: str = "",
     query_string: str = "",
     headers: dict[str, str] | None = None,
-):
+) -> tuple[int, dict[str, str], bytes]:
     environ = {
         "REQUEST_METHOD": method,
         "PATH_INFO": path,
@@ -389,16 +413,18 @@ def _invoke_raw_app(
     }
     for header_name, header_value in (headers or {}).items():
         environ[f"HTTP_{header_name.upper().replace('-', '_')}"] = header_value
-    captured: dict[str, object] = {}
+    captured_status = ""
+    captured_headers: list[tuple[str, str]] = []
 
     def start_response(status: str, headers: list[tuple[str, str]]) -> None:
-        captured["status"] = status
-        captured["headers"] = headers
+        nonlocal captured_status, captured_headers
+        captured_status = status
+        captured_headers = headers
 
     response_body = b"".join(app(environ, start_response))
     return (
-        int(str(captured["status"]).split(" ", 1)[0]),
-        dict(captured["headers"]),
+        int(captured_status.split(" ", 1)[0]),
+        dict(captured_headers),
         response_body,
     )
 
@@ -479,7 +505,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
     def _signed_in_cookie(
         self,
-        app,
+        app: WsgiApp,
     ) -> str:
         _, login_headers, _ = _invoke_raw_app(app, method="GET", path="/auth/github/login")
         state = parse_qs(urlparse(login_headers["Location"]).query)["state"][0]
@@ -1568,11 +1594,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
             profile_payload = _product_profile_payload_with_prod()
+            profile_lanes = cast(tuple[dict[str, object], ...], profile_payload["lanes"])
             profile_payload["lanes"] = tuple(
-                {**lane, "context": "sellyouroutboard"} for lane in profile_payload["lanes"]
+                {**lane, "context": "sellyouroutboard"} for lane in profile_lanes
             )
+            profile_preview = cast(dict[str, object], profile_payload["preview"])
             profile_payload["preview"] = {
-                **profile_payload["preview"],
+                **profile_preview,
                 "context": "sellyouroutboard",
             }
             store = PostgresRecordStore(database_url=database_url)
@@ -2238,7 +2266,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
             request_payload = _product_config_payload()
-            runtime_env = dict(request_payload["runtime_env"])
+            runtime_env = dict(cast(dict[str, object], request_payload["runtime_env"]))
             runtime_env["context"] = "sellyouroutboard-testing"
             request_payload["runtime_env"] = runtime_env
 
@@ -2283,7 +2311,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
             request_payload = _product_config_payload()
-            request_payload["secrets"] = [{**request_payload["secrets"][0], "scope": "global"}]
+            request_secrets = _product_config_secrets(request_payload)
+            request_payload["secrets"] = [{**request_secrets[0], "scope": "global"}]
 
             status_code, payload = _invoke_app(
                 app,
@@ -2324,9 +2353,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 database_url=database_url,
             )
             request_payload = _product_config_payload()
+            request_secrets = _product_config_secrets(request_payload)
             request_payload["secrets"] = [
                 {
-                    **request_payload["secrets"][0],
+                    **request_secrets[0],
                     "context": "sellyouroutboard-testing",
                 }
             ]
@@ -2474,7 +2504,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             profile_payload = _product_profile_payload()
             profile_payload["lanes"] = tuple(
                 {**lane, "context": f"  {lane['context']}  "}
-                for lane in profile_payload["lanes"]
+                for lane in _product_profile_lanes(profile_payload)
             )
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile_payload)
@@ -2793,7 +2823,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
                 {**lane, "context": f"  {lane['context']}  "}
-                for lane in profile_payload["lanes"]
+                for lane in _product_profile_lanes(profile_payload)
             )
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile_payload)
@@ -3086,7 +3116,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             profile_payload = _product_profile_payload_with_prod()
             profile_payload["lanes"] = tuple(
                 {**lane, "context": f"  {lane['context']}  "}
-                for lane in profile_payload["lanes"]
+                for lane in _product_profile_lanes(profile_payload)
             )
             store.write_product_profile_record(
                 LaunchplaneProductProfileRecord.model_validate(profile_payload)
@@ -4632,7 +4662,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(deployment.context, "opw")
             self.assertEqual(deployment.instance, "testing")
             self.assertEqual(deployment.deploy.status, "pass")
-            self.assertEqual(deployment.resolved_target.target_id, "compose-123")
+            resolved_target = deployment.resolved_target
+            assert resolved_target is not None
+            self.assertEqual(resolved_target.target_id, "compose-123")
             self.assertEqual(inventory.deployment_record_id, deployment.record_id)
             self.assertEqual(inventory.promotion_record_id, "")
 
@@ -4821,7 +4853,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260420T160500Z-opw-prod",
-                    artifact_identity={"artifact_id": "artifact-20260420-a1b2c3d4"},
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="artifact-20260420-a1b2c3d4"
+                    ),
                     context="opw",
                     instance="prod",
                     source_git_ref="6b3c9d7e8f901234567890abcdef1234567890ab",
@@ -5286,12 +5320,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         started_at="2026-04-20T18:20:00Z",
                         finished_at="2026-04-20T18:21:15Z",
                     ),
-                    destination_health={
-                        "verified": True,
-                        "urls": ["https://ver-testing.shinycomputers.com/api/health"],
-                        "timeout_seconds": 45,
-                        "status": "pass",
-                    },
+                    destination_health=_passed_healthcheck_evidence(
+                        "https://ver-testing.shinycomputers.com/api/health"
+                    ),
                 )
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
@@ -5380,12 +5411,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         deployment_id="testing-app-123",
                         status="pass",
                     ),
-                    destination_health={
-                        "verified": True,
-                        "urls": ["https://ver-testing.shinycomputers.com/api/health"],
-                        "timeout_seconds": 45,
-                        "status": "pass",
-                    },
+                    destination_health=_passed_healthcheck_evidence(
+                        "https://ver-testing.shinycomputers.com/api/health"
+                    ),
                 )
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
