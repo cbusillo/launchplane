@@ -2,12 +2,14 @@ from __future__ import annotations
 
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import cast
 import unittest
 
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
+    build_product_activity_read_model,
     build_product_environment_detail,
     build_product_site_overview,
 )
@@ -113,6 +115,115 @@ class _PreviewRecordStore:
     ) -> tuple[PreviewRecord, ...]:
         self.preview_record_calls.append((context_name, anchor_repo))
         return self._previews
+
+
+class _ActivityRecordStore(_PreviewRecordStore):
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        if context_name != "example-site-prod" or instance_name != "prod":
+            return ()
+        return (
+            SimpleNamespace(
+                record_id="deployment-prod-1",
+                deploy=SimpleNamespace(
+                    status="pass",
+                    started_at="2026-05-02T10:00:00Z",
+                    finished_at="2026-05-02T10:05:00Z",
+                ),
+            ),
+        )
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[object, ...]:
+        if context_name != "example-site-prod" or to_instance_name != "prod":
+            return ()
+        return (
+            SimpleNamespace(
+                record_id="promotion-prod-1",
+                deployment_record_id="deployment-prod-1",
+                backup_record_id="backup-prod-1",
+                from_instance="testing",
+                to_instance="prod",
+                deploy=SimpleNamespace(
+                    status="pass",
+                    started_at="2026-05-02T11:00:00Z",
+                    finished_at="2026-05-02T11:07:00Z",
+                ),
+                rollback=SimpleNamespace(
+                    attempted=False, status="skipped", started_at="", finished_at=""
+                ),
+            ),
+        )
+
+    def list_backup_gate_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        if context_name != "example-site-prod" or instance_name != "prod":
+            return ()
+        return (
+            SimpleNamespace(
+                record_id="backup-prod-1",
+                status="pass",
+                created_at="2026-05-02T10:50:00Z",
+            ),
+        )
+
+    def list_preview_desired_state_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        if context_name != "shared-preview":
+            return ()
+        return (
+            SimpleNamespace(
+                desired_state_id="desired-example-1",
+                product="example-site",
+                context="shared-preview",
+                status="pass",
+                discovered_at="2026-05-02T12:00:00Z",
+                desired_count=1,
+            ),
+            SimpleNamespace(
+                desired_state_id="desired-other-1",
+                product="other-site",
+                context="shared-preview",
+                status="pass",
+                discovered_at="2026-05-02T12:30:00Z",
+                desired_count=1,
+            ),
+        )
+
+    def list_preview_lifecycle_cleanup_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        return ()
+
+    def list_preview_pr_feedback_records(
+        self, *, context_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        return ()
+
+    def list_authz_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        return (
+            SimpleNamespace(
+                record_id="authz-policy-1",
+                status="active",
+                source="test-policy",
+                updated_at="2026-05-02T13:00:00Z",
+                policy=SimpleNamespace(
+                    github_actions=(SimpleNamespace(products=("example-site",)),),
+                    github_humans=(),
+                ),
+            ),
+        )
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
@@ -380,3 +491,42 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         self.assertEqual(detail.managed_secrets[0].status, "disabled")
         self.assertEqual(detail.managed_secrets[0].trust_state, "disabled")
+
+    def test_product_activity_read_model_aggregates_product_records(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(
+                preview_context="shared-preview",
+                testing_context="example-site-prod",
+                prod_context="example-site-prod",
+            )
+        )
+        store = _ActivityRecordStore(
+            profile,
+            (
+                _preview_record(
+                    preview_id="example-preview-1",
+                    context="shared-preview",
+                    anchor_repo="example-site",
+                    state="active",
+                    updated_at="2026-05-02T12:10:00Z",
+                ),
+            ),
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product="example-site",
+        )
+
+        event_types = {event.event_type for event in activity.events}
+        self.assertIn("deployment", event_types)
+        self.assertIn("promotion", event_types)
+        self.assertIn("backup_gate", event_types)
+        self.assertIn("preview", event_types)
+        self.assertIn("preview_desired_state", event_types)
+        self.assertIn("authz_policy", event_types)
+        self.assertNotIn(
+            "desired-other-1",
+            {link.record_id for event in activity.events for link in event.records},
+        )
+        self.assertEqual(activity.events[0].event_type, "authz_policy")

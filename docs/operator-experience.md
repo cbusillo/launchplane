@@ -62,6 +62,7 @@ The first product/site read endpoints are:
 
 - `GET /v1/products`
 - `GET /v1/products/{product}`
+- `GET /v1/products/{product}/activity`
 - `GET /v1/products/{product}/environments/{environment}`
 
 These endpoints are profile and driver driven. A standard `generic-web` site
@@ -70,6 +71,12 @@ lane profiles, target records, runtime-environment records, managed secret
 bindings, authz policy, and evidence records. The shared read model must not add
 product-specific top-level fields; driver-specific data belongs behind driver
 descriptor actions, capabilities, panels, or a driver-namespaced extension.
+
+Product activity is an operator timeline composed from existing Launchplane
+records. Events carry product, context, environment, driver id, action id,
+status, timestamp, and record links so the UI can render deployments,
+promotions, rollbacks, backup gates, previews, cleanup, feedback, and relevant
+authz changes without loading raw record payloads.
 
 ## Promotion Safety
 
