@@ -2,11 +2,22 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from datetime import datetime, timezone
-from typing import Any, Literal, TypeVar
+from typing import Any, Literal, Protocol, TypeVar, cast
 
 from pydantic import BaseModel
-from sqlalchemy import JSON, Index, Integer, String, create_engine, delete, desc, select
+from sqlalchemy import (
+    JSON,
+    ColumnExpressionArgument,
+    Index,
+    Integer,
+    String,
+    create_engine,
+    delete,
+    desc,
+    select,
+)
 from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -50,6 +61,12 @@ PayloadDict = dict[str, Any]
 PayloadJsonType = JSON().with_variant(JSONB(), "postgresql")
 RuntimeEnvironmentDeleteStatus = Literal["deleted", "missing", "changed"]
 CurrentAuthorityDeleteStatus = Literal["deleted", "missing", "changed"]
+_SqlFilter = ColumnExpressionArgument[bool]
+_SqlOrderBy = ColumnExpressionArgument[Any]
+
+
+class _PayloadRow(Protocol):
+    payload: PayloadDict
 
 
 class Base(DeclarativeBase):
@@ -565,7 +582,9 @@ def _human_session_from_payload(payload: PayloadDict) -> LaunchplaneHumanSession
     )
 
 
-def _build_engine(database_url: str, *, connection_factory: ConnectionFactory | None = None):
+def _build_engine(
+    database_url: str, *, connection_factory: ConnectionFactory | None = None
+) -> Engine:
     engine_kwargs: dict[str, Any] = {}
     if connection_factory is not None:
         engine_kwargs["creator"] = connection_factory
@@ -619,7 +638,7 @@ class PostgresRecordStore(HumanSessionStore):
         orm_model: type[Base],
         filters: Sequence[object],
     ) -> RecordModel:
-        statement = select(orm_model).where(*filters).limit(1)
+        statement = select(orm_model).where(*cast(Sequence[_SqlFilter], filters)).limit(1)
         with self._session_factory() as session:
             row = session.scalar(statement)
             if row is None:
@@ -655,14 +674,18 @@ class PostgresRecordStore(HumanSessionStore):
     ) -> tuple[RecordModel, ...]:
         statement = select(orm_model)
         if filters:
-            statement = statement.where(*filters)
-        statement = statement.order_by(*order_by)
+            statement = statement.where(*cast(Sequence[_SqlFilter], filters))
+        statement = statement.order_by(*cast(Sequence[_SqlOrderBy], order_by))
         if limit is not None:
             statement = statement.limit(limit)
         with self._session_factory() as session:
             rows = session.scalars(statement).all()
             return tuple(
-                self._read_payload(model_type=model_type, payload=row.payload) for row in rows
+                self._read_payload(
+                    model_type=model_type,
+                    payload=cast(_PayloadRow, row).payload,
+                )
+                for row in rows
             )
 
     def write_artifact_manifest(self, manifest: ArtifactIdentityManifest) -> None:
@@ -1881,57 +1904,57 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_pr_feedback": 0,
             "release_tuples": 0,
         }
-        for record in filesystem_store.list_artifact_manifests():
-            self.write_artifact_manifest(record)
+        for artifact_manifest in filesystem_store.list_artifact_manifests():
+            self.write_artifact_manifest(artifact_manifest)
             counts["artifacts"] += 1
-        for record in filesystem_store.list_authz_policy_records():
-            self.write_authz_policy_record(record)
+        for authz_policy_record in filesystem_store.list_authz_policy_records():
+            self.write_authz_policy_record(authz_policy_record)
             counts["authz_policies"] += 1
-        for record in filesystem_store.list_backup_gate_records():
-            self.write_backup_gate_record(record)
+        for backup_gate_record in filesystem_store.list_backup_gate_records():
+            self.write_backup_gate_record(backup_gate_record)
             counts["backup_gates"] += 1
-        for record in filesystem_store.list_deployment_records():
-            self.write_deployment_record(record)
+        for deployment_record in filesystem_store.list_deployment_records():
+            self.write_deployment_record(deployment_record)
             counts["deployments"] += 1
-        for record in filesystem_store.list_promotion_records():
-            self.write_promotion_record(record)
+        for promotion_record in filesystem_store.list_promotion_records():
+            self.write_promotion_record(promotion_record)
             counts["promotions"] += 1
-        for record in filesystem_store.list_environment_inventory():
-            self.write_environment_inventory(record)
+        for inventory_record in filesystem_store.list_environment_inventory():
+            self.write_environment_inventory(inventory_record)
             counts["inventory"] += 1
-        for record in filesystem_store.list_odoo_instance_override_records():
-            self.write_odoo_instance_override_record(record)
+        for override_record in filesystem_store.list_odoo_instance_override_records():
+            self.write_odoo_instance_override_record(override_record)
             counts["odoo_instance_overrides"] += 1
-        for record in filesystem_store.list_product_profile_records():
-            self.write_product_profile_record(record)
+        for product_profile_record in filesystem_store.list_product_profile_records():
+            self.write_product_profile_record(product_profile_record)
             counts["product_profiles"] += 1
-        for record in filesystem_store.list_preview_records():
-            self.write_preview_record(record)
+        for preview_record in filesystem_store.list_preview_records():
+            self.write_preview_record(preview_record)
             counts["preview_records"] += 1
-        for record in filesystem_store.list_preview_generation_records():
-            self.write_preview_generation_record(record)
+        for generation_record in filesystem_store.list_preview_generation_records():
+            self.write_preview_generation_record(generation_record)
             counts["preview_generations"] += 1
         if hasattr(filesystem_store, "list_preview_inventory_scan_records"):
-            for record in filesystem_store.list_preview_inventory_scan_records():
-                self.write_preview_inventory_scan_record(record)
+            for scan_record in filesystem_store.list_preview_inventory_scan_records():
+                self.write_preview_inventory_scan_record(scan_record)
                 counts["preview_inventory_scans"] += 1
         if hasattr(filesystem_store, "list_preview_desired_state_records"):
-            for record in filesystem_store.list_preview_desired_state_records():
-                self.write_preview_desired_state_record(record)
+            for desired_state_record in filesystem_store.list_preview_desired_state_records():
+                self.write_preview_desired_state_record(desired_state_record)
                 counts["preview_desired_states"] += 1
         if hasattr(filesystem_store, "list_preview_lifecycle_plan_records"):
-            for record in filesystem_store.list_preview_lifecycle_plan_records():
-                self.write_preview_lifecycle_plan_record(record)
+            for lifecycle_plan_record in filesystem_store.list_preview_lifecycle_plan_records():
+                self.write_preview_lifecycle_plan_record(lifecycle_plan_record)
                 counts["preview_lifecycle_plans"] += 1
         if hasattr(filesystem_store, "list_preview_lifecycle_cleanup_records"):
-            for record in filesystem_store.list_preview_lifecycle_cleanup_records():
-                self.write_preview_lifecycle_cleanup_record(record)
+            for cleanup_record in filesystem_store.list_preview_lifecycle_cleanup_records():
+                self.write_preview_lifecycle_cleanup_record(cleanup_record)
                 counts["preview_lifecycle_cleanups"] += 1
         if hasattr(filesystem_store, "list_preview_pr_feedback_records"):
-            for record in filesystem_store.list_preview_pr_feedback_records():
-                self.write_preview_pr_feedback_record(record)
+            for pr_feedback_record in filesystem_store.list_preview_pr_feedback_records():
+                self.write_preview_pr_feedback_record(pr_feedback_record)
                 counts["preview_pr_feedback"] += 1
-        for record in filesystem_store.list_release_tuple_records():
-            self.write_release_tuple_record(record)
+        for release_tuple_record in filesystem_store.list_release_tuple_records():
+            self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1
         return counts
