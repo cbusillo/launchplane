@@ -3,6 +3,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
 
+from pydantic import ValidationError
+
 from control_plane.workflows.odoo_artifact_publish import (
     DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY,
     OdooArtifactPublishEvidenceRequest,
@@ -27,6 +29,33 @@ def _artifact_payload() -> dict[str, object]:
 
 
 class OdooArtifactPublishWorkflowTests(unittest.TestCase):
+    def test_publish_requests_accept_new_odoo_contexts(self) -> None:
+        publish_request = OdooArtifactPublishRequest(
+            context="  New-Site  ",
+            manifest_path=Path("/work/new-site/workspace.toml"),
+            devkit_root=Path("/work/odoo-devkit"),
+            image_repository="ghcr.io/cbusillo/odoo-tenant-new-site",
+            image_tag="new-site-20260503-005c291b",
+        )
+        evidence_request = OdooArtifactPublishEvidenceRequest.model_validate(
+            {
+                "context": "new-site",
+                "manifest": {
+                    **_artifact_payload(),
+                    "artifact_id": "artifact-new-site-005c291b63b6",
+                },
+            }
+        )
+        inputs_request = OdooArtifactPublishInputsRequest(context="new-site")
+
+        self.assertEqual(publish_request.context, "new-site")
+        self.assertEqual(evidence_request.context, "new-site")
+        self.assertEqual(inputs_request.context, "new-site")
+
+    def test_publish_requests_reject_blank_contexts(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "requires context"):
+            OdooArtifactPublishInputsRequest(context="   ")
+
     def test_publish_resolves_launchplane_env_and_writes_artifact(self) -> None:
         record_store = Mock()
         captured_env = {}
