@@ -2466,6 +2466,69 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["profile"].driver_id, "verireel")
         self.assertEqual(kwargs["lane"].instance, "testing")
 
+    def test_generic_web_deploy_route_accepts_padded_lane_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload()
+            profile_payload["lanes"] = tuple(
+                {**lane, "context": f"  {lane['context']}  "}
+                for lane in profile_payload["lanes"]
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            driver_result = SimpleNamespace(deployment_record_id="deployment-syo-testing")
+
+            with patch(
+                "control_plane.service.execute_generic_web_deploy",
+                return_value=driver_result,
+            ) as deploy:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/deploy",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "deploy": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "instance": "testing",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-deploy-syo-padded-context"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-syo-testing")
+        deploy.assert_called_once()
+
     def test_generic_web_deploy_route_resolves_literal_generic_web_profile(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2722,6 +2785,94 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_generic_web_prod_promotion_route_accepts_padded_lane_context(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload_with_prod()
+            profile_payload["lanes"] = tuple(
+                {**lane, "context": f"  {lane['context']}  "}
+                for lane in profile_payload["lanes"]
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/promote-prod.yml"
+                            "@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_prod_promotion",
+                return_value=GenericWebProdPromotionResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    from_instance="testing",
+                    to_instance="prod",
+                    artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                    promotion_record_id="promotion-syo-testing-to-prod",
+                    deployment_record_id="deployment-syo-prod",
+                    inventory_record_id="sellyouroutboard-testing-prod",
+                    promotion_status="pass",
+                    deployment_status="pass",
+                    backup_status="skipped",
+                    source_health_status="pass",
+                    destination_health_status="pass",
+                    target_name="syo-prod-app",
+                    target_type="application",
+                    target_id="app-123",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "promotion": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-prod-promotion-syo-padded"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["promotion_record_id"], "promotion-syo-testing-to-prod")
+        execute_mock.assert_called_once()
+
     def test_human_session_can_dry_run_generic_web_prod_promotion(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -2923,6 +3074,83 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertFalse(payload["result"]["dry_run"])
         self.assertEqual(payload["result"]["run_id"], 25237186636)
         self.assertEqual(payload["records"], {})
+        dispatch_mock.assert_called_once()
+
+    def test_human_session_dispatches_generic_web_promotion_workflow_with_padded_lane_context(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload_with_prod()
+            profile_payload["lanes"] = tuple(
+                {**lane, "context": f"  {lane['context']}  "}
+                for lane in profile_payload["lanes"]
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.dispatch"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            with patch(
+                "control_plane.service.dispatch_generic_web_promotion_workflow",
+                return_value=GenericWebPromotionWorkflowResult(
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    repository="cbusillo/sellyouroutboard",
+                    workflow_id="promote-prod.yml",
+                    ref="main",
+                    dry_run=False,
+                    bump="patch",
+                    run_id=25237186636,
+                    run_url="https://github.com/cbusillo/sellyouroutboard/actions/runs/25237186636",
+                    run_status="queued",
+                ),
+            ) as dispatch_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion-workflow",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "workflow": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "context": "sellyouroutboard-testing",
+                            "dry_run": False,
+                            "bump": "patch",
+                            "observe_timeout_seconds": 0,
+                        },
+                    },
+                    authorization="",
+                    headers={"Cookie": cookie},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["run_id"], 25237186636)
         dispatch_mock.assert_called_once()
 
     def test_generic_web_promotion_workflow_rejects_unauthorized_human(self) -> None:
