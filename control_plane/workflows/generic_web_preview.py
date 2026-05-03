@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Literal
+from typing import Iterator, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -12,6 +12,7 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -19,6 +20,10 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.ship import utc_now_timestamp
+
+
+class GenericWebPreviewStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
 class GenericWebPreviewDesiredStateRequest(BaseModel):
@@ -256,7 +261,7 @@ def preview_pr_number_from_slug(*, preview_slug: str, slug_template: str) -> int
     return number if number > 0 else None
 
 
-def _iter_dokploy_applications(raw_projects: object):
+def _iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
     if not isinstance(raw_projects, list):
         raise click.ClickException("Dokploy project inventory returned an invalid response payload.")
     for raw_project in raw_projects:
@@ -279,7 +284,7 @@ def _iter_dokploy_applications(raw_projects: object):
                     yield application
 
 
-def _find_application_by_name(*, host: str, token: str, application_name: str):
+def _find_application_by_name(*, host: str, token: str, application_name: str) -> JsonObject | None:
     raw_projects = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -291,7 +296,7 @@ def _find_application_by_name(*, host: str, token: str, application_name: str):
     return None
 
 
-def _fetch_application(*, host: str, token: str, application_id: str) -> dict[str, object]:
+def _fetch_application(*, host: str, token: str, application_id: str) -> JsonObject:
     return control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -307,8 +312,8 @@ def _ensure_application(
     application_name: str,
     app_name: str,
     description: str,
-    template_application: dict[str, object],
-) -> tuple[dict[str, object], bool]:
+    template_application: JsonObject,
+) -> tuple[JsonObject, bool]:
     existing = _find_application_by_name(host=host, token=token, application_name=application_name)
     if existing is not None:
         application_id = str(existing.get("applicationId") or "").strip()
@@ -346,7 +351,7 @@ def _ensure_application(
     return _fetch_application(host=host, token=token, application_id=created_application_id), True
 
 
-def _preview_endpoint_spec_swarm(template_application: dict[str, object]) -> object:
+def _preview_endpoint_spec_swarm(template_application: JsonObject) -> JsonValue:
     return template_application.get("endpointSpecSwarm") or {"Mode": "dnsrr"}
 
 
@@ -354,8 +359,8 @@ def _configure_application(
     *,
     host: str,
     token: str,
-    application: dict[str, object],
-    template_application: dict[str, object],
+    application: JsonObject,
+    template_application: JsonObject,
     image_reference: str,
     env_text: str,
 ) -> None:
@@ -434,7 +439,7 @@ def _ensure_domain(
         query={"applicationId": application_id},
     )
     domains = raw_domains if isinstance(raw_domains, list) else []
-    existing: dict[str, object] | None = None
+    existing: JsonObject | None = None
     stale_domain_ids: list[str] = []
     for raw_domain in domains:
         domain = control_plane_dokploy.as_json_object(raw_domain)
@@ -447,7 +452,7 @@ def _ensure_domain(
             continue
         if domain_id:
             stale_domain_ids.append(domain_id)
-    payload: dict[str, object] = {
+    payload: JsonObject = {
         "host": preview_host,
         "path": "/",
         "internalPath": "/",
@@ -464,12 +469,13 @@ def _ensure_domain(
     }
     if existing is not None:
         existing_domain_id = str(existing.get("domainId") or "").strip()
+        update_payload: JsonObject = {"domainId": existing_domain_id, **payload}
         control_plane_dokploy.dokploy_request(
             host=host,
             token=token,
             path="/api/domain.update",
             method="POST",
-            payload={"domainId": existing_domain_id, **payload},
+            payload=update_payload,
         )
         return "", tuple(stale_domain_ids)
     created = control_plane_dokploy.dokploy_request(
@@ -504,7 +510,7 @@ def _delete_application(*, host: str, token: str, application_id: str) -> None:
 
 
 def resolve_generic_web_preview_profile(
-    *, record_store: object, product: str
+    *, record_store: GenericWebPreviewStore, product: str
 ) -> LaunchplaneProductProfileRecord:
     profile = record_store.read_product_profile_record(product)
     if profile.driver_id != "generic-web":
@@ -526,7 +532,7 @@ def _template_lane(*, profile: LaunchplaneProductProfileRecord) -> ProductLanePr
     return None
 
 
-def _field_value(payload: dict[str, object], field_path: str) -> object:
+def _field_value(payload: JsonObject, field_path: str) -> object:
     current: object = payload
     for part in field_path.split("."):
         if not part:
@@ -543,7 +549,7 @@ def _is_blank(value: object) -> bool:
 
 def _read_template_payload(
     *, control_plane_root: Path, template_lane: ProductLaneProfile
-) -> tuple[control_plane_dokploy.DokployTargetDefinition | None, dict[str, object] | None, str]:
+) -> tuple[control_plane_dokploy.DokployTargetDefinition | None, JsonObject | None, str]:
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
     )
@@ -601,7 +607,7 @@ def _preview_host(preview_url: str) -> str:
 def _render_preview_env_text(
     *,
     profile: LaunchplaneProductProfileRecord,
-    template_application: dict[str, object],
+    template_application: JsonObject,
     preview_url: str,
 ) -> str:
     template_env = control_plane_dokploy.parse_dokploy_env_text(
@@ -659,7 +665,7 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
 def evaluate_generic_web_preview_readiness(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebPreviewStore,
     request: GenericWebPreviewReadinessRequest,
     checked_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
@@ -699,7 +705,7 @@ def evaluate_generic_web_preview_readiness(
         )
 
     target_definition: control_plane_dokploy.DokployTargetDefinition | None = None
-    template_payload: dict[str, object] | None = None
+    template_payload: JsonObject | None = None
     target_error = ""
     try:
         target_definition, template_payload, target_error = _read_template_payload(
@@ -816,7 +822,7 @@ def evaluate_generic_web_preview_readiness(
 def execute_generic_web_preview_refresh(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebPreviewStore,
     request: GenericWebPreviewRefreshRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewRefreshResult:
@@ -976,7 +982,7 @@ def execute_generic_web_preview_refresh(
 def discover_generic_web_preview_desired_state(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebPreviewStore,
     request: GenericWebPreviewDesiredStateRequest,
     discovered_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
@@ -1005,7 +1011,7 @@ def discover_generic_web_preview_desired_state(
 def execute_generic_web_preview_inventory(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebPreviewStore,
     request: GenericWebPreviewInventoryRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewInventoryResult:
@@ -1053,7 +1059,7 @@ def execute_generic_web_preview_inventory(
 def execute_generic_web_preview_destroy(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebPreviewStore,
     request: GenericWebPreviewDestroyRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewDestroyResult:
