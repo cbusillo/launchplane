@@ -361,7 +361,7 @@ def build_product_activity_read_model(
         events.extend(
             _backup_gate_activity_events(record_store=record_store, profile=profile, lane=lane)
         )
-    if profile.preview.enabled and profile.preview.context.strip():
+    if profile.preview.context.strip():
         events.extend(_preview_activity_events(record_store=record_store, profile=profile))
         events.extend(_preview_context_activity_events(record_store=record_store, profile=profile))
     events.extend(_authz_policy_activity_events(record_store=record_store, profile=profile))
@@ -456,7 +456,6 @@ def _deployment_activity_events(
         "list_deployment_records",
         context_name=lane.context,
         instance_name=lane.instance,
-        limit=10,
     ):
         deploy = getattr(record, "deploy")
         occurred_at = deploy.finished_at or deploy.started_at
@@ -487,7 +486,6 @@ def _promotion_activity_events(
         "list_promotion_records",
         context_name=lane.context,
         to_instance_name=lane.instance,
-        limit=10,
     ):
         deploy = getattr(record, "deploy")
         rollback = getattr(record, "rollback")
@@ -536,7 +534,6 @@ def _backup_gate_activity_events(
         "list_backup_gate_records",
         context_name=lane.context,
         instance_name=lane.instance,
-        limit=10,
     ):
         events.append(
             _activity_event(
@@ -565,7 +562,6 @@ def _preview_activity_events(
         "list_preview_records",
         context_name=profile.preview.context,
         anchor_repo=_profile_anchor_repo(profile),
-        limit=10,
     ):
         state = str(getattr(record, "state"))
         action_id = "preview_destroy" if state == "destroyed" else "preview_refresh"
@@ -596,7 +592,6 @@ def _preview_context_activity_events(
         record_store,
         "list_preview_desired_state_records",
         context_name=preview_context,
-        limit=5,
     ):
         if getattr(record, "product", "") != profile.product:
             continue
@@ -621,7 +616,6 @@ def _preview_context_activity_events(
         record_store,
         "list_preview_lifecycle_cleanup_records",
         context_name=preview_context,
-        limit=5,
     ):
         if getattr(record, "product", "") != profile.product:
             continue
@@ -645,7 +639,6 @@ def _preview_context_activity_events(
         record_store,
         "list_preview_pr_feedback_records",
         context_name=preview_context,
-        limit=5,
     ):
         if getattr(record, "product", "") != profile.product:
             continue
@@ -678,7 +671,7 @@ def _authz_policy_activity_events(
     *, record_store: object, profile: LaunchplaneProductProfileRecord
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
-    for record in _optional_records(record_store, "list_authz_policy_records", limit=5):
+    for record in _optional_records(record_store, "list_authz_policy_records"):
         if not _authz_policy_mentions_product(record, profile.product):
             continue
         events.append(
