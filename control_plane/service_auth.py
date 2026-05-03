@@ -57,7 +57,14 @@ class GitHubOidcVerifier:
     ) -> None:
         self._audience = audience.strip()
         self._issuer = issuer.strip()
-        self._jwk_client = jwk_client or jwt.PyJWKClient(jwks_url)
+        resolved_jwks_url = jwks_url.strip()
+        if not self._audience:
+            raise ValueError("OIDC verifier requires audience.")
+        if not self._issuer:
+            raise ValueError("OIDC verifier requires issuer.")
+        if not resolved_jwks_url:
+            raise ValueError("OIDC verifier requires jwks_url.")
+        self._jwk_client = jwk_client or jwt.PyJWKClient(resolved_jwks_url)
 
     def verify(self, token: str) -> GitHubActionsIdentity:
         normalized_token = token.strip()
