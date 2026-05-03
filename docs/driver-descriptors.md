@@ -176,6 +176,10 @@ The HTTP service admits product-driver POST routes from descriptor action route
 paths and reads product-driver handler authorization actions from descriptor
 route metadata, so new drivers do not need a second hardcoded router allowlist
 or authz-action entry.
+The same route metadata also drives product-driver compatibility checks. A
+product whose descriptor names a `base_driver_id` can use the base driver's
+shared routes when its profile owns the requested lane, which keeps reusable
+site plumbing in Launchplane instead of copied into every site repo.
 
 Preview read models are capability-driven. A driver that exposes
 `previewable`, `preview_inventory_managed`, legacy `preview_lifecycle`, or the
