@@ -218,7 +218,13 @@ class _DriverRouteMetadata:
     operator_visible: bool
 
 
-_DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=BaseModel)
+class _ProductRouteEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+
+
+_DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=_ProductRouteEnvelope)
 
 
 @dataclass(frozen=True)
@@ -347,11 +353,8 @@ class GenericWebPromotionWorkflowEnvelope(BaseModel):
         return self
 
 
-class GenericWebPreviewDesiredStateEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenericWebPreviewDesiredStateEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     desired_state: GenericWebPreviewDesiredStateRequest
 
     @model_validator(mode="after")
@@ -373,11 +376,8 @@ _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class GenericWebPreviewRefreshEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenericWebPreviewRefreshEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     refresh: GenericWebPreviewRefreshRequest
 
     @model_validator(mode="after")
@@ -389,11 +389,8 @@ class GenericWebPreviewRefreshEnvelope(BaseModel):
         return self
 
 
-class GenericWebPreviewInventoryEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenericWebPreviewInventoryEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     inventory: GenericWebPreviewInventoryRequest
 
     @model_validator(mode="after")
@@ -425,11 +422,8 @@ _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class GenericWebPreviewReadinessEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenericWebPreviewReadinessEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     readiness: GenericWebPreviewReadinessRequest
 
     @model_validator(mode="after")
@@ -451,11 +445,8 @@ _GENERIC_WEB_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class GenericWebPreviewDestroyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenericWebPreviewDestroyEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     destroy: GenericWebPreviewDestroyRequest
 
     @model_validator(mode="after")
@@ -1207,7 +1198,7 @@ def _authorize_generic_web_preview_route(
     request = route_metadata.envelope_model.model_validate(payload)
     profile = resolve_generic_web_preview_profile(
         record_store=record_store,
-        product=str(getattr(request, "product")),
+        product=request.product,
     )
     authorization_response = _driver_route_authorization_response(
         authz_policy=authz_policy,
