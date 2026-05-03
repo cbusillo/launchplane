@@ -168,6 +168,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         descriptor = read_driver_descriptor("generic-web")
         actions = {action.action_id: action for action in descriptor.actions}
         route_metadata_by_action = {
+            "preview_desired_state": (
+                control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+                control_plane_service.GenericWebPreviewDesiredStateEnvelope,
+                "preview desired state",
+            ),
             "preview_inventory": (
                 control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
                 control_plane_service.GenericWebPreviewInventoryEnvelope,
@@ -182,6 +187,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                 control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE,
                 control_plane_service.GenericWebPreviewReadinessEnvelope,
                 "preview readiness",
+            ),
+            "preview_destroy": (
+                control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                control_plane_service.GenericWebPreviewDestroyEnvelope,
+                "destroy",
             ),
         }
 

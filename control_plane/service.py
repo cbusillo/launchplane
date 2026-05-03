@@ -360,6 +360,16 @@ class GenericWebPreviewDesiredStateEnvelope(BaseModel):
         return self
 
 
+_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/preview-desired-state",
+    envelope_model=GenericWebPreviewDesiredStateEnvelope,
+    denial_message=(
+        "Workflow cannot discover generic web preview desired state"
+        " for the requested product/context."
+    ),
+)
+
+
 class GenericWebPreviewRefreshEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -452,6 +462,16 @@ class GenericWebPreviewDestroyEnvelope(BaseModel):
         if self.product.strip() != self.destroy.product.strip():
             raise ValueError("generic web preview destroy requires matching product values")
         return self
+
+
+_GENERIC_WEB_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/preview-destroy",
+    envelope_model=GenericWebPreviewDestroyEnvelope,
+    denial_message=(
+        "Workflow cannot destroy generic web preview state"
+        " for the requested product/context."
+    ),
+)
 
 
 class BackupGateEvidenceEnvelope(BaseModel):
@@ -3816,8 +3836,13 @@ def create_launchplane_service_app(
                     request=request.workflow,
                 )
                 result = driver_result.model_dump(mode="json")
-            elif path == "/v1/drivers/generic-web/preview-desired-state":
-                request = GenericWebPreviewDesiredStateEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path:
+                request = cast(
+                    GenericWebPreviewDesiredStateEnvelope,
+                    _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.envelope_model.model_validate(
+                        payload
+                    ),
+                )
                 profile = resolve_generic_web_preview_profile(
                     record_store=record_store,
                     product=request.product,
@@ -3828,10 +3853,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                    denial_message=(
-                        "Workflow cannot discover generic web preview desired state"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3964,8 +3986,11 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
-            elif path == "/v1/drivers/generic-web/preview-destroy":
-                request = GenericWebPreviewDestroyEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
+                request = cast(
+                    GenericWebPreviewDestroyEnvelope,
+                    _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload),
+                )
                 profile = resolve_generic_web_preview_profile(
                     record_store=record_store,
                     product=request.product,
@@ -3976,10 +4001,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                    denial_message=(
-                        "Workflow cannot destroy generic web preview state"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
