@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import click
+from pydantic import ValidationError
 
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import (
@@ -97,6 +98,23 @@ def _source_tuple() -> ReleaseTupleRecord:
 
 
 class OdooProdPromotionWorkflowTests(unittest.TestCase):
+    def test_request_accepts_new_odoo_context(self) -> None:
+        request = OdooProdPromotionRequest(
+            context="  New-Site  ",
+            artifact_id="artifact-new-site-005c291b63b6",
+            backup_record_id="backup-gate-new-site-prod-1",
+        )
+
+        self.assertEqual(request.context, "new-site")
+
+    def test_request_rejects_blank_context(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "requires context"):
+            OdooProdPromotionRequest(
+                context="   ",
+                artifact_id="artifact-new-site-005c291b63b6",
+                backup_record_id="backup-gate-new-site-prod-1",
+            )
+
     def test_promotion_executes_existing_promotion_flow_and_writes_result(self) -> None:
         record_store = Mock()
         promotion_request = _promotion_request()

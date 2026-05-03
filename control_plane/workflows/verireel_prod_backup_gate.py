@@ -50,8 +50,8 @@ class VeriReelProdBackupGateRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelProdBackupGateRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel prod backup gate requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel prod backup gate requires context.")
         if self.instance != "prod":
             raise ValueError("VeriReel prod backup gate requires instance 'prod'.")
         if not self.backup_record_id.strip():
@@ -165,14 +165,12 @@ def _run_delegated_worker(
         )
     except subprocess.TimeoutExpired as exc:
         raise click.ClickException(
-            "VeriReel prod backup gate worker timed out after "
-            f"{timeout_seconds} seconds."
+            f"VeriReel prod backup gate worker timed out after {timeout_seconds} seconds."
         ) from exc
     stdout = completed.stdout.strip()
     if not stdout:
         detail = (
-            completed.stderr.strip()
-            or "VeriReel prod backup gate worker returned no JSON payload."
+            completed.stderr.strip() or "VeriReel prod backup gate worker returned no JSON payload."
         )
         raise click.ClickException(detail)
     try:

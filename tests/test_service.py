@@ -6238,6 +6238,119 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(updated_preview.destroyed_at, "2026-04-29T20:00:05Z")
         self.assertEqual(cleanup_records[0].status, "pass")
 
+    def test_preview_lifecycle_cleanup_endpoint_uses_verireel_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["preview"] = {
+                "enabled": True,
+                "context": "video-site-testing",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-video-site-testing-video-site-pr-41",
+                    context="video-site-testing",
+                    anchor_repo="video-site",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/every/video-site/pull/41",
+                    preview_label="video-site-testing/video-site#41",
+                    canonical_url="https://pr-41.preview.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-video-site-testing-20260429T195838Z",
+                    product="video-site",
+                    context="video-site-testing",
+                    planned_at="2026-04-29T19:58:38Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-video-site-testing-20260429T195837Z",
+                    actual_slugs=("pr-41",),
+                    orphaned_slugs=("pr-41",),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["video-site-testing"],
+                            "actions": ["preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.execute_verireel_preview_destroy",
+                return_value=VeriReelPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-04-29T20:00:00Z",
+                    destroy_finished_at="2026-04-29T20:00:05Z",
+                    application_name="ver-preview-pr-41-app",
+                    application_id="app-41",
+                    preview_url="https://pr-41.preview.example",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/lifecycle-cleanup",
+                    payload={
+                        "product": "video-site",
+                        "context": "video-site-testing",
+                        "plan_id": "preview-lifecycle-plan-video-site-testing-20260429T195838Z",
+                        "source": "preview-janitor",
+                        "apply": True,
+                        "destroy_reason": "external_preview_janitor_cleanup_completed",
+                    },
+                )
+
+            updated_preview = FilesystemRecordStore(state_dir=state_dir).read_preview_record(
+                "preview-video-site-testing-video-site-pr-41"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["destroyed_slugs"], ["pr-41"])
+        execute_mock.assert_called_once()
+        destroy_request = execute_mock.call_args.kwargs["request"]
+        self.assertEqual(destroy_request.context, "video-site-testing")
+        self.assertEqual(destroy_request.anchor_repo, "video-site")
+        self.assertEqual(updated_preview.state, "destroyed")
+
     def test_preview_lifecycle_cleanup_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -6874,6 +6987,152 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             execute_mock.assert_called_once()
 
+    def test_odoo_driver_route_accepts_product_profile_driver_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _product_profile_payload(product="tenant-cm")
+            profile_payload["display_name"] = "Tenant CM"
+            profile_payload["driver_id"] = "odoo"
+            profile_payload["lanes"] = (
+                {
+                    "instance": "prod",
+                    "context": "cm",
+                    "base_url": "https://cm.example.com",
+                    "health_url": "https://cm.example.com/web/health",
+                },
+            )
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/tenant-cm",
+                            "workflow_refs": [
+                                "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_prod_backup_gate.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/tenant-cm",
+                        workflow_ref=(
+                            "every/tenant-cm/.github/workflows/deploy-odoo.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_prod_backup_gate",
+                return_value=OdooProdBackupGateResult(
+                    context="cm",
+                    instance="prod",
+                    backup_record_id="backup-gate-cm-prod-run-1",
+                    backup_status="pass",
+                    backup_root="/volumes/data/backups/launchplane",
+                    database_dump_path="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/cm.dump",
+                    filestore_archive_path="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/cm-filestore.tar.gz",
+                    manifest_path="/volumes/data/backups/launchplane/cm/backup-gate-cm-prod-run-1/manifest.json",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-backup-gate",
+                    payload={
+                        "product": "tenant-cm",
+                        "backup_gate": {
+                            "context": "cm",
+                            "instance": "prod",
+                            "backup_record_id": "backup-gate-cm-prod-run-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["records"]["backup_record_id"], "backup-gate-cm-prod-run-1")
+            execute_mock.assert_called_once()
+
+    def test_odoo_driver_route_rejects_generic_web_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _product_profile_payload(product="example-site")
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/example-site",
+                            "workflow_refs": [
+                                "every/example-site/.github/workflows/deploy.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["example-site"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_prod_backup_gate.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/example-site",
+                        workflow_ref=(
+                            "every/example-site/.github/workflows/deploy.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.execute_odoo_prod_backup_gate") as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/prod-backup-gate",
+                    payload={
+                        "product": "example-site",
+                        "backup_gate": {
+                            "context": "cm",
+                            "instance": "prod",
+                            "backup_record_id": "backup-gate-example-prod-run-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+            execute_mock.assert_not_called()
+
     def test_odoo_prod_backup_gate_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -7381,6 +7640,182 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             self.assertEqual(payload["result"]["rollback_status"], "pass")
             execute_mock.assert_called_once()
+
+    def test_verireel_driver_route_accepts_product_profile_driver_id(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "video-site",
+                    "base_url": "https://testing.video.example",
+                    "health_url": "https://testing.video.example/api/health",
+                },
+                {
+                    "instance": "prod",
+                    "context": "video-site",
+                    "base_url": "https://video.example",
+                    "health_url": "https://video.example/api/health",
+                },
+            )
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["video-site"],
+                            "actions": ["verireel_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_verireel_prod_rollback",
+                return_value=VeriReelProdRollbackResult(
+                    promotion_record_id="promotion-video-testing-to-prod-run-12345-attempt-1",
+                    backup_record_id="backup-gate-video-prod-run-12345-attempt-1",
+                    snapshot_name="video-predeploy-20260421-180000",
+                    rollback_status="pass",
+                    rollback_health_status="pass",
+                    rollback_started_at="2026-04-21T18:20:00Z",
+                    rollback_finished_at="2026-04-21T18:21:00Z",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-rollback",
+                    payload={
+                        "product": "video-site",
+                        "rollback": {
+                            "context": "video-site",
+                            "instance": "prod",
+                            "promotion_record_id": "promotion-video-testing-to-prod-run-12345-attempt-1",
+                            "backup_record_id": "backup-gate-video-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(
+                payload["records"]["promotion_record_id"],
+                "promotion-video-testing-to-prod-run-12345-attempt-1",
+            )
+            execute_mock.assert_called_once()
+
+    def test_verireel_driver_route_rejects_unowned_profile_lane(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["lanes"] = (
+                {
+                    "instance": "testing",
+                    "context": "video-site",
+                    "base_url": "https://testing.video.example",
+                    "health_url": "https://testing.video.example/api/health",
+                },
+                {
+                    "instance": "prod",
+                    "context": "video-site",
+                    "base_url": "https://video.example",
+                    "health_url": "https://video.example/api/health",
+                },
+            )
+            profile_payload["preview"] = {
+                "enabled": False,
+                "context": "",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["other-site"],
+                            "actions": ["verireel_prod_rollback.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/promote-image.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.execute_verireel_prod_rollback") as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/verireel/prod-rollback",
+                    payload={
+                        "product": "video-site",
+                        "rollback": {
+                            "context": "other-site",
+                            "instance": "prod",
+                            "promotion_record_id": "promotion-video-testing-to-prod-run-12345-attempt-1",
+                            "backup_record_id": "backup-gate-video-prod-run-12345-attempt-1",
+                        },
+                    },
+                )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "product_driver_mismatch")
+            execute_mock.assert_not_called()
 
     def test_verireel_prod_rollback_driver_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

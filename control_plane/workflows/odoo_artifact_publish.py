@@ -14,7 +14,6 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.storage.filesystem import FilesystemRecordStore
 
-SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
 DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY = "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"
 PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
     "ODOO_VERSION",
@@ -47,11 +46,8 @@ class OdooArtifactPublishRequest(BaseModel):
         self.instance = self.instance.strip().lower()
         self.image_repository = self.image_repository.strip()
         self.image_tag = self.image_tag.strip()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo artifact publish supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo artifact publish requires context.")
         if self.instance not in {"testing", "prod"}:
             raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
         if not self.image_repository:
@@ -88,11 +84,8 @@ class OdooArtifactPublishEvidenceRequest(BaseModel):
     def _validate_request(self) -> "OdooArtifactPublishEvidenceRequest":
         self.context = self.context.strip().lower()
         self.instance = self.instance.strip().lower()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo artifact publish supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo artifact publish requires context.")
         if self.instance not in {"testing", "prod"}:
             raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
         expected_prefix = f"artifact-{self.context}-"
@@ -115,11 +108,8 @@ class OdooArtifactPublishInputsRequest(BaseModel):
     def _validate_request(self) -> "OdooArtifactPublishInputsRequest":
         self.context = self.context.strip().lower()
         self.instance = self.instance.strip().lower()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo artifact publish supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo artifact publish requires context.")
         if self.instance not in {"testing", "prod"}:
             raise ValueError("Odoo artifact publish requires instance 'testing' or 'prod'.")
         return self
