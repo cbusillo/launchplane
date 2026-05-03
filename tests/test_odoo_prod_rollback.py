@@ -146,14 +146,14 @@ def _target_id_record() -> DokployTargetIdRecord:
 
 
 class OdooProdRollbackWorkflowTests(unittest.TestCase):
-    def test_request_accepts_new_odoo_context(self) -> None:
-        request = OdooProdRollbackRequest(context="  New-Site  ")
+    def test_rollback_request_accepts_profile_owned_context(self) -> None:
+        request = OdooProdRollbackRequest(context=" New-Site ")
 
         self.assertEqual(request.context, "new-site")
 
-    def test_request_rejects_blank_context(self) -> None:
+    def test_rollback_request_rejects_blank_context(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires context"):
-            OdooProdRollbackRequest(context="   ")
+            OdooProdRollbackRequest(context=" ")
 
     def _record_store(self) -> Mock:
         record_store = Mock()

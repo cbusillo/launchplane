@@ -98,20 +98,20 @@ def _source_tuple() -> ReleaseTupleRecord:
 
 
 class OdooProdPromotionWorkflowTests(unittest.TestCase):
-    def test_request_accepts_new_odoo_context(self) -> None:
+    def test_promotion_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdPromotionRequest(
-            context="  New-Site  ",
-            artifact_id="artifact-new-site-005c291b63b6",
+            context=" New-Site ",
+            artifact_id="artifact-new-site-123",
             backup_record_id="backup-gate-new-site-prod-1",
         )
 
         self.assertEqual(request.context, "new-site")
 
-    def test_request_rejects_blank_context(self) -> None:
+    def test_promotion_request_rejects_blank_context(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooProdPromotionRequest(
-                context="   ",
-                artifact_id="artifact-new-site-005c291b63b6",
+                context=" ",
+                artifact_id="artifact-new-site-123",
                 backup_record_id="backup-gate-new-site-prod-1",
             )
 

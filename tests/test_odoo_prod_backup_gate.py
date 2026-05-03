@@ -47,18 +47,18 @@ def _runtime_values() -> dict[str, str]:
 
 
 class OdooProdBackupGateWorkflowTests(unittest.TestCase):
-    def test_request_accepts_new_odoo_context(self) -> None:
+    def test_backup_gate_request_accepts_profile_owned_context(self) -> None:
         request = OdooProdBackupGateRequest(
-            context="  New-Site  ",
+            context=" New-Site ",
             backup_record_id="backup-gate-new-site-prod-1",
         )
 
         self.assertEqual(request.context, "new-site")
 
-    def test_request_rejects_blank_context(self) -> None:
+    def test_backup_gate_request_rejects_blank_context(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooProdBackupGateRequest(
-                context="   ",
+                context=" ",
                 backup_record_id="backup-gate-new-site-prod-1",
             )
 

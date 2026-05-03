@@ -5,6 +5,7 @@ from unittest.mock import Mock, patch
 
 from pydantic import ValidationError
 
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.workflows.odoo_artifact_publish import (
     DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY,
     OdooArtifactPublishEvidenceRequest,
@@ -28,25 +29,27 @@ def _artifact_payload() -> dict[str, object]:
     }
 
 
+def _artifact_manifest(payload: dict[str, object] | None = None) -> ArtifactIdentityManifest:
+    return ArtifactIdentityManifest.model_validate(payload or _artifact_payload())
+
+
 class OdooArtifactPublishWorkflowTests(unittest.TestCase):
-    def test_publish_requests_accept_new_odoo_contexts(self) -> None:
+    def test_publish_requests_accept_profile_owned_contexts(self) -> None:
         publish_request = OdooArtifactPublishRequest(
-            context="  New-Site  ",
+            context=" New-Site ",
             manifest_path=Path("/work/new-site/workspace.toml"),
             devkit_root=Path("/work/odoo-devkit"),
             image_repository="ghcr.io/cbusillo/odoo-tenant-new-site",
-            image_tag="new-site-20260503-005c291b",
+            image_tag="new-site-20260503",
         )
-        evidence_request = OdooArtifactPublishEvidenceRequest.model_validate(
-            {
-                "context": "new-site",
-                "manifest": {
-                    **_artifact_payload(),
-                    "artifact_id": "artifact-new-site-005c291b63b6",
-                },
-            }
+        evidence_payload = dict(_artifact_payload())
+        evidence_payload["artifact_id"] = "artifact-new-site-005c291b63b6"
+        evidence_request = OdooArtifactPublishEvidenceRequest(
+            context="new-site",
+            instance="testing",
+            manifest=_artifact_manifest(evidence_payload),
         )
-        inputs_request = OdooArtifactPublishInputsRequest(context="new-site")
+        inputs_request = OdooArtifactPublishInputsRequest(context="new-site", instance="testing")
 
         self.assertEqual(publish_request.context, "new-site")
         self.assertEqual(evidence_request.context, "new-site")
@@ -54,13 +57,29 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
 
     def test_publish_requests_reject_blank_contexts(self) -> None:
         with self.assertRaisesRegex(ValidationError, "requires context"):
-            OdooArtifactPublishInputsRequest(context="   ")
+            OdooArtifactPublishRequest(
+                context=" ",
+                manifest_path=Path("/work/new-site/workspace.toml"),
+                devkit_root=Path("/work/odoo-devkit"),
+                image_repository="ghcr.io/cbusillo/odoo-tenant-new-site",
+                image_tag="new-site-20260503",
+            )
+        with self.assertRaisesRegex(ValidationError, "requires context"):
+            OdooArtifactPublishEvidenceRequest(
+                context=" ",
+                instance="testing",
+                manifest=_artifact_manifest(),
+            )
+        with self.assertRaisesRegex(ValidationError, "requires context"):
+            OdooArtifactPublishInputsRequest(context=" ", instance="testing")
 
     def test_publish_resolves_launchplane_env_and_writes_artifact(self) -> None:
         record_store = Mock()
-        captured_env = {}
+        captured_env: dict[str, str] = {}
 
-        def fake_run(command, *, capture_output, text, env):
+        def fake_run(
+            command: list[str], *, capture_output: bool, text: bool, env: dict[str, str]
+        ) -> Mock:
             del capture_output, text
             captured_env.update(env)
             output_file = Path(command[command.index("--output-file") + 1])
@@ -110,7 +129,9 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
     def test_publish_rejects_wrong_context_artifact(self) -> None:
         record_store = Mock()
 
-        def fake_run(command, *, capture_output, text, env):
+        def fake_run(
+            command: list[str], *, capture_output: bool, text: bool, env: dict[str, str]
+        ) -> Mock:
             del capture_output, text, env
             payload = dict(_artifact_payload())
             payload["artifact_id"] = "artifact-opw-005c291b63b6"
@@ -151,7 +172,7 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
             request=OdooArtifactPublishEvidenceRequest(
                 context="cm",
                 instance="testing",
-                manifest=_artifact_payload(),
+                manifest=_artifact_manifest(),
             ),
         )
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -13,19 +13,20 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
     PromotionRecord,
+    ReleaseStatus,
     RollbackExecutionEvidence,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.release_tuples import build_release_tuple_record_from_artifact_manifest
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.ship import (
@@ -45,6 +46,62 @@ class _RollbackSource:
     promoted_from_instance: str
     snapshot_name: str
     detail: str
+
+
+class OdooProdRollbackStore(Protocol):
+    def read_release_tuple_record(
+        self, *, context_name: str, channel_name: str
+    ) -> ReleaseTupleRecord: ...
+
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
+    def read_promotion_record(self, promotion_record_id: str) -> PromotionRecord: ...
+
+    def read_dokploy_target_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetRecord: ...
+
+    def read_dokploy_target_id_record(
+        self, *, context_name: str, instance_name: str
+    ) -> DokployTargetIdRecord: ...
+
+    def write_deployment_record(self, record: DeploymentRecord) -> None: ...
+
+    def write_environment_inventory(self, inventory: EnvironmentInventory) -> None: ...
+
+    def write_release_tuple_record(self, record: ReleaseTupleRecord) -> None: ...
+
+    def write_promotion_record(self, record: PromotionRecord) -> None: ...
+
+
+def _require_record_store(record_store: object) -> OdooProdRollbackStore:
+    required_methods = (
+        "read_release_tuple_record",
+        "read_artifact_manifest",
+        "read_environment_inventory",
+        "read_promotion_record",
+        "read_dokploy_target_record",
+        "read_dokploy_target_id_record",
+        "write_deployment_record",
+        "write_environment_inventory",
+        "write_release_tuple_record",
+        "write_promotion_record",
+    )
+    missing_methods = tuple(
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    )
+    if missing_methods:
+        raise click.ClickException(
+            "Odoo prod rollback requires a DB-backed Launchplane record store. "
+            f"Missing methods: {', '.join(missing_methods)}."
+        )
+    return cast(OdooProdRollbackStore, record_store)
 
 
 class OdooProdRollbackRequest(BaseModel):
@@ -101,7 +158,7 @@ def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) 
 
 def _read_source_release_tuple(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     request: OdooProdRollbackRequest,
 ) -> ReleaseTupleRecord:
     try:
@@ -117,7 +174,7 @@ def _read_source_release_tuple(
 
 def _read_artifact_manifest(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     artifact_id: str,
 ) -> ArtifactIdentityManifest:
     try:
@@ -164,7 +221,7 @@ def _resolve_rollback_source(
 
 def _read_prod_inventory(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     request: OdooProdRollbackRequest,
 ) -> EnvironmentInventory:
     try:
@@ -180,7 +237,7 @@ def _read_prod_inventory(
 
 def _read_promotion_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     promotion_record_id: str,
 ) -> PromotionRecord:
     try:
@@ -193,7 +250,7 @@ def _read_promotion_record(
 
 def _resolve_promotion_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     request: OdooProdRollbackRequest,
 ) -> PromotionRecord:
     promotion_record_id = request.promotion_record_id
@@ -224,7 +281,7 @@ def _resolve_promotion_record(
 
 def _read_target_definition(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     request: OdooProdRollbackRequest,
 ) -> control_plane_dokploy.DokployTargetDefinition:
     try:
@@ -460,7 +517,9 @@ def _verify_healthchecks(*, request: ShipRequest) -> None:
     )
 
 
-def _rollback_health_evidence(*, request: ShipRequest, status: str) -> HealthcheckEvidence:
+def _rollback_health_evidence(
+    *, request: ShipRequest, status: ReleaseStatus
+) -> HealthcheckEvidence:
     return request.destination_health.model_copy(
         update={
             "verified": status in {"pass", "fail"} and bool(request.destination_health.urls),
@@ -471,12 +530,12 @@ def _rollback_health_evidence(*, request: ShipRequest, status: str) -> Healthche
 
 def _write_rollback_state(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooProdRollbackStore,
     promotion_record: PromotionRecord,
     snapshot_name: str,
     request: ShipRequest,
-    status: str,
-    health_status: str,
+    status: ReleaseStatus,
+    health_status: ReleaseStatus,
     started_at: str,
     finished_at: str,
     detail: str,
@@ -501,19 +560,20 @@ def _write_rollback_state(
 def execute_odoo_prod_rollback(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: object,
     request: OdooProdRollbackRequest,
 ) -> OdooProdRollbackResult:
+    typed_record_store = _require_record_store(record_store)
     source_tuple: ReleaseTupleRecord | None = None
     if request.artifact_id:
         artifact_manifest = _read_artifact_manifest(
-            record_store=record_store,
+            record_store=typed_record_store,
             artifact_id=request.artifact_id,
         )
     else:
-        source_tuple = _read_source_release_tuple(record_store=record_store, request=request)
+        source_tuple = _read_source_release_tuple(record_store=typed_record_store, request=request)
         artifact_manifest = _read_artifact_manifest(
-            record_store=record_store,
+            record_store=typed_record_store,
             artifact_id=source_tuple.artifact_id,
         )
     rollback_source = _resolve_rollback_source(
@@ -521,8 +581,8 @@ def execute_odoo_prod_rollback(
         artifact_manifest=artifact_manifest,
         source_tuple=source_tuple,
     )
-    promotion_record = _resolve_promotion_record(record_store=record_store, request=request)
-    target_definition = _read_target_definition(record_store=record_store, request=request)
+    promotion_record = _resolve_promotion_record(record_store=typed_record_store, request=request)
+    target_definition = _read_target_definition(record_store=typed_record_store, request=request)
     ship_request = _resolve_ship_request(
         request=request,
         rollback_source=rollback_source,
@@ -539,7 +599,7 @@ def execute_odoo_prod_rollback(
         instance_name=request.instance,
     )
     started_at = utc_now_timestamp()
-    record_store.write_deployment_record(
+    typed_record_store.write_deployment_record(
         build_deployment_record(
             request=ship_request,
             record_id=deployment_record_id,
@@ -552,7 +612,7 @@ def execute_odoo_prod_rollback(
         )
     )
     _write_rollback_state(
-        record_store=record_store,
+        record_store=typed_record_store,
         promotion_record=promotion_record,
         snapshot_name=rollback_source.snapshot_name,
         request=ship_request,
@@ -580,7 +640,7 @@ def execute_odoo_prod_rollback(
         deploy_completed = True
         post_deploy_result = execute_odoo_post_deploy(
             control_plane_root=control_plane_root,
-            record_store=record_store,
+            record_store=typed_record_store,
             request=OdooPostDeployRequest(context=request.context, instance=request.instance),
         )
         post_deploy_status = post_deploy_result.post_deploy_status
@@ -611,9 +671,9 @@ def execute_odoo_prod_rollback(
                 request=ship_request, status=health_status
             ),
         )
-        record_store.write_deployment_record(final_deployment)
+        typed_record_store.write_deployment_record(final_deployment)
         _write_rollback_state(
-            record_store=record_store,
+            record_store=typed_record_store,
             promotion_record=promotion_record,
             snapshot_name=rollback_source.snapshot_name,
             request=ship_request,
@@ -652,14 +712,14 @@ def execute_odoo_prod_rollback(
         ),
         destination_health=_rollback_health_evidence(request=ship_request, status=health_status),
     )
-    record_store.write_deployment_record(final_deployment)
+    typed_record_store.write_deployment_record(final_deployment)
     inventory_record = build_environment_inventory(
         deployment_record=final_deployment,
         updated_at=finished_at,
         promotion_record_id=promotion_record.record_id,
         promoted_from_instance=rollback_source.promoted_from_instance,
     )
-    record_store.write_environment_inventory(inventory_record)
+    typed_record_store.write_environment_inventory(inventory_record)
     release_tuple = build_release_tuple_record_from_artifact_manifest(
         context_name=request.context,
         channel_name=request.instance,
@@ -667,9 +727,9 @@ def execute_odoo_prod_rollback(
         deployment_record_id=deployment_record_id,
         minted_at=finished_at,
     )
-    record_store.write_release_tuple_record(release_tuple)
+    typed_record_store.write_release_tuple_record(release_tuple)
     _write_rollback_state(
-        record_store=record_store,
+        record_store=typed_record_store,
         promotion_record=promotion_record,
         snapshot_name=rollback_source.snapshot_name,
         request=ship_request,
