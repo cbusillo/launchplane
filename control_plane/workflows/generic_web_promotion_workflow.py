@@ -12,6 +12,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.launchplane import github_api_request, resolve_launchplane_github_token
 
+BumpLevel = Literal["patch", "minor", "major"]
+
 
 class GenericWebPromotionWorkflowRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -20,7 +22,7 @@ class GenericWebPromotionWorkflowRequest(BaseModel):
     product: str
     context: str
     dry_run: bool = True
-    bump: Literal["patch", "minor", "major"] | None = None
+    bump: BumpLevel | None = None
     observe_timeout_seconds: int = Field(default=12, ge=0, le=60)
 
     @model_validator(mode="after")
@@ -43,7 +45,7 @@ class GenericWebPromotionWorkflowResult(BaseModel):
     workflow_id: str
     ref: str
     dry_run: bool
-    bump: Literal["patch", "minor", "major"]
+    bump: BumpLevel
     dispatch_status: Literal["dispatched"] = "dispatched"
     run_id: int = 0
     run_url: str = ""
@@ -76,7 +78,7 @@ def dispatch_generic_web_promotion_workflow(
     workflow = profile.promotion_workflow
     workflow_id = workflow.workflow_id.strip()
     ref = workflow.ref.strip()
-    bump = request.bump or workflow.default_bump.strip()
+    bump = _normalize_bump(request.bump or workflow.default_bump.strip())
     previous_run_ids = _workflow_dispatch_run_ids(
         owner=owner,
         repo=repo,
@@ -120,6 +122,17 @@ def dispatch_generic_web_promotion_workflow(
         run_status=_string_value(run.get("status")) if run else "pending",
         run_conclusion=_string_value(run.get("conclusion")) if run else "",
     )
+
+
+def _normalize_bump(value: str) -> BumpLevel:
+    normalized = value.strip()
+    if normalized == "patch":
+        return "patch"
+    if normalized == "minor":
+        return "minor"
+    if normalized == "major":
+        return "major"
+    raise click.ClickException("generic web promotion workflow bump must be patch, minor, or major")
 
 
 def _wait_for_workflow_run(
