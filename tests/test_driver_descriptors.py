@@ -164,18 +164,42 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._build_write_routes(),
         )
 
-    def test_generic_web_readiness_execution_metadata_matches_descriptor(self) -> None:
+    def test_generic_web_preview_execution_metadata_matches_descriptors(self) -> None:
         descriptor = read_driver_descriptor("generic-web")
         actions = {action.action_id: action for action in descriptor.actions}
-        readiness_action = actions["preview_readiness"]
-        execution_metadata = control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE
+        route_metadata_by_action = {
+            "preview_inventory": (
+                control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+                control_plane_service.GenericWebPreviewInventoryEnvelope,
+                "preview inventory",
+            ),
+            "preview_refresh": (
+                control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                control_plane_service.GenericWebPreviewRefreshEnvelope,
+                "refresh",
+            ),
+            "preview_readiness": (
+                control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+                control_plane_service.GenericWebPreviewReadinessEnvelope,
+                "preview readiness",
+            ),
+        }
 
-        self.assertEqual(execution_metadata.route_path, readiness_action.route_path)
-        self.assertIs(
-            execution_metadata.envelope_model,
-            control_plane_service.GenericWebPreviewReadinessEnvelope,
-        )
-        self.assertIn("preview readiness", execution_metadata.denial_message)
+        for action_id, (
+            execution_metadata,
+            envelope_model,
+            denial_message_fragment,
+        ) in route_metadata_by_action.items():
+            with self.subTest(action_id=action_id):
+                self.assertEqual(
+                    execution_metadata.route_path,
+                    actions[action_id].route_path,
+                )
+                self.assertIs(execution_metadata.envelope_model, envelope_model)
+                self.assertIn(
+                    denial_message_fragment,
+                    execution_metadata.denial_message,
+                )
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
