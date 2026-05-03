@@ -226,6 +226,28 @@ class _ActivityRecordStore(_PreviewRecordStore):
         )
 
 
+class _ManyDeploymentActivityRecordStore(_PreviewRecordStore):
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        if context_name != "example-site-prod" or instance_name != "prod":
+            return ()
+        records = tuple(
+            SimpleNamespace(
+                record_id=f"deployment-prod-{index}",
+                deploy=SimpleNamespace(
+                    status="pass",
+                    started_at=f"2026-05-02T10:{index:02d}:00Z",
+                    finished_at=f"2026-05-02T10:{index:02d}:30Z",
+                ),
+            )
+            for index in range(12, 0, -1)
+        )
+        if limit is not None:
+            return records[:limit]
+        return records
+
+
 class ProductEnvironmentReadModelTest(unittest.TestCase):
     def test_action_authz_map_matches_live_service_handlers(self) -> None:
         self.assertEqual(
@@ -530,3 +552,62 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             {link.record_id for event in activity.events for link in event.records},
         )
         self.assertEqual(activity.events[0].event_type, "authz_policy")
+
+    def test_product_activity_read_model_keeps_preview_history_when_previews_disabled(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(
+                preview_enabled=False,
+                preview_context="shared-preview",
+                testing_context="example-site-prod",
+                prod_context="example-site-prod",
+            )
+        )
+        store = _ActivityRecordStore(
+            profile,
+            (
+                _preview_record(
+                    preview_id="example-preview-1",
+                    context="shared-preview",
+                    anchor_repo="example-site",
+                    state="destroyed",
+                    updated_at="2026-05-02T12:10:00Z",
+                ),
+            ),
+        )
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product="example-site",
+        )
+
+        event_types = {event.event_type for event in activity.events}
+        self.assertIn("preview", event_types)
+        self.assertIn("preview_desired_state", event_types)
+
+    def test_product_activity_read_model_limits_after_merging_all_sources(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(
+                preview_enabled=False,
+                preview_context="",
+                testing_context="example-site-prod",
+                prod_context="example-site-prod",
+            )
+        )
+        store = _ManyDeploymentActivityRecordStore(profile, ())
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product="example-site",
+            limit=12,
+        )
+
+        deployment_record_ids = {
+            link.record_id
+            for event in activity.events
+            for link in event.records
+            if link.record_type == "deployment"
+        }
+        self.assertEqual(len(activity.events), 12)
+        self.assertIn("deployment-prod-1", deployment_record_ids)
