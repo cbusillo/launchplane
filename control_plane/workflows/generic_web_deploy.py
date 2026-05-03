@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -17,6 +18,12 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.ship import build_deployment_record, generate_deployment_record_id, utc_now_timestamp
+
+
+class GenericWebDeployStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def write_deployment_record(self, record: DeploymentRecord) -> object: ...
 
 
 class GenericWebDeployRequest(BaseModel):
@@ -54,13 +61,13 @@ class GenericWebDeployResult(BaseModel):
     context: str
     instance: str
     target_name: str = ""
-    target_type: str = ""
+    target_type: DokployTargetType | Literal[""] = ""
     target_id: str = ""
     error_message: str = ""
 
 
 def resolve_generic_web_profile_lane(
-    *, record_store: object, request: GenericWebDeployRequest
+    *, record_store: GenericWebDeployStore, request: GenericWebDeployRequest
 ) -> tuple[LaunchplaneProductProfileRecord, ProductLaneProfile]:
     profile = record_store.read_product_profile_record(request.product)
     if profile.driver_id != "generic-web":
@@ -75,7 +82,7 @@ def resolve_generic_web_profile_lane(
     )
 
 
-def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: str) -> str:
+def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: DokployTargetType) -> str:
     if configured_ship_mode == "auto":
         return f"dokploy-{target_type}-api"
     return f"dokploy-{configured_ship_mode}-api"
@@ -169,7 +176,7 @@ def _resolve_ship_request(
 def execute_generic_web_deploy(
     *,
     control_plane_root: Path,
-    record_store: object,
+    record_store: GenericWebDeployStore,
     request: GenericWebDeployRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
     lane: ProductLaneProfile | None = None,
