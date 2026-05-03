@@ -34,7 +34,8 @@ The descriptor contracts live in
 - `DriverCapabilityDescriptor`: grouped product capability such as stable
   promotion, artifact publish, preview lifecycle, or post-deploy settings.
 - `DriverActionDescriptor`: read-only action metadata, route path, method,
-  scope, safety level, and records the action can write.
+  authorization action, operator visibility, scope, safety level, and records the
+  action can write.
 - `DriverSettingGroupDescriptor`: setting/status groups the UI can render later
   without knowing product-specific storage internals.
 - `DriverContextView`: context or context/instance read model composed from
@@ -127,6 +128,26 @@ generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
 declared directly on the product driver.
 
+Driver action routes are owned by the base driver contract. The service accepts
+any product key on Odoo and VeriReel action envelopes, then authorizes the call
+against that product and verifies the product profile's `driver_id` or driver
+descriptor `base_driver_id` matches the requested base driver before dispatching
+the workflow. This keeps product repos on stable Launchplane routes while
+allowing new Odoo- or VeriReel-shaped products to be added by product profile and
+authz records instead of code forks.
+
+VeriReel preview lifecycle cleanup also uses the product and context on the
+preview lifecycle plan as the cleanup boundary. A VeriReel-shaped product can
+therefore clean up previews recorded under its own product key and preview
+context instead of being pinned to the canonical `verireel`/`verireel-testing`
+pair.
+
+VeriReel stable-lane actions follow the same product-profile boundary. For
+non-canonical products, service dispatch verifies that the requested context and
+instance match a lane on the product profile before invoking stable deploy,
+environment, rollout verification, backup gate, promotion, or rollback
+workflows.
+
 Odoo exposes:
 
 - artifact publish handoff
@@ -145,6 +166,12 @@ VeriReel exposes:
 
 These descriptors intentionally reference Launchplane routes, not runtime
 provider concepts, as the future GUI-facing action surface.
+
+Descriptor actions are also the source of truth for driver route authorization
+metadata. `authz_action` must match the live service handler authorization
+string for that route. Some service callback routes, such as verification
+writeback routes, are declared with `operator_visible=false`; they remain in the
+driver route authorization map but are not surfaced as operator actions.
 
 Preview read models are capability-driven. A driver that exposes
 `previewable`, `preview_inventory_managed`, legacy `preview_lifecycle`, or the

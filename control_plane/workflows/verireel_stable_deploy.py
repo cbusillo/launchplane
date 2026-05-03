@@ -13,7 +13,11 @@ from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
-from control_plane.workflows.ship import build_deployment_record, generate_deployment_record_id, utc_now_timestamp
+from control_plane.workflows.ship import (
+    build_deployment_record,
+    generate_deployment_record_id,
+    utc_now_timestamp,
+)
 from control_plane.workflows.verireel_rollout import (
     DEFAULT_ROLLOUT_INTERVAL_SECONDS,
     DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
@@ -44,8 +48,8 @@ class VeriReelStableDeployRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelStableDeployRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel stable deploy requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel stable deploy requires context.")
         if self.instance not in {"testing", "prod"}:
             raise ValueError("VeriReel stable deploy requires instance 'testing' or 'prod'.")
         if not self.artifact_id.strip():
@@ -154,7 +158,8 @@ def _resolve_ship_request(
         context=request.context,
         instance=request.instance,
         source_git_ref=request.source_git_ref,
-        target_name=target_definition.target_name.strip() or _default_target_name_for_instance(request.instance),
+        target_name=target_definition.target_name.strip()
+        or _default_target_name_for_instance(request.instance),
         target_type=target_definition.target_type,
         deploy_mode=deploy_mode,
         wait=True,
