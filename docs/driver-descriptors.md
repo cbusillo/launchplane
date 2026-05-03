@@ -34,7 +34,8 @@ The descriptor contracts live in
 - `DriverCapabilityDescriptor`: grouped product capability such as stable
   promotion, artifact publish, preview lifecycle, or post-deploy settings.
 - `DriverActionDescriptor`: read-only action metadata, route path, method,
-  scope, safety level, and records the action can write.
+  authorization action, operator visibility, scope, safety level, and records the
+  action can write.
 - `DriverSettingGroupDescriptor`: setting/status groups the UI can render later
   without knowing product-specific storage internals.
 - `DriverContextView`: context or context/instance read model composed from
@@ -165,6 +166,12 @@ VeriReel exposes:
 
 These descriptors intentionally reference Launchplane routes, not runtime
 provider concepts, as the future GUI-facing action surface.
+
+Descriptor actions are also the source of truth for driver route authorization
+metadata. `authz_action` must match the live service handler authorization
+string for that route. Some service callback routes, such as verification
+writeback routes, are declared with `operator_visible=false`; they remain in the
+driver route authorization map but are not surfaced as operator actions.
 
 Preview read models are capability-driven. A driver that exposes
 `previewable`, `preview_inventory_managed`, legacy `preview_lifecycle`, or the
