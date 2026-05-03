@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from typing import Protocol
 import click
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -12,6 +13,10 @@ from control_plane.storage.postgres import PostgresRecordStore
 
 GIT_SHA_PATTERN = re.compile(r"^[0-9a-fA-F]{7,40}$")
 LONG_LIVED_RELEASE_TUPLE_CHANNELS = {"testing", "prod"}
+
+
+class ReleaseTupleRecordStore(Protocol):
+    def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -53,7 +58,9 @@ def render_release_tuple_catalog_toml(records: tuple[ReleaseTupleRecord, ...]) -
             record.channel,
             scope=f"Release tuple record {record.tuple_id}",
         )
-        lines.append(f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(channel_name)}]")
+        lines.append(
+            f"[contexts.{_toml_bare_key(record.context)}.channels.{_toml_bare_key(channel_name)}]"
+        )
         lines.append(f"tuple_id = {_toml_string(record.tuple_id)}")
         lines.append("")
         lines.append(
@@ -250,23 +257,38 @@ def resolve_release_tuple(
     return release_tuple
 
 
-def _load_optional_release_tuple_catalog_from_database(*, database_url: str) -> ReleaseTupleCatalog | None:
+def _load_optional_release_tuple_catalog_from_database(
+    *, database_url: str
+) -> ReleaseTupleCatalog | None:
     record_store: PostgresRecordStore | None = None
     try:
         record_store = PostgresRecordStore(database_url=database_url)
         record_store.ensure_schema()
-        records = record_store.list_release_tuple_records()
+        return load_optional_release_tuple_catalog_from_store(
+            record_store=record_store,
+            source_label="Launchplane Postgres storage",
+        )
     except Exception as error:
-        raise click.ClickException(f"Could not load release tuples from Launchplane Postgres storage: {error}") from error
+        raise click.ClickException(
+            f"Could not load release tuples from Launchplane Postgres storage: {error}"
+        ) from error
     finally:
         try:
             if record_store is not None:
                 record_store.close()
         except Exception:
             pass
+
+
+def load_optional_release_tuple_catalog_from_store(
+    *,
+    record_store: ReleaseTupleRecordStore,
+    source_label: str = "Launchplane release tuple records",
+) -> ReleaseTupleCatalog | None:
+    records = record_store.list_release_tuple_records()
     if not records:
         return None
-    return build_release_tuple_catalog_from_records(records, source_label="Launchplane Postgres storage")
+    return build_release_tuple_catalog_from_records(records, source_label=source_label)
 
 
 def build_release_tuple_catalog_from_records(
@@ -282,7 +304,9 @@ def build_release_tuple_catalog_from_records(
             scope=f"{source_label} record {record.tuple_id}",
         )
         if record.tuple_id in seen_tuple_ids:
-            raise click.ClickException(f"Duplicate release tuple id {record.tuple_id!r} found in {source_label}.")
+            raise click.ClickException(
+                f"Duplicate release tuple id {record.tuple_id!r} found in {source_label}."
+            )
         seen_tuple_ids.add(record.tuple_id)
         context_channels = merged_contexts.setdefault(record.context, {})
         context_channels[normalized_channel_name] = ReleaseTupleDefinition(
@@ -305,7 +329,9 @@ def _build_release_tuple_catalog_from_context_map(
                 scope=f"release tuple catalog merge for context {context_name}",
             )
             if release_tuple.tuple_id in seen_tuple_ids:
-                raise click.ClickException(f"Duplicate release tuple id {release_tuple.tuple_id!r} found while merging catalogs.")
+                raise click.ClickException(
+                    f"Duplicate release tuple id {release_tuple.tuple_id!r} found while merging catalogs."
+                )
             seen_tuple_ids.add(release_tuple.tuple_id)
             channels[normalized_channel_name] = ReleaseTupleDefinition(
                 tuple_id=release_tuple.tuple_id,

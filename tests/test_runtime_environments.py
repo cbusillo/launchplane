@@ -6,18 +6,24 @@ import tomllib
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 from unittest.mock import patch
 
 from click.testing import CliRunner
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane.cli import main
+from control_plane import product_config as control_plane_product_config
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
 )
+from control_plane.contracts.secret_record import SecretAuditEvent
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretRecord
+from control_plane.contracts.secret_record import SecretVersion
 from control_plane.storage.postgres import PostgresRecordStore
 
 
@@ -73,6 +79,108 @@ def _seed_dokploy_target_records(*, database_url: str, payload: str) -> None:
             )
     finally:
         store.close()
+
+
+class _FakeProductConfigStore:
+    def __init__(self) -> None:
+        self.runtime_environment_records: dict[tuple[str, str, str], RuntimeEnvironmentRecord] = {}
+        self.secret_records: dict[str, SecretRecord] = {}
+        self.secret_versions: dict[str, SecretVersion] = {}
+        self.secret_bindings: dict[str, SecretBinding] = {}
+        self.secret_audit_events: list[SecretAuditEvent] = []
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return tuple(
+            record
+            for record in self.runtime_environment_records.values()
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None:
+        self.runtime_environment_records[(record.scope, record.context, record.instance)] = record
+
+    def find_secret_record(
+        self,
+        *,
+        scope: str,
+        integration: str,
+        name: str,
+        context: str = "",
+        instance: str = "",
+    ) -> SecretRecord | None:
+        for record in self.secret_records.values():
+            if (
+                record.scope == scope
+                and record.integration == integration
+                and record.name == name
+                and record.context == context
+                and record.instance == instance
+            ):
+                return record
+        return None
+
+    def read_secret_record(self, secret_id: str) -> SecretRecord:
+        return self.secret_records[secret_id]
+
+    def write_secret_record(self, record: SecretRecord) -> None:
+        self.secret_records[record.secret_id] = record
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        records = tuple(
+            record
+            for record in self.secret_records.values()
+            if (not integration or record.integration == integration)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+        return records[:limit] if limit is not None else records
+
+    def read_secret_version(self, version_id: str) -> SecretVersion:
+        return self.secret_versions[version_id]
+
+    def write_secret_version(self, version: SecretVersion) -> None:
+        self.secret_versions[version.version_id] = version
+
+    def list_secret_versions(self, *, secret_id: str) -> tuple[SecretVersion, ...]:
+        return tuple(
+            version for version in self.secret_versions.values() if version.secret_id == secret_id
+        )
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = tuple(
+            binding
+            for binding in self.secret_bindings.values()
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        return bindings[:limit] if limit is not None else bindings
+
+    def write_secret_binding(self, binding: SecretBinding) -> None:
+        self.secret_bindings[binding.binding_id] = binding
+
+    def write_secret_audit_event(self, event: SecretAuditEvent) -> None:
+        self.secret_audit_events.append(event)
+
+    def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
+        return tuple(event for event in self.secret_audit_events if event.secret_id == secret_id)
 
 
 class _FakeRuntimeEnvironmentStore:
@@ -135,6 +243,50 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         )
 
         self.assertIsNone(definition)
+    def test_product_config_apply_uses_structural_store_boundary(self) -> None:
+        store = _FakeProductConfigStore()
+
+        with patch.dict(
+            os.environ,
+            {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+            clear=True,
+        ):
+            payload = control_plane_product_config.apply_product_config_bundle(
+                record_store=store,
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                    "runtime_env": {"CONTACT_EMAIL_MODE": "smtp"},
+                    "secrets": [
+                        {
+                            "name": "smtp-password",
+                            "binding_key": "SMTP_PASSWORD",
+                            "value": "smtp-secret-value",
+                        }
+                    ],
+                },
+                mode="apply",
+                actor="operator@example.com",
+                source_label="fake-store-test",
+            )
+
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["mode"], "apply")
+        runtime_environment_payload = cast("dict[str, object]", payload["runtime_environment"])
+        secret_payloads = cast("list[dict[str, object]]", payload["secrets"])
+        self.assertEqual(runtime_environment_payload["action"], "created")
+        self.assertEqual(secret_payloads[0]["action"], "created")
+        self.assertEqual(len(store.runtime_environment_records), 1)
+        runtime_record = next(iter(store.runtime_environment_records.values()))
+        self.assertEqual(runtime_record.env["CONTACT_EMAIL_MODE"], "smtp")
+        secret_record = next(iter(store.secret_records.values()))
+        self.assertEqual(secret_record.context, "sellyouroutboard")
+        self.assertEqual(secret_record.instance, "prod")
+        secret_binding = next(iter(store.secret_bindings.values()))
+        self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
+        self.assertEqual(store.secret_audit_events[0].actor, "operator@example.com")
 
     def test_environments_import_command_is_not_available(self) -> None:
         result = CliRunner().invoke(main, ["environments", "import"])

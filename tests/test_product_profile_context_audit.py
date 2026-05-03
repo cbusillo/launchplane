@@ -2,29 +2,39 @@ import json
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import cast
 
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_profile_record import ProductImageProfile
 from control_plane.contracts.product_profile_record import ProductLaneProfile
 from control_plane.contracts.product_profile_record import ProductPreviewProfile
 from control_plane.contracts.promotion_record import ArtifactIdentityReference
 from control_plane.contracts.promotion_record import DeploymentEvidence
+from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
 from control_plane.contracts.secret_record import SecretVersion
+from control_plane.product_context_audit import build_product_context_cutover_audit
 from control_plane.storage.postgres import PostgresRecordStore
 
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _payload_list(payload: dict[str, object], key: str) -> list[dict[str, object]]:
+    return cast("list[dict[str, object]]", payload[key])
 
 
 def _product_profile() -> LaunchplaneProductProfileRecord:
@@ -168,7 +178,186 @@ def _seed_records(database_url: str) -> None:
         store.close()
 
 
+class _FakeContextAuditStore:
+    def __init__(self) -> None:
+        self.profile = _product_profile()
+        self.runtime_records = (
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                env={"SMTP_PASSWORD": "redacted"},
+                updated_at="2026-05-01T00:03:00Z",
+                source_label="fake-store",
+            ),
+        )
+        self.secret_records = (
+            SecretRecord(
+                secret_id="secret-syo-smtp-password",
+                scope="context_instance",
+                integration="runtime_environment",
+                name="smtp-password",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                current_version_id="secret-version-syo-smtp-password",
+                created_at="2026-05-01T00:06:00Z",
+                updated_at="2026-05-01T00:06:00Z",
+            ),
+        )
+        self.secret_bindings = (
+            SecretBinding(
+                binding_id="secret-binding-syo-smtp-password",
+                secret_id="secret-syo-smtp-password",
+                integration="runtime_environment",
+                binding_key="SMTP_PASSWORD",
+                context="sellyouroutboard-testing",
+                instance="prod",
+                created_at="2026-05-01T00:06:00Z",
+                updated_at="2026-05-01T00:06:00Z",
+            ),
+        )
+        self.target_records = (
+            DokployTargetRecord(
+                context="sellyouroutboard-testing",
+                instance="prod",
+                target_type="application",
+                target_name="syo-prod-app",
+                domains=("sellyouroutboard.com",),
+                updated_at="2026-05-01T00:05:00Z",
+                source_label="fake-store",
+            ),
+        )
+        self.target_id_records = (
+            DokployTargetIdRecord(
+                context="sellyouroutboard-testing",
+                instance="prod",
+                target_id="target-syo-prod",
+                updated_at="2026-05-01T00:05:00Z",
+                source_label="fake-store",
+            ),
+        )
+        self.deployment_records = (_deployment_record(),)
+
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
+        if product != self.profile.product:
+            raise FileNotFoundError(product)
+        return self.profile
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return tuple(
+            record
+            for record in self.runtime_records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]:
+        del limit
+        return tuple(
+            record
+            for record in self.secret_records
+            if (not integration or record.integration == integration)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        del limit
+        return tuple(
+            record
+            for record in self.secret_bindings
+            if (not integration or record.integration == integration)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]:
+        return self.target_records
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]:
+        return self.target_id_records
+
+    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]:
+        return ()
+
+    def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]:
+        return ()
+
+    def list_backup_gate_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[BackupGateRecord, ...]:
+        del context_name, instance_name, limit
+        return ()
+
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]:
+        del limit
+        return tuple(
+            record
+            for record in self.deployment_records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PromotionRecord, ...]:
+        del context_name, from_instance_name, to_instance_name, limit
+        return ()
+
+
 class ProductProfileContextAuditTests(unittest.TestCase):
+    def test_audit_builder_uses_structural_record_store_boundary(self) -> None:
+        payload = build_product_context_cutover_audit(
+            record_store=_FakeContextAuditStore(),
+            product="sellyouroutboard",
+            source_context="sellyouroutboard-testing",
+            target_context="sellyouroutboard",
+        )
+
+        self.assertEqual(payload["status"], "ok")
+        profile_payload = cast("dict[str, object]", payload["profile"])
+        profile_summary = cast("dict[str, object]", profile_payload["summary"])
+        contexts_payload = cast("dict[str, object]", payload["contexts"])
+        source_payload = cast("dict[str, object]", contexts_payload["source"])
+        self.assertEqual(profile_summary["product"], "sellyouroutboard")
+        self.assertEqual(
+            _payload_list(source_payload, "runtime_environment_records")[0]["env_keys"],
+            ["SMTP_PASSWORD"],
+        )
+        self.assertEqual(
+            _payload_list(source_payload, "managed_secret_records")[0]["binding_key"],
+            "SMTP_PASSWORD",
+        )
+        self.assertEqual(
+            _payload_list(source_payload, "dokploy_targets")[0]["target_id"],
+            "target-syo-prod",
+        )
+        evidence_counts = cast("dict[str, object]", source_payload["append_only_evidence_counts"])
+        self.assertEqual(evidence_counts["deployments"], 1)
+
     def test_audit_context_cutover_reports_redacted_current_authority(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
