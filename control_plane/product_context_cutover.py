@@ -256,6 +256,7 @@ def _profile_after_cutover(
     now: str,
     source_label: str,
 ) -> LaunchplaneProductProfileRecord:
+    source_preview_context = profile.preview.context.strip()
     lanes = tuple(
         lane.model_copy(update={"context": target_context})
         if lane.context == source_context or lane.instance in {"testing", "prod"}
@@ -268,8 +269,8 @@ def _profile_after_cutover(
     historical_contexts = tuple(
         dict.fromkeys(
             context.strip()
-            for context in (*profile.historical_contexts, source_context)
-            if context.strip()
+            for context in (*profile.historical_contexts, source_context, source_preview_context)
+            if context.strip() and context.strip() != target_context
         )
     )
     return profile.model_copy(

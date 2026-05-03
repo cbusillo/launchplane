@@ -414,6 +414,49 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             actions["prod_promotion"].disabled_reasons[0],
         )
 
+    def test_product_site_overview_authorizes_generic_web_prod_workflow_with_testing_context(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+
+        def action_allowed(action: str, product: str, context: str) -> bool:
+            return (
+                action == "generic_web_prod_promotion.dispatch"
+                and context == "example-site-testing"
+            )
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=action_allowed,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertTrue(actions["prod_promotion_workflow"].enabled)
+
+    def test_product_site_overview_does_not_authorize_generic_web_prod_workflow_with_prod_only_context(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+
+        def action_allowed(action: str, product: str, context: str) -> bool:
+            return (
+                action == "generic_web_prod_promotion.dispatch" and context == "example-site-prod"
+            )
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=action_allowed,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertFalse(actions["prod_promotion_workflow"].enabled)
+
     def test_preview_disabled_hides_generic_web_preview_actions(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
             _site_profile_payload(preview_enabled=False, preview_context="")
@@ -432,7 +475,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertFalse(actions["preview_refresh"].enabled)
         self.assertFalse(actions["preview_destroy"].enabled)
 
-    def test_product_site_overview_does_not_enable_prod_actions_for_testing_only_authz(
+    def test_product_site_overview_uses_testing_only_authz_for_workflow_not_direct_prod(
         self,
     ) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
@@ -452,7 +495,7 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         )
 
         actions = {action.action_id: action for action in overview.available_actions}
-        self.assertFalse(actions["prod_promotion_workflow"].enabled)
+        self.assertTrue(actions["prod_promotion_workflow"].enabled)
         self.assertFalse(actions["prod_promotion"].enabled)
 
     def test_product_site_overview_hides_generic_web_prod_workflow_without_prod_lane(
