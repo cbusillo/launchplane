@@ -41,7 +41,40 @@ class _PreviewStore:
         )
 
 
+RouteMetadataExpectation = tuple[
+    control_plane_service._DriverRouteExecutionMetadata[Any],
+    type[Any],
+    str,
+]
+
+
 class DriverDescriptorRegistryTests(unittest.TestCase):
+    def assert_route_metadata_matches_descriptor(
+        self,
+        *,
+        driver_id: str,
+        route_metadata_by_action: dict[str, RouteMetadataExpectation],
+    ) -> None:
+        descriptor = read_driver_descriptor(driver_id)
+        actions = {action.action_id: action for action in descriptor.actions}
+
+        for action_id, (
+            execution_metadata,
+            envelope_model,
+            denial_message_fragment,
+        ) in route_metadata_by_action.items():
+            with self.subTest(driver_id=driver_id, action_id=action_id):
+                self.assertIn(action_id, actions)
+                self.assertEqual(
+                    execution_metadata.route_path,
+                    actions[action_id].route_path,
+                )
+                self.assertIs(execution_metadata.envelope_model, envelope_model)
+                self.assertIn(
+                    denial_message_fragment,
+                    execution_metadata.denial_message,
+                )
+
     def test_registry_lists_product_drivers_without_provider_vocabulary(self) -> None:
         descriptors = list_driver_descriptors()
 
@@ -166,313 +199,181 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
 
     def test_generic_web_execution_metadata_matches_descriptors(self) -> None:
-        descriptor = read_driver_descriptor("generic-web")
-        actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action: dict[
-            str,
-            tuple[
-                control_plane_service._DriverRouteExecutionMetadata[Any],
-                type[Any],
-                str,
-            ],
-        ] = {
-            "stable_deploy": (
-                control_plane_service._GENERIC_WEB_DEPLOY_ROUTE,
-                control_plane_service.GenericWebDeployEnvelope,
-                "deploy driver",
-            ),
-            "prod_promotion": (
-                control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE,
-                control_plane_service.GenericWebProdPromotionEnvelope,
-                "prod promotion driver",
-            ),
-            "prod_promotion_workflow": (
-                control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
-                control_plane_service.GenericWebPromotionWorkflowEnvelope,
-                "prod promotion workflow",
-            ),
-            "preview_desired_state": (
-                control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
-                control_plane_service.GenericWebPreviewDesiredStateEnvelope,
-                "preview desired state",
-            ),
-            "preview_inventory": (
-                control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
-                control_plane_service.GenericWebPreviewInventoryEnvelope,
-                "preview inventory",
-            ),
-            "preview_refresh": (
-                control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
-                control_plane_service.GenericWebPreviewRefreshEnvelope,
-                "refresh",
-            ),
-            "preview_readiness": (
-                control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE,
-                control_plane_service.GenericWebPreviewReadinessEnvelope,
-                "preview readiness",
-            ),
-            "preview_destroy": (
-                control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
-                control_plane_service.GenericWebPreviewDestroyEnvelope,
-                "destroy",
-            ),
-        }
-
-        for action_id, (
-            execution_metadata,
-            envelope_model,
-            denial_message_fragment,
-        ) in route_metadata_by_action.items():
-            with self.subTest(action_id=action_id):
-                self.assertEqual(
-                    execution_metadata.route_path,
-                    actions[action_id].route_path,
-                )
-                self.assertIs(execution_metadata.envelope_model, envelope_model)
-                self.assertIn(
-                    denial_message_fragment,
-                    execution_metadata.denial_message,
-                )
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="generic-web",
+            route_metadata_by_action={
+                "stable_deploy": (
+                    control_plane_service._GENERIC_WEB_DEPLOY_ROUTE,
+                    control_plane_service.GenericWebDeployEnvelope,
+                    "deploy driver",
+                ),
+                "prod_promotion": (
+                    control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                    control_plane_service.GenericWebProdPromotionEnvelope,
+                    "prod promotion driver",
+                ),
+                "prod_promotion_workflow": (
+                    control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+                    control_plane_service.GenericWebPromotionWorkflowEnvelope,
+                    "prod promotion workflow",
+                ),
+                "preview_desired_state": (
+                    control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+                    control_plane_service.GenericWebPreviewDesiredStateEnvelope,
+                    "preview desired state",
+                ),
+                "preview_inventory": (
+                    control_plane_service._GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+                    control_plane_service.GenericWebPreviewInventoryEnvelope,
+                    "preview inventory",
+                ),
+                "preview_refresh": (
+                    control_plane_service._GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                    control_plane_service.GenericWebPreviewRefreshEnvelope,
+                    "refresh generic",
+                ),
+                "preview_readiness": (
+                    control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+                    control_plane_service.GenericWebPreviewReadinessEnvelope,
+                    "preview readiness",
+                ),
+                "preview_destroy": (
+                    control_plane_service._GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                    control_plane_service.GenericWebPreviewDestroyEnvelope,
+                    "destroy generic",
+                ),
+            },
+        )
 
     def test_odoo_artifact_execution_metadata_matches_descriptors(self) -> None:
-        descriptor = read_driver_descriptor("odoo")
-        actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action: dict[
-            str,
-            tuple[
-                control_plane_service._DriverRouteExecutionMetadata[Any],
-                type[Any],
-                str,
-            ],
-        ] = {
-            "artifact_publish_inputs": (
-                control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
-                control_plane_service.OdooArtifactPublishInputsEnvelope,
-                "artifact publish inputs",
-            ),
-            "artifact_publish": (
-                control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE,
-                control_plane_service.OdooArtifactPublishEnvelope,
-                "artifact publish evidence",
-            ),
-            "post_deploy": (
-                control_plane_service._ODOO_POST_DEPLOY_ROUTE,
-                control_plane_service.OdooPostDeployEnvelope,
-                "post-deploy driver",
-            ),
-        }
-
-        for action_id, (
-            execution_metadata,
-            envelope_model,
-            denial_message_fragment,
-        ) in route_metadata_by_action.items():
-            with self.subTest(action_id=action_id):
-                self.assertEqual(
-                    execution_metadata.route_path,
-                    actions[action_id].route_path,
-                )
-                self.assertIs(execution_metadata.envelope_model, envelope_model)
-                self.assertIn(
-                    denial_message_fragment,
-                    execution_metadata.denial_message,
-                )
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="odoo",
+            route_metadata_by_action={
+                "artifact_publish_inputs": (
+                    control_plane_service._ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
+                    control_plane_service.OdooArtifactPublishInputsEnvelope,
+                    "artifact publish inputs",
+                ),
+                "artifact_publish": (
+                    control_plane_service._ODOO_ARTIFACT_PUBLISH_ROUTE,
+                    control_plane_service.OdooArtifactPublishEnvelope,
+                    "artifact publish evidence",
+                ),
+                "post_deploy": (
+                    control_plane_service._ODOO_POST_DEPLOY_ROUTE,
+                    control_plane_service.OdooPostDeployEnvelope,
+                    "post-deploy driver",
+                ),
+            },
+        )
 
     def test_odoo_prod_execution_metadata_matches_descriptors(self) -> None:
-        descriptor = read_driver_descriptor("odoo")
-        actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action: dict[
-            str,
-            tuple[
-                control_plane_service._DriverRouteExecutionMetadata[Any],
-                type[Any],
-                str,
-            ],
-        ] = {
-            "prod_backup_gate": (
-                control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE,
-                control_plane_service.OdooProdBackupGateEnvelope,
-                "prod backup-gate driver",
-            ),
-            "prod_promotion": (
-                control_plane_service._ODOO_PROD_PROMOTION_ROUTE,
-                control_plane_service.OdooProdPromotionEnvelope,
-                "prod promotion driver",
-            ),
-            "prod_rollback": (
-                control_plane_service._ODOO_PROD_ROLLBACK_ROUTE,
-                control_plane_service.OdooProdRollbackEnvelope,
-                "prod rollback driver",
-            ),
-        }
-
-        for action_id, (
-            execution_metadata,
-            envelope_model,
-            denial_message_fragment,
-        ) in route_metadata_by_action.items():
-            with self.subTest(action_id=action_id):
-                self.assertEqual(
-                    execution_metadata.route_path,
-                    actions[action_id].route_path,
-                )
-                self.assertIs(execution_metadata.envelope_model, envelope_model)
-                self.assertIn(
-                    denial_message_fragment,
-                    execution_metadata.denial_message,
-                )
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="odoo",
+            route_metadata_by_action={
+                "prod_backup_gate": (
+                    control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE,
+                    control_plane_service.OdooProdBackupGateEnvelope,
+                    "prod backup-gate driver",
+                ),
+                "prod_promotion": (
+                    control_plane_service._ODOO_PROD_PROMOTION_ROUTE,
+                    control_plane_service.OdooProdPromotionEnvelope,
+                    "prod promotion driver",
+                ),
+                "prod_rollback": (
+                    control_plane_service._ODOO_PROD_ROLLBACK_ROUTE,
+                    control_plane_service.OdooProdRollbackEnvelope,
+                    "prod rollback driver",
+                ),
+            },
+        )
 
     def test_verireel_prod_execution_metadata_matches_descriptors(self) -> None:
-        descriptor = read_driver_descriptor("verireel")
-        actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action: dict[
-            str,
-            tuple[
-                control_plane_service._DriverRouteExecutionMetadata[Any],
-                type[Any],
-                str,
-            ],
-        ] = {
-            "prod_deploy": (
-                control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE,
-                control_plane_service.VeriReelProdDeployEnvelope,
-                "prod deploy driver",
-            ),
-            "prod_backup_gate": (
-                control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE,
-                control_plane_service.VeriReelProdBackupGateEnvelope,
-                "prod backup gate driver",
-            ),
-            "prod_promotion": (
-                control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE,
-                control_plane_service.VeriReelProdPromotionEnvelope,
-                "prod promotion driver",
-            ),
-            "prod_rollback": (
-                control_plane_service._VERIREEL_PROD_ROLLBACK_ROUTE,
-                control_plane_service.VeriReelProdRollbackEnvelope,
-                "prod rollback driver",
-            ),
-        }
-
-        for action_id, (
-            execution_metadata,
-            envelope_model,
-            denial_message_fragment,
-        ) in route_metadata_by_action.items():
-            with self.subTest(action_id=action_id):
-                self.assertEqual(
-                    execution_metadata.route_path,
-                    actions[action_id].route_path,
-                )
-                self.assertIs(execution_metadata.envelope_model, envelope_model)
-                self.assertIn(
-                    denial_message_fragment,
-                    execution_metadata.denial_message,
-                )
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="verireel",
+            route_metadata_by_action={
+                "prod_deploy": (
+                    control_plane_service._VERIREEL_PROD_DEPLOY_ROUTE,
+                    control_plane_service.VeriReelProdDeployEnvelope,
+                    "prod deploy driver",
+                ),
+                "prod_backup_gate": (
+                    control_plane_service._VERIREEL_PROD_BACKUP_GATE_ROUTE,
+                    control_plane_service.VeriReelProdBackupGateEnvelope,
+                    "prod backup gate driver",
+                ),
+                "prod_promotion": (
+                    control_plane_service._VERIREEL_PROD_PROMOTION_ROUTE,
+                    control_plane_service.VeriReelProdPromotionEnvelope,
+                    "prod promotion driver",
+                ),
+                "prod_rollback": (
+                    control_plane_service._VERIREEL_PROD_ROLLBACK_ROUTE,
+                    control_plane_service.VeriReelProdRollbackEnvelope,
+                    "prod rollback driver",
+                ),
+            },
+        )
 
     def test_verireel_stable_execution_metadata_matches_descriptors(self) -> None:
-        descriptor = read_driver_descriptor("verireel")
-        actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action: dict[
-            str,
-            tuple[
-                control_plane_service._DriverRouteExecutionMetadata[Any],
-                type[Any],
-                str,
-            ],
-        ] = {
-            "testing_deploy": (
-                control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE,
-                control_plane_service.VeriReelTestingDeployEnvelope,
-                "testing deploy driver",
-            ),
-            "testing_verification": (
-                control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE,
-                control_plane_service.VeriReelTestingVerificationEnvelope,
-                "testing verification",
-            ),
-            "stable_environment": (
-                control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE,
-                control_plane_service.VeriReelStableEnvironmentEnvelope,
-                "stable environment",
-            ),
-            "runtime_verification": (
-                control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE,
-                control_plane_service.VeriReelRuntimeVerificationEnvelope,
-                "runtime verification driver",
-            ),
-            "app_maintenance": (
-                control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE,
-                control_plane_service.VeriReelAppMaintenanceEnvelope,
-                "app maintenance driver",
-            ),
-        }
-
-        for action_id, (
-            execution_metadata,
-            envelope_model,
-            denial_message_fragment,
-        ) in route_metadata_by_action.items():
-            with self.subTest(action_id=action_id):
-                self.assertEqual(
-                    execution_metadata.route_path,
-                    actions[action_id].route_path,
-                )
-                self.assertIs(execution_metadata.envelope_model, envelope_model)
-                self.assertIn(
-                    denial_message_fragment,
-                    execution_metadata.denial_message,
-                )
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="verireel",
+            route_metadata_by_action={
+                "testing_deploy": (
+                    control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE,
+                    control_plane_service.VeriReelTestingDeployEnvelope,
+                    "testing deploy driver",
+                ),
+                "testing_verification": (
+                    control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE,
+                    control_plane_service.VeriReelTestingVerificationEnvelope,
+                    "testing verification",
+                ),
+                "stable_environment": (
+                    control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+                    control_plane_service.VeriReelStableEnvironmentEnvelope,
+                    "stable environment",
+                ),
+                "runtime_verification": (
+                    control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+                    control_plane_service.VeriReelRuntimeVerificationEnvelope,
+                    "runtime verification driver",
+                ),
+                "app_maintenance": (
+                    control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE,
+                    control_plane_service.VeriReelAppMaintenanceEnvelope,
+                    "app maintenance driver",
+                ),
+            },
+        )
 
     def test_verireel_preview_execution_metadata_matches_descriptors(self) -> None:
-        descriptor = read_driver_descriptor("verireel")
-        actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action: dict[
-            str,
-            tuple[
-                control_plane_service._DriverRouteExecutionMetadata[Any],
-                type[Any],
-                str,
-            ],
-        ] = {
-            "preview_refresh": (
-                control_plane_service._VERIREEL_PREVIEW_REFRESH_ROUTE,
-                control_plane_service.VeriReelPreviewRefreshEnvelope,
-                "preview refresh driver",
-            ),
-            "preview_inventory": (
-                control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE,
-                control_plane_service.VeriReelPreviewInventoryEnvelope,
-                "preview inventory",
-            ),
-            "preview_destroy": (
-                control_plane_service._VERIREEL_PREVIEW_DESTROY_ROUTE,
-                control_plane_service.VeriReelPreviewDestroyEnvelope,
-                "preview destroy driver",
-            ),
-            "preview_verification": (
-                control_plane_service._VERIREEL_PREVIEW_VERIFICATION_ROUTE,
-                control_plane_service.VeriReelPreviewVerificationEnvelope,
-                "preview verification",
-            ),
-        }
-
-        for action_id, (
-            execution_metadata,
-            envelope_model,
-            denial_message_fragment,
-        ) in route_metadata_by_action.items():
-            with self.subTest(action_id=action_id):
-                self.assertEqual(
-                    execution_metadata.route_path,
-                    actions[action_id].route_path,
-                )
-                self.assertIs(execution_metadata.envelope_model, envelope_model)
-                self.assertIn(
-                    denial_message_fragment,
-                    execution_metadata.denial_message,
-                )
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="verireel",
+            route_metadata_by_action={
+                "preview_refresh": (
+                    control_plane_service._VERIREEL_PREVIEW_REFRESH_ROUTE,
+                    control_plane_service.VeriReelPreviewRefreshEnvelope,
+                    "preview refresh driver",
+                ),
+                "preview_inventory": (
+                    control_plane_service._VERIREEL_PREVIEW_INVENTORY_ROUTE,
+                    control_plane_service.VeriReelPreviewInventoryEnvelope,
+                    "preview inventory",
+                ),
+                "preview_destroy": (
+                    control_plane_service._VERIREEL_PREVIEW_DESTROY_ROUTE,
+                    control_plane_service.VeriReelPreviewDestroyEnvelope,
+                    "preview destroy driver",
+                ),
+                "preview_verification": (
+                    control_plane_service._VERIREEL_PREVIEW_VERIFICATION_ROUTE,
+                    control_plane_service.VeriReelPreviewVerificationEnvelope,
+                    "preview verification",
+                ),
+            },
+        )
 
     def test_route_policy_sets_use_execution_metadata(self) -> None:
         self.assertEqual(
