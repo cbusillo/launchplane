@@ -374,6 +374,9 @@ only after a passing plan and a matching stored preview record are present.
 
 ### Operator read endpoints
 
+- `GET /v1/products`
+- `GET /v1/products/{product}`
+- `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/previews/{preview_id}`
 - `GET /v1/previews/{preview_id}/history`
 - `GET /v1/inventory/{context}/{instance}`
@@ -391,6 +394,22 @@ current Launchplane record nouns without forcing them to infer state from
 workflow logs or host-local files. Secret status reads return metadata only:
 Launchplane does not expose plaintext secret retrieval through the service
 boundary.
+
+Product/site reads use action `product_environment.read`. They compose
+Launchplane-owned product profiles, driver descriptors, stable lane records,
+preview summaries, runtime-environment key summaries, managed secret binding
+metadata, action availability, and trust state. Raw context names and provider
+target identifiers remain evidence metadata; runtime values, secret plaintext,
+secret ciphertext, and product-specific driver payloads are not exposed as
+shared top-level fields.
+
+Preview-related product actions are only shown when the product profile enables
+previews. That includes generic-web preview discovery and inventory actions,
+not just refresh and destroy operations.
+
+Prod-scoped product actions are only shown when the product profile actually
+defines a prod lane. Generic-web prod promotion is additionally hidden unless
+the testing and prod lanes share the same context.
 
 Product context cutover audit is read-only and uses `product_profile.read` for
 the requested product in the Launchplane service context. It returns redacted

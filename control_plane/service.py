@@ -54,6 +54,11 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackStatus,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_environment_read_model import (
+    build_product_environment_detail,
+    build_product_site_overview,
+    build_product_site_overviews,
+)
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
@@ -1267,6 +1272,12 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_profile.read", {"product": segments[2], "context_cutover_audit": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "product-profiles"]:
         return "product_profile.read", {"product": segments[2]}
+    if len(segments) == 2 and segments == ["v1", "products"]:
+        return "product_environment.read", {}
+    if len(segments) == 3 and segments[:2] == ["v1", "products"]:
+        return "product_environment.read", {"product": segments[2]}
+    if len(segments) == 5 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
+        return "product_environment.read", {"product": segments[2], "environment": segments[4]}
     return None
 
 
@@ -3025,6 +3036,117 @@ def create_launchplane_service_app(
                             "trace_id": request_trace_id,
                             "driver_id": driver_id_filter,
                             "profiles": [profile.model_dump(mode="json") for profile in profiles],
+                        },
+                    )
+                if action == "product_environment.read":
+
+                    def product_action_allowed(
+                        requested_action: str, requested_product: str, requested_context: str
+                    ) -> bool:
+                        return authz_policy.allows(
+                            identity=identity,
+                            action=requested_action,
+                            product=requested_product,
+                            context=requested_context,
+                        )
+
+                    if "environment" in params:
+                        detail = build_product_environment_detail(
+                            record_store=record_store,
+                            product=params["product"],
+                            environment=params["environment"],
+                            action_allowed=product_action_allowed,
+                        )
+                        if not product_action_allowed(
+                            "product_environment.read",
+                            detail.product,
+                            detail.context,
+                        ):
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=403,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "authorization_denied",
+                                        "message": (
+                                            "Workflow cannot read the requested product environment."
+                                        ),
+                                    },
+                                },
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "environment": detail.model_dump(mode="json"),
+                            },
+                        )
+                    if "product" in params:
+                        overview = build_product_site_overview(
+                            record_store=record_store,
+                            product=params["product"],
+                            action_allowed=product_action_allowed,
+                        )
+                        if not product_action_allowed(
+                            "product_environment.read",
+                            overview.product,
+                            "launchplane",
+                        ):
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=403,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "authorization_denied",
+                                        "message": "Workflow cannot read the requested product overview.",
+                                    },
+                                },
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "product": overview.model_dump(mode="json"),
+                            },
+                        )
+                    if not product_action_allowed(
+                        "product_environment.read",
+                        "launchplane",
+                        _LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot list product overviews.",
+                                },
+                            },
+                        )
+                    overviews = build_product_site_overviews(
+                        record_store=record_store,
+                        action_allowed=product_action_allowed,
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "products": [
+                                overview.model_dump(mode="json") for overview in overviews
+                            ],
                         },
                     )
                 context_name = params["context"]
