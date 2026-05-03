@@ -35,7 +35,6 @@ from control_plane.workflows.ship import (
 )
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
-SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
 
 
 @dataclass(frozen=True)
@@ -71,11 +70,8 @@ class OdooProdRollbackRequest(BaseModel):
         self.promotion_record_id = self.promotion_record_id.strip()
         self.artifact_id = self.artifact_id.strip()
         self.reason = self.reason.strip()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo prod rollback supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo prod rollback requires context.")
         if self.instance != "prod":
             raise ValueError("Odoo prod rollback requires instance 'prod'.")
         if self.verify_health and not self.wait:
@@ -331,10 +327,12 @@ def _sync_artifact_image_reference_for_target(
         target_id=target_definition.target_id,
     )
     env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
-    runtime_environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
-        control_plane_root=control_plane_root,
-        context_name=target_definition.context,
-        instance_name=target_definition.instance,
+    runtime_environment_values = (
+        control_plane_runtime_environments.resolve_runtime_environment_values(
+            control_plane_root=control_plane_root,
+            context_name=target_definition.context,
+            instance_name=target_definition.instance,
+        )
     )
     desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
     if target_definition.target_type == "compose":

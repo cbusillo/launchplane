@@ -306,6 +306,51 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
             "preview_generation.write",
         )
 
+    def test_product_site_overview_hides_non_operator_driver_actions(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            {
+                "schema_version": 1,
+                "product": "verireel",
+                "display_name": "VeriReel",
+                "repository": "every/verireel",
+                "driver_id": "verireel",
+                "image": {"repository": "ghcr.io/every/verireel"},
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+                "lanes": (
+                    {
+                        "instance": "testing",
+                        "context": "verireel-testing",
+                        "base_url": "https://testing.verireel.example",
+                        "health_url": "https://testing.verireel.example/healthz",
+                    },
+                    {
+                        "instance": "prod",
+                        "context": "verireel",
+                        "base_url": "https://verireel.example",
+                        "health_url": "https://verireel.example/healthz",
+                    },
+                ),
+                "preview": {
+                    "enabled": True,
+                    "context": "verireel-testing",
+                    "slug_template": "pr-{number}",
+                },
+                "updated_at": "2026-05-02T22:30:00Z",
+                "source": "test",
+            }
+        )
+
+        overview = build_product_site_overview(
+            record_store=_PreviewRecordStore(profile, ()),
+            product=profile.product,
+            action_allowed=lambda *_: True,
+        )
+
+        actions = {action.action_id: action for action in overview.available_actions}
+        self.assertNotIn("testing_verification", actions)
+        self.assertNotIn("preview_verification", actions)
+
     def test_product_site_overview_filters_preview_summaries_by_repository_and_state(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(_site_profile_payload())
         store = _PreviewRecordStore(
