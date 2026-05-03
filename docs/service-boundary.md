@@ -455,7 +455,9 @@ These use the same authn/authz boundary as evidence ingress:
 - `POST /v1/drivers/generic-web/prod-promotion`
 - `POST /v1/drivers/verireel/...`
 
-The first explicit driver routes now in service are:
+The first driver route handlers now in service are admitted from descriptor
+action route paths rather than a separate product-driver router allowlist. The
+current handlers include:
 
 - `POST /v1/drivers/odoo/post-deploy`
 - `POST /v1/drivers/odoo/artifact-publish-inputs`

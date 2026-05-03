@@ -1274,6 +1274,36 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     return None
 
 
+def _driver_write_routes_from_descriptors() -> frozenset[str]:
+    return frozenset(
+        action.route_path
+        for descriptor in list_driver_descriptors()
+        for action in descriptor.actions
+        if action.method == "POST" and action.route_path.startswith("/v1/drivers/")
+    )
+
+
+def _build_write_routes() -> frozenset[str]:
+    launchplane_write_routes = {
+        "/v1/evidence/deployments",
+        "/v1/evidence/backup-gates",
+        "/v1/evidence/previews/generations",
+        "/v1/evidence/previews/destroyed",
+        "/v1/authz-policies/github-actions/grants",
+        "/v1/product-config/apply",
+        "/v1/product-profiles/context-cutover/apply",
+        "/v1/product-profiles/legacy-context-cleanup/apply",
+        "/v1/previews/desired-state",
+        "/v1/previews/pr-feedback",
+        "/v1/previews/lifecycle-cleanup",
+        "/v1/previews/lifecycle-plan",
+        "/v1/product-profiles",
+        "/v1/evidence/promotions",
+        "/v1/drivers/launchplane/self-deploy",
+    }
+    return frozenset(launchplane_write_routes | set(_driver_write_routes_from_descriptors()))
+
+
 def _secret_capable_store(record_store: object):
     if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
         return record_store
@@ -2289,50 +2319,7 @@ def create_launchplane_service_app(
             else None
         )
     )
-    write_routes = {
-        "/v1/evidence/deployments",
-        "/v1/evidence/backup-gates",
-        "/v1/evidence/previews/generations",
-        "/v1/evidence/previews/destroyed",
-        "/v1/authz-policies/github-actions/grants",
-        "/v1/product-config/apply",
-        "/v1/product-profiles/context-cutover/apply",
-        "/v1/product-profiles/legacy-context-cleanup/apply",
-        "/v1/previews/desired-state",
-        "/v1/previews/pr-feedback",
-        "/v1/previews/lifecycle-cleanup",
-        "/v1/previews/lifecycle-plan",
-        "/v1/product-profiles",
-        "/v1/evidence/promotions",
-        "/v1/drivers/launchplane/self-deploy",
-        "/v1/drivers/generic-web/deploy",
-        "/v1/drivers/generic-web/prod-promotion",
-        "/v1/drivers/generic-web/prod-promotion-workflow",
-        "/v1/drivers/generic-web/preview-desired-state",
-        "/v1/drivers/generic-web/preview-refresh",
-        "/v1/drivers/generic-web/preview-inventory",
-        "/v1/drivers/generic-web/preview-readiness",
-        "/v1/drivers/generic-web/preview-destroy",
-        "/v1/drivers/odoo/artifact-publish-inputs",
-        "/v1/drivers/odoo/artifact-publish",
-        "/v1/drivers/odoo/post-deploy",
-        "/v1/drivers/odoo/prod-backup-gate",
-        "/v1/drivers/odoo/prod-promotion",
-        "/v1/drivers/odoo/prod-rollback",
-        "/v1/drivers/verireel/preview-refresh",
-        "/v1/drivers/verireel/preview-inventory",
-        "/v1/drivers/verireel/preview-destroy",
-        "/v1/drivers/verireel/preview-verification",
-        "/v1/drivers/verireel/testing-deploy",
-        "/v1/drivers/verireel/testing-verification",
-        "/v1/drivers/verireel/stable-environment",
-        "/v1/drivers/verireel/runtime-verification",
-        "/v1/drivers/verireel/app-maintenance",
-        "/v1/drivers/verireel/prod-deploy",
-        "/v1/drivers/verireel/prod-backup-gate",
-        "/v1/drivers/verireel/prod-promotion",
-        "/v1/drivers/verireel/prod-rollback",
-    }
+    write_routes = _build_write_routes()
 
     def app(
         environ: dict[str, object],
