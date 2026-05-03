@@ -705,11 +705,8 @@ _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class OdooProdRollbackEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OdooProdRollbackEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     rollback: OdooProdRollbackRequest
 
     @model_validator(mode="after")
@@ -718,11 +715,8 @@ class OdooProdRollbackEnvelope(BaseModel):
         return self
 
 
-class OdooProdBackupGateEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OdooProdBackupGateEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     backup_gate: OdooProdBackupGateRequest
 
     @model_validator(mode="after")
@@ -731,17 +725,44 @@ class OdooProdBackupGateEnvelope(BaseModel):
         return self
 
 
-class OdooProdPromotionEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class OdooProdPromotionEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     promotion: OdooProdPromotionRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "OdooProdPromotionEnvelope":
         _validate_driver_envelope_product(self.product, label="Odoo prod promotion")
         return self
+
+
+_ODOO_PROD_BACKUP_GATE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/prod-backup-gate",
+    envelope_model=OdooProdBackupGateEnvelope,
+    denial_message=(
+        "Workflow cannot execute the Odoo prod backup-gate driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_ODOO_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/prod-promotion",
+    envelope_model=OdooProdPromotionEnvelope,
+    denial_message=(
+        "Workflow cannot execute the Odoo prod promotion driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_ODOO_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/prod-rollback",
+    envelope_model=OdooProdRollbackEnvelope,
+    denial_message=(
+        "Workflow cannot execute the Odoo prod rollback driver"
+        " for the requested product/context."
+    ),
+)
 
 
 class VeriReelTestingDeployEnvelope(BaseModel):
@@ -4169,8 +4190,8 @@ def create_launchplane_service_app(
                     request=request.inputs,
                 )
                 driver_result = result
-            elif path == "/v1/drivers/odoo/prod-backup-gate":
-                request = OdooProdBackupGateEnvelope.model_validate(payload)
+            elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
+                request = _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4182,10 +4203,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.backup_gate.context,
-                    denial_message=(
-                        "Workflow cannot execute the Odoo prod backup-gate driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_ODOO_PROD_BACKUP_GATE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4215,8 +4233,8 @@ def create_launchplane_service_app(
                     "filestore_archive_path": driver_result.filestore_archive_path,
                     "manifest_path": driver_result.manifest_path,
                 }
-            elif path == "/v1/drivers/odoo/prod-promotion":
-                request = OdooProdPromotionEnvelope.model_validate(payload)
+            elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
+                request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4228,10 +4246,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.promotion.context,
-                    denial_message=(
-                        "Workflow cannot execute the Odoo prod promotion driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_ODOO_PROD_PROMOTION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4265,8 +4280,8 @@ def create_launchplane_service_app(
                     "post_deploy_status": driver_result.post_deploy_status,
                     "destination_health_status": driver_result.destination_health_status,
                 }
-            elif path == "/v1/drivers/odoo/prod-rollback":
-                request = OdooProdRollbackEnvelope.model_validate(payload)
+            elif path == _ODOO_PROD_ROLLBACK_ROUTE.route_path:
+                request = _ODOO_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4278,10 +4293,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.rollback.context,
-                    denial_message=(
-                        "Workflow cannot execute the Odoo prod rollback driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_ODOO_PROD_ROLLBACK_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
