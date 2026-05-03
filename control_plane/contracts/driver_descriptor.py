@@ -33,6 +33,8 @@ class DriverActionDescriptor(BaseModel):
     scope: DriverActionScope
     method: Literal["GET", "POST"]
     route_path: str
+    authz_action: str = ""
+    operator_visible: bool = True
     input_schema: dict[str, object] = Field(default_factory=dict)
     output_schema: dict[str, object] = Field(default_factory=dict)
     writes_records: tuple[str, ...] = ()
