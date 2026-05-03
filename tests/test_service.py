@@ -6308,6 +6308,119 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(updated_preview.destroyed_at, "2026-04-29T20:00:05Z")
         self.assertEqual(cleanup_records[0].status, "pass")
 
+    def test_preview_lifecycle_cleanup_endpoint_uses_verireel_product_profile(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            profile_payload = _generic_site_profile_payload(product="video-site")
+            profile_payload["display_name"] = "Video Site"
+            profile_payload["driver_id"] = "verireel"
+            profile_payload["preview"] = {
+                "enabled": True,
+                "context": "video-site-testing",
+                "slug_template": "pr-{number}",
+            }
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-video-site-testing-video-site-pr-41",
+                    context="video-site-testing",
+                    anchor_repo="video-site",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/every/video-site/pull/41",
+                    preview_label="video-site-testing/video-site#41",
+                    canonical_url="https://pr-41.preview.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            store.write_preview_lifecycle_plan_record(
+                PreviewLifecyclePlanRecord(
+                    plan_id="preview-lifecycle-plan-video-site-testing-20260429T195838Z",
+                    product="video-site",
+                    context="video-site-testing",
+                    planned_at="2026-04-29T19:58:38Z",
+                    source="preview-janitor",
+                    status="pass",
+                    inventory_scan_id="preview-inventory-scan-video-site-testing-20260429T195837Z",
+                    actual_slugs=("pr-41",),
+                    orphaned_slugs=("pr-41",),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/video-site",
+                            "workflow_refs": [
+                                "every/video-site/.github/workflows/preview-janitor.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["video-site"],
+                            "contexts": ["video-site-testing"],
+                            "actions": ["preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/video-site",
+                        workflow_ref=(
+                            "every/video-site/.github/workflows/preview-janitor.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.workflows.preview_lifecycle_cleanup.execute_verireel_preview_destroy",
+                return_value=VeriReelPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-04-29T20:00:00Z",
+                    destroy_finished_at="2026-04-29T20:00:05Z",
+                    application_name="ver-preview-pr-41-app",
+                    application_id="app-41",
+                    preview_url="https://pr-41.preview.example",
+                ),
+            ) as execute_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/lifecycle-cleanup",
+                    payload={
+                        "product": "video-site",
+                        "context": "video-site-testing",
+                        "plan_id": "preview-lifecycle-plan-video-site-testing-20260429T195838Z",
+                        "source": "preview-janitor",
+                        "apply": True,
+                        "destroy_reason": "external_preview_janitor_cleanup_completed",
+                    },
+                )
+
+            updated_preview = FilesystemRecordStore(state_dir=state_dir).read_preview_record(
+                "preview-video-site-testing-video-site-pr-41"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["destroyed_slugs"], ["pr-41"])
+        execute_mock.assert_called_once()
+        destroy_request = execute_mock.call_args.kwargs["request"]
+        self.assertEqual(destroy_request.context, "video-site-testing")
+        self.assertEqual(destroy_request.anchor_repo, "video-site")
+        self.assertEqual(updated_preview.state, "destroyed")
+
     def test_preview_lifecycle_cleanup_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

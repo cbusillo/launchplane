@@ -833,10 +833,10 @@ class VeriReelPreviewVerificationRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelPreviewVerificationRequest":
-        if self.context != "verireel-testing":
-            raise ValueError("VeriReel preview verification requires context 'verireel-testing'.")
-        if self.anchor_repo != "verireel":
-            raise ValueError("VeriReel preview verification requires anchor_repo 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel preview verification requires context.")
+        if not self.anchor_repo.strip():
+            raise ValueError("VeriReel preview verification requires anchor_repo.")
         if self.verification_status.strip() not in {"pass", "fail"}:
             raise ValueError("VeriReel preview verification status must be 'pass' or 'fail'.")
         if not self.verified_at.strip():

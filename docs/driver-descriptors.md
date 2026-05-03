@@ -135,6 +135,12 @@ the workflow. This keeps product repos on stable Launchplane routes while
 allowing new Odoo- or VeriReel-shaped products to be added by product profile and
 authz records instead of code forks.
 
+VeriReel preview lifecycle cleanup also uses the product and context on the
+preview lifecycle plan as the cleanup boundary. A VeriReel-shaped product can
+therefore clean up previews recorded under its own product key and preview
+context instead of being pinned to the canonical `verireel`/`verireel-testing`
+pair.
+
 Odoo exposes:
 
 - artifact publish handoff
