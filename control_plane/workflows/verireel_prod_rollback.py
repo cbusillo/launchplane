@@ -16,17 +16,18 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PromotionRecord,
+    ReleaseStatus,
     RollbackExecutionEvidence,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 from control_plane.workflows.verireel_prod_promotion import (
-    DEFAULT_ROLLOUT_INTERVAL_SECONDS,
-    DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
-    VeriReelRolloutVerificationResult,
     _read_backup_gate_record,
 )
 from control_plane.workflows.verireel_rollout import (
+    DEFAULT_ROLLOUT_INTERVAL_SECONDS,
+    DEFAULT_ROLLOUT_TIMEOUT_SECONDS,
+    VeriReelRolloutVerificationResult,
     assert_verireel_rollout_pages as _assert_rollout_pages,
     fetch_url_text as _fetch_url_text,
     resolve_verireel_rollout_base_urls,
@@ -95,7 +96,7 @@ class VeriReelProdRollbackWorkerResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
-    status: str
+    status: ReleaseStatus
     snapshot_name: str
     started_at: str = ""
     finished_at: str = ""
@@ -108,8 +109,8 @@ class VeriReelProdRollbackResult(BaseModel):
     promotion_record_id: str
     backup_record_id: str
     snapshot_name: str = ""
-    rollback_status: str
-    rollback_health_status: str = "skipped"
+    rollback_status: ReleaseStatus
+    rollback_health_status: ReleaseStatus = "skipped"
     rollback_started_at: str = ""
     rollback_finished_at: str = ""
     error_message: str = ""
@@ -259,8 +260,8 @@ def _write_promotion_rollback_state(
     promotion_record: PromotionRecord,
     request: VeriReelProdRollbackRequest,
     snapshot_name: str,
-    rollback_status: str,
-    rollback_health_status: str,
+    rollback_status: ReleaseStatus,
+    rollback_health_status: ReleaseStatus,
     rollback_started_at: str,
     rollback_finished_at: str,
     detail: str,
