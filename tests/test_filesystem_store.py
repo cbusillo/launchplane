@@ -5,9 +5,14 @@ from tempfile import TemporaryDirectory
 from click.testing import CliRunner
 
 from control_plane.cli import main
-from control_plane.contracts.artifact_identity import ArtifactIdentityManifest, ArtifactImageReference
+from control_plane.contracts.artifact_identity import (
+    ArtifactAddonSelector,
+    ArtifactAddonSource,
+    ArtifactIdentityManifest,
+    ArtifactImageReference,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
-from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
@@ -19,9 +24,44 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductPreviewProfile,
 )
-from control_plane.contracts.promotion_record import DeploymentEvidence, PromotionRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+    PromotionRecord,
+)
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
+
+
+def _artifact_identity(artifact_id: str) -> ArtifactIdentityReference:
+    return ArtifactIdentityReference(artifact_id=artifact_id)
+
+
+def _resolved_target() -> ResolvedTargetEvidence:
+    return ResolvedTargetEvidence(
+        target_type="compose",
+        target_id="compose-123",
+        target_name="opw-prod",
+    )
+
+
+def _post_deploy_pass() -> PostDeployUpdateEvidence:
+    return PostDeployUpdateEvidence(
+        attempted=True,
+        status="pass",
+        detail="Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
+    )
+
+
+def _health_pass() -> HealthcheckEvidence:
+    return HealthcheckEvidence(
+        verified=True,
+        urls=("https://prod.example.com/web/health",),
+        timeout_seconds=45,
+        status="pass",
+    )
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
@@ -65,11 +105,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 source_commit="f45db648",
                 enterprise_base_digest="sha256:enterprise123",
                 addon_selectors=(
-                    {
-                        "repository": "cbusillo/disable_odoo_online",
-                        "selector": "main",
-                        "resolved_ref": "f45db648",
-                    },
+                    ArtifactAddonSelector(
+                        repository="cbusillo/disable_odoo_online",
+                        selector="main",
+                        resolved_ref="f45db648",
+                    ),
                 ),
                 image=ArtifactImageReference(
                     repository="ghcr.io/cbusillo/odoo-private",
@@ -223,7 +263,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store = FilesystemRecordStore(state_dir=state_dir)
             record = PromotionRecord(
                 record_id="promotion-20260410-182231-opw-testing-prod",
-                artifact_identity={"artifact_id": "artifact-20260410-f45db648"},
+                artifact_identity=_artifact_identity("artifact-20260410-f45db648"),
                 backup_record_id="backup-opw-prod-20260410T182231Z",
                 context="opw",
                 from_instance="testing",
@@ -248,7 +288,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_promotion_record(
                 PromotionRecord(
                     record_id="promotion-20260410T182231Z-opw-testing-to-prod",
-                    artifact_identity={"artifact_id": "artifact-1"},
+                    artifact_identity=_artifact_identity("artifact-1"),
                     backup_record_id="backup-opw-prod-20260410T182231Z",
                     context="opw",
                     from_instance="testing",
@@ -265,7 +305,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_promotion_record(
                 PromotionRecord(
                     record_id="promotion-20260411T182231Z-opw-testing-to-prod",
-                    artifact_identity={"artifact_id": "artifact-2"},
+                    artifact_identity=_artifact_identity("artifact-2"),
                     backup_record_id="backup-opw-prod-20260411T182231Z",
                     context="opw",
                     from_instance="testing",
@@ -282,7 +322,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_promotion_record(
                 PromotionRecord(
                     record_id="promotion-20260412T182231Z-opw-staging-to-prod",
-                    artifact_identity={"artifact_id": "artifact-3"},
+                    artifact_identity=_artifact_identity("artifact-3"),
                     backup_record_id="backup-opw-prod-20260412T182231Z",
                     context="opw",
                     from_instance="staging",
@@ -299,7 +339,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_promotion_record(
                 PromotionRecord(
                     record_id="promotion-20260413T182231Z-opw-testing-to-prod",
-                    artifact_identity={"artifact_id": "artifact-4"},
+                    artifact_identity=_artifact_identity("artifact-4"),
                     backup_record_id="backup-opw-prod-20260413T182231Z",
                     context="opw",
                     from_instance="testing",
@@ -327,15 +367,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store = FilesystemRecordStore(state_dir=state_dir)
             record = DeploymentRecord(
                 record_id="deployment-20260410T182231Z-opw-prod",
-                artifact_identity={"artifact_id": "artifact-20260410-f45db648"},
+                artifact_identity=_artifact_identity("artifact-20260410-f45db648"),
                 context="opw",
                 instance="prod",
                 source_git_ref="abc123",
-                resolved_target={
-                    "target_type": "compose",
-                    "target_id": "compose-123",
-                    "target_name": "opw-prod",
-                },
+                resolved_target=_resolved_target(),
                 deploy=DeploymentEvidence(
                     target_name="opw-prod",
                     target_type="compose",
@@ -345,17 +381,8 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     started_at="2026-04-10T18:22:31Z",
                     finished_at="2026-04-10T18:24:00Z",
                 ),
-                post_deploy_update={
-                    "attempted": True,
-                    "status": "pass",
-                    "detail": "Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
-                },
-                destination_health={
-                    "verified": True,
-                    "urls": ["https://prod.example.com/web/health"],
-                    "timeout_seconds": 45,
-                    "status": "pass",
-                },
+                post_deploy_update=_post_deploy_pass(),
+                destination_health=_health_pass(),
             )
 
             written_path = store.write_deployment_record(record)
@@ -365,7 +392,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(loaded_record.deploy.deployment_id, "delegated-compose-ship")
             self.assertEqual(loaded_record.post_deploy_update.status, "pass")
             self.assertEqual(loaded_record.destination_health.status, "pass")
-            self.assertEqual(loaded_record.resolved_target.target_id, "compose-123")
+            resolved_target = loaded_record.resolved_target
+            assert resolved_target is not None
+            self.assertEqual(resolved_target.target_id, "compose-123")
 
     def test_list_deployment_records_filters_and_sorts_latest_first(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -374,7 +403,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260410T182231Z-opw-prod",
-                    artifact_identity={"artifact_id": "artifact-1"},
+                    artifact_identity=_artifact_identity("artifact-1"),
                     context="opw",
                     instance="prod",
                     source_git_ref="abc123",
@@ -390,7 +419,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260411T182231Z-opw-prod",
-                    artifact_identity={"artifact_id": "artifact-2"},
+                    artifact_identity=_artifact_identity("artifact-2"),
                     context="opw",
                     instance="prod",
                     source_git_ref="def456",
@@ -406,7 +435,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260412T182231Z-opw-staging",
-                    artifact_identity={"artifact_id": "artifact-3"},
+                    artifact_identity=_artifact_identity("artifact-3"),
                     context="opw",
                     instance="staging",
                     source_git_ref="ghi789",
@@ -422,7 +451,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             store.write_deployment_record(
                 DeploymentRecord(
                     record_id="deployment-20260413T182231Z-opw-prod",
-                    artifact_identity={"artifact_id": "artifact-4"},
+                    artifact_identity=_artifact_identity("artifact-4"),
                     context="opw",
                     instance="prod",
                     source_git_ref="jkl012",
@@ -449,7 +478,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     artifact_id="artifact-sha256-image456",
                     source_commit="f45db648",
                     enterprise_base_digest="sha256:enterprise123",
-                    addon_sources=({"repository": "cbusillo/disable_odoo_online", "ref": "main"},),
+                    addon_sources=(
+                        ArtifactAddonSource(
+                            repository="cbusillo/disable_odoo_online", ref="main"
+                        ),
+                    ),
                     image=ArtifactImageReference(
                         repository="ghcr.io/cbusillo/odoo-private",
                         digest="sha256:image456",
@@ -531,7 +564,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             record = EnvironmentInventory(
                 context="opw",
                 instance="prod",
-                artifact_identity={"artifact_id": "artifact-20260410-f45db648"},
+                artifact_identity=_artifact_identity("artifact-20260410-f45db648"),
                 source_git_ref="abc123",
                 deploy=DeploymentEvidence(
                     target_name="opw-prod",
@@ -542,17 +575,8 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     started_at="2026-04-10T18:22:31Z",
                     finished_at="2026-04-10T18:24:00Z",
                 ),
-                post_deploy_update={
-                    "attempted": True,
-                    "status": "pass",
-                    "detail": "Odoo-specific post-deploy update completed through the native control-plane Dokploy schedule workflow.",
-                },
-                destination_health={
-                    "verified": True,
-                    "urls": ["https://prod.example.com/web/health"],
-                    "timeout_seconds": 45,
-                    "status": "pass",
-                },
+                post_deploy_update=_post_deploy_pass(),
+                destination_health=_health_pass(),
                 updated_at="2026-04-10T18:24:01Z",
                 deployment_record_id="deployment-20260410T182231Z-opw-prod",
                 promotion_record_id="promotion-20260410T182231Z-opw-testing-to-prod",
