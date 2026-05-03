@@ -3967,27 +3967,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.post_deploy.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the Odoo post-deploy driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the Odoo post-deploy driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4016,27 +4010,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.publish.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write Odoo artifact publish evidence"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot write Odoo artifact publish evidence"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4066,27 +4054,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.inputs.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot read Odoo artifact publish inputs"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot read Odoo artifact publish inputs"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4110,27 +4092,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.backup_gate.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the Odoo prod backup-gate driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the Odoo prod backup-gate driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4162,27 +4138,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.promotion.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the Odoo prod promotion driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the Odoo prod promotion driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4218,27 +4188,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.rollback.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the Odoo prod rollback driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the Odoo prod rollback driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
