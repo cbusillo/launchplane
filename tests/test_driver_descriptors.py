@@ -2,6 +2,7 @@ import json
 import unittest
 from unittest.mock import patch
 
+from control_plane import service as control_plane_service
 from control_plane.contracts.driver_descriptor import (
     DriverCapabilityDescriptor,
     DriverDescriptor,
@@ -133,6 +134,34 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertFalse(
             route_actions["/v1/drivers/verireel/preview-verification"].operator_visible
+        )
+
+    def test_service_accepts_descriptor_post_driver_routes(self) -> None:
+        descriptor_post_route_metadata = {
+            action.route_path: (descriptor.driver_id, action.action_id, action.authz_action)
+            for descriptor in list_driver_descriptors()
+            for action in descriptor.actions
+            if action.method == "POST" and action.route_path.startswith("/v1/drivers/")
+        }
+        service_route_metadata = control_plane_service._driver_route_metadata_from_descriptors()
+
+        self.assertTrue(descriptor_post_route_metadata)
+        self.assertLessEqual(
+            set(descriptor_post_route_metadata), control_plane_service._build_write_routes()
+        )
+        for route_path, (
+            driver_id,
+            action_id,
+            authz_action,
+        ) in descriptor_post_route_metadata.items():
+            self.assertEqual(service_route_metadata[route_path].driver_id, driver_id)
+            self.assertEqual(service_route_metadata[route_path].action_id, action_id)
+            self.assertEqual(
+                control_plane_service._descriptor_driver_authz_action(route_path), authz_action
+            )
+        self.assertIn(
+            "/v1/drivers/launchplane/self-deploy",
+            control_plane_service._build_write_routes(),
         )
 
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:

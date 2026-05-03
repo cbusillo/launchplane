@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
 import io
@@ -204,6 +205,17 @@ from control_plane.workflows.verireel_preview_driver import (
 
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+
+
+@dataclass(frozen=True)
+class _DriverRouteMetadata:
+    driver_id: str
+    action_id: str
+    method: str
+    authz_action: str
+    operator_visible: bool
+
+
 _LAUNCHPLANE_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 _LOGGER = logging.getLogger(__name__)
 _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
@@ -1274,6 +1286,65 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     return None
 
 
+def _driver_route_metadata_from_descriptors() -> dict[str, _DriverRouteMetadata]:
+    route_metadata: dict[str, _DriverRouteMetadata] = {}
+    for descriptor in list_driver_descriptors():
+        for action in descriptor.actions:
+            if not action.route_path.startswith("/v1/drivers/"):
+                continue
+            if not action.authz_action:
+                raise ValueError(
+                    f"Driver action {descriptor.driver_id}.{action.action_id} "
+                    "must declare authz_action."
+                )
+            if action.route_path in route_metadata:
+                raise ValueError(f"Duplicate driver action route path: {action.route_path}")
+            route_metadata[action.route_path] = _DriverRouteMetadata(
+                driver_id=descriptor.driver_id,
+                action_id=action.action_id,
+                method=action.method,
+                authz_action=action.authz_action,
+                operator_visible=action.operator_visible,
+            )
+    return route_metadata
+
+
+def _descriptor_driver_authz_action(route_path: str) -> str:
+    try:
+        return _driver_route_metadata_from_descriptors()[route_path].authz_action
+    except KeyError as exc:
+        raise ValueError(f"Unknown descriptor-backed driver route: {route_path}") from exc
+
+
+def _driver_write_routes_from_descriptors() -> frozenset[str]:
+    return frozenset(
+        route_path
+        for route_path, route_metadata in _driver_route_metadata_from_descriptors().items()
+        if route_metadata.method == "POST"
+    )
+
+
+def _build_write_routes() -> frozenset[str]:
+    launchplane_write_routes = {
+        "/v1/evidence/deployments",
+        "/v1/evidence/backup-gates",
+        "/v1/evidence/previews/generations",
+        "/v1/evidence/previews/destroyed",
+        "/v1/authz-policies/github-actions/grants",
+        "/v1/product-config/apply",
+        "/v1/product-profiles/context-cutover/apply",
+        "/v1/product-profiles/legacy-context-cleanup/apply",
+        "/v1/previews/desired-state",
+        "/v1/previews/pr-feedback",
+        "/v1/previews/lifecycle-cleanup",
+        "/v1/previews/lifecycle-plan",
+        "/v1/product-profiles",
+        "/v1/evidence/promotions",
+        "/v1/drivers/launchplane/self-deploy",
+    }
+    return frozenset(launchplane_write_routes | set(_driver_write_routes_from_descriptors()))
+
+
 def _secret_capable_store(record_store: object):
     if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
         return record_store
@@ -2289,50 +2360,7 @@ def create_launchplane_service_app(
             else None
         )
     )
-    write_routes = {
-        "/v1/evidence/deployments",
-        "/v1/evidence/backup-gates",
-        "/v1/evidence/previews/generations",
-        "/v1/evidence/previews/destroyed",
-        "/v1/authz-policies/github-actions/grants",
-        "/v1/product-config/apply",
-        "/v1/product-profiles/context-cutover/apply",
-        "/v1/product-profiles/legacy-context-cleanup/apply",
-        "/v1/previews/desired-state",
-        "/v1/previews/pr-feedback",
-        "/v1/previews/lifecycle-cleanup",
-        "/v1/previews/lifecycle-plan",
-        "/v1/product-profiles",
-        "/v1/evidence/promotions",
-        "/v1/drivers/launchplane/self-deploy",
-        "/v1/drivers/generic-web/deploy",
-        "/v1/drivers/generic-web/prod-promotion",
-        "/v1/drivers/generic-web/prod-promotion-workflow",
-        "/v1/drivers/generic-web/preview-desired-state",
-        "/v1/drivers/generic-web/preview-refresh",
-        "/v1/drivers/generic-web/preview-inventory",
-        "/v1/drivers/generic-web/preview-readiness",
-        "/v1/drivers/generic-web/preview-destroy",
-        "/v1/drivers/odoo/artifact-publish-inputs",
-        "/v1/drivers/odoo/artifact-publish",
-        "/v1/drivers/odoo/post-deploy",
-        "/v1/drivers/odoo/prod-backup-gate",
-        "/v1/drivers/odoo/prod-promotion",
-        "/v1/drivers/odoo/prod-rollback",
-        "/v1/drivers/verireel/preview-refresh",
-        "/v1/drivers/verireel/preview-inventory",
-        "/v1/drivers/verireel/preview-destroy",
-        "/v1/drivers/verireel/preview-verification",
-        "/v1/drivers/verireel/testing-deploy",
-        "/v1/drivers/verireel/testing-verification",
-        "/v1/drivers/verireel/stable-environment",
-        "/v1/drivers/verireel/runtime-verification",
-        "/v1/drivers/verireel/app-maintenance",
-        "/v1/drivers/verireel/prod-deploy",
-        "/v1/drivers/verireel/prod-backup-gate",
-        "/v1/drivers/verireel/prod-promotion",
-        "/v1/drivers/verireel/prod-rollback",
-    }
+    write_routes = _build_write_routes()
 
     def app(
         environ: dict[str, object],
@@ -3561,7 +3589,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="generic_web_deploy.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=lane.context,
                 ):
@@ -3620,7 +3648,7 @@ def create_launchplane_service_app(
                     )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="generic_web_prod_promotion.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=destination_lane.context,
                 ):
@@ -3672,7 +3700,7 @@ def create_launchplane_service_app(
                 profile = record_store.read_product_profile_record(request.product)
                 if not authz_policy.allows(
                     identity=identity,
-                    action="generic_web_prod_promotion.dispatch",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=request.workflow.context,
                 ):
@@ -3716,7 +3744,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="preview_desired_state.discover",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=profile.preview.context,
                 ):
@@ -3766,7 +3794,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="preview_inventory.read",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=profile.preview.context,
                 ):
@@ -3806,7 +3834,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="preview_refresh.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=profile.preview.context,
                 ):
@@ -3851,7 +3879,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="preview_readiness.evaluate",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=profile.preview.context,
                 ):
@@ -3886,7 +3914,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="preview_destroy.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=profile.product,
                     context=profile.preview.context,
                 ):
@@ -3932,7 +3960,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="odoo_post_deploy.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.post_deploy.context,
                 ):
@@ -3981,7 +4009,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="odoo_artifact_publish.write",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.publish.context,
                 ):
@@ -4031,7 +4059,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="odoo_artifact_publish_inputs.read",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.inputs.context,
                 ):
@@ -4075,7 +4103,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="odoo_prod_backup_gate.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.backup_gate.context,
                 ):
@@ -4127,7 +4155,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="odoo_prod_promotion.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.promotion.context,
                 ):
@@ -4183,7 +4211,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="odoo_prod_rollback.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.rollback.context,
                 ):
@@ -4235,7 +4263,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_testing_deploy.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.deploy.context,
                 ):
@@ -4282,7 +4310,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="deployment.write",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.verification.context,
                 ):
@@ -4327,7 +4355,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_stable_environment.read",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.environment.context,
                 ):
@@ -4362,7 +4390,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_stable_environment.read",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.verification.context,
                 ):
@@ -4395,7 +4423,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_app_maintenance.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.maintenance.context,
                 ):
@@ -4441,7 +4469,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_prod_deploy.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.deploy.context,
                 ):
@@ -4488,7 +4516,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_prod_backup_gate.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.backup_gate.context,
                 ):
@@ -4543,7 +4571,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_prod_promotion.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.promotion.context,
                 ):
@@ -4593,7 +4621,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_prod_rollback.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.rollback.context,
                 ):
@@ -4641,7 +4669,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_preview_refresh.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.refresh.context,
                 ):
@@ -4690,7 +4718,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_preview_inventory.read",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.inventory.context,
                 ):
@@ -4729,7 +4757,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="verireel_preview_destroy.execute",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.destroy.context,
                 ):
@@ -4777,7 +4805,7 @@ def create_launchplane_service_app(
                 )
                 if not authz_policy.allows(
                     identity=identity,
-                    action="preview_generation.write",
+                    action=_descriptor_driver_authz_action(path),
                     product=request.product,
                     context=request.verification.context,
                 ):
