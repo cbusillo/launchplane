@@ -1361,6 +1361,41 @@ def _driver_route_authorization_response(
     )
 
 
+def _resolve_and_authorize_descriptor_route(
+    *,
+    route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
+    record_store: object,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    product: str,
+    authorization_context: str,
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    trace_id: str,
+    descriptor_context: str = "",
+    descriptor_instance: str = "",
+    require_profile: bool = False,
+) -> tuple[_ResolvedProductDriverContext, list[bytes] | None]:
+    resolved_driver_context = _resolve_descriptor_product_driver_context(
+        record_store=record_store,
+        route_path=route_metadata.route_path,
+        product=product,
+        context=descriptor_context,
+        instance=descriptor_instance,
+        require_profile=require_profile,
+    )
+    authorization_response = _driver_route_authorization_response(
+        authz_policy=authz_policy,
+        identity=identity,
+        route_path=route_metadata.route_path,
+        product=product,
+        context=authorization_context,
+        denial_message=route_metadata.denial_message,
+        start_response=start_response,
+        trace_id=trace_id,
+    )
+    return resolved_driver_context, authorization_response
+
+
 def _authorize_generic_web_preview_route(
     *,
     route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
@@ -4180,18 +4215,13 @@ def create_launchplane_service_app(
                 result = {}
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
                 request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(payload)
-                _resolve_descriptor_product_driver_context(
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_POST_DEPLOY_ROUTE,
                     record_store=record_store,
-                    route_path=path,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
                     product=request.product,
-                    context=request.post_deploy.context,
-                    denial_message=_ODOO_POST_DEPLOY_ROUTE.denial_message,
+                    authorization_context=request.post_deploy.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4220,18 +4250,13 @@ def create_launchplane_service_app(
                 }
             elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
                 request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(payload)
-                _resolve_descriptor_product_driver_context(
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
                     record_store=record_store,
-                    route_path=path,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
                     product=request.product,
-                    context=request.publish.context,
-                    denial_message=_ODOO_ARTIFACT_PUBLISH_ROUTE.denial_message,
+                    authorization_context=request.publish.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4263,18 +4288,13 @@ def create_launchplane_service_app(
                 request = _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(
                     payload
                 )
-                _resolve_descriptor_product_driver_context(
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
                     record_store=record_store,
-                    route_path=path,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
                     product=request.product,
-                    context=request.inputs.context,
-                    denial_message=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.denial_message,
+                    authorization_context=request.inputs.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4298,18 +4318,13 @@ def create_launchplane_service_app(
                 driver_result = result
             elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
                 request = _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
-                _resolve_descriptor_product_driver_context(
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
                     record_store=record_store,
-                    route_path=path,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
                     product=request.product,
-                    context=request.backup_gate.context,
-                    denial_message=_ODOO_PROD_BACKUP_GATE_ROUTE.denial_message,
+                    authorization_context=request.backup_gate.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4341,18 +4356,13 @@ def create_launchplane_service_app(
                 }
             elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
                 request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
-                _resolve_descriptor_product_driver_context(
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_PROD_PROMOTION_ROUTE,
                     record_store=record_store,
-                    route_path=path,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
                     product=request.product,
-                    context=request.promotion.context,
-                    denial_message=_ODOO_PROD_PROMOTION_ROUTE.denial_message,
+                    authorization_context=request.promotion.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4388,18 +4398,13 @@ def create_launchplane_service_app(
                 }
             elif path == _ODOO_PROD_ROLLBACK_ROUTE.route_path:
                 request = _ODOO_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
-                _resolve_descriptor_product_driver_context(
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_PROD_ROLLBACK_ROUTE,
                     record_store=record_store,
-                    route_path=path,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
                     product=request.product,
-                    context=request.rollback.context,
-                    denial_message=_ODOO_PROD_ROLLBACK_ROUTE.denial_message,
+                    authorization_context=request.rollback.context,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
