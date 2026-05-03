@@ -1185,11 +1185,15 @@ def _driver_route_authorization_response(
     start_response: Callable[[str, list[tuple[str, str]]], None],
     trace_id: str,
 ) -> list[bytes] | None:
+    """Authorize descriptor routes against normalized product/context values."""
+
+    normalized_product = product.strip()
+    normalized_context = context.strip()
     if authz_policy.allows(
         identity=identity,
         action=_descriptor_driver_authz_action(route_path),
-        product=product,
-        context=context,
+        product=normalized_product,
+        context=normalized_context,
     ):
         return None
     return _json_response(
