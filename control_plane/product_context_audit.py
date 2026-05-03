@@ -1,6 +1,10 @@
 from __future__ import annotations
 
-from control_plane import secrets as control_plane_secrets
+from typing import Protocol
+
+from control_plane.secrets import SECRET_STATUS_CONFIGURED
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -8,9 +12,61 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.promotion_record import PromotionRecord
+from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
-from control_plane.contracts.secret_record import SecretRecord
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.contracts.secret_record import SecretBinding, SecretRecord
+
+
+class ProductContextAuditStore(Protocol):
+    def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
+
+    def list_secret_records(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretRecord, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]: ...
+
+    def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
+
+    def list_environment_inventory(self) -> tuple[EnvironmentInventory, ...]: ...
+
+    def list_release_tuple_records(self) -> tuple[ReleaseTupleRecord, ...]: ...
+
+    def list_backup_gate_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[BackupGateRecord, ...]: ...
+
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[DeploymentRecord, ...]: ...
+
+    def list_promotion_records(
+        self,
+        *,
+        context_name: str = "",
+        from_instance_name: str = "",
+        to_instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[PromotionRecord, ...]: ...
 
 
 def _artifact_id_or_empty(artifact_identity: object) -> str:
@@ -117,13 +173,22 @@ def _summarize_dokploy_target_record(
 
 def _summarize_secret_record_for_context_audit(
     *,
-    record_store: PostgresRecordStore,
+    record_store: ProductContextAuditStore,
     record: SecretRecord,
 ) -> dict[str, object]:
-    binding = control_plane_secrets.build_secret_status(
-        record_store,
-        secret_id=record.secret_id,
-    ).get("binding")
+    binding = next(
+        (
+            binding
+            for binding in record_store.list_secret_bindings(
+                integration=record.integration,
+                context_name=record.context,
+                instance_name=record.instance,
+                limit=None,
+            )
+            if binding.secret_id == record.secret_id and binding.status == SECRET_STATUS_CONFIGURED
+        ),
+        None,
+    )
     return {
         "secret_id": record.secret_id,
         "scope": record.scope,
@@ -132,15 +197,15 @@ def _summarize_secret_record_for_context_audit(
         "context": record.context,
         "instance": record.instance,
         "status": record.status,
-        "binding_key": str(binding.get("binding_key", "")) if isinstance(binding, dict) else "",
-        "binding_status": str(binding.get("status", "")) if isinstance(binding, dict) else "",
+        "binding_key": binding.binding_key if binding is not None else "",
+        "binding_status": binding.status if binding is not None else "",
         "updated_at": record.updated_at,
     }
 
 
 def _context_cutover_route_payload(
     *,
-    record_store: PostgresRecordStore,
+    record_store: ProductContextAuditStore,
     context_name: str,
 ) -> dict[str, object]:
     runtime_records = record_store.list_runtime_environment_records(context_name=context_name)
@@ -266,7 +331,7 @@ def _build_context_cutover_warnings(
 
 def build_product_context_cutover_audit(
     *,
-    record_store: PostgresRecordStore,
+    record_store: ProductContextAuditStore,
     product: str,
     source_context: str,
     target_context: str,
