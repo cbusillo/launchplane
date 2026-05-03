@@ -278,6 +278,50 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     execution_metadata.denial_message,
                 )
 
+    def test_odoo_prod_execution_metadata_matches_descriptors(self) -> None:
+        descriptor = read_driver_descriptor("odoo")
+        actions = {action.action_id: action for action in descriptor.actions}
+        route_metadata_by_action: dict[
+            str,
+            tuple[
+                control_plane_service._DriverRouteExecutionMetadata[Any],
+                type[Any],
+                str,
+            ],
+        ] = {
+            "prod_backup_gate": (
+                control_plane_service._ODOO_PROD_BACKUP_GATE_ROUTE,
+                control_plane_service.OdooProdBackupGateEnvelope,
+                "prod backup-gate driver",
+            ),
+            "prod_promotion": (
+                control_plane_service._ODOO_PROD_PROMOTION_ROUTE,
+                control_plane_service.OdooProdPromotionEnvelope,
+                "prod promotion driver",
+            ),
+            "prod_rollback": (
+                control_plane_service._ODOO_PROD_ROLLBACK_ROUTE,
+                control_plane_service.OdooProdRollbackEnvelope,
+                "prod rollback driver",
+            ),
+        }
+
+        for action_id, (
+            execution_metadata,
+            envelope_model,
+            denial_message_fragment,
+        ) in route_metadata_by_action.items():
+            with self.subTest(action_id=action_id):
+                self.assertEqual(
+                    execution_metadata.route_path,
+                    actions[action_id].route_path,
+                )
+                self.assertIs(execution_metadata.envelope_model, envelope_model)
+                self.assertIn(
+                    denial_message_fragment,
+                    execution_metadata.denial_message,
+                )
+
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
             driver_id="custom-web",
