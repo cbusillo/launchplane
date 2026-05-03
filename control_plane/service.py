@@ -13,7 +13,7 @@ import secrets
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import Callable, cast
+from typing import Callable, Generic, TypeVar, cast
 from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 
@@ -218,10 +218,13 @@ class _DriverRouteMetadata:
     operator_visible: bool
 
 
+_DriverRouteEnvelopeT = TypeVar("_DriverRouteEnvelopeT", bound=BaseModel)
+
+
 @dataclass(frozen=True)
-class _DriverRouteExecutionMetadata:
+class _DriverRouteExecutionMetadata(Generic[_DriverRouteEnvelopeT]):
     route_path: str
-    envelope_model: type[BaseModel]
+    envelope_model: type[_DriverRouteEnvelopeT]
     denial_message: str
 
 
@@ -1189,6 +1192,34 @@ def _driver_route_authorization_response(
             },
         },
     )
+
+
+def _authorize_generic_web_preview_route(
+    *,
+    route_metadata: _DriverRouteExecutionMetadata[_DriverRouteEnvelopeT],
+    payload: dict[str, object],
+    record_store: object,
+    authz_policy: LaunchplaneAuthzPolicy,
+    identity: LaunchplaneIdentity,
+    start_response: Callable[[str, list[tuple[str, str]]], None],
+    trace_id: str,
+) -> tuple[_DriverRouteEnvelopeT, LaunchplaneProductProfileRecord, list[bytes] | None]:
+    request = route_metadata.envelope_model.model_validate(payload)
+    profile = resolve_generic_web_preview_profile(
+        record_store=record_store,
+        product=str(getattr(request, "product")),
+    )
+    authorization_response = _driver_route_authorization_response(
+        authz_policy=authz_policy,
+        identity=identity,
+        route_path=route_metadata.route_path,
+        product=profile.product,
+        context=profile.preview.context,
+        denial_message=route_metadata.denial_message,
+        start_response=start_response,
+        trace_id=trace_id,
+    )
+    return request, profile, authorization_response
 
 
 def _http_status_text(status_code: int) -> str:
@@ -3837,23 +3868,12 @@ def create_launchplane_service_app(
                 )
                 result = driver_result.model_dump(mode="json")
             elif path == _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path:
-                request = cast(
-                    GenericWebPreviewDesiredStateEnvelope,
-                    _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.envelope_model.model_validate(
-                        payload
-                    ),
-                )
-                profile = resolve_generic_web_preview_profile(
+                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                    route_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+                    payload=payload,
                     record_store=record_store,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=profile.preview.context,
-                    denial_message=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3883,23 +3903,12 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path:
-                request = cast(
-                    GenericWebPreviewInventoryEnvelope,
-                    _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(
-                        payload
-                    ),
-                )
-                profile = resolve_generic_web_preview_profile(
+                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                    route_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+                    payload=payload,
                     record_store=record_store,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=profile.preview.context,
-                    denial_message=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3919,21 +3928,12 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path:
-                request = cast(
-                    GenericWebPreviewRefreshEnvelope,
-                    _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload),
-                )
-                profile = resolve_generic_web_preview_profile(
+                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                    route_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                    payload=payload,
                     record_store=record_store,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=profile.preview.context,
-                    denial_message=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3958,21 +3958,12 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path:
-                request = cast(
-                    GenericWebPreviewReadinessEnvelope,
-                    _GENERIC_WEB_PREVIEW_READINESS_ROUTE.envelope_model.model_validate(payload),
-                )
-                profile = resolve_generic_web_preview_profile(
+                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                    route_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+                    payload=payload,
                     record_store=record_store,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=profile.preview.context,
-                    denial_message=_GENERIC_WEB_PREVIEW_READINESS_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3987,21 +3978,12 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
-                request = cast(
-                    GenericWebPreviewDestroyEnvelope,
-                    _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload),
-                )
-                profile = resolve_generic_web_preview_profile(
+                request, profile, authorization_response = _authorize_generic_web_preview_route(
+                    route_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                    payload=payload,
                     record_store=record_store,
-                    product=request.product,
-                )
-                authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
-                    route_path=path,
-                    product=profile.product,
-                    context=profile.preview.context,
-                    denial_message=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
