@@ -75,7 +75,67 @@ def _seed_dokploy_target_records(*, database_url: str, payload: str) -> None:
         store.close()
 
 
+class _FakeRuntimeEnvironmentStore:
+    def __init__(self, records: tuple[RuntimeEnvironmentRecord, ...]) -> None:
+        self.records = records
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        return tuple(
+            record
+            for record in self.records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
+
+
 class RuntimeEnvironmentTests(unittest.TestCase):
+    def test_load_optional_runtime_definition_uses_structural_store_boundary(self) -> None:
+        definition = control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
+            record_store=_FakeRuntimeEnvironmentStore(
+                records=(
+                    RuntimeEnvironmentRecord(
+                        scope="global",
+                        env={"SHARED_MODE": "db"},
+                        updated_at="2026-05-01T00:00:00Z",
+                        source_label="fake-store",
+                    ),
+                    RuntimeEnvironmentRecord(
+                        scope="context",
+                        context="verireel",
+                        env={"VERIREEL_CONTEXT": "prod"},
+                        updated_at="2026-05-01T00:01:00Z",
+                        source_label="fake-store",
+                    ),
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="verireel",
+                        instance="prod",
+                        env={"VERIREEL_PROD_CT_ID": 101},
+                        updated_at="2026-05-01T00:02:00Z",
+                        source_label="fake-store",
+                    ),
+                )
+            )
+        )
+
+        self.assertIsNotNone(definition)
+        assert definition is not None
+        self.assertEqual(definition.shared_env["SHARED_MODE"], "db")
+        self.assertEqual(definition.contexts["verireel"].shared_env["VERIREEL_CONTEXT"], "prod")
+        self.assertEqual(
+            definition.contexts["verireel"].instances["prod"].env["VERIREEL_PROD_CT_ID"],
+            101,
+        )
+
+    def test_load_optional_runtime_definition_returns_none_for_empty_store(self) -> None:
+        definition = control_plane_runtime_environments.load_optional_runtime_environment_definition_from_store(
+            record_store=_FakeRuntimeEnvironmentStore(records=())
+        )
+
+        self.assertIsNone(definition)
+
     def test_environments_import_command_is_not_available(self) -> None:
         result = CliRunner().invoke(main, ["environments", "import"])
 
