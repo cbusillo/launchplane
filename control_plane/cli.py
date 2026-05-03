@@ -8,6 +8,7 @@ import subprocess
 import time
 from json import JSONDecodeError
 from pathlib import Path
+from typing import Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -217,7 +218,7 @@ def _build_authz_policy_record(
     *,
     policy_file: Path,
     source_label: str,
-    status: str = "active",
+    status: Literal["active", "superseded"] = "active",
 ) -> LaunchplaneAuthzPolicyRecord:
     policy = load_authz_policy(policy_file)
     updated_at = utc_now_timestamp()
@@ -379,6 +380,23 @@ def _status_tone(value: str) -> str:
     }:
         return "warn"
     return "neutral"
+
+
+def _json_object_items(value: object) -> list[dict[str, object]]:
+    if not isinstance(value, (list, tuple)):
+        return []
+    return [item for item in value if isinstance(item, dict)]
+
+
+def _json_object(value: object) -> dict[str, object] | None:
+    return value if isinstance(value, dict) else None
+
+
+def _int_from_json_value(value: object, *, default: int = 0) -> int:
+    try:
+        return int(str(value))
+    except ValueError:
+        return default
 
 
 def _status_label(value: str) -> str:
@@ -861,20 +879,21 @@ def _build_launchplane_preview_enablement_action_payload(
         }
 
     def companion_snapshot_source_map_payload() -> list[dict[str, object]]:
+        companion_rows: list[dict[str, object]] = [
+            {
+                "repo": summary.repo,
+                "git_sha": summary.head_sha,
+                "selection": "companion",
+            }
+            for summary in request_metadata_companion_summaries
+        ]
         return [
             {
                 "repo": anchor_repo,
                 "git_sha": anchor_head_sha,
                 "selection": "anchor",
             },
-            *[
-                {
-                    "repo": summary.repo,
-                    "git_sha": summary.head_sha,
-                    "selection": "companion",
-                }
-                for summary in request_metadata_companion_summaries
-            ],
+            *companion_rows,
         ]
 
     def companion_summaries_payload() -> list[dict[str, object]]:
@@ -1278,11 +1297,7 @@ def _build_launchplane_promotion_detail_payload(
         if isinstance(promotion_action.get("latest_promotion"), dict)
         else None
     )
-    evidence_checks = (
-        promotion_action.get("evidence_checks")
-        if isinstance(promotion_action.get("evidence_checks"), list)
-        else []
-    )
+    evidence_checks = _json_object_items(promotion_action.get("evidence_checks"))
     if (
         testing_live is None
         and prod_live is None
@@ -1312,7 +1327,7 @@ def _build_launchplane_promotion_detail_payload(
         ).strip(),
         "source_git_ref": str(promotion_action.get("source_git_ref", "")).strip(),
         "retained_evidence": str(promotion_action.get("retained_evidence", "")).strip(),
-        "evidence_checks": [item for item in evidence_checks if isinstance(item, dict)],
+        "evidence_checks": evidence_checks,
         "latest_backup_gate": latest_backup_gate,
         "latest_promotion": latest_promotion,
         "recent_backup_gates": tuple(
@@ -1419,7 +1434,7 @@ def _build_launchplane_preview_enablement_items(
     preview_by_key: dict[tuple[str, int], dict[str, object]] = {}
     for row in previews:
         row_anchor_repo = str(row.get("anchor_repo", "")).strip()
-        row_pr_number = int(row.get("anchor_pr_number", 0) or 0)
+        row_pr_number = _int_from_json_value(row.get("anchor_pr_number", 0))
         if not row_anchor_repo or row_pr_number <= 0:
             continue
         preview_by_key.setdefault((row_anchor_repo, row_pr_number), row)
@@ -1635,7 +1650,10 @@ def _build_launchplane_preview_enablement_items(
         )
 
     priority = {"candidate": 0, "requested": 1, "paused": 2, "running": 3, "retained": 4}
-    items.sort(key=lambda item: int(item.get("anchor_pr_number", 0) or 0), reverse=True)
+    items.sort(
+        key=lambda item: _int_from_json_value(item.get("anchor_pr_number", 0)),
+        reverse=True,
+    )
     items.sort(key=lambda item: str(item.get("updated_at", "")), reverse=True)
     items.sort(key=lambda item: priority.get(str(item.get("state", "")).strip(), 9))
 
@@ -1668,12 +1686,7 @@ def _build_launchplane_tenant_payload(
         record_store=record_store,
         context_name=resolved_context,
     )
-    preview_rows = (
-        preview_inventory.get("previews")
-        if isinstance(preview_inventory.get("previews"), list)
-        else []
-    )
-    previews = [item for item in preview_rows if isinstance(item, dict)]
+    previews = _json_object_items(preview_inventory.get("previews"))
     if resolved_anchor_repo:
         previews = [
             item
@@ -1813,7 +1826,7 @@ def _write_launchplane_site_bundle(
     output_dir: Path,
     context_name: str,
 ) -> None:
-    record_store = _store(state_dir)
+    record_store = FilesystemRecordStore(state_dir=state_dir)
     inventory_payload = build_preview_inventory_payload(
         record_store=record_store,
         context_name=context_name,
@@ -1823,12 +1836,7 @@ def _write_launchplane_site_bundle(
         record_store=record_store,
         context_name=context_name,
     )
-    preview_rows = (
-        inventory_payload.get("previews")
-        if isinstance(inventory_payload.get("previews"), list)
-        else []
-    )
-    preview_items = [item for item in preview_rows if isinstance(item, dict)]
+    preview_items = _json_object_items(inventory_payload.get("previews"))
     tenant_environments = (
         tenant_payload.get("environments") if isinstance(tenant_payload, dict) else None
     )
@@ -1871,7 +1879,7 @@ def _write_launchplane_site_bundle(
     for item in preview_items:
         item_context = str(item.get("context", ""))
         anchor_repo = str(item.get("anchor_repo", ""))
-        anchor_pr_number = int(item.get("anchor_pr_number", 0) or 0)
+        anchor_pr_number = _int_from_json_value(item.get("anchor_pr_number", 0))
         relative_path = _launchplane_preview_bundle_relative_path(
             context_name=item_context,
             anchor_repo=anchor_repo,
@@ -2001,8 +2009,7 @@ def _render_launchplane_preview_index_page_html(
     nav_links: dict[str, str] | None = None,
 ) -> str:
     context_name = str(payload.get("context", ""))
-    previews = payload.get("previews") if isinstance(payload.get("previews"), list) else []
-    preview_rows = [item for item in previews if isinstance(item, dict)]
+    preview_rows = _json_object_items(payload.get("previews"))
 
     def preview_matches_filter(row: dict[str, object], filter_key: str) -> bool:
         bucket = _launchplane_inventory_bucket(row)
@@ -2154,7 +2161,7 @@ def _render_launchplane_preview_index_page_html(
             )
             for repo_value in repos
         )
-    grouped_rows = {key: [] for key, _, _ in bucket_specs}
+    grouped_rows: dict[str, list[dict[str, object]]] = {key: [] for key, _, _ in bucket_specs}
     for row in preview_rows:
         grouped_rows[_launchplane_inventory_bucket(row)].append(row)
     for rows in grouped_rows.values():
@@ -2188,7 +2195,7 @@ def _render_launchplane_preview_index_page_html(
                 detail_href_builder(
                     str(row.get("context", "")),
                     str(row.get("anchor_repo", "")),
-                    int(row.get("anchor_pr_number", 0) or 0),
+                    _int_from_json_value(row.get("anchor_pr_number", 0)),
                 )
             )
         canonical_url = escape(str(row.get("canonical_url", "")))
@@ -2352,16 +2359,8 @@ def _render_launchplane_preview_index_page_html(
         item_context = str(environment_payload.get("context", "")).strip()
         if environment_detail_href_builder is not None and item_context:
             detail_href = environment_detail_href_builder(item_context, instance_name)
-        live_payload = (
-            environment_payload.get("live")
-            if isinstance(environment_payload.get("live"), dict)
-            else {}
-        )
-        latest_promotion = (
-            environment_payload.get("latest_promotion")
-            if isinstance(environment_payload.get("latest_promotion"), dict)
-            else None
-        )
+        live_payload = _json_object(environment_payload.get("live")) or {}
+        latest_promotion = _json_object(environment_payload.get("latest_promotion"))
         tone = environment_tone(environment_payload)
         deploy_status = escape(str(live_payload.get("deploy_status", "pending") or "pending"))
         destination_health = escape(
@@ -2464,7 +2463,7 @@ def _render_launchplane_preview_index_page_html(
 
     def render_enablement_row(item: dict[str, object]) -> str:
         anchor_repo = str(item.get("anchor_repo", "")).strip()
-        anchor_pr_number = int(item.get("anchor_pr_number", 0) or 0)
+        anchor_pr_number = _int_from_json_value(item.get("anchor_pr_number", 0))
         anchor_pr_url = escape(str(item.get("anchor_pr_url", "")).strip())
         state = escape(str(item.get("state", "candidate")).strip() or "candidate")
         tone = escape(str(item.get("tone", "neutral")).strip() or "neutral")
@@ -2479,7 +2478,7 @@ def _render_launchplane_preview_index_page_html(
         status_summary = escape(str(item.get("status_summary", "")).strip())
         canonical_url = escape(str(item.get("canonical_url", "")).strip())
         preview_id = escape(str(item.get("preview_id", "")).strip())
-        action_payload = item.get("action") if isinstance(item.get("action"), dict) else None
+        action_payload = _json_object(item.get("action"))
         detail_href = ""
         if detail_href_builder is not None and anchor_repo and anchor_pr_number > 0:
             detail_href = detail_href_builder(context_name, anchor_repo, anchor_pr_number)
@@ -2529,15 +2528,10 @@ def _render_launchplane_preview_index_page_html(
         context_name: str,
     ) -> str:
         tone = str(promotion_action.get("tone", "neutral")).strip() or "neutral"
-        evidence_checks = (
-            promotion_action.get("evidence_checks")
-            if isinstance(promotion_action.get("evidence_checks"), list)
-            else []
-        )
+        evidence_checks = _json_object_items(promotion_action.get("evidence_checks"))
         evidence_html = "".join(
             render_promotion_evidence_check(check)
             for check in evidence_checks
-            if isinstance(check, dict)
         )
         recipe_cards: list[str] = []
         backup_gate_recipe = str(promotion_action.get("backup_gate_recipe", "")).strip()
@@ -2586,16 +2580,8 @@ def _render_launchplane_preview_index_page_html(
                 f'<a class="lane-detail-link" href="{escape(detail_href)}">Open promotion detail</a>'
                 "</p>"
             )
-        latest_backup_gate = (
-            promotion_action.get("latest_backup_gate")
-            if isinstance(promotion_action.get("latest_backup_gate"), dict)
-            else None
-        )
-        latest_promotion = (
-            promotion_action.get("latest_promotion")
-            if isinstance(promotion_action.get("latest_promotion"), dict)
-            else None
-        )
+        latest_backup_gate = _json_object(promotion_action.get("latest_backup_gate"))
+        latest_promotion = _json_object(promotion_action.get("latest_promotion"))
         latest_backup_gate_html = "Unavailable"
         if latest_backup_gate is not None:
             latest_backup_gate_html = f"<code>{escape(str(latest_backup_gate.get('record_id', '')) or 'Unavailable')}</code>"
@@ -2716,47 +2702,16 @@ def _render_launchplane_preview_index_page_html(
         tenant_label = escape(
             str(tenant_payload.get("tenant_label", "")).strip() or context_name or "tenant"
         )
-        preview_counts = (
-            tenant_payload.get("preview_counts")
-            if isinstance(tenant_payload.get("preview_counts"), dict)
-            else {}
-        )
-        preview_candidates = (
-            tenant_payload.get("preview_candidates")
-            if isinstance(tenant_payload.get("preview_candidates"), list)
-            else []
-        )
-        preview_enablement = (
-            tenant_payload.get("preview_enablement")
-            if isinstance(tenant_payload.get("preview_enablement"), list)
-            else []
-        )
+        preview_counts = _json_object(tenant_payload.get("preview_counts")) or {}
+        preview_candidates = _json_object_items(tenant_payload.get("preview_candidates"))
+        preview_enablement_rows = _json_object_items(tenant_payload.get("preview_enablement"))
         preview_enablement_counts = (
-            tenant_payload.get("preview_enablement_counts")
-            if isinstance(tenant_payload.get("preview_enablement_counts"), dict)
-            else {}
+            _json_object(tenant_payload.get("preview_enablement_counts")) or {}
         )
-        environments = (
-            tenant_payload.get("environments")
-            if isinstance(tenant_payload.get("environments"), dict)
-            else {}
-        )
-        promotion_summary = (
-            tenant_payload.get("promotion_summary")
-            if isinstance(tenant_payload.get("promotion_summary"), dict)
-            else {}
-        )
-        promotion_action = (
-            tenant_payload.get("promotion_action")
-            if isinstance(tenant_payload.get("promotion_action"), dict)
-            else {}
-        )
-        environment_actions = (
-            tenant_payload.get("environment_actions")
-            if isinstance(tenant_payload.get("environment_actions"), dict)
-            else {}
-        )
-        preview_enablement_rows = [item for item in preview_enablement if isinstance(item, dict)]
+        environments = _json_object(tenant_payload.get("environments")) or {}
+        promotion_summary = _json_object(tenant_payload.get("promotion_summary")) or {}
+        promotion_action = _json_object(tenant_payload.get("promotion_action")) or {}
+        environment_actions = _json_object(tenant_payload.get("environment_actions")) or {}
         preview_enablement_html = ""
         if preview_enablement_rows:
             visible_enablement_rows = preview_enablement_rows[:4]
@@ -2811,8 +2766,8 @@ def _render_launchplane_preview_index_page_html(
         if has_environment_evidence:
             dense_environment_html = f"""
             <div class=\"environment-board\">
-              {render_environment_lane("testing", environments.get("testing") if isinstance(environments, dict) else None)}
-              {render_environment_lane("prod", environments.get("prod") if isinstance(environments, dict) else None)}
+              {render_environment_lane("testing", _json_object(environments.get("testing")))}
+              {render_environment_lane("prod", _json_object(environments.get("prod")))}
             </div>
             {lane_actions_html}
             {promotion_stage_html if show_promotion_stage else ""}
@@ -3958,8 +3913,7 @@ def _render_launchplane_preview_policy_page_html(
     nav_links: dict[str, str] | None = None,
 ) -> str:
     context_name = str(payload.get("context", ""))
-    previews = payload.get("previews") if isinstance(payload.get("previews"), list) else []
-    preview_rows = [item for item in previews if isinstance(item, dict)]
+    preview_rows = _json_object_items(payload.get("previews"))
     active_preview_count = sum(
         1 for row in preview_rows if str(row.get("state", "")).strip().lower() != "destroyed"
     )
@@ -4223,35 +4177,13 @@ def _render_launchplane_promotion_status_page_html(
     )
     source_git_ref = escape(str(payload.get("source_git_ref", "")) or "Unavailable")
     status_label = escape(str(payload.get("status", "unknown")).replace("_", " "))
-    evidence_checks = (
-        payload.get("evidence_checks") if isinstance(payload.get("evidence_checks"), list) else []
-    )
-    latest_backup_gate = (
-        payload.get("latest_backup_gate")
-        if isinstance(payload.get("latest_backup_gate"), dict)
-        else None
-    )
-    latest_promotion = (
-        payload.get("latest_promotion")
-        if isinstance(payload.get("latest_promotion"), dict)
-        else None
-    )
-    recent_backup_gates_payload = payload.get("recent_backup_gates")
-    recent_backup_gates = (
-        list(recent_backup_gates_payload)
-        if isinstance(recent_backup_gates_payload, (list, tuple))
-        else []
-    )
-    recent_promotions_payload = payload.get("recent_promotions")
-    recent_promotions = (
-        list(recent_promotions_payload)
-        if isinstance(recent_promotions_payload, (list, tuple))
-        else []
-    )
-    testing_live = (
-        payload.get("testing_live") if isinstance(payload.get("testing_live"), dict) else None
-    )
-    prod_live = payload.get("prod_live") if isinstance(payload.get("prod_live"), dict) else None
+    evidence_checks = _json_object_items(payload.get("evidence_checks"))
+    latest_backup_gate = _json_object(payload.get("latest_backup_gate"))
+    latest_promotion = _json_object(payload.get("latest_promotion"))
+    recent_backup_gates = _json_object_items(payload.get("recent_backup_gates"))
+    recent_promotions = _json_object_items(payload.get("recent_promotions"))
+    testing_live = _json_object(payload.get("testing_live"))
+    prod_live = _json_object(payload.get("prod_live"))
 
     evidence_html = (
         "".join(
@@ -4265,7 +4197,6 @@ def _render_launchplane_promotion_status_page_html(
         </article>
         """
             for check in evidence_checks
-            if isinstance(check, dict)
         )
         or '<p class="table-empty">No promotion evidence checks recorded yet.</p>'
     )
@@ -4662,37 +4593,13 @@ def _render_launchplane_environment_status_page_html(
 ) -> str:
     context_name = str(payload.get("context", "")).strip()
     instance_name = str(payload.get("instance", "")).strip() or "environment"
-    live_payload = payload.get("live") if isinstance(payload.get("live"), dict) else {}
-    live_promotion = (
-        payload.get("live_promotion") if isinstance(payload.get("live_promotion"), dict) else None
-    )
-    authorized_backup_gate = (
-        payload.get("authorized_backup_gate")
-        if isinstance(payload.get("authorized_backup_gate"), dict)
-        else None
-    )
-    latest_promotion = (
-        payload.get("latest_promotion")
-        if isinstance(payload.get("latest_promotion"), dict)
-        else None
-    )
-    latest_deployment = (
-        payload.get("latest_deployment")
-        if isinstance(payload.get("latest_deployment"), dict)
-        else None
-    )
-    recent_promotions_payload = payload.get("recent_promotions")
-    recent_promotions = (
-        list(recent_promotions_payload)
-        if isinstance(recent_promotions_payload, (list, tuple))
-        else []
-    )
-    recent_deployments_payload = payload.get("recent_deployments")
-    recent_deployments = (
-        list(recent_deployments_payload)
-        if isinstance(recent_deployments_payload, (list, tuple))
-        else []
-    )
+    live_payload = _json_object(payload.get("live")) or {}
+    live_promotion = _json_object(payload.get("live_promotion"))
+    authorized_backup_gate = _json_object(payload.get("authorized_backup_gate"))
+    latest_promotion = _json_object(payload.get("latest_promotion"))
+    latest_deployment = _json_object(payload.get("latest_deployment"))
+    recent_promotions = _json_object_items(payload.get("recent_promotions"))
+    recent_deployments = _json_object_items(payload.get("recent_deployments"))
 
     lane_title = f"{context_name}/{instance_name}" if context_name else instance_name
     role_summary = (
@@ -4734,15 +4641,10 @@ def _render_launchplane_environment_status_page_html(
 
     backup_gate_html = ""
     if authorized_backup_gate is not None:
+        backup_gate_evidence = _json_object(authorized_backup_gate.get("evidence")) or {}
         evidence_entries = "".join(
             f"<li><code>{escape(str(key))}</code> {escape(str(value))}</li>"
-            for key, value in sorted(
-                (
-                    authorized_backup_gate.get("evidence")
-                    if isinstance(authorized_backup_gate.get("evidence"), dict)
-                    else {}
-                ).items()
-            )
+            for key, value in sorted(backup_gate_evidence.items())
         )
         backup_gate_html = f"""
         <article class=\"detail-note\">

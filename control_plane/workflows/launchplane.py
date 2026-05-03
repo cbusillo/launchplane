@@ -1684,7 +1684,7 @@ def apply_preview_destroyed_transition(
 
 def build_preview_status_payload(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
@@ -1815,7 +1815,7 @@ def build_preview_status_payload(
 
 def build_preview_inventory_payload(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     context_name: str = "",
 ) -> dict[str, object]:
     previews = record_store.list_preview_records(context_name=context_name)
@@ -1877,7 +1877,7 @@ def build_preview_inventory_payload(
 
 def build_preview_history_payload(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: PreviewMutationRecordStore,
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
