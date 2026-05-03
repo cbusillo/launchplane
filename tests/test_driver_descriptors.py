@@ -1,5 +1,6 @@
 import json
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from control_plane import service as control_plane_service
@@ -164,10 +165,32 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._build_write_routes(),
         )
 
-    def test_generic_web_preview_execution_metadata_matches_descriptors(self) -> None:
+    def test_generic_web_execution_metadata_matches_descriptors(self) -> None:
         descriptor = read_driver_descriptor("generic-web")
         actions = {action.action_id: action for action in descriptor.actions}
-        route_metadata_by_action = {
+        route_metadata_by_action: dict[
+            str,
+            tuple[
+                control_plane_service._DriverRouteExecutionMetadata[Any],
+                type[Any],
+                str,
+            ],
+        ] = {
+            "stable_deploy": (
+                control_plane_service._GENERIC_WEB_DEPLOY_ROUTE,
+                control_plane_service.GenericWebDeployEnvelope,
+                "deploy driver",
+            ),
+            "prod_promotion": (
+                control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE,
+                control_plane_service.GenericWebProdPromotionEnvelope,
+                "prod promotion driver",
+            ),
+            "prod_promotion_workflow": (
+                control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE,
+                control_plane_service.GenericWebPromotionWorkflowEnvelope,
+                "prod promotion workflow",
+            ),
             "preview_desired_state": (
                 control_plane_service._GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
                 control_plane_service.GenericWebPreviewDesiredStateEnvelope,

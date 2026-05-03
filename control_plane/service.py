@@ -305,11 +305,8 @@ class DeploymentEvidenceEnvelope(BaseModel):
         return self
 
 
-class GenericWebDeployEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class GenericWebDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     deploy: GenericWebDeployRequest
 
     @model_validator(mode="after")
@@ -321,11 +318,18 @@ class GenericWebDeployEnvelope(BaseModel):
         return self
 
 
-class GenericWebProdPromotionEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+_GENERIC_WEB_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/deploy",
+    envelope_model=GenericWebDeployEnvelope,
+    denial_message=(
+        "Workflow cannot execute the generic web deploy driver"
+        " for the requested product/context."
+    ),
+)
 
+
+class GenericWebProdPromotionEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     promotion: GenericWebProdPromotionRequest
 
     @model_validator(mode="after")
@@ -337,11 +341,18 @@ class GenericWebProdPromotionEnvelope(BaseModel):
         return self
 
 
-class GenericWebPromotionWorkflowEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+_GENERIC_WEB_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/prod-promotion",
+    envelope_model=GenericWebProdPromotionEnvelope,
+    denial_message=(
+        "Workflow cannot execute the generic web prod promotion driver"
+        " for the requested product/context."
+    ),
+)
 
+
+class GenericWebPromotionWorkflowEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     workflow: GenericWebPromotionWorkflowRequest
 
     @model_validator(mode="after")
@@ -351,6 +362,16 @@ class GenericWebPromotionWorkflowEnvelope(BaseModel):
         if self.product.strip() != self.workflow.product.strip():
             raise ValueError("generic web promotion workflow requires matching product values")
         return self
+
+
+_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/prod-promotion-workflow",
+    envelope_model=GenericWebPromotionWorkflowEnvelope,
+    denial_message=(
+        "Caller cannot dispatch the generic web prod promotion workflow"
+        " for the requested product/context."
+    ),
+)
 
 
 class GenericWebPreviewDesiredStateEnvelope(_ProductRouteEnvelope):
@@ -3712,8 +3733,8 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     request=request.deploy,
                 )
-            elif path == "/v1/drivers/generic-web/deploy":
-                request = GenericWebDeployEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_DEPLOY_ROUTE.route_path:
+                request = _GENERIC_WEB_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -3733,10 +3754,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=lane.context,
-                    denial_message=(
-                        "Workflow cannot execute the generic web deploy driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_DEPLOY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3761,8 +3779,10 @@ def create_launchplane_service_app(
                     lane=lane,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
-            elif path == "/v1/drivers/generic-web/prod-promotion":
-                request = GenericWebProdPromotionEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path:
+                request = _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _profile, _source_lane, destination_lane = resolve_generic_web_promotion_lanes(
                     record_store=record_store,
                     request=request.promotion,
@@ -3786,10 +3806,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=destination_lane.context,
-                    denial_message=(
-                        "Workflow cannot execute the generic web prod promotion driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PROD_PROMOTION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3823,8 +3840,10 @@ def create_launchplane_service_app(
                     "backup_status": driver_result.backup_status,
                     "dry_run": driver_result.dry_run,
                 }
-            elif path == "/v1/drivers/generic-web/prod-promotion-workflow":
-                request = GenericWebPromotionWorkflowEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path:
+                request = _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 profile = record_store.read_product_profile_record(request.product)
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
@@ -3832,10 +3851,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=request.workflow.context,
-                    denial_message=(
-                        "Caller cannot dispatch the generic web prod promotion workflow"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
