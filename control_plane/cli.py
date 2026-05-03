@@ -62,6 +62,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_profile_record import ProductImageProfile
 from control_plane.contracts.product_profile_record import ProductLaneProfile
 from control_plane.contracts.product_profile_record import ProductPreviewProfile
+from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.promotion_record import (
     BackupGateEvidence,
     HealthcheckEvidence,
@@ -75,6 +76,7 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
 )
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.launchplane_mutations import (
@@ -113,6 +115,7 @@ from control_plane.workflows.launchplane import (
     verify_github_webhook_signature,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
     execute_odoo_artifact_publish,
@@ -8453,6 +8456,20 @@ def _summarize_runtime_environment_record(
     }
 
 
+def _summarize_secret_binding_record(binding: SecretBinding) -> dict[str, object]:
+    return {
+        "binding_id": binding.binding_id,
+        "integration": binding.integration,
+        "binding_type": binding.binding_type,
+        "binding_key": binding.binding_key,
+        "context": binding.context,
+        "instance": binding.instance,
+        "status": binding.status,
+        "created_at": binding.created_at,
+        "updated_at": binding.updated_at,
+    }
+
+
 def _parse_runtime_environment_assignment(raw_assignment: str) -> tuple[str, str]:
     key_name, separator, value = raw_assignment.partition("=")
     normalized_key = key_name.strip()
@@ -9336,6 +9353,11 @@ def secrets() -> None:
 @main.group("product-config")
 def product_config() -> None:
     """Trusted product runtime config apply commands."""
+
+
+@main.group("product-onboarding")
+def product_onboarding() -> None:
+    """Idempotent product onboarding record commands."""
 
 
 @product_config.command("apply")
@@ -12151,6 +12173,74 @@ def authz_policies_import_toml(database_url: str, policy_file: Path, source_labe
     click.echo(
         json.dumps(
             {"status": "ok", "record": _summarize_authz_policy_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@product_onboarding.command("apply")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane product onboarding records.",
+)
+@click.option(
+    "--manifest-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Operator-approved JSON product onboarding manifest.",
+)
+@click.option("--updated-at", default="", help="Override manifest updated_at timestamp.")
+def product_onboarding_apply(database_url: str, manifest_file: Path, updated_at: str) -> None:
+    try:
+        manifest_payload = json.loads(manifest_file.read_text())
+    except JSONDecodeError as exc:
+        raise click.ClickException(
+            f"Product onboarding manifest must be valid JSON: {exc}"
+        ) from exc
+    try:
+        manifest = ProductOnboardingManifest.model_validate(manifest_payload)
+    except ValidationError as exc:
+        raise click.ClickException(f"Product onboarding manifest failed validation: {exc}") from exc
+
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        result = apply_product_onboarding_manifest(
+            record_store=store,
+            manifest=manifest,
+            updated_at=updated_at,
+        )
+    finally:
+        store.close()
+
+    target_id_map = _target_id_map(result.dokploy_target_ids)
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "product": result.product,
+                "product_profile": _summarize_product_profile_record(result.product_profile),
+                "dokploy_target_count": len(result.dokploy_targets),
+                "dokploy_targets": [
+                    _summarize_dokploy_target_record(
+                        record,
+                        target_id=target_id_map.get(_dokploy_target_route(record), ""),
+                    )
+                    for record in result.dokploy_targets
+                ],
+                "runtime_environment_record_count": len(result.runtime_environments),
+                "runtime_environment_records": [
+                    _summarize_runtime_environment_record(record)
+                    for record in result.runtime_environments
+                ],
+                "secret_binding_count": len(result.secret_bindings),
+                "secret_bindings": [
+                    _summarize_secret_binding_record(binding) for binding in result.secret_bindings
+                ],
+            },
             indent=2,
             sort_keys=True,
         )

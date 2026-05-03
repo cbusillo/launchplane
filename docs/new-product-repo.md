@@ -37,19 +37,34 @@ DB-backed product profile.
 
 ## Launchplane Records
 
-Before wiring workflows, seed or verify these records in Launchplane:
+Before wiring workflows, seed or verify these records in Launchplane with an
+operator-owned onboarding manifest:
+
+```sh
+uv run launchplane product-onboarding apply \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --manifest-file state/product-onboarding/<product>.json
+```
+
+The manifest is applied idempotently and writes Launchplane-owned records for:
 
 - product profile with product key, owning repo, driver id, image repository,
   runtime port, health path, and preview policy
 - lane profiles for stable instances such as `testing` and `prod`
 - Dokploy or provider target records and target-id records
 - runtime-environment records for non-secret settings
-- managed secret records for secret values
-- authz policy records for GitHub Actions workflows
+- disabled managed secret binding placeholders for required secret keys
+
+Then import or update DB-backed authz policy records for the product's GitHub
+Actions workflows. Authz policy merging remains a separate operator step so a
+new product onboarding manifest cannot accidentally replace unrelated product
+access rules.
 
 Do not store these as product-repo Launchplane manifests. The repo may document
 the expected app runtime contract, but Launchplane records are the live source
-of lifecycle truth.
+of lifecycle truth. Store operator manifests under Launchplane state or another
+operator-owned state location, not in product repos and not in git-tracked
+history when they contain site-specific runtime details.
 
 ## GitHub Actions Shape
 

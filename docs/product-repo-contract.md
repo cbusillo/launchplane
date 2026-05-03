@@ -142,8 +142,10 @@ When creating a new website repo for Launchplane:
 - Add a health endpoint that returns enough non-secret version data for
   Launchplane to verify the deployed artifact.
 - Publish immutable container images or artifacts from GitHub Actions.
-- Seed the product profile, lane profiles, target records, runtime environment,
-  managed secrets, and authz policy in Launchplane.
+- Apply an operator-owned Launchplane product onboarding manifest to seed the
+  product profile, lane profiles, target records, runtime environment, disabled
+  managed secret binding placeholders, and then update DB-backed authz policy in
+  Launchplane.
 - Use `generic-web` directly when the product is a stateless or mostly
   stateless web app with standard preview/deploy behavior.
 - Add a product driver only when the product has named extra obligations such as
