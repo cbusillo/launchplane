@@ -4234,27 +4234,21 @@ def create_launchplane_service_app(
                     context=request.deploy.context,
                     instance=request.deploy.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.deploy.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel testing deploy driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel testing deploy driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4281,27 +4275,21 @@ def create_launchplane_service_app(
                     context=request.verification.context,
                     instance=request.verification.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.verification.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write VeriReel testing verification"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot write VeriReel testing verification"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4326,27 +4314,21 @@ def create_launchplane_service_app(
                     context=request.environment.context,
                     instance=request.environment.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.environment.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot read the VeriReel stable environment"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot read the VeriReel stable environment"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 driver_result = resolve_verireel_stable_environment(
                     control_plane_root=resolved_root,
                     request=request.environment,
@@ -4361,27 +4343,21 @@ def create_launchplane_service_app(
                     context=request.verification.context,
                     instance=request.verification.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.verification.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel runtime verification driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel runtime verification driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 driver_result = execute_verireel_rollout_verification(
                     control_plane_root=resolved_root,
                     request=request.verification,
@@ -4394,27 +4370,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.maintenance.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel app maintenance driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel app maintenance driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4440,27 +4410,21 @@ def create_launchplane_service_app(
                     context=request.deploy.context,
                     instance=request.deploy.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.deploy.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel prod deploy driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel prod deploy driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4487,27 +4451,21 @@ def create_launchplane_service_app(
                     context=request.backup_gate.context,
                     instance=request.backup_gate.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.backup_gate.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel prod backup gate driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel prod backup gate driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4542,27 +4500,21 @@ def create_launchplane_service_app(
                     context=request.promotion.context,
                     instance=request.promotion.to_instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.promotion.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel prod promotion driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel prod promotion driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4592,27 +4544,21 @@ def create_launchplane_service_app(
                     context=request.rollback.context,
                     instance=request.rollback.instance,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.rollback.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel prod rollback driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel prod rollback driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4640,27 +4586,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.refresh.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel preview refresh driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel preview refresh driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4689,27 +4629,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.inventory.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot read the VeriReel preview inventory"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot read the VeriReel preview inventory"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 driver_result = execute_verireel_preview_inventory(
                     control_plane_root=resolved_root,
                     request=request.inventory,
@@ -4728,27 +4662,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.destroy.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot execute the VeriReel preview destroy driver"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot execute the VeriReel preview destroy driver"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -4776,27 +4704,21 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                 )
-                if not authz_policy.allows(
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action=_descriptor_driver_authz_action(path),
+                    route_path=path,
                     product=request.product,
                     context=request.verification.context,
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": (
-                                    "Workflow cannot write VeriReel preview verification"
-                                    " for the requested product/context."
-                                ),
-                            },
-                        },
-                    )
+                    denial_message=(
+                        "Workflow cannot write VeriReel preview verification"
+                        " for the requested product/context."
+                    ),
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
