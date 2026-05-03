@@ -273,15 +273,7 @@ def build_preview_lifecycle_cleanup_record(
             preview_slug_template=preview_slug_template,
         )
 
-    if plan.product != "verireel" or plan.context != "verireel-testing":
-        return _blocked_record(
-            plan=plan,
-            requested_at=requested_at,
-            source=source,
-            apply=True,
-            error_message="VeriReel preview lifecycle cleanup execution requires verireel-testing.",
-        )
-
+    anchor_repo = plan.product
     parsed_previews: list[tuple[str, int]] = []
     for preview_slug in plan.orphaned_slugs:
         try:
@@ -297,7 +289,7 @@ def build_preview_lifecycle_cleanup_record(
         preview = find_preview_record(
             record_store=record_store,
             context_name=plan.context,
-            anchor_repo="verireel",
+            anchor_repo=anchor_repo,
             anchor_pr_number=anchor_pr_number,
         )
         if preview is None:
@@ -308,7 +300,7 @@ def build_preview_lifecycle_cleanup_record(
                 apply=True,
                 error_message=(
                     "Launchplane will not destroy preview provider state without a matching "
-                    f"stored preview record for {plan.context}/verireel/{preview_slug}."
+                    f"stored preview record for {plan.context}/{anchor_repo}/{preview_slug}."
                 ),
             )
         parsed_previews.append((preview_slug, anchor_pr_number))
@@ -321,7 +313,7 @@ def build_preview_lifecycle_cleanup_record(
             control_plane_root=control_plane_root,
             request=VeriReelPreviewDestroyRequest(
                 context=plan.context,
-                anchor_repo="verireel",
+                anchor_repo=anchor_repo,
                 anchor_pr_number=anchor_pr_number,
                 preview_slug=preview_slug,
                 destroy_reason=destroy_reason,
@@ -334,7 +326,7 @@ def build_preview_lifecycle_cleanup_record(
                     record_store=record_store,
                     request=PreviewDestroyMutationRequest(
                         context=plan.context,
-                        anchor_repo="verireel",
+                        anchor_repo=anchor_repo,
                         anchor_pr_number=anchor_pr_number,
                         destroyed_at=destroy_result.destroy_finished_at,
                         destroy_reason=destroy_reason,
@@ -344,7 +336,7 @@ def build_preview_lifecycle_cleanup_record(
                 results.append(
                     PreviewLifecycleCleanupResult(
                         preview_slug=preview_slug,
-                        anchor_repo="verireel",
+                        anchor_repo=anchor_repo,
                         anchor_pr_number=anchor_pr_number,
                         status="destroyed",
                         application_name=destroy_result.application_name,
@@ -357,7 +349,7 @@ def build_preview_lifecycle_cleanup_record(
                 results.append(
                     PreviewLifecycleCleanupResult(
                         preview_slug=preview_slug,
-                        anchor_repo="verireel",
+                        anchor_repo=anchor_repo,
                         anchor_pr_number=anchor_pr_number,
                         status="failed",
                         application_name=destroy_result.application_name,
@@ -371,7 +363,7 @@ def build_preview_lifecycle_cleanup_record(
         results.append(
             PreviewLifecycleCleanupResult(
                 preview_slug=preview_slug,
-                anchor_repo="verireel",
+                anchor_repo=anchor_repo,
                 anchor_pr_number=anchor_pr_number,
                 status="failed",
                 application_name=destroy_result.application_name,
