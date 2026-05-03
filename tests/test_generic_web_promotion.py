@@ -1,12 +1,15 @@
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Literal
 from unittest.mock import patch
 
 import click
 from pydantic import ValidationError
 
-from control_plane.contracts.deployment_record import ResolvedTargetEvidence
+from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -14,8 +17,9 @@ from control_plane.contracts.product_profile_record import (
     ProductPromotionWorkflowProfile,
     ProductPreviewProfile,
 )
-from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.promotion_record import HealthcheckEvidence, PromotionRecord
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     execute_generic_web_prod_promotion,
@@ -31,28 +35,31 @@ from control_plane.workflows.ship import build_deployment_record
 class _GenericWebPromotionStore:
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
-        self.deployments = {}
-        self.promotions = {}
-        self.inventories = {}
+        self.deployments: dict[str, DeploymentRecord] = {}
+        self.promotions: dict[str, PromotionRecord] = {}
+        self.inventories: dict[tuple[str, str], EnvironmentInventory] = {}
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
             raise FileNotFoundError(product)
         return self.profile
 
-    def write_deployment_record(self, record) -> None:
+    def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployments[record.record_id] = record
 
-    def read_deployment_record(self, record_id: str):
+    def read_deployment_record(self, record_id: str) -> DeploymentRecord:
         try:
             return self.deployments[record_id]
         except KeyError as exc:
             raise FileNotFoundError(record_id) from exc
 
-    def write_promotion_record(self, record) -> None:
+    def read_backup_gate_record(self, record_id: str) -> BackupGateRecord:
+        raise FileNotFoundError(record_id)
+
+    def write_promotion_record(self, record: PromotionRecord) -> None:
         self.promotions[record.record_id] = record
 
-    def write_environment_inventory(self, record) -> None:
+    def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.inventories[(record.context, record.instance)] = record
 
 
@@ -98,17 +105,17 @@ def _profile(
     )
 
 
-def _request(**overrides) -> GenericWebProdPromotionRequest:
-    payload = {
+def _request(**overrides: object) -> GenericWebProdPromotionRequest:
+    payload: dict[str, object] = {
         "product": "sellyouroutboard",
         "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         "source_git_ref": "abc123",
     }
     payload.update(overrides)
-    return GenericWebProdPromotionRequest(**payload)
+    return GenericWebProdPromotionRequest.model_validate(payload)
 
 
-def _deployment_record():
+def _deployment_record() -> DeploymentRecord:
     ship_request = ShipRequest(
         artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         context="sellyouroutboard-testing",
@@ -135,24 +142,27 @@ def _deployment_record():
     )
 
 
+def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> GenericWebDeployResult:
+    return GenericWebDeployResult(
+        deployment_record_id="deployment-syo-prod",
+        deploy_status=deploy_status,
+        deploy_started_at="2026-05-01T21:00:00Z",
+        deploy_finished_at="2026-05-01T21:01:00Z",
+        product="sellyouroutboard",
+        context="sellyouroutboard-testing",
+        instance="prod",
+        target_name="syo-prod-app",
+        target_type="application",
+        target_id="app-123",
+        error_message="provider failed" if deploy_status == "fail" else "",
+    )
 class GenericWebProdPromotionTests(unittest.TestCase):
     def test_execute_records_source_destination_health_promotion_and_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
 
-        def fake_deploy(**kwargs):
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
-            return type(
-                "DeployResult",
-                (),
-                {
-                    "deployment_record_id": "deployment-syo-prod",
-                    "deploy_status": "pass",
-                    "target_name": "syo-prod-app",
-                    "target_type": "application",
-                    "target_id": "app-123",
-                    "error_message": "",
-                },
-            )()
+            return _deploy_result()
 
         with (
             patch(
@@ -207,20 +217,9 @@ class GenericWebProdPromotionTests(unittest.TestCase):
     def test_execute_refreshes_inventory_when_health_is_skipped(self) -> None:
         store = _GenericWebPromotionStore(_profile())
 
-        def fake_deploy(**kwargs):
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
-            return type(
-                "DeployResult",
-                (),
-                {
-                    "deployment_record_id": "deployment-syo-prod",
-                    "deploy_status": "pass",
-                    "target_name": "syo-prod-app",
-                    "target_type": "application",
-                    "target_id": "app-123",
-                    "error_message": "",
-                },
-            )()
+            return _deploy_result()
 
         with patch(
             "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
@@ -242,20 +241,9 @@ class GenericWebProdPromotionTests(unittest.TestCase):
             _profile(health_path="/healthz", explicit_health_urls=False)
         )
 
-        def fake_deploy(**kwargs):
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
             store.write_deployment_record(_deployment_record())
-            return type(
-                "DeployResult",
-                (),
-                {
-                    "deployment_record_id": "deployment-syo-prod",
-                    "deploy_status": "pass",
-                    "target_name": "syo-prod-app",
-                    "target_type": "application",
-                    "target_id": "app-123",
-                    "error_message": "",
-                },
-            )()
+            return _deploy_result()
 
         with (
             patch(
@@ -312,23 +300,12 @@ class GenericWebProdPromotionTests(unittest.TestCase):
     def test_deploy_failure_marks_destination_health_skipped(self) -> None:
         store = _GenericWebPromotionStore(_profile())
 
-        def fake_deploy(**kwargs):
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
             deployment_record = _deployment_record().model_copy(
                 update={"deploy": _deployment_record().deploy.model_copy(update={"status": "fail"})}
             )
             store.write_deployment_record(deployment_record)
-            return type(
-                "DeployResult",
-                (),
-                {
-                    "deployment_record_id": "deployment-syo-prod",
-                    "deploy_status": "fail",
-                    "target_name": "syo-prod-app",
-                    "target_type": "application",
-                    "target_id": "app-123",
-                    "error_message": "provider failed",
-                },
-            )()
+            return _deploy_result(deploy_status="fail")
 
         with (
             patch(
@@ -359,7 +336,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
 
         def fake_github_api_request(
             *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ):
+        ) -> object:
             nonlocal listed_once
             requests.append((method, path, body))
             if method == "POST":
@@ -435,7 +412,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
 
         def fake_github_api_request(
             *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ):
+        ) -> object:
             nonlocal list_count
             if method == "POST":
                 return None
@@ -478,7 +455,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
 
         def fake_github_api_request(
             *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ):
+        ) -> object:
             nonlocal list_count
             if method == "POST":
                 return None
@@ -523,7 +500,7 @@ class GenericWebPromotionWorkflowTests(unittest.TestCase):
     def test_observation_accepts_run_created_in_same_second_as_dispatch(self) -> None:
         def fake_github_api_request(
             *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
-        ):
+        ) -> object:
             self.assertEqual(method, "GET")
             return {
                 "workflow_runs": [
