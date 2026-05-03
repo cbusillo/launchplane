@@ -371,6 +371,60 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     execution_metadata.denial_message,
                 )
 
+    def test_verireel_stable_execution_metadata_matches_descriptors(self) -> None:
+        descriptor = read_driver_descriptor("verireel")
+        actions = {action.action_id: action for action in descriptor.actions}
+        route_metadata_by_action: dict[
+            str,
+            tuple[
+                control_plane_service._DriverRouteExecutionMetadata[Any],
+                type[Any],
+                str,
+            ],
+        ] = {
+            "testing_deploy": (
+                control_plane_service._VERIREEL_TESTING_DEPLOY_ROUTE,
+                control_plane_service.VeriReelTestingDeployEnvelope,
+                "testing deploy driver",
+            ),
+            "testing_verification": (
+                control_plane_service._VERIREEL_TESTING_VERIFICATION_ROUTE,
+                control_plane_service.VeriReelTestingVerificationEnvelope,
+                "testing verification",
+            ),
+            "stable_environment": (
+                control_plane_service._VERIREEL_STABLE_ENVIRONMENT_ROUTE,
+                control_plane_service.VeriReelStableEnvironmentEnvelope,
+                "stable environment",
+            ),
+            "runtime_verification": (
+                control_plane_service._VERIREEL_RUNTIME_VERIFICATION_ROUTE,
+                control_plane_service.VeriReelRuntimeVerificationEnvelope,
+                "runtime verification driver",
+            ),
+            "app_maintenance": (
+                control_plane_service._VERIREEL_APP_MAINTENANCE_ROUTE,
+                control_plane_service.VeriReelAppMaintenanceEnvelope,
+                "app maintenance driver",
+            ),
+        }
+
+        for action_id, (
+            execution_metadata,
+            envelope_model,
+            denial_message_fragment,
+        ) in route_metadata_by_action.items():
+            with self.subTest(action_id=action_id):
+                self.assertEqual(
+                    execution_metadata.route_path,
+                    actions[action_id].route_path,
+                )
+                self.assertIs(execution_metadata.envelope_model, envelope_model)
+                self.assertIn(
+                    denial_message_fragment,
+                    execution_metadata.denial_message,
+                )
+
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
             driver_id="custom-web",

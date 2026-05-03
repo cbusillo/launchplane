@@ -765,11 +765,8 @@ _ODOO_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
-class VeriReelTestingDeployEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelTestingDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     deploy: VeriReelStableDeployRequest
 
     @model_validator(mode="after")
@@ -822,11 +819,8 @@ class VeriReelTestingVerificationRequest(BaseModel):
         return self
 
 
-class VeriReelTestingVerificationEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelTestingVerificationEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     verification: VeriReelTestingVerificationRequest
 
     @model_validator(mode="after")
@@ -847,11 +841,8 @@ class VeriReelProdDeployEnvelope(_ProductRouteEnvelope):
         return self
 
 
-class VeriReelAppMaintenanceEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelAppMaintenanceEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     maintenance: VeriReelAppMaintenanceRequest
 
     @model_validator(mode="after")
@@ -860,11 +851,8 @@ class VeriReelAppMaintenanceEnvelope(BaseModel):
         return self
 
 
-class VeriReelStableEnvironmentEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelStableEnvironmentEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     environment: VeriReelStableEnvironmentRequest
 
     @model_validator(mode="after")
@@ -873,17 +861,64 @@ class VeriReelStableEnvironmentEnvelope(BaseModel):
         return self
 
 
-class VeriReelRuntimeVerificationEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+class VeriReelRuntimeVerificationEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
-    product: str
     verification: VeriReelRolloutVerificationRequest
 
     @model_validator(mode="after")
     def _validate_alignment(self) -> "VeriReelRuntimeVerificationEnvelope":
         _validate_driver_envelope_product(self.product, label="VeriReel runtime verification")
         return self
+
+
+_VERIREEL_TESTING_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/testing-deploy",
+    envelope_model=VeriReelTestingDeployEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel testing deploy driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_TESTING_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/testing-verification",
+    envelope_model=VeriReelTestingVerificationEnvelope,
+    denial_message=(
+        "Workflow cannot write VeriReel testing verification"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_STABLE_ENVIRONMENT_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/stable-environment",
+    envelope_model=VeriReelStableEnvironmentEnvelope,
+    denial_message=(
+        "Workflow cannot read the VeriReel stable environment"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_RUNTIME_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/runtime-verification",
+    envelope_model=VeriReelRuntimeVerificationEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel runtime verification driver"
+        " for the requested product/context."
+    ),
+)
+
+
+_VERIREEL_APP_MAINTENANCE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/verireel/app-maintenance",
+    envelope_model=VeriReelAppMaintenanceEnvelope,
+    denial_message=(
+        "Workflow cannot execute the VeriReel app maintenance driver"
+        " for the requested product/context."
+    ),
+)
 
 
 class VeriReelProdPromotionEnvelope(_ProductRouteEnvelope):
@@ -4349,8 +4384,8 @@ def create_launchplane_service_app(
                     "rollback_status": driver_result.rollback_status,
                     "rollback_health_status": driver_result.rollback_health_status,
                 }
-            elif path == "/v1/drivers/verireel/testing-deploy":
-                request = VeriReelTestingDeployEnvelope.model_validate(payload)
+            elif path == _VERIREEL_TESTING_DEPLOY_ROUTE.route_path:
+                request = _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4364,10 +4399,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.deploy.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel testing deploy driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_TESTING_DEPLOY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4390,8 +4422,10 @@ def create_launchplane_service_app(
                     request=request.deploy,
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
-            elif path == "/v1/drivers/verireel/testing-verification":
-                request = VeriReelTestingVerificationEnvelope.model_validate(payload)
+            elif path == _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path:
+                request = _VERIREEL_TESTING_VERIFICATION_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4405,10 +4439,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.verification.context,
-                    denial_message=(
-                        "Workflow cannot write VeriReel testing verification"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_TESTING_VERIFICATION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4429,8 +4460,10 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     request=request.verification,
                 )
-            elif path == "/v1/drivers/verireel/stable-environment":
-                request = VeriReelStableEnvironmentEnvelope.model_validate(payload)
+            elif path == _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path:
+                request = _VERIREEL_STABLE_ENVIRONMENT_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4444,10 +4477,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.environment.context,
-                    denial_message=(
-                        "Workflow cannot read the VeriReel stable environment"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_STABLE_ENVIRONMENT_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4458,8 +4488,10 @@ def create_launchplane_service_app(
                     request=request.environment,
                 )
                 result = {}
-            elif path == "/v1/drivers/verireel/runtime-verification":
-                request = VeriReelRuntimeVerificationEnvelope.model_validate(payload)
+            elif path == _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path:
+                request = _VERIREEL_RUNTIME_VERIFICATION_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4473,10 +4505,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.verification.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel runtime verification driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_RUNTIME_VERIFICATION_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -4487,8 +4516,8 @@ def create_launchplane_service_app(
                     request=request.verification,
                 )
                 result = {}
-            elif path == "/v1/drivers/verireel/app-maintenance":
-                request = VeriReelAppMaintenanceEnvelope.model_validate(payload)
+            elif path == _VERIREEL_APP_MAINTENANCE_ROUTE.route_path:
+                request = _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4500,10 +4529,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=request.product,
                     context=request.maintenance.context,
-                    denial_message=(
-                        "Workflow cannot execute the VeriReel app maintenance driver"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_VERIREEL_APP_MAINTENANCE_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
