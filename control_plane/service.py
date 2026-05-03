@@ -3844,13 +3844,25 @@ def create_launchplane_service_app(
                 request = _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
                     payload
                 )
-                profile = record_store.read_product_profile_record(request.product)
+                resolved_driver_context = _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=request.product,
+                    context=request.workflow.context,
+                    require_profile=True,
+                )
+                if resolved_driver_context.profile is None or resolved_driver_context.lane is None:
+                    raise ProductDriverMismatchError(
+                        "Generic web promotion workflow requires a product profile lane."
+                    )
+                profile = resolved_driver_context.profile
+                lane = resolved_driver_context.lane
                 authorization_response = _driver_route_authorization_response(
                     authz_policy=authz_policy,
                     identity=identity,
                     route_path=path,
                     product=profile.product,
-                    context=request.workflow.context,
+                    context=lane.context,
                     denial_message=_GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
