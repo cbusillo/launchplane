@@ -190,13 +190,13 @@ def render_post_deploy_payload(
         "addon_settings": [],
     }
     config_parameters: list[dict[str, object]] = []
-    for override in record.config_parameters:
-        environment_key = config_parameter_secret_env_key(override.key)
+    for config_parameter_override in record.config_parameters:
+        environment_key = config_parameter_secret_env_key(config_parameter_override.key)
         config_parameters.append(
             {
-                "key": override.key,
+                "key": config_parameter_override.key,
                 "value": _payload_override_value(
-                    value=override.value, environment_key=environment_key
+                    value=config_parameter_override.value, environment_key=environment_key
                 ),
             }
         )
@@ -207,18 +207,19 @@ def render_post_deploy_payload(
             protected_shopify_store_keys=protected_shopify_store_keys,
         )
     )
-    for override in record.addon_settings:
-        if override.addon == SHOPIFY_ADDON_NAME:
+    for addon_setting_override in record.addon_settings:
+        if addon_setting_override.addon == SHOPIFY_ADDON_NAME:
             continue
         environment_key = addon_setting_secret_env_key(
-            addon_name=override.addon, setting_name=override.setting
+            addon_name=addon_setting_override.addon,
+            setting_name=addon_setting_override.setting,
         )
         addon_settings.append(
             {
-                "addon": override.addon,
-                "setting": override.setting,
+                "addon": addon_setting_override.addon,
+                "setting": addon_setting_override.setting,
                 "value": _payload_override_value(
-                    value=override.value, environment_key=environment_key
+                    value=addon_setting_override.value, environment_key=environment_key
                 ),
             }
         )
