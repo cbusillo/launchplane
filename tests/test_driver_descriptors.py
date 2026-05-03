@@ -164,6 +164,19 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             control_plane_service._build_write_routes(),
         )
 
+    def test_generic_web_readiness_execution_metadata_matches_descriptor(self) -> None:
+        descriptor = read_driver_descriptor("generic-web")
+        actions = {action.action_id: action for action in descriptor.actions}
+        readiness_action = actions["preview_readiness"]
+        execution_metadata = control_plane_service._GENERIC_WEB_PREVIEW_READINESS_ROUTE
+
+        self.assertEqual(execution_metadata.route_path, readiness_action.route_path)
+        self.assertIs(
+            execution_metadata.envelope_model,
+            control_plane_service.GenericWebPreviewReadinessEnvelope,
+        )
+        self.assertIn("preview readiness", execution_metadata.denial_message)
+
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
             driver_id="custom-web",
