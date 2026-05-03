@@ -55,6 +55,7 @@ from control_plane.contracts.preview_pr_feedback_record import (
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.product_environment_read_model import (
+    build_product_activity_read_model,
     build_product_environment_detail,
     build_product_site_overview,
     build_product_site_overviews,
@@ -1274,6 +1275,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_profile.read", {"product": segments[2]}
     if len(segments) == 2 and segments == ["v1", "products"]:
         return "product_environment.read", {}
+    if len(segments) == 4 and segments[:2] == ["v1", "products"] and segments[3] == "activity":
+        return "product_environment.read", {"product": segments[2], "activity": "true"}
     if len(segments) == 3 and segments[:2] == ["v1", "products"]:
         return "product_environment.read", {"product": segments[2]}
     if len(segments) == 5 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
@@ -3050,6 +3053,37 @@ def create_launchplane_service_app(
                             context=requested_context,
                         )
 
+                    if params.get("activity") == "true":
+                        activity = build_product_activity_read_model(
+                            record_store=record_store,
+                            product=params["product"],
+                        )
+                        if not product_action_allowed(
+                            "product_environment.read",
+                            activity.product,
+                            "launchplane",
+                        ):
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=403,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "authorization_denied",
+                                        "message": "Workflow cannot read the requested product activity.",
+                                    },
+                                },
+                            )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "activity": activity.model_dump(mode="json"),
+                            },
+                        )
                     if "environment" in params:
                         detail = build_product_environment_detail(
                             record_store=record_store,

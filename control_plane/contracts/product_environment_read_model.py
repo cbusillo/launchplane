@@ -205,6 +205,42 @@ class ProductEnvironmentDetail(BaseModel):
     provenance: DataProvenance
 
 
+class ProductActivityRecordLink(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    record_type: str
+    record_id: str
+
+
+class ProductActivityEvent(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    event_id: str
+    event_type: str
+    product: str
+    context: str
+    environment: str = ""
+    driver_id: str
+    action_id: str
+    status: str
+    occurred_at: str
+    title: str
+    summary: str = ""
+    records: tuple[ProductActivityRecordLink, ...] = ()
+    trust_state: FreshnessStatus = "recorded"
+
+
+class ProductActivityReadModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    display_name: str
+    repository: str
+    driver_id: str
+    events: tuple[ProductActivityEvent, ...] = ()
+
+
 def build_product_site_overviews(
     *, record_store: ProductReadModelStore, action_allowed: ActionAllowed
 ) -> tuple[ProductSiteOverview, ...]:
@@ -310,6 +346,35 @@ def build_product_environment_detail(
     )
 
 
+def build_product_activity_read_model(
+    *, record_store: ProductReadModelStore, product: str, limit: int = 50
+) -> ProductActivityReadModel:
+    profile = record_store.read_product_profile_record(product)
+    events: list[ProductActivityEvent] = []
+    for lane in profile.lanes:
+        events.extend(
+            _deployment_activity_events(record_store=record_store, profile=profile, lane=lane)
+        )
+        events.extend(
+            _promotion_activity_events(record_store=record_store, profile=profile, lane=lane)
+        )
+        events.extend(
+            _backup_gate_activity_events(record_store=record_store, profile=profile, lane=lane)
+        )
+    if profile.preview.enabled and profile.preview.context.strip():
+        events.extend(_preview_activity_events(record_store=record_store, profile=profile))
+        events.extend(_preview_context_activity_events(record_store=record_store, profile=profile))
+    events.extend(_authz_policy_activity_events(record_store=record_store, profile=profile))
+    events.sort(key=lambda event: (event.occurred_at, event.event_id), reverse=True)
+    return ProductActivityReadModel(
+        product=profile.product,
+        display_name=profile.display_name,
+        repository=profile.repository,
+        driver_id=profile.driver_id,
+        events=tuple(events[:limit]),
+    )
+
+
 def _read_profile_descriptor(
     profile: LaunchplaneProductProfileRecord,
 ) -> tuple[DriverDescriptor | None, str]:
@@ -317,6 +382,321 @@ def _read_profile_descriptor(
         return read_driver_descriptor(profile.driver_id), ""
     except FileNotFoundError:
         return None, f"Product driver {profile.driver_id!r} is not registered in Launchplane."
+
+
+def _optional_records(
+    record_store: object, method_name: str, **kwargs: object
+) -> tuple[object, ...]:
+    method = getattr(record_store, method_name, None)
+    if not callable(method):
+        return ()
+    return tuple(method(**kwargs))
+
+
+def _record_link(record_type: str, record_id: str) -> ProductActivityRecordLink:
+    return ProductActivityRecordLink(record_type=record_type, record_id=record_id)
+
+
+def _event_trust_state(status: str) -> FreshnessStatus:
+    if status in {"pass", "ready", "active", "configured"}:
+        return "recorded"
+    if status in {"destroyed", "skipped", "superseded"}:
+        return "recorded"
+    if status in {"pending", "failed", "fail", "blocked"}:
+        return "recorded"
+    return "recorded"
+
+
+def _activity_event(
+    *,
+    event_type: str,
+    product: str,
+    context: str,
+    environment: str,
+    driver_id: str,
+    action_id: str,
+    status: str,
+    occurred_at: str,
+    title: str,
+    summary: str = "",
+    records: tuple[ProductActivityRecordLink, ...] = (),
+) -> ProductActivityEvent:
+    record_key = records[0].record_id if records else f"{context}:{environment}:{occurred_at}"
+    return ProductActivityEvent(
+        event_id=f"{event_type}:{record_key}",
+        event_type=event_type,
+        product=product,
+        context=context,
+        environment=environment,
+        driver_id=driver_id,
+        action_id=action_id,
+        status=status,
+        occurred_at=occurred_at,
+        title=title,
+        summary=summary,
+        records=records,
+        trust_state=_event_trust_state(status),
+    )
+
+
+def _lane_action_id(*, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile) -> str:
+    if profile.driver_id == "verireel" and lane.instance == "testing":
+        return "testing_deploy"
+    if profile.driver_id == "verireel" and lane.instance == "prod":
+        return "prod_deploy"
+    return "stable_deploy"
+
+
+def _deployment_activity_events(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> tuple[ProductActivityEvent, ...]:
+    events: list[ProductActivityEvent] = []
+    for record in _optional_records(
+        record_store,
+        "list_deployment_records",
+        context_name=lane.context,
+        instance_name=lane.instance,
+        limit=10,
+    ):
+        deploy = getattr(record, "deploy")
+        occurred_at = deploy.finished_at or deploy.started_at
+        events.append(
+            _activity_event(
+                event_type="deployment",
+                product=profile.product,
+                context=lane.context,
+                environment=lane.instance,
+                driver_id=profile.driver_id,
+                action_id=_lane_action_id(profile=profile, lane=lane),
+                status=str(deploy.status),
+                occurred_at=occurred_at,
+                title=f"{profile.display_name} {lane.instance} deployment",
+                summary=f"Deployment {deploy.status} for {lane.context}/{lane.instance}.",
+                records=(_record_link("deployment", str(getattr(record, "record_id"))),),
+            )
+        )
+    return tuple(events)
+
+
+def _promotion_activity_events(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> tuple[ProductActivityEvent, ...]:
+    events: list[ProductActivityEvent] = []
+    for record in _optional_records(
+        record_store,
+        "list_promotion_records",
+        context_name=lane.context,
+        to_instance_name=lane.instance,
+        limit=10,
+    ):
+        deploy = getattr(record, "deploy")
+        rollback = getattr(record, "rollback")
+        rollback_attempted = bool(getattr(rollback, "attempted", False))
+        occurred_at = (
+            rollback.finished_at or rollback.started_at
+            if rollback_attempted
+            else deploy.finished_at or deploy.started_at
+        )
+        action_id = "prod_rollback" if rollback_attempted else "prod_promotion"
+        status = str(rollback.status if rollback_attempted else deploy.status)
+        record_links = [_record_link("promotion", str(getattr(record, "record_id")))]
+        deployment_record_id = str(getattr(record, "deployment_record_id", "") or "")
+        backup_record_id = str(getattr(record, "backup_record_id", "") or "")
+        if deployment_record_id:
+            record_links.append(_record_link("deployment", deployment_record_id))
+        if backup_record_id:
+            record_links.append(_record_link("backup_gate", backup_record_id))
+        events.append(
+            _activity_event(
+                event_type="rollback" if rollback_attempted else "promotion",
+                product=profile.product,
+                context=lane.context,
+                environment=lane.instance,
+                driver_id=profile.driver_id,
+                action_id=action_id,
+                status=status,
+                occurred_at=occurred_at,
+                title=f"{profile.display_name} {lane.instance} {action_id.replace('_', ' ')}",
+                summary=(
+                    f"{getattr(record, 'from_instance')} to "
+                    f"{getattr(record, 'to_instance')} {status}."
+                ),
+                records=tuple(record_links),
+            )
+        )
+    return tuple(events)
+
+
+def _backup_gate_activity_events(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> tuple[ProductActivityEvent, ...]:
+    events: list[ProductActivityEvent] = []
+    for record in _optional_records(
+        record_store,
+        "list_backup_gate_records",
+        context_name=lane.context,
+        instance_name=lane.instance,
+        limit=10,
+    ):
+        events.append(
+            _activity_event(
+                event_type="backup_gate",
+                product=profile.product,
+                context=lane.context,
+                environment=lane.instance,
+                driver_id=profile.driver_id,
+                action_id="prod_backup_gate",
+                status=str(getattr(record, "status")),
+                occurred_at=str(getattr(record, "created_at")),
+                title=f"{profile.display_name} {lane.instance} backup gate",
+                summary=f"Backup gate {getattr(record, 'status')} for {lane.context}/{lane.instance}.",
+                records=(_record_link("backup_gate", str(getattr(record, "record_id"))),),
+            )
+        )
+    return tuple(events)
+
+
+def _preview_activity_events(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord
+) -> tuple[ProductActivityEvent, ...]:
+    events: list[ProductActivityEvent] = []
+    for record in _optional_records(
+        record_store,
+        "list_preview_records",
+        context_name=profile.preview.context,
+        anchor_repo=_profile_anchor_repo(profile),
+        limit=10,
+    ):
+        state = str(getattr(record, "state"))
+        action_id = "preview_destroy" if state == "destroyed" else "preview_refresh"
+        events.append(
+            _activity_event(
+                event_type="preview",
+                product=profile.product,
+                context=profile.preview.context,
+                environment="preview",
+                driver_id=profile.driver_id,
+                action_id=action_id,
+                status=state,
+                occurred_at=str(getattr(record, "updated_at")),
+                title=f"{profile.display_name} preview {state}",
+                summary=str(getattr(record, "preview_label")),
+                records=(_record_link("preview", str(getattr(record, "preview_id"))),),
+            )
+        )
+    return tuple(events)
+
+
+def _preview_context_activity_events(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord
+) -> tuple[ProductActivityEvent, ...]:
+    events: list[ProductActivityEvent] = []
+    preview_context = profile.preview.context
+    for record in _optional_records(
+        record_store,
+        "list_preview_desired_state_records",
+        context_name=preview_context,
+        limit=5,
+    ):
+        if getattr(record, "product", "") != profile.product:
+            continue
+        events.append(
+            _activity_event(
+                event_type="preview_desired_state",
+                product=profile.product,
+                context=preview_context,
+                environment="preview",
+                driver_id=profile.driver_id,
+                action_id="preview_desired_state",
+                status=str(getattr(record, "status")),
+                occurred_at=str(getattr(record, "discovered_at")),
+                title=f"{profile.display_name} desired previews discovered",
+                summary=f"{getattr(record, 'desired_count')} desired preview(s).",
+                records=(
+                    _record_link("preview_desired_state", str(getattr(record, "desired_state_id"))),
+                ),
+            )
+        )
+    for record in _optional_records(
+        record_store,
+        "list_preview_lifecycle_cleanup_records",
+        context_name=preview_context,
+        limit=5,
+    ):
+        if getattr(record, "product", "") != profile.product:
+            continue
+        events.append(
+            _activity_event(
+                event_type="preview_cleanup",
+                product=profile.product,
+                context=preview_context,
+                environment="preview",
+                driver_id=profile.driver_id,
+                action_id="preview_destroy",
+                status=str(getattr(record, "status")),
+                occurred_at=str(getattr(record, "requested_at")),
+                title=f"{profile.display_name} preview cleanup",
+                records=(
+                    _record_link("preview_lifecycle_cleanup", str(getattr(record, "cleanup_id"))),
+                ),
+            )
+        )
+    for record in _optional_records(
+        record_store,
+        "list_preview_pr_feedback_records",
+        context_name=preview_context,
+        limit=5,
+    ):
+        if getattr(record, "product", "") != profile.product:
+            continue
+        events.append(
+            _activity_event(
+                event_type="preview_pr_feedback",
+                product=profile.product,
+                context=preview_context,
+                environment="preview",
+                driver_id=profile.driver_id,
+                action_id="preview_pr_feedback",
+                status=str(getattr(record, "status")),
+                occurred_at=str(getattr(record, "requested_at")),
+                title=f"{profile.display_name} preview PR feedback",
+                records=(_record_link("preview_pr_feedback", str(getattr(record, "feedback_id"))),),
+            )
+        )
+    return tuple(events)
+
+
+def _authz_policy_mentions_product(record: object, product: str) -> bool:
+    policy = getattr(record, "policy", None)
+    if policy is None:
+        return False
+    rules = (*getattr(policy, "github_actions", ()), *getattr(policy, "github_humans", ()))
+    return any(product in getattr(rule, "products", ()) for rule in rules)
+
+
+def _authz_policy_activity_events(
+    *, record_store: object, profile: LaunchplaneProductProfileRecord
+) -> tuple[ProductActivityEvent, ...]:
+    events: list[ProductActivityEvent] = []
+    for record in _optional_records(record_store, "list_authz_policy_records", limit=5):
+        if not _authz_policy_mentions_product(record, profile.product):
+            continue
+        events.append(
+            _activity_event(
+                event_type="authz_policy",
+                product=profile.product,
+                context="launchplane",
+                environment="",
+                driver_id="launchplane",
+                action_id="authz_policy.update",
+                status=str(getattr(record, "status")),
+                occurred_at=str(getattr(record, "updated_at")),
+                title=f"{profile.display_name} authorization policy updated",
+                summary=str(getattr(record, "source")),
+                records=(_record_link("authz_policy", str(getattr(record, "record_id"))),),
+            )
+        )
+    return tuple(events)
 
 
 def _profile_provenance(profile: LaunchplaneProductProfileRecord) -> DataProvenance:

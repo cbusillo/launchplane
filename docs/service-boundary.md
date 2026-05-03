@@ -376,6 +376,7 @@ only after a passing plan and a matching stored preview record are present.
 
 - `GET /v1/products`
 - `GET /v1/products/{product}`
+- `GET /v1/products/{product}/activity`
 - `GET /v1/products/{product}/environments/{environment}`
 - `GET /v1/previews/{preview_id}`
 - `GET /v1/previews/{preview_id}/history`
@@ -402,6 +403,11 @@ metadata, action availability, and trust state. Raw context names and provider
 target identifiers remain evidence metadata; runtime values, secret plaintext,
 secret ciphertext, and product-specific driver payloads are not exposed as
 shared top-level fields.
+
+Product activity reads are intentionally record-link oriented. They summarize
+deployments, promotions, rollbacks, backup gates, preview identity/lifecycle,
+preview feedback, and matching authz-policy changes with driver/action IDs and
+record references rather than embedding raw record payloads.
 
 Preview-related product actions are only shown when the product profile enables
 previews. That includes generic-web preview discovery and inventory actions,

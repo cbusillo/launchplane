@@ -1331,6 +1331,48 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(actions["prod_backup_gate"]["trust_state"], "unsupported")
         self.assertNotIn("sellyouroutboard", response_text)
 
+    def test_product_activity_endpoint_returns_product_timeline(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["example-site"],
+                            "contexts": ["launchplane"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products/example-site/activity",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["activity"]["product"], "example-site")
+        self.assertEqual(payload["activity"]["events"][0]["event_type"], "authz_policy")
+        self.assertEqual(payload["activity"]["events"][0]["action_id"], "authz_policy.update")
+
     def test_product_environment_detail_redacts_runtime_and_secret_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
