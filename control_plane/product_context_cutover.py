@@ -265,10 +265,18 @@ def _profile_after_cutover(
     preview = profile.preview.model_copy(
         update={"context": target_context} if profile.preview.enabled else {}
     )
+    historical_contexts = tuple(
+        dict.fromkeys(
+            context.strip()
+            for context in (*profile.historical_contexts, source_context)
+            if context.strip()
+        )
+    )
     return profile.model_copy(
         update={
             "display_name": display_name or profile.display_name,
             "lanes": lanes,
+            "historical_contexts": historical_contexts,
             "preview": preview,
             "updated_at": now,
             "source": source_label,
@@ -280,6 +288,7 @@ def _profile_semantic_payload(profile: LaunchplaneProductProfileRecord) -> dict[
     return {
         "display_name": profile.display_name,
         "lanes": [lane.model_dump(mode="json") for lane in profile.lanes],
+        "historical_contexts": list(profile.historical_contexts),
         "preview": profile.preview.model_dump(mode="json"),
     }
 

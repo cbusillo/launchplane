@@ -350,21 +350,57 @@ def build_product_activity_read_model(
     *, record_store: ProductReadModelStore, product: str, limit: int = 50
 ) -> ProductActivityReadModel:
     profile = record_store.read_product_profile_record(product)
+    source_limit = max(limit, 0)
     events: list[ProductActivityEvent] = []
-    for lane in profile.lanes:
+    for lane in _product_activity_lanes(profile):
         events.extend(
-            _deployment_activity_events(record_store=record_store, profile=profile, lane=lane)
+            _deployment_activity_events(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                source_limit=source_limit,
+            )
         )
         events.extend(
-            _promotion_activity_events(record_store=record_store, profile=profile, lane=lane)
+            _promotion_activity_events(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                source_limit=source_limit,
+            )
         )
         events.extend(
-            _backup_gate_activity_events(record_store=record_store, profile=profile, lane=lane)
+            _backup_gate_activity_events(
+                record_store=record_store,
+                profile=profile,
+                lane=lane,
+                source_limit=source_limit,
+            )
         )
-    if profile.preview.context.strip():
-        events.extend(_preview_activity_events(record_store=record_store, profile=profile))
-        events.extend(_preview_context_activity_events(record_store=record_store, profile=profile))
-    events.extend(_authz_policy_activity_events(record_store=record_store, profile=profile))
+    for preview_context in _product_activity_preview_contexts(profile):
+        events.extend(
+            _preview_activity_events(
+                record_store=record_store,
+                profile=profile,
+                preview_context=preview_context,
+                source_limit=source_limit,
+            )
+        )
+        events.extend(
+            _preview_context_activity_events(
+                record_store=record_store,
+                profile=profile,
+                preview_context=preview_context,
+                source_limit=source_limit,
+            )
+        )
+    events.extend(
+        _authz_policy_activity_events(
+            record_store=record_store,
+            profile=profile,
+            source_limit=source_limit,
+        )
+    )
     events.sort(key=lambda event: (event.occurred_at, event.event_id), reverse=True)
     return ProductActivityReadModel(
         product=profile.product,
@@ -447,8 +483,37 @@ def _lane_action_id(*, profile: LaunchplaneProductProfileRecord, lane: ProductLa
     return "stable_deploy"
 
 
+def _product_activity_lanes(
+    profile: LaunchplaneProductProfileRecord,
+) -> tuple[ProductLaneProfile, ...]:
+    lanes: list[ProductLaneProfile] = []
+    seen_routes: set[tuple[str, str]] = set()
+    for lane in profile.lanes:
+        for context in (lane.context, *profile.historical_contexts):
+            normalized_context = context.strip()
+            route = (normalized_context, lane.instance)
+            if not normalized_context or route in seen_routes:
+                continue
+            seen_routes.add(route)
+            lanes.append(lane.model_copy(update={"context": normalized_context}))
+    return tuple(lanes)
+
+
+def _product_activity_preview_contexts(profile: LaunchplaneProductProfileRecord) -> tuple[str, ...]:
+    contexts: list[str] = []
+    for context in (profile.preview.context, *profile.historical_contexts):
+        normalized_context = context.strip()
+        if normalized_context and normalized_context not in contexts:
+            contexts.append(normalized_context)
+    return tuple(contexts)
+
+
 def _deployment_activity_events(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    source_limit: int,
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
     for record in _optional_records(
@@ -456,6 +521,7 @@ def _deployment_activity_events(
         "list_deployment_records",
         context_name=lane.context,
         instance_name=lane.instance,
+        limit=source_limit,
     ):
         deploy = getattr(record, "deploy")
         occurred_at = deploy.finished_at or deploy.started_at
@@ -478,7 +544,11 @@ def _deployment_activity_events(
 
 
 def _promotion_activity_events(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    source_limit: int,
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
     for record in _optional_records(
@@ -486,6 +556,7 @@ def _promotion_activity_events(
         "list_promotion_records",
         context_name=lane.context,
         to_instance_name=lane.instance,
+        limit=source_limit,
     ):
         deploy = getattr(record, "deploy")
         rollback = getattr(record, "rollback")
@@ -526,7 +597,11 @@ def _promotion_activity_events(
 
 
 def _backup_gate_activity_events(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    source_limit: int,
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
     for record in _optional_records(
@@ -534,6 +609,7 @@ def _backup_gate_activity_events(
         "list_backup_gate_records",
         context_name=lane.context,
         instance_name=lane.instance,
+        limit=source_limit,
     ):
         events.append(
             _activity_event(
@@ -554,14 +630,19 @@ def _backup_gate_activity_events(
 
 
 def _preview_activity_events(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    preview_context: str,
+    source_limit: int,
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
     for record in _optional_records(
         record_store,
         "list_preview_records",
-        context_name=profile.preview.context,
+        context_name=preview_context,
         anchor_repo=_profile_anchor_repo(profile),
+        limit=source_limit,
     ):
         state = str(getattr(record, "state"))
         action_id = "preview_destroy" if state == "destroyed" else "preview_refresh"
@@ -569,7 +650,7 @@ def _preview_activity_events(
             _activity_event(
                 event_type="preview",
                 product=profile.product,
-                context=profile.preview.context,
+                context=preview_context,
                 environment="preview",
                 driver_id=profile.driver_id,
                 action_id=action_id,
@@ -584,14 +665,18 @@ def _preview_activity_events(
 
 
 def _preview_context_activity_events(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord
+    *,
+    record_store: object,
+    profile: LaunchplaneProductProfileRecord,
+    preview_context: str,
+    source_limit: int,
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
-    preview_context = profile.preview.context
     for record in _optional_records(
         record_store,
         "list_preview_desired_state_records",
         context_name=preview_context,
+        limit=source_limit,
     ):
         if getattr(record, "product", "") != profile.product:
             continue
@@ -616,6 +701,7 @@ def _preview_context_activity_events(
         record_store,
         "list_preview_lifecycle_cleanup_records",
         context_name=preview_context,
+        limit=source_limit,
     ):
         if getattr(record, "product", "") != profile.product:
             continue
@@ -639,6 +725,7 @@ def _preview_context_activity_events(
         record_store,
         "list_preview_pr_feedback_records",
         context_name=preview_context,
+        limit=source_limit,
     ):
         if getattr(record, "product", "") != profile.product:
             continue
@@ -668,10 +755,10 @@ def _authz_policy_mentions_product(record: object, product: str) -> bool:
 
 
 def _authz_policy_activity_events(
-    *, record_store: object, profile: LaunchplaneProductProfileRecord
+    *, record_store: object, profile: LaunchplaneProductProfileRecord, source_limit: int
 ) -> tuple[ProductActivityEvent, ...]:
     events: list[ProductActivityEvent] = []
-    for record in _optional_records(record_store, "list_authz_policy_records"):
+    for record in _optional_records(record_store, "list_authz_policy_records", limit=source_limit):
         if not _authz_policy_mentions_product(record, profile.product):
             continue
         events.append(

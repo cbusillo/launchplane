@@ -236,6 +236,7 @@ class ProductContextCutoverTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "apply")
         self.assertEqual(profile.display_name, "SellYourOutboard")
         self.assertEqual({lane.context for lane in profile.lanes}, {"sellyouroutboard"})
+        self.assertEqual(profile.historical_contexts, ("sellyouroutboard-testing",))
         self.assertEqual(profile.preview.context, "sellyouroutboard")
         self.assertEqual(len(target_runtime_records), 2)
         self.assertEqual(target.target_name, "syo-prod-app")

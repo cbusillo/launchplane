@@ -227,9 +227,16 @@ class _ActivityRecordStore(_PreviewRecordStore):
 
 
 class _ManyDeploymentActivityRecordStore(_PreviewRecordStore):
+    def __init__(
+        self, profile: LaunchplaneProductProfileRecord, previews: tuple[PreviewRecord, ...]
+    ) -> None:
+        super().__init__(profile, previews)
+        self.deployment_limits: list[int | None] = []
+
     def list_deployment_records(
         self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
     ) -> tuple[object, ...]:
+        self.deployment_limits.append(limit)
         if context_name != "example-site-prod" or instance_name != "prod":
             return ()
         records = tuple(
@@ -246,6 +253,38 @@ class _ManyDeploymentActivityRecordStore(_PreviewRecordStore):
         if limit is not None:
             return records[:limit]
         return records
+
+
+class _HistoricalActivityRecordStore(_PreviewRecordStore):
+    def __init__(
+        self, profile: LaunchplaneProductProfileRecord, previews: tuple[PreviewRecord, ...]
+    ) -> None:
+        super().__init__(profile, previews)
+        self.deployment_calls: list[tuple[str, str, int | None]] = []
+
+    def list_deployment_records(
+        self, *, context_name: str = "", instance_name: str = "", limit: int | None = None
+    ) -> tuple[object, ...]:
+        self.deployment_calls.append((context_name, instance_name, limit))
+        if instance_name != "prod" or context_name not in {
+            "example-site-prod",
+            "example-site-legacy",
+        }:
+            return ()
+        return (
+            SimpleNamespace(
+                record_id=f"deployment-{context_name}",
+                deploy=SimpleNamespace(
+                    status="pass",
+                    started_at="2026-05-02T10:00:00Z",
+                    finished_at=(
+                        "2026-05-02T12:00:00Z"
+                        if context_name == "example-site-prod"
+                        else "2026-05-02T09:00:00Z"
+                    ),
+                ),
+            ),
+        )
 
 
 class ProductEnvironmentReadModelTest(unittest.TestCase):
@@ -586,6 +625,35 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertIn("preview", event_types)
         self.assertIn("preview_desired_state", event_types)
 
+    def test_product_activity_read_model_reads_historical_contexts_after_cutover(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            {
+                **_site_profile_payload(
+                    preview_enabled=False,
+                    preview_context="",
+                    testing_context="example-site-prod",
+                    prod_context="example-site-prod",
+                ),
+                "historical_contexts": ("example-site-legacy",),
+            }
+        )
+        store = _HistoricalActivityRecordStore(profile, ())
+
+        activity = build_product_activity_read_model(
+            record_store=store,
+            product="example-site",
+            limit=10,
+        )
+
+        deployment_contexts = {
+            event.context for event in activity.events if event.event_type == "deployment"
+        }
+        self.assertIn("example-site-prod", deployment_contexts)
+        self.assertIn("example-site-legacy", deployment_contexts)
+        self.assertIn(("example-site-legacy", "prod", 10), store.deployment_calls)
+
     def test_product_activity_read_model_limits_after_merging_all_sources(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(
             _site_profile_payload(
@@ -611,3 +679,4 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         }
         self.assertEqual(len(activity.events), 12)
         self.assertIn("deployment-prod-1", deployment_record_ids)
+        self.assertIn(12, store.deployment_limits)
