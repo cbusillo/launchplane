@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 import click
 
@@ -15,6 +16,12 @@ DEFAULT_RUNTIME_ENVIRONMENTS_FILE = "config/runtime-environments.toml"
 
 ScalarValue = str | int | float | bool
 ScalarMap = dict[str, ScalarValue]
+
+
+class RuntimeEnvironmentRecordStore(Protocol):
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -40,12 +47,12 @@ def load_runtime_environment_definition(
 ) -> RuntimeEnvironmentDefinition:
     database_url = resolve_database_url()
     if database_url:
-        database_definition = _load_optional_runtime_environment_definition_from_database(database_url=database_url)
+        database_definition = _load_optional_runtime_environment_definition_from_database(
+            database_url=database_url
+        )
         if database_definition is not None:
             return database_definition
-        raise click.ClickException(
-            "Missing DB-backed Launchplane runtime environment records."
-        )
+        raise click.ClickException("Missing DB-backed Launchplane runtime environment records.")
 
     raise click.ClickException(
         "Missing Launchplane runtime environment authority. Configure DB-backed runtime environment records."
@@ -116,7 +123,10 @@ def resolve_tracked_target_environment_values(
             control_plane_root=control_plane_root
         )
     except click.ClickException as error:
-        if str(error).startswith("Missing Launchplane tracked Dokploy target authority") or str(error).startswith(
+        error_message = str(error)
+        if error_message.startswith(
+            "Missing Launchplane tracked Dokploy target authority"
+        ) or error_message.startswith(
             "Missing DB-backed Launchplane tracked Dokploy target records."
         ):
             return {}
@@ -184,7 +194,7 @@ def _load_optional_runtime_environment_definition_from_database(
     try:
         record_store = PostgresRecordStore(database_url=database_url)
         record_store.ensure_schema()
-        records = record_store.list_runtime_environment_records()
+        return load_optional_runtime_environment_definition_from_store(record_store=record_store)
     except Exception as error:
         raise click.ClickException(
             f"Could not load runtime environments from Launchplane Postgres storage: {error}"
@@ -195,6 +205,12 @@ def _load_optional_runtime_environment_definition_from_database(
                 record_store.close()
         except Exception:
             pass
+
+
+def load_optional_runtime_environment_definition_from_store(
+    *, record_store: RuntimeEnvironmentRecordStore
+) -> RuntimeEnvironmentDefinition | None:
+    records = record_store.list_runtime_environment_records()
     if not records:
         return None
     return build_runtime_environment_definition_from_records(records)

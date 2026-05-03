@@ -56,7 +56,7 @@ class OdooProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(request.context, "new-site")
 
     def test_backup_gate_request_rejects_blank_context(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooProdBackupGateRequest(
                 context=" ",
                 backup_record_id="backup-gate-new-site-prod-1",

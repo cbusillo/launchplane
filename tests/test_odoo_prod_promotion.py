@@ -108,7 +108,7 @@ class OdooProdPromotionWorkflowTests(unittest.TestCase):
         self.assertEqual(request.context, "new-site")
 
     def test_promotion_request_rejects_blank_context(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooProdPromotionRequest(
                 context=" ",
                 artifact_id="artifact-new-site-123",

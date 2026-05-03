@@ -56,7 +56,7 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         self.assertEqual(inputs_request.context, "new-site")
 
     def test_publish_requests_reject_blank_contexts(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooArtifactPublishRequest(
                 context=" ",
                 manifest_path=Path("/work/new-site/workspace.toml"),
@@ -64,13 +64,13 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
                 image_repository="ghcr.io/cbusillo/odoo-tenant-new-site",
                 image_tag="new-site-20260503",
             )
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooArtifactPublishEvidenceRequest(
                 context=" ",
                 instance="testing",
                 manifest=_artifact_manifest(),
             )
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooArtifactPublishInputsRequest(context=" ", instance="testing")
 
     def test_publish_resolves_launchplane_env_and_writes_artifact(self) -> None:

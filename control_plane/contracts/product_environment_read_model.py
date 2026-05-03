@@ -16,7 +16,11 @@ from control_plane.contracts.product_profile_record import (
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
-from control_plane.drivers.registry import build_driver_context_view, read_driver_descriptor
+from control_plane.drivers.registry import (
+    build_driver_context_view,
+    list_driver_descriptors,
+    read_driver_descriptor,
+)
 
 
 ActionAllowed = Callable[[str, str, str], bool]
@@ -33,35 +37,16 @@ class ProductReadModelStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
 
-ACTION_AUTHZ_BY_ROUTE = {
-    "/v1/drivers/generic-web/deploy": "generic_web_deploy.execute",
-    "/v1/drivers/generic-web/prod-promotion": "generic_web_prod_promotion.execute",
-    "/v1/drivers/generic-web/prod-promotion-workflow": "generic_web_prod_promotion.dispatch",
-    "/v1/drivers/generic-web/preview-desired-state": "preview_desired_state.discover",
-    "/v1/drivers/generic-web/preview-inventory": "preview_inventory.read",
-    "/v1/drivers/generic-web/preview-refresh": "preview_refresh.execute",
-    "/v1/drivers/generic-web/preview-readiness": "preview_readiness.evaluate",
-    "/v1/drivers/generic-web/preview-destroy": "preview_destroy.execute",
-    "/v1/drivers/odoo/artifact-publish-inputs": "odoo_artifact_publish_inputs.read",
-    "/v1/drivers/odoo/artifact-publish": "odoo_artifact_publish.write",
-    "/v1/drivers/odoo/post-deploy": "odoo_post_deploy.execute",
-    "/v1/drivers/odoo/prod-backup-gate": "odoo_prod_backup_gate.execute",
-    "/v1/drivers/odoo/prod-promotion": "odoo_prod_promotion.execute",
-    "/v1/drivers/odoo/prod-rollback": "odoo_prod_rollback.execute",
-    "/v1/drivers/verireel/testing-deploy": "verireel_testing_deploy.execute",
-    "/v1/drivers/verireel/testing-verification": "deployment.write",
-    "/v1/drivers/verireel/stable-environment": "verireel_stable_environment.read",
-    "/v1/drivers/verireel/runtime-verification": "verireel_stable_environment.read",
-    "/v1/drivers/verireel/app-maintenance": "verireel_app_maintenance.execute",
-    "/v1/drivers/verireel/prod-deploy": "verireel_prod_deploy.execute",
-    "/v1/drivers/verireel/prod-backup-gate": "verireel_prod_backup_gate.execute",
-    "/v1/drivers/verireel/prod-promotion": "verireel_prod_promotion.execute",
-    "/v1/drivers/verireel/prod-rollback": "verireel_prod_rollback.execute",
-    "/v1/drivers/verireel/preview-refresh": "verireel_preview_refresh.execute",
-    "/v1/drivers/verireel/preview-inventory": "verireel_preview_inventory.read",
-    "/v1/drivers/verireel/preview-destroy": "verireel_preview_destroy.execute",
-    "/v1/drivers/verireel/preview-verification": "preview_generation.write",
-}
+def _build_action_authz_by_route() -> dict[str, str]:
+    return {
+        action.route_path: action.authz_action
+        for descriptor in list_driver_descriptors()
+        for action in descriptor.actions
+        if action.route_path and action.authz_action
+    }
+
+
+ACTION_AUTHZ_BY_ROUTE = _build_action_authz_by_route()
 
 PREVIEW_PROFILE_REQUIRED_ACTION_IDS = {
     "preview_desired_state",
@@ -1049,6 +1034,7 @@ def _action_availability(
     descriptor_actions = {
         action.action_id: action
         for action in (descriptor.actions if descriptor is not None else ())
+        if action.operator_visible
     }
     action_ids = tuple(descriptor_actions)
     if include_unsupported:
@@ -1100,7 +1086,9 @@ def _availability_for_descriptor_action(
     support_reason = _action_support_reason(profile=profile, action=action)
     if support_reason:
         disabled_reasons.append(support_reason)
-    authz_action = ACTION_AUTHZ_BY_ROUTE.get(action.route_path, action.action_id)
+    authz_action = action.authz_action or ACTION_AUTHZ_BY_ROUTE.get(
+        action.route_path, action.action_id
+    )
     if not action_allowed(authz_action, product, authorization_context):
         disabled_reasons.append("Caller is not authorized for this action.")
     return ProductActionAvailability(

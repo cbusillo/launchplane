@@ -152,7 +152,7 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(request.context, "new-site")
 
     def test_rollback_request_rejects_blank_context(self) -> None:
-        with self.assertRaises(ValidationError):
+        with self.assertRaisesRegex(ValidationError, "requires context"):
             OdooProdRollbackRequest(context=" ")
 
     def _record_store(self) -> Mock:
