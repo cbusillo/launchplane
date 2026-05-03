@@ -111,6 +111,30 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         )
         self.assertEqual(actions["preview_destroy"].safety, "destructive")
 
+    def test_driver_actions_declare_route_authorization_metadata(self) -> None:
+        route_actions = {
+            action.route_path: action
+            for descriptor in list_driver_descriptors()
+            for action in descriptor.actions
+            if action.route_path
+        }
+
+        self.assertTrue(all(action.authz_action for action in route_actions.values()))
+        self.assertEqual(
+            route_actions["/v1/drivers/verireel/testing-verification"].authz_action,
+            "deployment.write",
+        )
+        self.assertFalse(
+            route_actions["/v1/drivers/verireel/testing-verification"].operator_visible
+        )
+        self.assertEqual(
+            route_actions["/v1/drivers/verireel/preview-verification"].authz_action,
+            "preview_generation.write",
+        )
+        self.assertFalse(
+            route_actions["/v1/drivers/verireel/preview-verification"].operator_visible
+        )
+
     def test_preview_read_model_is_capability_driven_not_verireel_named(self) -> None:
         descriptor = DriverDescriptor(
             driver_id="custom-web",
@@ -137,9 +161,14 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
             )
 
         self.assertEqual(view.drivers[0].driver_id, "custom-web")
-        self.assertEqual(view.drivers[0].preview_summaries[0].preview.preview_id, "preview-web-pr-7")
         self.assertEqual(
-            view.drivers[0].preview_inventory_provenance.detail,
+            view.drivers[0].preview_summaries[0].preview.preview_id, "preview-web-pr-7"
+        )
+        preview_inventory_provenance = view.drivers[0].preview_inventory_provenance
+        self.assertIsNotNone(preview_inventory_provenance)
+        assert preview_inventory_provenance is not None
+        self.assertEqual(
+            preview_inventory_provenance.detail,
             "Preview identity record exists, but no generation evidence is recorded.",
         )
 

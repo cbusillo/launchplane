@@ -12,7 +12,6 @@ from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
-SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
 BACKUP_GATE_SOURCE = "launchplane-odoo-prod-backup-gate"
 
 
@@ -30,11 +29,8 @@ class OdooProdBackupGateRequest(BaseModel):
         self.context = self.context.strip().lower()
         self.instance = self.instance.strip().lower()
         self.backup_record_id = self.backup_record_id.strip()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo prod backup gate supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo prod backup gate requires context.")
         if self.instance != "prod":
             raise ValueError("Odoo prod backup gate requires instance 'prod'.")
         if not self.backup_record_id:
