@@ -211,7 +211,7 @@ def _find_application_schedule(*, host: str, token: str, application_id: str, sc
         schedule_type="application",
     ):
         if str(schedule.get("name") or "").strip() == schedule_name:
-            return dict(schedule)
+            return schedule
     return None
 
 
@@ -229,7 +229,7 @@ def _upsert_application_schedule(
         application_id=application_id,
         schedule_name=schedule_name,
     )
-    payload: dict[str, object] = {
+    payload: JsonObject = {
         "name": schedule_name,
         "cronExpression": control_plane_dokploy.DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
         "scheduleType": "application",
@@ -248,12 +248,16 @@ def _upsert_application_schedule(
             payload=payload,
         )
     else:
+        update_payload: JsonObject = {
+            "scheduleId": control_plane_dokploy.schedule_key(existing_schedule),
+            **payload,
+        }
         control_plane_dokploy.dokploy_request(
             host=host,
             token=token,
             path="/api/schedule.update",
             method="POST",
-            payload={"scheduleId": control_plane_dokploy.schedule_key(existing_schedule), **payload},
+            payload=update_payload,
         )
     resolved_schedule = _find_application_schedule(
         host=host,
