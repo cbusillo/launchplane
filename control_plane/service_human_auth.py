@@ -9,7 +9,7 @@ import hmac
 import os
 import secrets
 import warnings
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from authlib.integrations.requests_client import (  # type: ignore[import-untyped]
@@ -154,7 +154,7 @@ class GitHubOAuthClient:
     ) -> OAuth2SessionType:
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
-            from authlib.integrations.requests_client import OAuth2Session  # type: ignore[import-untyped]
+            from authlib.integrations.requests_client import OAuth2Session
 
         return OAuth2Session(
             client_id=client_id,
@@ -212,7 +212,7 @@ class GitHubOAuthClient:
         )
         teams = frozenset(_team_names(team_payload))
         if self._config.bootstrap_admin_emails.intersection(email_candidates):
-            role: str | None = "admin"
+            role: Literal["read_only", "admin"] | None = "admin"
         else:
             role = authz_policy.human_role_for(
                 login=login,
