@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import TypedDict
 from urllib.parse import quote
 
 import click
@@ -13,6 +14,12 @@ from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
 )
+
+
+class GitHubPreviewPullRequest(TypedDict):
+    number: int
+    html_url: str
+    head_sha: str
 
 
 def _repository_parts(repository: str) -> tuple[str, str]:
@@ -42,9 +49,9 @@ def list_github_open_pull_requests_with_label(
     label: str,
     token: str,
     max_pages: int = 10,
-) -> tuple[dict[str, object], ...]:
+) -> tuple[GitHubPreviewPullRequest, ...]:
     per_page = 100
-    pull_requests: list[dict[str, object]] = []
+    pull_requests: list[GitHubPreviewPullRequest] = []
     for page in range(1, max_pages + 1):
         payload = github_api_request(
             path=(
@@ -80,7 +87,7 @@ def list_github_open_pull_requests_with_label(
             )
         if len(payload) < per_page:
             break
-    return tuple(sorted(pull_requests, key=lambda item: int(item["number"])))
+    return tuple(sorted(pull_requests, key=lambda item: item["number"]))
 
 
 def build_preview_desired_state_record(
@@ -151,14 +158,14 @@ def discover_github_preview_desired_state(
         desired_previews = tuple(
             PreviewLifecycleDesiredPreview(
                 preview_slug=render_preview_slug(
-                    anchor_pr_number=int(pull_request["number"]),
+                    anchor_pr_number=pull_request["number"],
                     preview_slug_prefix=preview_slug_prefix,
                     preview_slug_template=preview_slug_template,
                 ),
                 anchor_repo=anchor_repo,
-                anchor_pr_number=int(pull_request["number"]),
-                anchor_pr_url=str(pull_request["html_url"]),
-                head_sha=str(pull_request["head_sha"]),
+                anchor_pr_number=pull_request["number"],
+                anchor_pr_url=pull_request["html_url"],
+                head_sha=pull_request["head_sha"],
             )
             for pull_request in pull_requests
         )
