@@ -141,6 +141,12 @@ therefore clean up previews recorded under its own product key and preview
 context instead of being pinned to the canonical `verireel`/`verireel-testing`
 pair.
 
+VeriReel stable-lane actions follow the same product-profile boundary. For
+non-canonical products, service dispatch verifies that the requested context and
+instance match a lane on the product profile before invoking stable deploy,
+environment, rollout verification, backup gate, promotion, or rollback
+workflows.
+
 Odoo exposes:
 
 - artifact publish handoff

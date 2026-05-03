@@ -67,8 +67,8 @@ class VeriReelProdRollbackRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelProdRollbackRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel prod rollback requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel prod rollback requires context.")
         if self.instance != "prod":
             raise ValueError("VeriReel prod rollback requires instance 'prod'.")
         if not self.promotion_record_id.strip():
