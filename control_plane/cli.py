@@ -1,5 +1,5 @@
 import base64
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 import hashlib
 from html import escape
 import json
@@ -8,7 +8,7 @@ import subprocess
 import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal
+from typing import Literal, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -43,7 +43,10 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideApplyResult
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
-from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary
+from control_plane.contracts.preview_generation_record import (
+    PreviewGenerationRecord,
+    PreviewPullRequestSummary,
+)
 from control_plane.contracts.preview_mutation_request import (
     LaunchplanePullRequestMutationIntent,
     PreviewDestroyMutationRequest,
@@ -74,10 +77,12 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
 from control_plane.contracts.runtime_environment_record import (
+    RuntimeEnvironmentScope,
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
+    ScalarValue,
 )
-from control_plane.contracts.secret_record import SecretBinding
+from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.launchplane_mutations import (
@@ -164,6 +169,16 @@ _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
+@overload
+def _store(state_dir: Path, *, database_url: None = None) -> FilesystemRecordStore: ...
+
+
+@overload
+def _store(
+    state_dir: Path, *, database_url: str
+) -> FilesystemRecordStore | PostgresRecordStore: ...
+
+
 def _store(
     state_dir: Path, *, database_url: str | None = None
 ) -> FilesystemRecordStore | PostgresRecordStore:
@@ -234,6 +249,49 @@ def _build_authz_policy_record(
         policy_sha256=policy_sha256,
         policy=policy,
     )
+
+
+def _normalize_secret_scope(scope: str) -> SecretScope:
+    normalized_scope = scope.strip().lower()
+    if normalized_scope == "global":
+        return "global"
+    if normalized_scope == "context":
+        return "context"
+    if normalized_scope == "context_instance":
+        return "context_instance"
+    raise click.ClickException("Secret scope must be one of global, context, or context_instance.")
+
+
+def _normalize_odoo_apply_status(
+    status: str,
+) -> Literal["skipped", "pending", "pass", "fail"]:
+    normalized_status = status.strip().lower()
+    if normalized_status == "skipped":
+        return "skipped"
+    if normalized_status == "pending":
+        return "pending"
+    if normalized_status == "pass":
+        return "pass"
+    if normalized_status == "fail":
+        return "fail"
+    raise click.ClickException(
+        "Odoo override apply status must be skipped, pending, pass, or fail."
+    )
+
+
+def _normalize_odoo_prod_rollback_source_channel(source_channel: str) -> Literal["testing"]:
+    if source_channel.strip().lower() == "testing":
+        return "testing"
+    raise click.ClickException("Odoo prod rollback source channel must be testing.")
+
+
+def _normalize_dokploy_target_type(target_type: str) -> Literal["compose", "application"]:
+    normalized_target_type = target_type.strip().lower()
+    if normalized_target_type == "compose":
+        return "compose"
+    if normalized_target_type == "application":
+        return "application"
+    raise click.ClickException("Dokploy target type must be compose or application.")
 
 
 def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
@@ -393,9 +451,13 @@ def _json_object(value: object) -> dict[str, object] | None:
 
 
 def _int_from_json_value(value: object, *, default: int = 0) -> int:
+    if value is None:
+        return default
+    if not isinstance(value, (str, int, float, bool)):
+        return default
     try:
-        return int(str(value))
-    except ValueError:
+        return int(value or default)
+    except (TypeError, ValueError):
         return default
 
 
@@ -2529,10 +2591,7 @@ def _render_launchplane_preview_index_page_html(
     ) -> str:
         tone = str(promotion_action.get("tone", "neutral")).strip() or "neutral"
         evidence_checks = _json_object_items(promotion_action.get("evidence_checks"))
-        evidence_html = "".join(
-            render_promotion_evidence_check(check)
-            for check in evidence_checks
-        )
+        evidence_html = "".join(render_promotion_evidence_check(check) for check in evidence_checks)
         recipe_cards: list[str] = []
         backup_gate_recipe = str(promotion_action.get("backup_gate_recipe", "")).strip()
         if backup_gate_recipe:
@@ -5048,43 +5107,17 @@ def _render_launchplane_preview_status_page_html(
     *,
     nav_links: dict[str, str] | None = None,
 ) -> str:
-    preview = payload.get("preview") if isinstance(payload.get("preview"), dict) else {}
-    trust_summary = (
-        payload.get("trust_summary") if isinstance(payload.get("trust_summary"), dict) else {}
-    )
-    health_summary = (
-        payload.get("health_summary") if isinstance(payload.get("health_summary"), dict) else {}
-    )
-    input_summary = (
-        payload.get("input_summary") if isinstance(payload.get("input_summary"), dict) else {}
-    )
-    lifecycle_summary = (
-        payload.get("lifecycle_summary")
-        if isinstance(payload.get("lifecycle_summary"), dict)
-        else {}
-    )
-    links = payload.get("links") if isinstance(payload.get("links"), dict) else {}
-    recent_generations = (
-        payload.get("recent_generations")
-        if isinstance(payload.get("recent_generations"), list)
-        else []
-    )
-    source_map = (
-        input_summary.get("source_map") if isinstance(input_summary.get("source_map"), list) else []
-    )
-    companions = (
-        input_summary.get("companions") if isinstance(input_summary.get("companions"), list) else []
-    )
-    serving_generation = (
-        payload.get("serving_generation")
-        if isinstance(payload.get("serving_generation"), dict)
-        else {}
-    )
-    latest_generation = (
-        payload.get("latest_generation")
-        if isinstance(payload.get("latest_generation"), dict)
-        else {}
-    )
+    preview = _json_object(payload.get("preview")) or {}
+    trust_summary = _json_object(payload.get("trust_summary")) or {}
+    health_summary = _json_object(payload.get("health_summary")) or {}
+    input_summary = _json_object(payload.get("input_summary")) or {}
+    lifecycle_summary = _json_object(payload.get("lifecycle_summary")) or {}
+    links = _json_object(payload.get("links")) or {}
+    recent_generations = _json_object_items(payload.get("recent_generations"))
+    source_map = _json_object_items(input_summary.get("source_map"))
+    companions = _json_object_items(input_summary.get("companions"))
+    serving_generation = _json_object(payload.get("serving_generation")) or {}
+    latest_generation = _json_object(payload.get("latest_generation")) or {}
 
     preview_label = escape(str(preview.get("preview_label", "Launchplane preview")))
     context_name = escape(str(preview.get("context", "")))
@@ -5436,16 +5469,15 @@ def _render_launchplane_preview_status_page_html(
         identity_html = f'<p class="identity-line">{"<span>&bull;</span>".join(identity_bits)}</p>'
 
     action_slug = _launchplane_action_slug(preview_label)
-    raw_anchor_head_sha = (
-        str(input_summary.get("anchor", {}).get("head_sha", "")).strip()
-        if isinstance(input_summary.get("anchor"), dict)
-        else ""
-    )
+    raw_anchor_head_sha = str(
+        (_json_object(input_summary.get("anchor")) or {}).get("head_sha", "")
+    ).strip()
     raw_baseline_release_tuple_id = str(input_summary.get("baseline_release_tuple_id", "")).strip()
-    raw_source_map = [item for item in source_map if isinstance(item, dict)]
-    raw_companions = [item for item in companions if isinstance(item, dict)]
+    raw_source_map = source_map
+    raw_companions = companions
     raw_context_name = str(preview.get("context", "")).strip()
     raw_anchor_repo = str(preview.get("anchor_repo", "")).strip()
+    raw_anchor_pr_number = _int_from_json_value(preview.get("anchor_pr_number", 0))
     raw_anchor_pr_url = str(preview.get("anchor_pr_url", links.get("anchor_pr_url", ""))).strip()
     raw_latest_generation_id = str(latest_generation.get("generation_id", "")).strip()
     raw_latest_requested_reason = str(latest_generation.get("requested_reason", "")).strip()
@@ -5460,7 +5492,7 @@ def _render_launchplane_preview_status_page_html(
             "schema_version": 1,
             "context": raw_context_name,
             "anchor_repo": raw_anchor_repo,
-            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_number": _int_from_json_value(preview.get("anchor_pr_number", 0)),
             "destroyed_at": "<utc-timestamp>",
             "destroy_reason": "operator_requested",
         }
@@ -5489,7 +5521,7 @@ def _render_launchplane_preview_status_page_html(
             "schema_version": 1,
             "context": raw_context_name,
             "anchor_repo": raw_anchor_repo,
-            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_number": raw_anchor_pr_number,
             "anchor_pr_url": raw_anchor_pr_url,
             "state": preview_state.strip().lower() or "pending",
             "updated_at": "<utc-timestamp>",
@@ -5498,7 +5530,7 @@ def _render_launchplane_preview_status_page_html(
             "schema_version": 1,
             "context": raw_context_name,
             "anchor_repo": raw_anchor_repo,
-            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_number": raw_anchor_pr_number,
             "anchor_pr_url": raw_anchor_pr_url,
             "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
             "state": "resolving",
@@ -5551,7 +5583,7 @@ def _render_launchplane_preview_status_page_html(
             "schema_version": 1,
             "context": raw_context_name,
             "anchor_repo": raw_anchor_repo,
-            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_number": raw_anchor_pr_number,
             "anchor_pr_url": raw_anchor_pr_url,
             "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
             "generation_id": raw_latest_generation_id,
@@ -5581,7 +5613,7 @@ def _render_launchplane_preview_status_page_html(
             "schema_version": 1,
             "context": raw_context_name,
             "anchor_repo": raw_anchor_repo,
-            "anchor_pr_number": int(preview.get("anchor_pr_number", 0) or 0),
+            "anchor_pr_number": raw_anchor_pr_number,
             "anchor_pr_url": raw_anchor_pr_url,
             "anchor_head_sha": raw_anchor_head_sha or "<anchor-head-sha>",
             "generation_id": raw_latest_generation_id,
@@ -6077,7 +6109,10 @@ def _render_launchplane_preview_status_page_html(
 
 
 def _load_json_file(input_file: Path) -> dict[str, object]:
-    return json.loads(input_file.read_text(encoding="utf-8"))
+    payload = json.loads(input_file.read_text(encoding="utf-8"))
+    if not isinstance(payload, dict):
+        raise click.ClickException(f"{input_file} must contain a JSON object.")
+    return payload
 
 
 def _load_github_webhook_json_bytes(
@@ -6221,15 +6256,21 @@ def _inspect_local_launchplane_config_boundary(*, control_plane_root: Path) -> d
         control_plane_root / control_plane_dokploy.DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE
     )
 
-    runtime_environment_record_count = int(
-        managed_store_status.get("runtime_environment_record_count") or 0
+    runtime_environment_record_count = _int_from_json_value(
+        managed_store_status.get("runtime_environment_record_count")
     )
-    dokploy_target_record_count = int(managed_store_status.get("dokploy_target_record_count") or 0)
-    dokploy_target_id_record_count = int(
-        managed_store_status.get("dokploy_target_id_record_count") or 0
+    dokploy_target_record_count = _int_from_json_value(
+        managed_store_status.get("dokploy_target_record_count")
     )
-    release_tuple_record_count = int(managed_store_status.get("release_tuple_record_count") or 0)
-    authz_policy_record_count = int(managed_store_status.get("authz_policy_record_count") or 0)
+    dokploy_target_id_record_count = _int_from_json_value(
+        managed_store_status.get("dokploy_target_id_record_count")
+    )
+    release_tuple_record_count = _int_from_json_value(
+        managed_store_status.get("release_tuple_record_count")
+    )
+    authz_policy_record_count = _int_from_json_value(
+        managed_store_status.get("authz_policy_record_count")
+    )
     dokploy_host_managed = bool(managed_secret_bindings.get("DOKPLOY_HOST"))
     dokploy_token_managed = bool(managed_secret_bindings.get("DOKPLOY_TOKEN"))
     dokploy_managed_complete = dokploy_host_managed and dokploy_token_managed
@@ -6384,7 +6425,7 @@ def _build_launchplane_service_target_preflight(
     *,
     target_type: str,
     target_id: str,
-    target_payload: dict[str, object],
+    target_payload: Mapping[str, object],
 ) -> dict[str, object]:
     env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     source_type = str(target_payload.get("sourceType") or "").strip()
@@ -6405,6 +6446,15 @@ def _build_launchplane_service_target_preflight(
     managed_store_status = _launchplane_managed_store_status(database_url=database_url)
     managed_secret_bindings = managed_store_status.get("dokploy_secret_bindings", {})
     assert isinstance(managed_secret_bindings, dict)
+    authz_policy_record_count = _int_from_json_value(
+        managed_store_status.get("authz_policy_record_count")
+    )
+    dokploy_target_id_record_count = _int_from_json_value(
+        managed_store_status.get("dokploy_target_id_record_count")
+    )
+    runtime_environment_record_count = _int_from_json_value(
+        managed_store_status.get("runtime_environment_record_count")
+    )
 
     git_access_mode = ""
     if custom_git_url.startswith("git@"):
@@ -6436,29 +6486,14 @@ def _build_launchplane_service_target_preflight(
             env_map=env_map,
             env_keys=_LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS,
         ),
-        "authz_policy_record_count": int(
-            managed_store_status.get("authz_policy_record_count") or 0
-        ),
-        "authz_policy_db_configured": int(
-            managed_store_status.get("authz_policy_record_count") or 0
-        )
-        > 0,
+        "authz_policy_record_count": authz_policy_record_count,
+        "authz_policy_db_configured": authz_policy_record_count > 0,
         "target_ids_env_configured": False,
-        "target_ids_record_count": int(
-            managed_store_status.get("dokploy_target_id_record_count") or 0
-        ),
-        "target_ids_configured": int(
-            managed_store_status.get("dokploy_target_id_record_count") or 0
-        )
-        > 0,
+        "target_ids_record_count": dokploy_target_id_record_count,
+        "target_ids_configured": dokploy_target_id_record_count > 0,
         "runtime_environments_env_configured": False,
-        "runtime_environment_record_count": int(
-            managed_store_status.get("runtime_environment_record_count") or 0
-        ),
-        "runtime_environments_configured": int(
-            managed_store_status.get("runtime_environment_record_count") or 0
-        )
-        > 0,
+        "runtime_environment_record_count": runtime_environment_record_count,
+        "runtime_environments_configured": runtime_environment_record_count > 0,
         "docker_image_reference_present": _launchplane_service_env_key_present(
             env_map=env_map,
             env_key=ARTIFACT_IMAGE_REFERENCE_ENV_KEY,
@@ -6559,7 +6594,7 @@ def _inspect_launchplane_service_dokploy_target(
     token: str,
     target_type: str,
     target_id: str,
-) -> tuple[dict[str, object], dict[str, object]]:
+) -> tuple[control_plane_dokploy.JsonObject, dict[str, object]]:
     target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
         host=host,
         token=token,
@@ -6591,7 +6626,7 @@ def _apply_dokploy_image_reference(
     target_type: str,
     target_id: str,
     image_reference: str,
-    target_payload: dict[str, object] | None = None,
+    target_payload: control_plane_dokploy.JsonObject | None = None,
 ) -> dict[str, object]:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
@@ -7161,7 +7196,7 @@ def _read_odoo_instance_override_record_for_post_deploy(
 def _write_odoo_instance_override_apply_result(
     *,
     record: OdooInstanceOverrideRecord,
-    status: str,
+    status: Literal["skipped", "pending", "pass", "fail"],
     detail: str,
 ) -> None:
     database_url = resolve_database_url(None)
@@ -7374,7 +7409,7 @@ def _require_artifact_id(*, requested_artifact_id: str) -> str:
 
 def _read_artifact_manifest(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     artifact_id: str,
 ) -> ArtifactIdentityManifest:
     try:
@@ -7387,7 +7422,7 @@ def _read_artifact_manifest(
 
 def _read_backup_gate_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     record_id: str,
 ) -> BackupGateRecord:
     try:
@@ -7401,7 +7436,7 @@ def _read_backup_gate_record(
 def _resolve_backup_gate_for_promotion(
     *,
     request: PromotionRequest,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
 ) -> tuple[PromotionRequest, BackupGateRecord | None]:
     if not request.backup_gate.required:
         resolved_request = request.model_copy(
@@ -7473,7 +7508,7 @@ def _artifact_image_reference_from_manifest(manifest: ArtifactIdentityManifest) 
 
 def _artifact_target_runtime_contract_findings(
     *,
-    target_payload: dict[str, object],
+    target_payload: Mapping[str, object],
     env_map: dict[str, str],
 ) -> dict[str, object]:
     legacy_source_values = []
@@ -7526,7 +7561,7 @@ def _validate_artifact_target_runtime_contract(
     *,
     artifact_manifest: ArtifactIdentityManifest | None,
     resolved_target: ResolvedTargetEvidence,
-    target_payload: dict[str, object],
+    target_payload: Mapping[str, object],
     env_map: dict[str, str],
 ) -> None:
     if artifact_manifest is None:
@@ -7667,14 +7702,16 @@ def _sync_live_target_from_tracked_contract(
         "watch_paths": list(target_definition.watch_paths),
         "enable_submodules": target_definition.enable_submodules,
     }
+    raw_watch_paths = target_payload.get("watchPaths")
+    live_watch_paths = (
+        [str(item) for item in raw_watch_paths] if isinstance(raw_watch_paths, list) else []
+    )
     live_source_fields = {
         "source_type": str(target_payload.get("sourceType") or "").strip(),
         "custom_git_url": str(target_payload.get("customGitUrl") or "").strip(),
         "custom_git_branch": str(target_payload.get("customGitBranch") or "").strip(),
         "compose_path": str(target_payload.get("composePath") or "").strip(),
-        "watch_paths": list(target_payload.get("watchPaths"))
-        if isinstance(target_payload.get("watchPaths"), list)
-        else [],
+        "watch_paths": live_watch_paths,
         "enable_submodules": bool(target_payload.get("enableSubmodules"))
         if target_payload.get("enableSubmodules") is not None
         else None,
@@ -7808,7 +7845,7 @@ def _apply_live_target_runtime_environment(
     changed_keys = initial_delta["changed_keys"]
     changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
     deploy_result: dict[str, str] | None = None
-    verification = {
+    verification: dict[str, object] = {
         "status": "skipped",
         "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
     }
@@ -8005,11 +8042,11 @@ def _build_runtime_environment_sync_evidence(
 
 def _write_environment_inventory(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     deployment_record: DeploymentRecord,
     promotion_record_id: str = "",
     promoted_from_instance: str = "",
-) -> Path:
+) -> Path | None:
     inventory_record = build_environment_inventory(
         deployment_record=deployment_record,
         updated_at=utc_now_timestamp(),
@@ -8021,9 +8058,9 @@ def _write_environment_inventory(
 
 def _write_environment_inventory_from_promotion(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     promotion_record: PromotionRecord,
-) -> Path:
+) -> Path | None:
     deployment_record_id = promotion_record.deployment_record_id.strip()
     if not deployment_record_id:
         raise click.ClickException(
@@ -8062,7 +8099,7 @@ def _write_environment_inventory_from_promotion(
 
 def _write_release_tuple_from_deployment(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     deployment_record: DeploymentRecord,
     artifact_manifest: ArtifactIdentityManifest,
 ) -> Path | None:
@@ -8082,7 +8119,7 @@ def _write_release_tuple_from_deployment(
 
 def _read_source_release_tuple_for_promotion(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     request: PromotionRequest,
 ) -> ReleaseTupleRecord | None:
     if not control_plane_release_tuples.should_mint_release_tuple_for_channel(
@@ -8109,7 +8146,7 @@ def _read_source_release_tuple_for_promotion(
 
 def _read_source_release_tuple_for_promotion_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     promotion_record: PromotionRecord,
 ) -> ReleaseTupleRecord:
     artifact_id = _artifact_id_or_empty(promotion_record.artifact_identity)
@@ -8137,7 +8174,7 @@ def _read_source_release_tuple_for_promotion_record(
 
 def _write_promoted_release_tuple(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     source_tuple: ReleaseTupleRecord | None,
     deployment_record: DeploymentRecord,
     promotion_record: PromotionRecord,
@@ -8240,7 +8277,7 @@ def _summarize_environment_inventory(record: EnvironmentInventory) -> dict[str, 
 
 def _build_environment_status_payload(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     context_name: str,
     instance_name: str,
 ) -> dict[str, object]:
@@ -8307,7 +8344,7 @@ def _build_environment_status_payload(
 
 def _build_environment_overview_payloads(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: FilesystemRecordStore | PostgresRecordStore,
     context_name: str,
 ) -> list[dict[str, object]]:
     inventory_records = sorted(
@@ -8396,25 +8433,25 @@ def _validate_runtime_environment_scope_route(
     scope: str,
     context_name: str,
     instance_name: str,
-) -> None:
+) -> RuntimeEnvironmentScope:
     if scope == "global":
         if context_name or instance_name:
             raise click.ClickException(
                 "Global runtime environment records do not accept --context or --instance."
             )
-        return
+        return "global"
     if scope == "context":
         if not context_name or instance_name:
             raise click.ClickException(
                 "Context runtime environment records require --context and do not accept --instance."
             )
-        return
+        return "context"
     if scope == "instance":
         if not context_name or not instance_name:
             raise click.ClickException(
                 "Instance runtime environment records require --context and --instance."
             )
-        return
+        return "instance"
     raise click.ClickException(f"Unsupported runtime environment scope: {scope}")
 
 
@@ -8441,17 +8478,17 @@ def _build_runtime_environment_record_for_put(
     assignments: tuple[str, ...],
     source_label: str,
 ) -> RuntimeEnvironmentRecord:
-    _validate_runtime_environment_scope_route(
+    normalized_scope = _validate_runtime_environment_scope_route(
         scope=scope,
         context_name=context_name,
         instance_name=instance_name,
     )
 
-    env_values: dict[str, object] = {}
+    env_values: dict[str, ScalarValue] = {}
     for record in existing_records:
         if _runtime_environment_record_matches(
             record,
-            scope=scope,
+            scope=normalized_scope,
             context_name=context_name,
             instance_name=instance_name,
         ):
@@ -8462,7 +8499,7 @@ def _build_runtime_environment_record_for_put(
         env_values[key_name] = value
 
     return RuntimeEnvironmentRecord(
-        scope=scope,
+        scope=normalized_scope,
         context=context_name,
         instance=instance_name,
         env=env_values,
@@ -8505,14 +8542,14 @@ def _build_runtime_environment_record_for_unset(
     keys: tuple[str, ...],
     source_label: str,
 ) -> tuple[RuntimeEnvironmentRecord, tuple[str, ...], tuple[str, ...]]:
-    _validate_runtime_environment_scope_route(
+    normalized_scope = _validate_runtime_environment_scope_route(
         scope=scope,
         context_name=context_name,
         instance_name=instance_name,
     )
     target_record = _find_runtime_environment_record(
         existing_records=existing_records,
-        scope=scope,
+        scope=normalized_scope,
         context_name=context_name,
         instance_name=instance_name,
     )
@@ -8556,14 +8593,14 @@ def _build_runtime_environment_record_for_relabel(
     instance_name: str,
     source_label: str,
 ) -> RuntimeEnvironmentRecord:
-    _validate_runtime_environment_scope_route(
+    normalized_scope = _validate_runtime_environment_scope_route(
         scope=scope,
         context_name=context_name,
         instance_name=instance_name,
     )
     target_record = _find_runtime_environment_record(
         existing_records=existing_records,
-        scope=scope,
+        scope=normalized_scope,
         context_name=context_name,
         instance_name=instance_name,
     )
@@ -9102,19 +9139,19 @@ def _migrate_odoo_override_secret_transport_record(
             )
         )
 
-    for override in record.addon_settings:
-        value = override.value
+    for addon_override in record.addon_settings:
+        value = addon_override.value
         if value.source != "secret_binding":
-            addon_settings.append(override)
+            addon_settings.append(addon_override)
             continue
         desired_binding_key = control_plane_odoo_instance_overrides.addon_setting_secret_env_key(
-            addon_name=override.addon, setting_name=override.setting
+            addon_name=addon_override.addon, setting_name=addon_override.setting
         )
         binding = binding_by_id.get(value.secret_binding_id)
         if binding is None:
             raise click.ClickException(
                 f"Odoo override {record.context}/{record.instance} addon setting "
-                f"{override.addon}.{override.setting} references missing secret binding "
+                f"{addon_override.addon}.{addon_override.setting} references missing secret binding "
                 f"{value.secret_binding_id!r}."
             )
         desired_binding_id = control_plane_secrets.expected_secret_binding_id(
@@ -9134,7 +9171,7 @@ def _migrate_odoo_override_secret_transport_record(
         changes.append(
             {
                 "kind": "addon_setting",
-                "key": f"{override.addon}.{override.setting}",
+                "key": f"{addon_override.addon}.{addon_override.setting}",
                 "action": action,
                 "old_binding_id": value.secret_binding_id,
                 "new_binding_id": desired_binding_id,
@@ -9144,8 +9181,8 @@ def _migrate_odoo_override_secret_transport_record(
         )
         addon_settings.append(
             OdooAddonSettingOverride(
-                addon=override.addon,
-                setting=override.setting,
+                addon=addon_override.addon,
+                setting=addon_override.setting,
                 value=OdooOverrideValue(
                     source="secret_binding", secret_binding_id=desired_binding_id
                 ),
@@ -9195,7 +9232,7 @@ def _build_odoo_instance_override_record_with_apply_result(
         raise click.ClickException(
             "Missing DB-backed Odoo instance override record for the requested instance."
         )
-    normalized_status = status.strip().lower()
+    normalized_status = _normalize_odoo_apply_status(status)
     attempted = normalized_status in {"pending", "pass", "fail"}
     return target_record.model_copy(
         update={
@@ -9360,7 +9397,7 @@ def secrets_put(
     try:
         result = control_plane_secrets.write_secret_value(
             record_store=postgres_store,
-            scope=scope,
+            scope=_normalize_secret_scope(scope),
             integration=integration,
             name=name,
             plaintext_value=value,
@@ -9744,7 +9781,7 @@ def _first_driver_payload(view_payload: object, *, driver_id: str) -> dict[str, 
         return None
     for driver_view in view_payload.drivers:
         if getattr(driver_view, "driver_id", "") == driver_id:
-            return driver_view.model_dump(mode="json")
+            return _json_object(driver_view.model_dump(mode="json"))
     return None
 
 
@@ -10049,7 +10086,7 @@ def odoo_rollbacks_execute(
         request=OdooProdRollbackRequest(
             context=context,
             instance=instance,
-            source_channel=source_channel,
+            source_channel=_normalize_odoo_prod_rollback_source_channel(source_channel),
             promotion_record_id=promotion_record_id,
             artifact_id=artifact_id,
             reason=reason,
@@ -11068,7 +11105,7 @@ def launchplane_previews_replay_github_webhook(
         apply_intent=apply_intent,
         deliver_feedback=deliver_feedback,
     )
-    payload["webhook_replay"] = {
+    webhook_replay_payload: dict[str, object] = {
         "adapter": envelope.adapter,
         "event_name": resolved_event_name,
         "delivery_id": resolved_delivery_id,
@@ -11076,7 +11113,8 @@ def launchplane_previews_replay_github_webhook(
     }
     replay_capture_payload = envelope.replay_capture_payload()
     if replay_capture_payload is not None:
-        payload["webhook_replay"]["capture"] = replay_capture_payload
+        webhook_replay_payload["capture"] = replay_capture_payload
+    payload["webhook_replay"] = webhook_replay_payload
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
@@ -11134,6 +11172,7 @@ def _ingest_launchplane_pr_event_payload(
         )
         request_metadata_payload = payload.get("request_metadata")
         action = decision_payload.get("action", "") if isinstance(decision_payload, dict) else ""
+        apply_result = _json_object(payload.get("apply"))
         payload["feedback"] = build_pull_request_feedback_payload(
             record_store=record_store,
             event=event,
@@ -11147,7 +11186,7 @@ def _ingest_launchplane_pr_event_payload(
                 if isinstance(payload.get("manifest"), dict)
                 else None
             ),
-            apply_result=payload["apply"],
+            apply_result=apply_result,
         )
     if deliver_feedback:
         resolved_context = (
@@ -11489,7 +11528,7 @@ def _read_launchplane_preview_or_fail(
     context_name: str,
     anchor_repo: str,
     anchor_pr_number: int,
-):
+) -> PreviewRecord:
     preview_record = find_preview_record(
         record_store=record_store,
         context_name=context_name,
@@ -11508,7 +11547,7 @@ def _read_launchplane_generation_or_fail(
     record_store: FilesystemRecordStore,
     preview_id: str,
     generation_id: str,
-):
+) -> PreviewGenerationRecord:
     generations = record_store.list_preview_generation_records(preview_id=preview_id)
     for generation_record in generations:
         if generation_record.generation_id == generation_id:
@@ -11777,7 +11816,7 @@ def environments_delete_record(
         raise click.ClickException("Choose exactly one of --dry-run or --apply.")
     normalized_context = context_name.strip()
     normalized_instance = instance_name.strip()
-    _validate_runtime_environment_scope_route(
+    normalized_scope = _validate_runtime_environment_scope_route(
         scope=scope,
         context_name=normalized_context,
         instance_name=normalized_instance,
@@ -11788,7 +11827,7 @@ def environments_delete_record(
     try:
         target_record = _find_runtime_environment_record(
             existing_records=postgres_store.list_runtime_environment_records(),
-            scope=scope,
+            scope=normalized_scope,
             context_name=normalized_context,
             instance_name=normalized_instance,
         )
@@ -11797,7 +11836,7 @@ def environments_delete_record(
                 "Missing DB-backed runtime environment record for the requested scope."
             )
         protected_targets = _protected_runtime_environment_delete_targets(
-            scope=scope,
+            scope=normalized_scope,
             context_name=normalized_context,
             instance_name=normalized_instance,
             target_records=postgres_store.list_dokploy_target_records(),
@@ -12930,7 +12969,7 @@ def promote_record(
         from_instance_name=from_instance_name,
         to_instance_name=to_instance_name,
         target_name=target_name,
-        target_type=target_type,
+        target_type=_normalize_dokploy_target_type(target_type),
         deploy_mode=deploy_mode,
         deployment_id=deployment_id,
     )
