@@ -1095,6 +1095,24 @@ _VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+_HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
+    {
+        _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
+        _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+    }
+)
+_NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
+    {
+        _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
+        _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
+        _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
+    }
+)
+_PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES = frozenset(
+    {_VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path}
+)
+
+
 class LaunchplaneSelfDeployRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2869,10 +2887,7 @@ def create_launchplane_service_app(
                     session_manager=session_manager,
                 )
             else:
-                if path in {
-                    "/v1/drivers/generic-web/prod-promotion",
-                    "/v1/drivers/generic-web/prod-promotion-workflow",
-                }:
+                if path in _HUMAN_IDENTITY_MUTATION_ROUTES:
                     identity = _read_identity(
                         environ=environ,
                         verifier=verifier,
@@ -5528,13 +5543,9 @@ def create_launchplane_service_app(
             driver_result=driver_result,
         )
         should_store_idempotency = True
-        if path in {
-            "/v1/drivers/verireel/stable-environment",
-            "/v1/drivers/verireel/runtime-verification",
-            "/v1/drivers/verireel/preview-inventory",
-        }:
+        if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
             should_store_idempotency = False
-        if path == "/v1/drivers/verireel/prod-backup-gate":
+        if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
             driver_result_status = ""
             if isinstance(driver_result, dict):
                 driver_result_status = str(driver_result.get("backup_status") or "")
