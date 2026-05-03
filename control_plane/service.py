@@ -392,6 +392,26 @@ class GenericWebPreviewInventoryEnvelope(BaseModel):
         return self
 
 
+_GENERIC_WEB_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/preview-refresh",
+    envelope_model=GenericWebPreviewRefreshEnvelope,
+    denial_message=(
+        "Workflow cannot refresh generic web preview state"
+        " for the requested product/context."
+    ),
+)
+
+
+_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/generic-web/preview-inventory",
+    envelope_model=GenericWebPreviewInventoryEnvelope,
+    denial_message=(
+        "Workflow cannot read generic web preview inventory"
+        " for the requested product/context."
+    ),
+)
+
+
 class GenericWebPreviewReadinessEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -3840,8 +3860,13 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
-            elif path == "/v1/drivers/generic-web/preview-inventory":
-                request = GenericWebPreviewInventoryEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path:
+                request = cast(
+                    GenericWebPreviewInventoryEnvelope,
+                    _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(
+                        payload
+                    ),
+                )
                 profile = resolve_generic_web_preview_profile(
                     record_store=record_store,
                     product=request.product,
@@ -3852,10 +3877,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                    denial_message=(
-                        "Workflow cannot read generic web preview inventory"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
@@ -3874,8 +3896,11 @@ def create_launchplane_service_app(
                     preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
-            elif path == "/v1/drivers/generic-web/preview-refresh":
-                request = GenericWebPreviewRefreshEnvelope.model_validate(payload)
+            elif path == _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path:
+                request = cast(
+                    GenericWebPreviewRefreshEnvelope,
+                    _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload),
+                )
                 profile = resolve_generic_web_preview_profile(
                     record_store=record_store,
                     product=request.product,
@@ -3886,10 +3911,7 @@ def create_launchplane_service_app(
                     route_path=path,
                     product=profile.product,
                     context=profile.preview.context,
-                    denial_message=(
-                        "Workflow cannot refresh generic web preview state"
-                        " for the requested product/context."
-                    ),
+                    denial_message=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.denial_message,
                     start_response=start_response,
                     trace_id=request_trace_id,
                 )
