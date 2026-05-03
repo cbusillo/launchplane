@@ -57,8 +57,8 @@ class VeriReelProdPromotionRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelProdPromotionRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel prod promotion requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel prod promotion requires context.")
         if self.from_instance != "testing":
             raise ValueError("VeriReel prod promotion requires from_instance 'testing'.")
         if self.to_instance != "prod":
@@ -373,14 +373,20 @@ def _resolve_application_id(
         context_name=request.context,
         instance_name=request.to_instance,
     )
-    if target_definition is None or target_definition.target_type != "application" or not target_definition.target_id.strip():
+    if (
+        target_definition is None
+        or target_definition.target_type != "application"
+        or not target_definition.target_id.strip()
+    ):
         raise click.ClickException(
             f"VeriReel prod promotion post-deploy update requires an application target for {request.context}/{request.to_instance}."
         )
     return target_definition.target_id.strip()
 
 
-def _find_application_schedule(*, host: str, token: str, application_id: str, schedule_name: str) -> dict[str, object] | None:
+def _find_application_schedule(
+    *, host: str, token: str, application_id: str, schedule_name: str
+) -> dict[str, object] | None:
     for schedule in control_plane_dokploy.list_dokploy_schedules(
         host=host,
         token=token,
@@ -430,7 +436,10 @@ def _upsert_application_schedule(
             token=token,
             path="/api/schedule.update",
             method="POST",
-            payload={"scheduleId": control_plane_dokploy.schedule_key(existing_schedule), **payload},
+            payload={
+                "scheduleId": control_plane_dokploy.schedule_key(existing_schedule),
+                **payload,
+            },
         )
     resolved_schedule = _find_application_schedule(
         host=host,
@@ -614,7 +623,9 @@ def execute_verireel_prod_promotion(
         )
 
     if deployment_result.rollout_status != "pass":
-        error_message = deployment_result.error_message or "VeriReel prod rollout verification failed."
+        error_message = (
+            deployment_result.error_message or "VeriReel prod rollout verification failed."
+        )
         failed_rollout_result = VeriReelRolloutVerificationResult(
             status="fail",
             base_url=deployment_result.rollout_base_url,

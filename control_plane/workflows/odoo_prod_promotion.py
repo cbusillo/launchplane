@@ -12,8 +12,6 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 
-SUPPORTED_ODOO_CONTEXTS = {"cm", "opw"}
-
 
 class OdooProdPromotionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -39,11 +37,8 @@ class OdooProdPromotionRequest(BaseModel):
         self.artifact_id = self.artifact_id.strip()
         self.backup_record_id = self.backup_record_id.strip()
         self.source_git_ref = self.source_git_ref.strip()
-        if self.context not in SUPPORTED_ODOO_CONTEXTS:
-            supported = ", ".join(sorted(SUPPORTED_ODOO_CONTEXTS))
-            raise ValueError(
-                f"Odoo prod promotion supports contexts {supported}; got {self.context!r}."
-            )
+        if not self.context:
+            raise ValueError("Odoo prod promotion requires context.")
         if self.from_instance != "testing" or self.to_instance != "prod":
             raise ValueError("Odoo prod promotion requires testing -> prod.")
         if not self.artifact_id:
