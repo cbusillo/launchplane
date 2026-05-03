@@ -127,6 +127,14 @@ generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
 declared directly on the product driver.
 
+Driver action routes are owned by the base driver contract. The service accepts
+any product key on Odoo and VeriReel action envelopes, then authorizes the call
+against that product and verifies the product profile's `driver_id` or driver
+descriptor `base_driver_id` matches the requested base driver before dispatching
+the workflow. This keeps product repos on stable Launchplane routes while
+allowing new Odoo- or VeriReel-shaped products to be added by product profile and
+authz records instead of code forks.
+
 Odoo exposes:
 
 - artifact publish handoff
