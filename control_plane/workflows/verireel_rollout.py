@@ -33,8 +33,8 @@ class VeriReelRolloutVerificationRequest(BaseModel):
 
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelRolloutVerificationRequest":
-        if self.context != "verireel":
-            raise ValueError("VeriReel rollout verification requires context 'verireel'.")
+        if not self.context.strip():
+            raise ValueError("VeriReel rollout verification requires context.")
         if self.instance not in {"testing", "prod"}:
             raise ValueError("VeriReel rollout verification requires instance 'testing' or 'prod'.")
         return self
@@ -131,7 +131,9 @@ def assert_verireel_rollout_pages(
                 accept="text/html,application/json",
             )
         except (HTTPError, URLError, TimeoutError, ValueError) as exc:
-            raise click.ClickException(f"{error_prefix} page verification failed for {page_url}: {exc}") from exc
+            raise click.ClickException(
+                f"{error_prefix} page verification failed for {page_url}: {exc}"
+            ) from exc
         if status_code < 200 or status_code >= 300:
             raise click.ClickException(
                 f"{error_prefix} page verification expected {page_url} to return 2xx, received {status_code}."
