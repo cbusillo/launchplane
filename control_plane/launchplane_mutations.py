@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Protocol
 
 import click
 
@@ -7,9 +8,10 @@ from control_plane.contracts.preview_mutation_request import (
     PreviewGenerationMutationRequest,
     PreviewMutationRequest,
 )
+from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
 from control_plane.contracts.preview_record import PreviewRecord
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.launchplane import (
+    PreviewMutationRecordStore,
     apply_generation_failed_transition,
     apply_generation_ready_transition,
     apply_generation_requested_transition,
@@ -20,6 +22,12 @@ from control_plane.workflows.launchplane import (
 )
 
 
+class LaunchplaneMutationStore(PreviewMutationRecordStore, Protocol):
+    def write_preview_record(self, record: PreviewRecord) -> object: ...
+
+    def write_preview_generation_record(self, record: PreviewGenerationRecord) -> object: ...
+
+
 def control_plane_root() -> Path:
     return Path(__file__).resolve().parent.parent
 
@@ -27,7 +35,7 @@ def control_plane_root() -> Path:
 def upsert_launchplane_preview_from_request(
     *,
     control_plane_root_path: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplaneMutationStore,
     request: PreviewMutationRequest,
 ) -> PreviewRecord:
     existing_preview = find_preview_record(
@@ -45,9 +53,11 @@ def upsert_launchplane_preview_from_request(
         existing_preview.model_copy(
             update={
                 "anchor_pr_url": normalized_request.anchor_pr_url,
-                "canonical_url": normalized_request.canonical_url.strip() or existing_preview.canonical_url,
+                "canonical_url": normalized_request.canonical_url.strip()
+                or existing_preview.canonical_url,
                 "updated_at": normalized_request.updated_at.strip() or existing_preview.updated_at,
-                "eligible_at": normalized_request.eligible_at.strip() or existing_preview.eligible_at,
+                "eligible_at": normalized_request.eligible_at.strip()
+                or existing_preview.eligible_at,
                 "paused_at": normalized_request.paused_at or existing_preview.paused_at,
                 "destroy_after": normalized_request.destroy_after or existing_preview.destroy_after,
             }
@@ -66,7 +76,7 @@ def upsert_launchplane_preview_from_request(
 def apply_launchplane_generation_evidence(
     *,
     control_plane_root_path: Path,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplaneMutationStore,
     preview_request: PreviewMutationRequest,
     generation_request: PreviewGenerationMutationRequest,
 ) -> dict[str, object]:
@@ -107,7 +117,7 @@ def apply_launchplane_generation_evidence(
 
 def apply_launchplane_destroy_preview(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: LaunchplaneMutationStore,
     request: PreviewDestroyMutationRequest,
 ) -> dict[str, object]:
     preview_record = find_preview_record(
