@@ -12,6 +12,10 @@ from pydantic import ValidationError
 from control_plane.cli import main
 from control_plane.cli import _run_compose_post_deploy_update
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
+from control_plane.contracts.dokploy_target_record import (
+    DokployTargetPolicies,
+    DokployTargetShopifyPolicy,
+)
 from control_plane.contracts.odoo_instance_override_record import (
     OdooAddonSettingOverride,
     OdooConfigParameterOverride,
@@ -229,6 +233,14 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(stored_record.last_apply.applied_at, "2026-04-23T12:00:00Z")
 
     def test_post_deploy_update_renders_literal_odoo_overrides_and_marks_pass(self) -> None:
+        def capture_post_deploy_update(**kwargs: object) -> None:
+            workflow_environment_overrides = kwargs["workflow_environment_overrides"]
+            protected_shopify_store_keys = kwargs["protected_shopify_store_keys"]
+            assert isinstance(workflow_environment_overrides, dict)
+            assert isinstance(protected_shopify_store_keys, tuple)
+            captured_workflow_environment.update(workflow_environment_overrides)
+            captured_protected_shopify_store_keys.extend(protected_shopify_store_keys)
+
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
                 Path(temporary_directory_name) / "launchplane.sqlite3"
@@ -259,11 +271,11 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                         target_type="compose",
                         target_name="opw-prod",
                         target_id="compose-123",
-                        policies={
-                            "shopify": {
-                                "protected_store_keys": ["yps-your-part-supplier"],
-                            }
-                        },
+                        policies=DokployTargetPolicies(
+                            shopify=DokployTargetShopifyPolicy(
+                                protected_store_keys=("yps-your-part-supplier",)
+                            )
+                        ),
                     ),
                 ),
             )
@@ -282,14 +294,7 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 ),
                 patch(
                     "control_plane.dokploy.run_compose_post_deploy_update",
-                    side_effect=lambda **kwargs: (
-                        captured_workflow_environment.update(
-                            kwargs["workflow_environment_overrides"]
-                        ),
-                        captured_protected_shopify_store_keys.extend(
-                            kwargs["protected_shopify_store_keys"]
-                        ),
-                    ),
+                    side_effect=capture_post_deploy_update,
                 ),
             ):
                 _run_compose_post_deploy_update(env_file=None, request=_ship_request())

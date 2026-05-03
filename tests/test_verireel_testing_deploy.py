@@ -144,7 +144,10 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(result.error_message, "deploy failed")
             deployment = store.read_deployment_record("deployment-verireel-testing-run-12345-attempt-1")
             self.assertEqual(deployment.deploy.status, "fail")
-            self.assertEqual(deployment.resolved_target.target_id, "testing-app-123")
+            resolved_target = deployment.resolved_target
+            self.assertIsNotNone(resolved_target)
+            assert resolved_target is not None
+            self.assertEqual(resolved_target.target_id, "testing-app-123")
 
     def test_execute_dokploy_deploy_updates_application_image_before_triggering_deploy(self) -> None:
         captured_dokploy_requests: list[dict[str, object]] = []
