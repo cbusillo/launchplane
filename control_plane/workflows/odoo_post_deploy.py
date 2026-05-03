@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -14,8 +14,15 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooOverrideApplyResult,
     OdooOverrideApplyStatus,
 )
-from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
+
+
+class OdooPostDeployStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
 
 
 class OdooPostDeployRequest(BaseModel):
@@ -54,7 +61,7 @@ class OdooPostDeployResult(BaseModel):
 
 def _read_odoo_instance_override_record(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooPostDeployStore,
     context_name: str,
     instance_name: str,
 ) -> OdooInstanceOverrideRecord | None:
@@ -69,7 +76,7 @@ def _read_odoo_instance_override_record(
 
 def _write_odoo_instance_override_apply_result(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooPostDeployStore,
     record: OdooInstanceOverrideRecord,
     status: OdooOverrideApplyStatus,
     detail: str,
@@ -90,6 +97,24 @@ def _write_odoo_instance_override_apply_result(
     )
     record_store.write_odoo_instance_override_record(updated_record)
     return updated_record
+
+
+def _require_record_store(record_store: object) -> OdooPostDeployStore:
+    required_methods = (
+        "read_odoo_instance_override_record",
+        "write_odoo_instance_override_record",
+    )
+    missing_methods = tuple(
+        method_name
+        for method_name in required_methods
+        if not callable(getattr(record_store, method_name, None))
+    )
+    if missing_methods:
+        raise click.ClickException(
+            "Odoo post-deploy requires a Launchplane record store with override support. "
+            f"Missing methods: {', '.join(missing_methods)}."
+        )
+    return cast(OdooPostDeployStore, record_store)
 
 
 def _resolve_compose_target_definition(
@@ -120,12 +145,13 @@ def _resolve_compose_target_definition(
 def execute_odoo_post_deploy(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: object,
     request: OdooPostDeployRequest,
     env_file: Path | None = None,
 ) -> OdooPostDeployResult:
+    typed_record_store = _require_record_store(record_store)
     odoo_override_record = _read_odoo_instance_override_record(
-        record_store=record_store,
+        record_store=typed_record_store,
         context_name=request.context,
         instance_name=request.instance,
     )
@@ -158,7 +184,7 @@ def execute_odoo_post_deploy(
             )
         except click.ClickException as error:
             _write_odoo_instance_override_apply_result(
-                record_store=record_store,
+                record_store=typed_record_store,
                 record=odoo_override_record,
                 status="fail",
                 detail=str(error),
@@ -190,7 +216,7 @@ def execute_odoo_post_deploy(
     except click.ClickException as error:
         if odoo_override_record is not None and override_phase_enabled:
             _write_odoo_instance_override_apply_result(
-                record_store=record_store,
+                record_store=typed_record_store,
                 record=odoo_override_record,
                 status="fail",
                 detail=str(error),
@@ -225,7 +251,7 @@ def execute_odoo_post_deploy(
         else:
             detail = f"Odoo instance override record is not configured for phase {request.phase}."
         updated_record = _write_odoo_instance_override_apply_result(
-            record_store=record_store,
+            record_store=typed_record_store,
             record=odoo_override_record,
             status=override_status,
             detail=detail,

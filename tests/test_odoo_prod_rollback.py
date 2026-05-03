@@ -4,6 +4,7 @@ from unittest.mock import Mock, patch
 
 import click
 from click.testing import CliRunner
+from pydantic import ValidationError
 
 from control_plane.cli import main
 from control_plane.contracts.artifact_identity import (
@@ -145,6 +146,15 @@ def _target_id_record() -> DokployTargetIdRecord:
 
 
 class OdooProdRollbackWorkflowTests(unittest.TestCase):
+    def test_rollback_request_accepts_profile_owned_context(self) -> None:
+        request = OdooProdRollbackRequest(context=" New-Site ")
+
+        self.assertEqual(request.context, "new-site")
+
+    def test_rollback_request_rejects_blank_context(self) -> None:
+        with self.assertRaises(ValidationError):
+            OdooProdRollbackRequest(context=" ")
+
     def _record_store(self) -> Mock:
         record_store = Mock()
         record_store.read_release_tuple_record.return_value = _release_tuple()

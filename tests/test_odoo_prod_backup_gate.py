@@ -3,6 +3,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import click
+from pydantic import ValidationError
 
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
@@ -46,6 +47,21 @@ def _runtime_values() -> dict[str, str]:
 
 
 class OdooProdBackupGateWorkflowTests(unittest.TestCase):
+    def test_backup_gate_request_accepts_profile_owned_context(self) -> None:
+        request = OdooProdBackupGateRequest(
+            context=" New-Site ",
+            backup_record_id="backup-gate-new-site-prod-1",
+        )
+
+        self.assertEqual(request.context, "new-site")
+
+    def test_backup_gate_request_rejects_blank_context(self) -> None:
+        with self.assertRaises(ValidationError):
+            OdooProdBackupGateRequest(
+                context=" ",
+                backup_record_id="backup-gate-new-site-prod-1",
+            )
+
     def _record_store(self) -> Mock:
         record_store = Mock()
         record_store.read_dokploy_target_record.return_value = _target_record()
