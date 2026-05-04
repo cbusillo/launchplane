@@ -3675,6 +3675,169 @@ class LaunchplaneServiceTests(unittest.TestCase):
         _, kwargs = refresh.call_args
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
 
+    def test_generic_web_preview_refresh_retry_runs_again_after_failed_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "refresh": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.example.test",
+                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                side_effect=[
+                    {
+                        "refresh_status": "fail",
+                        "application_id": "app-preview",
+                        "error_message": "provider unavailable",
+                    },
+                    {"refresh_status": "pass", "application_id": "app-preview"},
+                ],
+            ) as refresh:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(first_payload["result"]["refresh_status"], "fail")
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(second_payload["result"]["refresh_status"], "pass")
+        self.assertNotIn("replayed", second_payload)
+        self.assertEqual(refresh.call_count, 2)
+
+    def test_generic_web_preview_refresh_rejects_reused_key_for_changed_artifact(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            first_request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "refresh": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.example.test",
+                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha-a",
+                },
+            }
+            second_request_payload = json.loads(json.dumps(first_request_payload))
+            second_request_payload["refresh"]["image_reference"] = (
+                "ghcr.io/cbusillo/sellyouroutboard:sha-b"
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={"refresh_status": "pass", "application_id": "app-preview"},
+            ) as refresh:
+                first_status_code, _ = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=first_request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha-a"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=second_request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha-a"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 409)
+        self.assertEqual(second_payload["error"]["code"], "idempotency_key_reused")
+        refresh.assert_called_once()
+
     def test_generic_web_preview_readiness_route_returns_driver_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -3819,6 +3982,91 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
         self.assertEqual(kwargs["profile"].preview.context, "sellyouroutboard-testing")
         self.assertEqual(kwargs["request"].preview_slug, "pr-42")
+
+    def test_generic_web_preview_destroy_replays_when_only_reason_changes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_destroy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            first_request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "destroy": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "preview_slug": "pr-42",
+                    "destroy_reason": "external_preview_pull_request_closed",
+                },
+            }
+            second_request_payload = json.loads(json.dumps(first_request_payload))
+            second_request_payload["destroy"]["destroy_reason"] = "janitor_backstop"
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_destroy",
+                return_value=GenericWebPreviewDestroyResult(
+                    destroy_status="pass",
+                    destroy_started_at="2026-05-03T16:00:00Z",
+                    destroy_finished_at="2026-05-03T16:00:02Z",
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-testing",
+                    preview_slug="pr-42",
+                    application_name="sellyouroutboard-pr-42",
+                    application_id="app-preview",
+                ),
+            ) as destroy:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-destroy",
+                    payload=first_request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-destroy:syo:42"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-destroy",
+                    payload=second_request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-destroy:syo:42"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(first_payload["result"], second_payload["result"])
+        self.assertTrue(second_payload["replayed"])
+        destroy.assert_called_once()
 
     def test_driver_context_view_endpoint_returns_lane_summary(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
