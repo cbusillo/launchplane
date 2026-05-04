@@ -571,6 +571,7 @@ def _read_template_payload(
 ) -> tuple[control_plane_dokploy.DokployTargetDefinition | None, JsonObject | None, str]:
     source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
         control_plane_root=control_plane_root,
+        allow_incomplete_target_ids=True,
     )
     target_definition = control_plane_dokploy.find_dokploy_target_definition(
         source_of_truth,

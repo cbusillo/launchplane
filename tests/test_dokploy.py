@@ -1324,6 +1324,57 @@ target_type = "compose"
             "Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception)
         )
 
+    def test_read_control_plane_dokploy_source_of_truth_can_ignore_incomplete_unrelated_targets(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="sellyouroutboard",
+                    instance="testing",
+                    target_type="application",
+                    target_name="syo-testing",
+                    updated_at="2026-05-04T19:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="discord-blue",
+                    instance="prod",
+                    target_type="application",
+                    target_name="discord-blue",
+                    updated_at="2026-05-04T19:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_id_record(
+                DokployTargetIdRecord(
+                    context="sellyouroutboard",
+                    instance="testing",
+                    target_id="app-syo-testing",
+                    updated_at="2026-05-04T19:00:00Z",
+                    source_label="test",
+                )
+            )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                    control_plane_root=control_plane_root,
+                    allow_incomplete_target_ids=True,
+                )
+
+            store.close()
+
+        self.assertEqual(
+            [(target.context, target.instance, target.target_id) for target in source_of_truth.targets],
+            [("sellyouroutboard", "testing", "app-syo-testing")],
+        )
+
     def test_read_control_plane_dokploy_source_of_truth_reads_database_target_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -1410,6 +1461,24 @@ protected_store_keys = ["yps-your-part-supplier"]
         self.assertIn(
             "Missing DB-backed Dokploy target-id record for opw/prod", str(raised_error.exception)
         )
+
+        source_of_truth = control_plane_dokploy.build_dokploy_source_of_truth_from_records(
+            (
+                control_plane_dokploy.build_dokploy_target_record_from_definition(
+                    control_plane_dokploy.DokployTargetDefinition(
+                        context="opw",
+                        instance="prod",
+                        target_id="compose-placeholder",
+                        target_type="compose",
+                    ),
+                    updated_at="2026-04-22T00:00:00Z",
+                    source_label="test",
+                ),
+            ),
+            (),
+            allow_incomplete_target_ids=True,
+        )
+        self.assertEqual(source_of_truth.targets, ())
 
     def test_read_control_plane_dokploy_source_of_truth_rejects_duplicate_context_instance_targets(
         self,
