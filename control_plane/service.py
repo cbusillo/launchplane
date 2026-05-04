@@ -2034,6 +2034,9 @@ def _authz_diagnostic_payload(
     identity: LaunchplaneIdentity,
     authz_policy_sha256_value: str,
     authz_policy_source: str,
+    action: str = "",
+    product: str = "",
+    context: str = "",
 ) -> dict[str, object]:
     if isinstance(identity, GitHubHumanIdentity):
         identity_payload: dict[str, object] = {
@@ -2053,11 +2056,18 @@ def _authz_diagnostic_payload(
             "environment": identity.environment,
             "subject": identity.subject,
         }
-    return {
+    payload: dict[str, object] = {
         "identity": identity_payload,
         "policy_source": authz_policy_source,
         "policy_sha256": authz_policy_sha256_value,
     }
+    if action or product or context:
+        payload["request"] = {
+            "action": action,
+            "product": product,
+            "context": context,
+        }
+    return payload
 
 
 def _product_profile_context_cutover_allowed_contexts(
@@ -4149,9 +4159,7 @@ def create_launchplane_service_app(
                     "product_profile": onboarding_result.product_profile.product,
                     "dokploy_target_count": len(onboarding_result.dokploy_targets),
                     "dokploy_target_id_count": len(onboarding_result.dokploy_target_ids),
-                    "runtime_environment_record_count": len(
-                        onboarding_result.runtime_environments
-                    ),
+                    "runtime_environment_record_count": len(onboarding_result.runtime_environments),
                     "secret_binding_count": len(onboarding_result.secret_bindings),
                 }
                 driver_result = {
@@ -5673,6 +5681,7 @@ def create_launchplane_service_app(
                     context=preview_pr_feedback_request.context,
                     status=preview_pr_feedback_request.status,
                 ):
+                    feedback_authz_action = "preview_pr_feedback.write"
                     return _json_response(
                         start_response=start_response,
                         status_code=403,
@@ -5686,6 +5695,14 @@ def create_launchplane_service_app(
                                     " product/context."
                                 ),
                             },
+                            "authz": _authz_diagnostic_payload(
+                                identity=identity,
+                                authz_policy_sha256_value=resolved_authz_policy_sha256,
+                                authz_policy_source=resolved_authz_policy_source,
+                                action=feedback_authz_action,
+                                product=preview_pr_feedback_request.product,
+                                context=preview_pr_feedback_request.context,
+                            ),
                         },
                     )
                 idempotent_response = _check_idempotent_request(
