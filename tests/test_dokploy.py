@@ -1371,8 +1371,57 @@ target_type = "compose"
             store.close()
 
         self.assertEqual(
-            [(target.context, target.instance, target.target_id) for target in source_of_truth.targets],
+            [
+                (target.context, target.instance, target.target_id)
+                for target in source_of_truth.targets
+            ],
             [("sellyouroutboard", "testing", "app-syo-testing")],
+        )
+
+    def test_read_control_plane_dokploy_source_of_truth_can_preserve_allowed_incomplete_target(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_name="syo-testing",
+                    updated_at="2026-05-04T19:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_dokploy_target_record(
+                DokployTargetRecord(
+                    context="discord-blue",
+                    instance="prod",
+                    target_type="application",
+                    target_name="discord-blue",
+                    updated_at="2026-05-04T19:00:00Z",
+                    source_label="test",
+                )
+            )
+
+            with patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True):
+                source_of_truth = control_plane_dokploy.read_control_plane_dokploy_source_of_truth(
+                    control_plane_root=control_plane_root,
+                    allow_incomplete_target_ids=True,
+                    allowed_incomplete_target_routes=(("sellyouroutboard-testing", "testing"),),
+                )
+
+            store.close()
+
+        self.assertEqual(
+            [
+                (target.context, target.instance, target.target_id)
+                for target in source_of_truth.targets
+            ],
+            [("sellyouroutboard-testing", "testing", "")],
         )
 
     def test_read_control_plane_dokploy_source_of_truth_reads_database_target_records(self) -> None:

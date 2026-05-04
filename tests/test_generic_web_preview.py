@@ -290,6 +290,56 @@ class GenericWebPreviewTests(unittest.TestCase):
             ["template_env", "template_provider_fields", "transport_policy"],
         )
 
+    def test_evaluate_generic_web_preview_readiness_keeps_template_lane_when_target_id_missing(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_id="",
+                    target_name="sellyouroutboard-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ) as source_of_truth,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+            ) as read_dokploy_config,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload"
+            ) as fetch_dokploy_target_payload,
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="sellyouroutboard"),
+                checked_at="2026-04-30T21:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "blocked")
+        self.assertEqual(result.template_context, "sellyouroutboard-testing")
+        self.assertEqual(result.template_instance, "testing")
+        self.assertEqual(result.template_target_id, "")
+        self.assertEqual([check.check_id for check in result.checks], ["template_target"])
+        self.assertIn("template lane to have a Dokploy target_id", result.checks[0].message)
+        source_of_truth.assert_called_once_with(
+            control_plane_root=Path("."),
+            allow_incomplete_target_ids=True,
+            allowed_incomplete_target_routes=(("sellyouroutboard-testing", "testing"),),
+        )
+        read_dokploy_config.assert_not_called()
+        fetch_dokploy_target_payload.assert_not_called()
+
     def test_execute_generic_web_preview_refresh_blocks_before_provider_mutation(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         source = DokploySourceOfTruth(

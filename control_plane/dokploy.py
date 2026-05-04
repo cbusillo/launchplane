@@ -290,10 +290,6 @@ class DokployTargetDefinition(BaseModel):
             raise ValueError("Dokploy target requires non-empty context")
         if not self.instance.strip():
             raise ValueError("Dokploy target requires non-empty instance")
-        if not self.target_id.strip():
-            raise ValueError(
-                f"Dokploy target {self.context}/{self.instance} requires non-empty target_id"
-            )
         return self
 
 
@@ -450,6 +446,7 @@ def read_control_plane_dokploy_source_of_truth(
     *,
     control_plane_root: Path,
     allow_incomplete_target_ids: bool = False,
+    allowed_incomplete_target_routes: tuple[tuple[str, str], ...] = (),
 ) -> DokploySourceOfTruth:
     del control_plane_root
     database_url = resolve_database_url()
@@ -460,6 +457,7 @@ def read_control_plane_dokploy_source_of_truth(
     source_of_truth = _load_optional_dokploy_source_of_truth_from_database(
         database_url=database_url,
         allow_incomplete_target_ids=allow_incomplete_target_ids,
+        allowed_incomplete_target_routes=allowed_incomplete_target_routes,
     )
     if source_of_truth is None:
         raise click.ClickException("Missing DB-backed Launchplane tracked Dokploy target records.")
@@ -505,24 +503,32 @@ def build_dokploy_source_of_truth_from_records(
     target_id_records: tuple[DokployTargetIdRecord, ...],
     *,
     allow_incomplete_target_ids: bool = False,
+    allowed_incomplete_target_routes: tuple[tuple[str, str], ...] = (),
 ) -> DokploySourceOfTruth:
     target_id_map = {
         (record.context.strip(), record.instance.strip()): record.target_id
         for record in target_id_records
     }
     remaining_target_id_routes = set(target_id_map)
+    allowed_incomplete_routes = {
+        (context_name.strip(), instance_name.strip())
+        for context_name, instance_name in allowed_incomplete_target_routes
+    }
     targets_payload: list[dict[str, object]] = []
     for record in target_records:
         target_route = (record.context.strip(), record.instance.strip())
         target_id = target_id_map.get(target_route, "").strip()
         if not target_id:
             if allow_incomplete_target_ids:
-                continue
-            raise click.ClickException(
-                "Missing DB-backed Dokploy target-id record for "
-                f"{record.context}/{record.instance}."
-            )
-        remaining_target_id_routes.discard(target_route)
+                if target_route not in allowed_incomplete_routes:
+                    continue
+            else:
+                raise click.ClickException(
+                    "Missing DB-backed Dokploy target-id record for "
+                    f"{record.context}/{record.instance}."
+                )
+        else:
+            remaining_target_id_routes.discard(target_route)
         targets_payload.append(
             {
                 "context": record.context,
@@ -566,6 +572,7 @@ def load_optional_dokploy_source_of_truth_from_store(
     *,
     record_store: DokployTargetRecordStore,
     allow_incomplete_target_ids: bool = False,
+    allowed_incomplete_target_routes: tuple[tuple[str, str], ...] = (),
 ) -> DokploySourceOfTruth | None:
     target_records = record_store.list_dokploy_target_records()
     if not target_records:
@@ -575,11 +582,15 @@ def load_optional_dokploy_source_of_truth_from_store(
         target_records,
         target_id_records,
         allow_incomplete_target_ids=allow_incomplete_target_ids,
+        allowed_incomplete_target_routes=allowed_incomplete_target_routes,
     )
 
 
 def _load_optional_dokploy_source_of_truth_from_database(
-    *, database_url: str, allow_incomplete_target_ids: bool = False
+    *,
+    database_url: str,
+    allow_incomplete_target_ids: bool = False,
+    allowed_incomplete_target_routes: tuple[tuple[str, str], ...] = (),
 ) -> DokploySourceOfTruth | None:
     record_store: PostgresRecordStore | None = None
     try:
@@ -588,6 +599,7 @@ def _load_optional_dokploy_source_of_truth_from_database(
         return load_optional_dokploy_source_of_truth_from_store(
             record_store=record_store,
             allow_incomplete_target_ids=allow_incomplete_target_ids,
+            allowed_incomplete_target_routes=allowed_incomplete_target_routes,
         )
     except click.ClickException:
         raise
