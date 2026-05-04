@@ -932,6 +932,11 @@ def _read_lane_summary(
             iter(list_deployments(context_name=context_name, instance_name=instance_name, limit=1)),
             None,
         )
+    if _inventory_is_older_than_deployment(
+        inventory=inventory,
+        latest_deployment=latest_deployment,
+    ):
+        inventory = None
     latest_promotion = None
     list_promotions = _list_promotion_records_method(record_store)
     if list_promotions is not None:
@@ -970,6 +975,22 @@ def _read_lane_summary(
         odoo_instance_override=odoo_instance_override,
     )
     return summary.model_copy(update={"provenance": _lane_provenance(summary)})
+
+
+def _inventory_is_older_than_deployment(
+    *,
+    inventory: EnvironmentInventory | None,
+    latest_deployment: DeploymentRecord | None,
+) -> bool:
+    if inventory is None or latest_deployment is None:
+        return False
+    inventory_updated_at = _parse_timestamp(inventory.updated_at)
+    deployment_recorded_at = _parse_timestamp(
+        latest_deployment.deploy.finished_at or latest_deployment.deploy.started_at
+    )
+    if inventory_updated_at is None or deployment_recorded_at is None:
+        return inventory.deployment_record_id != latest_deployment.record_id
+    return inventory_updated_at < deployment_recorded_at
 
 
 def _list_preview_summaries(
