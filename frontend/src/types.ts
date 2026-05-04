@@ -404,6 +404,62 @@ export interface ProductProfileListPayload {
   profiles: ProductProfileRecord[];
 }
 
+export interface ProductActionAvailability {
+  action_id: string;
+  label: string;
+  description: string;
+  safety: Safety | string;
+  scope: string;
+  method: string;
+  route_path: string;
+  authz_action: string;
+  enabled: boolean;
+  disabled_reasons: string[];
+  trust_state: FreshnessStatus;
+}
+
+export interface ProductEnvironmentSummary {
+  environment: string;
+  context: string;
+  base_url: string;
+  health_url: string;
+  trust_state: FreshnessStatus;
+  provenance: DataProvenance;
+  warnings: string[];
+  available_actions: ProductActionAvailability[];
+}
+
+export interface ProductPreviewOverview {
+  enabled: boolean;
+  context: string;
+  slug_template: string;
+  active_count: number;
+  latest_preview_id: string;
+  trust_state: FreshnessStatus;
+  provenance: DataProvenance;
+}
+
+export interface ProductSiteOverview {
+  schema_version: number;
+  product: string;
+  display_name: string;
+  repository: string;
+  driver_id: string;
+  base_driver_id: string;
+  environments: ProductEnvironmentSummary[];
+  preview: ProductPreviewOverview;
+  warnings: string[];
+  trust_state: FreshnessStatus;
+  provenance: DataProvenance;
+  available_actions: ProductActionAvailability[];
+}
+
+export interface ProductListPayload {
+  status: "ok";
+  trace_id: string;
+  products: ProductSiteOverview[];
+}
+
 export interface GenericWebProdPromotionRequest {
   schema_version: 1;
   product: string;

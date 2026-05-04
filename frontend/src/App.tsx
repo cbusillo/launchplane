@@ -31,6 +31,7 @@ import {
   dispatchGenericWebPromotionWorkflow,
   dryRunGenericWebProdPromotion,
   listDrivers,
+  listProducts,
   listProductProfiles,
   logout,
   readAuthSession,
@@ -51,6 +52,7 @@ import type {
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
   ProductProfileRecord,
+  ProductSiteOverview,
   ProductConfigRuntimeScope,
   ProductConfigSecretScope,
   PreviewSummary,
@@ -283,6 +285,36 @@ function choiceFromProductProfile(profile: ProductProfileRecord): DriverChoice {
   };
 }
 
+function contextForProductEnvironment(
+  product: ProductSiteOverview,
+  environment: "testing" | "prod",
+): string {
+  const summary = product.environments.find(
+    (candidate) => candidate.environment === environment,
+  );
+  if (summary?.context.trim()) {
+    return summary.context.trim();
+  }
+  const fallback = product.environments.find((candidate) =>
+    candidate.context.trim(),
+  );
+  return fallback?.context.trim() || "";
+}
+
+function choiceFromProductOverview(product: ProductSiteOverview): DriverChoice {
+  return {
+    driverId: product.product,
+    testingContext: contextForProductEnvironment(product, "testing"),
+    prodContext: contextForProductEnvironment(product, "prod"),
+    previewContext: product.preview.enabled
+      ? product.preview.context.trim()
+      : "",
+    label: product.display_name || product.product,
+    driverLabel: product.driver_id,
+    repository: product.repository,
+  };
+}
+
 export function App() {
   const showFixtureGallery =
     import.meta.env.DEV &&
@@ -297,6 +329,9 @@ export function App() {
   const [drivers, setDrivers] = useState<DriverDescriptor[]>([]);
   const [productProfiles, setProductProfiles] = useState<
     ProductProfileRecord[]
+  >([]);
+  const [productOverviews, setProductOverviews] = useState<
+    ProductSiteOverview[]
   >([]);
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
@@ -355,6 +390,7 @@ export function App() {
     if (authStatus !== "signed_in") {
       setDrivers([]);
       setProductProfiles([]);
+      setProductOverviews([]);
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -373,6 +409,11 @@ export function App() {
       selected.previewContext
         ? readDriverView(selected.previewContext, "").catch(() => null)
         : Promise.resolve(null),
+      listProducts().catch(() => ({
+        status: "ok" as const,
+        trace_id: "",
+        products: [],
+      })),
       listProductProfiles("generic-web").catch(() => ({
         status: "ok" as const,
         trace_id: "",
@@ -386,6 +427,7 @@ export function App() {
           prodPayload,
           testingPayload,
           previewPayload,
+          productsPayload,
           profilePayload,
         ]) => {
           if (controller.signal.aborted) {
@@ -396,6 +438,7 @@ export function App() {
           setProdView(prodPayload.view);
           setTestingView(testingPayload.view);
           setPreviewView(previewPayload?.view ?? null);
+          setProductOverviews(productsPayload.products);
         },
       )
       .catch((apiError: unknown) => {
@@ -421,7 +464,7 @@ export function App() {
   }, [authStatus, selected, refreshKey]);
 
   const choices = useMemo(() => {
-    const driverChoices = drivers.flatMap((driver) => {
+    const driverChoices: DriverChoice[] = drivers.flatMap((driver) => {
       const stableContexts = driver.context_patterns.filter((context) => {
         return context !== "verireel-testing" && !context.includes("*");
       });
@@ -437,10 +480,18 @@ export function App() {
         driverLabel: driver.driver_id,
       }));
     });
-    const profileChoices = productProfiles.map((profile) =>
+    const profileChoices: DriverChoice[] = productProfiles.map((profile) =>
       choiceFromProductProfile(profile),
     );
-    const merged = [...profileChoices, ...driverChoices, ...DEFAULT_CHOICES];
+    const overviewChoices: DriverChoice[] = productOverviews.map((overview) =>
+      choiceFromProductOverview(overview),
+    );
+    const merged: DriverChoice[] = [
+      ...overviewChoices,
+      ...profileChoices,
+      ...driverChoices,
+      ...DEFAULT_CHOICES,
+    ];
     const seen = new Set<string>();
     return merged.filter((choice) => {
       const key = choiceKey(choice);
@@ -450,14 +501,28 @@ export function App() {
       seen.add(key);
       return true;
     });
-  }, [drivers, productProfiles]);
+  }, [drivers, productProfiles, productOverviews]);
 
   useEffect(() => {
     if (!choices.length) {
       return;
     }
     const selectedKey = choiceKey(selected);
-    if (choices.some((choice) => choiceKey(choice) === selectedKey)) {
+    const selectedChoice = choices.find(
+      (choice) => choiceKey(choice) === selectedKey,
+    );
+    const productBackedChoice = choices.find(
+      (choice) => choice.driverId === selected.driverId && choice.repository,
+    );
+    if (
+      productBackedChoice &&
+      choiceKey(productBackedChoice) !== selectedKey &&
+      !selectedChoice?.repository
+    ) {
+      setSelected(productBackedChoice);
+      return;
+    }
+    if (selectedChoice) {
       return;
     }
     setSelected(choices[0]);
@@ -473,6 +538,10 @@ export function App() {
     prodDriverView?.descriptor ??
     testingDriverView?.descriptor ??
     currentDriver;
+  const selectedProductOverview =
+    productOverviews.find(
+      (overview) => overview.product === selected.driverId,
+    ) ?? null;
 
   const actions = useMemo(() => {
     return (
@@ -499,6 +568,7 @@ export function App() {
       setAuthStatus("signed_out");
       setDrivers([]);
       setProductProfiles([]);
+      setProductOverviews([]);
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -534,6 +604,11 @@ export function App() {
                 onClearToken={signOut}
               />
             ) : null}
+            <ProductOverviewShell
+              product={selectedProductOverview}
+              selected={selected}
+              loading={loading}
+            />
             <section className="lane-grid" aria-busy={loading}>
               <LanePanel
                 title="Prod"
@@ -724,6 +799,116 @@ function Header({
         </button>
       </div>
     </header>
+  );
+}
+
+function ProductOverviewShell({
+  product,
+  selected,
+  loading,
+}: {
+  product: ProductSiteOverview | null;
+  selected: DriverChoice;
+  loading: boolean;
+}) {
+  const environments = product?.environments ?? [];
+  const enabledActions = product?.available_actions.filter(
+    (action) => action.enabled,
+  );
+  const blockedActions = product?.available_actions.filter(
+    (action) => !action.enabled,
+  );
+  const preview = product?.preview;
+
+  return (
+    <section className="panel product-overview-shell">
+      <PanelHead
+        eyebrow="product workspace"
+        title={product?.display_name || selected.label}
+        right={
+          <div className="panel-badges">
+            <TrustBadge provenance={product?.provenance ?? null} />
+            <StatusPill status={product?.trust_state ?? "missing"} />
+          </div>
+        }
+      />
+      {loading ? (
+        <SkeletonRows />
+      ) : (
+        <div className="product-overview-grid">
+          <div className="product-overview-identity">
+            <div>
+              <span className="overview-label">Product key</span>
+              <code>{product?.product || selected.driverId}</code>
+            </div>
+            <div>
+              <span className="overview-label">Repository</span>
+              <code>
+                {product?.repository || selected.repository || "unknown"}
+              </code>
+            </div>
+            <div>
+              <span className="overview-label">Driver</span>
+              <code>
+                {product?.driver_id || selected.driverLabel}
+                {product?.base_driver_id ? ` / ${product.base_driver_id}` : ""}
+              </code>
+            </div>
+          </div>
+          <div className="product-environment-strip">
+            {environments.length ? (
+              environments.map((environment) => (
+                <div
+                  className="product-environment-pill"
+                  key={`${environment.environment}:${environment.context}`}
+                  data-environment={environment.environment}
+                >
+                  <span>{environment.environment}</span>
+                  <strong>{freshnessLabel(environment.trust_state)}</strong>
+                  <code>{environment.context}</code>
+                </div>
+              ))
+            ) : (
+              <StateBlock
+                icon={<Database size={18} />}
+                title="No product environment read model"
+              />
+            )}
+          </div>
+          <div className="product-overview-sidecar">
+            <KeyValue
+              label="Previews"
+              value={
+                preview?.enabled
+                  ? `${preview.active_count} active / ${preview.context || "no context"}`
+                  : "not enabled"
+              }
+              status={preview?.enabled ? preview.trust_state : "unsupported"}
+            />
+            <KeyValue
+              label="Enabled actions"
+              value={`${enabledActions?.length ?? 0} enabled`}
+              status={enabledActions?.length ? "pass" : "unknown"}
+            />
+            <KeyValue
+              label="Blocked actions"
+              value={`${blockedActions?.length ?? 0} blocked`}
+              status={blockedActions?.length ? "blocked" : "pass"}
+            />
+          </div>
+        </div>
+      )}
+      {product?.warnings.length ? (
+        <div className="overview-warning-list">
+          {product.warnings.map((warning) => (
+            <span key={warning}>
+              <AlertTriangle size={14} aria-hidden="true" />
+              {warning}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </section>
   );
 }
 

@@ -10,6 +10,7 @@ import type {
   LogoutPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductListPayload,
   ProductProfileListPayload,
 } from "./types";
 
@@ -87,6 +88,10 @@ export function listProductProfiles(
 ): Promise<ProductProfileListPayload> {
   const query = driverId ? `?driver_id=${encodeURIComponent(driverId)}` : "";
   return requestJson<ProductProfileListPayload>(`/v1/product-profiles${query}`);
+}
+
+export function listProducts(): Promise<ProductListPayload> {
+  return requestJson<ProductListPayload>("/v1/products");
 }
 
 export function applyProductConfig(
