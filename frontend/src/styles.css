@@ -292,6 +292,98 @@ p {
   background: var(--hair);
 }
 
+.product-overview-shell {
+  border-top: 3px solid var(--lane-preview);
+}
+
+.product-overview-grid {
+  display: grid;
+  grid-template-columns: minmax(220px, 0.86fr) minmax(0, 1.35fr) minmax(
+      220px,
+      0.72fr
+    );
+  gap: 14px;
+  padding: 16px;
+}
+
+.product-overview-identity,
+.product-overview-sidecar {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.product-overview-identity > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.overview-label {
+  color: var(--fg-faint);
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.product-overview-identity code,
+.product-environment-pill code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-environment-strip {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  align-content: start;
+}
+
+.product-environment-pill {
+  display: grid;
+  min-height: 86px;
+  align-content: space-between;
+  gap: 7px;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--bg-2);
+  padding: 10px;
+}
+
+.product-environment-pill[data-environment="prod"] {
+  border-color: color-mix(in oklab, var(--lane-prod) 45%, var(--hair));
+}
+
+.product-environment-pill[data-environment="testing"] {
+  border-color: color-mix(in oklab, var(--lane-testing) 45%, var(--hair));
+}
+
+.product-environment-pill span {
+  color: var(--fg-strong);
+  font-weight: 700;
+  text-transform: capitalize;
+}
+
+.product-environment-pill strong {
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+
+.overview-warning-list {
+  display: grid;
+  gap: 6px;
+  border-top: 1px solid var(--hair-soft);
+  padding: 0 16px 14px;
+}
+
+.overview-warning-list span {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--status-warn);
+}
+
 .work-grid {
   display: grid;
   grid-template-columns: minmax(0, 1.45fr) minmax(320px, 1fr);
@@ -1329,10 +1421,15 @@ p {
 
 @media (max-width: 1120px) {
   .lane-grid,
+  .product-overview-grid,
   .work-grid,
   .work-grid-evidence,
   .config-edit-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .product-environment-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .config-target-grid {
@@ -1378,6 +1475,10 @@ p {
 
   .operator-main {
     padding: 12px;
+  }
+
+  .product-environment-strip {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .kv-row,
