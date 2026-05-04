@@ -575,6 +575,22 @@ retries do not collide. The regular cleanup workflow uses
 - prod promotion evidence: `prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<record_id>`
 - generic-web prod promotion driver:
   `generic-web-prod-promotion:<product>:<context>:<from_instance>:<to_instance>:<artifact_id>:<source_git_ref>`
+- generic-web preview refresh driver:
+  `generic-web-preview-refresh:<product>:<anchor_pr_number>:<sha>`
+- generic-web preview destroy driver:
+  `generic-web-preview-destroy:<product>:<anchor_pr_number>`
+
+Generic-web product workflow clients live in product repositories as thin
+Launchplane callers until Launchplane provides a shared distributable helper.
+Those clients must keep Launchplane lifecycle truth out of the product repo and
+follow the shared request semantics: request a GitHub OIDC token with an explicit
+timeout, apply bounded timeouts to Launchplane route calls, preserve HTTP status
+and raw response bodies before attempting JSON parsing on failed responses, do
+not retry `AbortError` or timeout aborts, and use stable idempotency keys for the
+same product operation. Generic-web preview destroy keys intentionally omit the
+free-form destroy reason so the same preview cleanup is idempotent even when the
+caller wording changes between cleanup paths.
+
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel testing verification driver:
