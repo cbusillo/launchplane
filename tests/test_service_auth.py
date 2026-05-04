@@ -302,6 +302,37 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
+    def test_syo_preview_grant_covers_canonical_context(self) -> None:
+        rule = GitHubActionsPolicyRule(
+            repository="cbusillo/sellyouroutboard",
+            workflow_refs=(
+                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@*",
+            ),
+            event_names=("pull_request",),
+            products=("sellyouroutboard",),
+            contexts=("sellyouroutboard",),
+            actions=("preview_refresh.execute",),
+        )
+        identity = _actions_identity(
+            repository="cbusillo/sellyouroutboard",
+            workflow_ref=(
+                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                "@refs/heads/replace-mike-photo-batch"
+            ),
+            event_name="pull_request",
+            ref="refs/pull/41/merge",
+            subject="repo:cbusillo/sellyouroutboard:pull_request",
+        )
+
+        self.assertTrue(
+            rule.allows(
+                identity=identity,
+                action="preview_refresh.execute",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+
     def test_parse_authz_policy_toml_preserves_human_and_actions_rules(self) -> None:
         policy = parse_authz_policy_toml(
             """
