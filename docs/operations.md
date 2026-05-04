@@ -110,10 +110,11 @@ The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
 Additional evidence routes should land against the same authn/authz boundary
 rather than creating separate ad hoc ingress patterns.
 
-The deploy workflow maintains the DB-backed grant that lets the manual Product
-Context Cutover Audit workflow read the SellYourOutboard product profile. The
-grant request returns only authz policy record metadata and rule counts; it does
-not echo workflow refs or the full policy body.
+The deploy workflow maintains DB-backed grants for SellYourOutboard operational
+workflows, including product profile cutover reads/writes, production promotion,
+and generic-web preview refresh/destroy requests. The grant request returns only
+authz policy record metadata and rule counts; it does not echo workflow refs or
+the full policy body.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. Run it first with
