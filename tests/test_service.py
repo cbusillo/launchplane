@@ -1344,7 +1344,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(target.target_type, "application")
         self.assertFalse(target.healthcheck_enabled)
         self.assertEqual(target_id.target_id, "app-discord-blue")
-        self.assertEqual(runtime_records[0].env, {"DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue"})
+        self.assertEqual(
+            runtime_records[0].env, {"DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue"}
+        )
         self.assertEqual(secret_bindings[0].binding_key, "DISCORD_TOKEN")
         self.assertNotIn("secret_id", json.dumps(payload, sort_keys=True))
 
@@ -7504,6 +7506,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["identity"]["repository"], "every/verireel")
+        self.assertEqual(
+            payload["authz"]["identity"]["workflow_ref"],
+            "every/verireel/.github/workflows/preview-control-plane.yml@refs/pull/42/merge",
+        )
+        self.assertEqual(payload["authz"]["identity"]["event_name"], "pull_request")
+        self.assertEqual(payload["authz"]["request"]["action"], "preview_pr_feedback.write")
+        self.assertEqual(payload["authz"]["request"]["product"], "verireel")
+        self.assertEqual(payload["authz"]["request"]["context"], "verireel-testing")
+        self.assertIn("policy_sha256", payload["authz"])
+        self.assertIn("policy_source", payload["authz"])
 
     def test_preview_lifecycle_cleanup_endpoint_records_report_only_cleanup(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
