@@ -86,6 +86,25 @@ values. Use `--project-name`, `--target-name`, `--domain`, and
 `--healthcheck-path` when the provider payload does not expose enough redacted
 metadata for the record.
 
+When the Dokploy application does not exist yet, let Launchplane plan and apply
+the provider mutation so the app id is captured in records immediately:
+
+```sh
+uv run launchplane dokploy-targets create-application \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --context <product-context> \
+  --instance prod \
+  --target-name <dokploy-application-name> \
+  --project-name <dokploy-project-name>
+```
+
+This command is also dry-run by default. With `--apply`, it can create a
+Dokploy project, environment, and application, then write the matching tracked
+target and target-id records. Use `--project-id` or `--environment-id` to reuse
+existing provider containers, and `--server-id` when the app belongs on a remote
+Dokploy server. It still does not configure secrets or copy provider env text;
+runtime and secret records remain separate Launchplane-owned setup steps.
+
 Then import or update DB-backed authz policy records for the product's GitHub
 Actions workflows. Authz policy merging remains a separate operator step so a
 new product onboarding manifest cannot accidentally replace unrelated product

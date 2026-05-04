@@ -10,7 +10,10 @@ from control_plane.cli import main
 from control_plane import secrets as control_plane_secrets
 from control_plane.dokploy import JsonObject
 from control_plane.storage.postgres import PostgresRecordStore
-from control_plane.workflows.dokploy_target_adoption import adopt_dokploy_target
+from control_plane.workflows.dokploy_target_adoption import (
+    adopt_dokploy_target,
+    create_dokploy_application_target,
+)
 
 
 def _sqlite_database_url(database_path: Path) -> str:
@@ -268,6 +271,210 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(target_record.target_name, "discord-blue-prod")
         self.assertEqual(target_record.source_label, "test:adopt")
         self.assertEqual(target_id_record.target_id, "app-123")
+
+    def test_create_application_target_dry_run_plans_provider_requests(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                return {}
+
+            result = create_dokploy_application_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="discord-blue",
+                instance="prod",
+                target_name="discord-blue-prod",
+                project_name="Discord Blue",
+                environment_name="prod",
+                server_id="server-123",
+                healthcheck_path="/health",
+                updated_at="2026-05-04T23:00:00Z",
+                apply=False,
+                mutate_provider=mutate_provider,
+                fetch_target_payload=lambda *_args: {},
+            )
+            target_records = store.list_dokploy_target_records()
+            store.close()
+
+        self.assertFalse(result.applied)
+        self.assertEqual(requests, [])
+        self.assertEqual(
+            [item["path"] for item in result.provider_requests],
+            [
+                "/api/project.create",
+                "/api/environment.create",
+                "/api/application.create",
+            ],
+        )
+        self.assertEqual(result.target_record.target_name, "discord-blue-prod")
+        self.assertEqual(result.target_id_record.target_id, "planned-application-id")
+        self.assertEqual(target_records, ())
+
+    def test_create_application_target_applies_provider_and_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                if path == "/api/project.create":
+                    return {"projectId": "project-123"}
+                if path == "/api/environment.create":
+                    self.assertEqual(payload["projectId"], "project-123")
+                    return {"environmentId": "env-123"}
+                if path == "/api/application.create":
+                    self.assertEqual(payload["environmentId"], "env-123")
+                    return {"applicationId": "app-123"}
+                raise AssertionError(path)
+
+            result = create_dokploy_application_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="discord-blue",
+                instance="prod",
+                target_name="discord-blue-prod",
+                project_name="Discord Blue",
+                environment_name="prod",
+                server_id="server-123",
+                healthcheck_path="/health",
+                updated_at="2026-05-04T23:05:00Z",
+                apply=True,
+                mutate_provider=mutate_provider,
+                fetch_target_payload=lambda *_args: {
+                    "name": "discord-blue-prod",
+                    "environment": {"project": {"name": "Discord Blue"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(
+            [path for path, _payload in requests],
+            [
+                "/api/project.create",
+                "/api/environment.create",
+                "/api/application.create",
+            ],
+        )
+        self.assertEqual(result.project_id, "project-123")
+        self.assertEqual(result.environment_id, "env-123")
+        self.assertEqual(target_record.target_name, "discord-blue-prod")
+        self.assertEqual(target_record.healthcheck_path, "/health")
+        self.assertEqual(target_id_record.target_id, "app-123")
+
+    def test_create_application_target_reuses_existing_environment(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                return {"applicationId": "app-456"}
+
+            result = create_dokploy_application_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="verireel",
+                instance="testing",
+                target_name="verireel-testing",
+                project_name="VeriReel",
+                environment_id="env-existing",
+                apply=True,
+                mutate_provider=mutate_provider,
+                fetch_target_payload=lambda *_args: {"name": "verireel-testing"},
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="verireel", instance_name="testing"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual([path for path, _payload in requests], ["/api/application.create"])
+        self.assertEqual(requests[0][1]["environmentId"], "env-existing")
+        self.assertEqual(target_id_record.target_id, "app-456")
+
+    def test_cli_create_application_dry_run_outputs_plan(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temporary_directory / "db.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(store=store)
+            store.close()
+
+            with patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "dokploy-targets",
+                        "create-application",
+                        "--database-url",
+                        database_url,
+                        "--context",
+                        "discord-blue",
+                        "--instance",
+                        "prod",
+                        "--target-name",
+                        "discord-blue-prod",
+                        "--project-name",
+                        "Discord Blue",
+                        "--server-id",
+                        "server-123",
+                    ],
+                )
+
+            store = PostgresRecordStore(database_url=database_url)
+            records = store.list_dokploy_target_records()
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["plan"]["application"]["target_name"], "discord-blue-prod")
+        self.assertEqual(len(payload["provider_requests"]), 3)
+        self.assertEqual(records, ())
 
 
 if __name__ == "__main__":
