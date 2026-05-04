@@ -3789,6 +3789,199 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "Dokploy API POST /api/application.update failed (500): provider exploded",
                 )
 
+    def test_generic_web_preview_refresh_route_keeps_blocked_result_non_mutating(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "refresh": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.example.test",
+                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={
+                    "refresh_status": "blocked",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:00:01Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "pr-42",
+                    "application_name": "sellyouroutboard-pr-42",
+                    "application_id": "",
+                    "preview_url": "https://pr-42.example.test",
+                    "error_message": "Generic web preview readiness blocked refresh.",
+                },
+            ) as refresh:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
+                )
+
+                self.assertEqual(status_code, 202)
+                self.assertEqual(payload["records"], {})
+                self.assertEqual(payload["result"]["refresh_status"], "blocked")
+                store = FilesystemRecordStore(state_dir=state_dir)
+                self.assertEqual(store.list_preview_records(), ())
+                self.assertIsNone(
+                    store.read_idempotency_record(
+                        scope=(
+                            "github-actions:cbusillo/sellyouroutboard:"
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                        route_path="/v1/drivers/generic-web/preview-refresh",
+                        idempotency_key="generic-web-preview-refresh:syo:42:sha",
+                    )
+                )
+                refresh.assert_called_once()
+
+    def test_generic_web_preview_refresh_retry_runs_again_after_blocked_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "schema_version": 1,
+                "product": "sellyouroutboard",
+                "refresh": {
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "preview_slug": "pr-42",
+                    "preview_url": "https://pr-42.example.test",
+                    "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                },
+            }
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                side_effect=[
+                    {
+                        "refresh_status": "blocked",
+                        "refresh_started_at": "2026-05-03T15:00:00Z",
+                        "refresh_finished_at": "2026-05-03T15:00:01Z",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard-testing",
+                        "preview_slug": "pr-42",
+                        "application_name": "sellyouroutboard-pr-42",
+                        "application_id": "",
+                        "preview_url": "https://pr-42.example.test",
+                        "error_message": "Generic web preview readiness blocked refresh.",
+                    },
+                    {
+                        "refresh_status": "pass",
+                        "refresh_started_at": "2026-05-03T15:06:00Z",
+                        "refresh_finished_at": "2026-05-03T15:10:00Z",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard-testing",
+                        "preview_slug": "pr-42",
+                        "application_name": "sellyouroutboard-pr-42",
+                        "application_id": "app-preview",
+                        "preview_url": "https://pr-42.example.test",
+                    },
+                ],
+            ) as refresh:
+                first_status_code, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
+                )
+                second_status_code, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:42:sha"},
+                )
+
+        self.assertEqual(first_status_code, 202)
+        self.assertEqual(first_payload["result"]["refresh_status"], "blocked")
+        self.assertEqual(second_status_code, 202)
+        self.assertEqual(second_payload["result"]["refresh_status"], "pass")
+        self.assertNotIn("replayed", second_payload)
+        self.assertEqual(refresh.call_count, 2)
+
     def test_generic_web_preview_refresh_route_rejects_unparseable_slug_before_provider_mutation(
         self,
     ) -> None:
