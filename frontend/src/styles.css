@@ -855,6 +855,7 @@ p {
 }
 
 .config-label input,
+.config-label select,
 .config-row input {
   min-width: 0;
   min-height: 34px;
@@ -864,6 +865,42 @@ p {
   color: var(--fg);
   padding: 7px 9px;
   font-family: var(--font-mono);
+}
+
+.config-readonly-label strong {
+  min-height: 34px;
+  display: flex;
+  align-items: center;
+  overflow: hidden;
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-derived-routing {
+  min-height: 34px;
+  display: grid;
+  align-content: center;
+  gap: 2px;
+}
+
+.config-derived-routing code,
+.config-derived-routing small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-derived-routing code {
+  color: var(--fg);
+}
+
+.config-derived-routing small {
+  color: var(--fg-faint);
+  font-family: var(--font-mono);
+  font-size: 11px;
 }
 
 .config-editor {

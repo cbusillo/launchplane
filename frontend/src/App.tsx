@@ -51,6 +51,7 @@ import type {
   LaneSummary,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductEnvironmentSummary,
   ProductProfileRecord,
   ProductSiteOverview,
   ProductConfigRuntimeScope,
@@ -637,6 +638,7 @@ export function App() {
               productDefault={selectedDriver?.product ?? selected.driverId}
               contextDefault={selected.prodContext}
               instanceDefault="prod"
+              environments={selectedProductOverview?.environments ?? []}
               disabled={loading}
             />
             <section className="work-grid">
@@ -968,20 +970,20 @@ function ProductConfigPanel({
   productDefault,
   contextDefault,
   instanceDefault,
+  environments,
   disabled,
   applyConfig = applyProductConfig,
 }: {
   productDefault: string;
   contextDefault: string;
   instanceDefault: string;
+  environments: ProductEnvironmentSummary[];
   disabled: boolean;
   applyConfig?: (
     payload: ProductConfigApplyRequest,
   ) => Promise<ProductConfigApplyPayload>;
 }) {
-  const [product, setProduct] = useState(productDefault);
-  const [contextName, setContextName] = useState(contextDefault);
-  const [instanceName, setInstanceName] = useState(instanceDefault);
+  const [targetEnvironment, setTargetEnvironment] = useState(instanceDefault);
   const [sourceLabel, setSourceLabel] = useState("product-config-ui");
   const [runtimeRows, setRuntimeRows] = useState<RuntimeConfigRow[]>(() => [
     newRuntimeConfigRow(),
@@ -1000,12 +1002,41 @@ function ProductConfigPanel({
   const [traceId, setTraceId] = useState("");
   const requestSequence = useRef(0);
 
+  const environmentOptions = useMemo(
+    () =>
+      environments.filter(
+        (environment) =>
+          environment.environment.trim() && environment.context.trim(),
+      ),
+    [environments],
+  );
+
+  const selectedEnvironment =
+    environmentOptions.find(
+      (environment) => environment.environment === targetEnvironment,
+    ) ??
+    environmentOptions.find(
+      (environment) => environment.environment === instanceDefault,
+    ) ??
+    environmentOptions[0] ??
+    null;
+  const contextName = (selectedEnvironment?.context ?? contextDefault).trim();
+  const instanceName = (
+    selectedEnvironment?.environment ??
+    (targetEnvironment || instanceDefault)
+  ).trim();
+  const product = productDefault.trim();
+
   useEffect(() => {
-    setProduct(productDefault);
-    setContextName(contextDefault);
-    setInstanceName(instanceDefault);
+    const nextEnvironment =
+      environmentOptions.find(
+        (environment) => environment.environment === instanceDefault,
+      )?.environment ??
+      environmentOptions[0]?.environment ??
+      instanceDefault;
+    setTargetEnvironment(nextEnvironment);
     clearReviewState();
-  }, [productDefault, contextDefault, instanceDefault]);
+  }, [productDefault, contextDefault, instanceDefault, environmentOptions]);
 
   const runtimeScope = runtimeScopeForTarget(contextName, instanceName);
   const secretScope = secretScopeForTarget(contextName, instanceName);
@@ -1220,39 +1251,42 @@ function ProductConfigPanel({
         }
       />
       <div className="config-target-grid">
-        <label className="config-label">
+        <div className="config-label config-readonly-label">
           <span>Product ID</span>
-          <input
-            value={product}
-            onChange={(event) => {
-              clearReviewState();
-              setProduct(event.target.value);
-            }}
-            spellCheck={false}
-          />
-        </label>
+          <strong>{product || "No product selected"}</strong>
+        </div>
         <label className="config-label">
-          <span>Stable context</span>
-          <input
-            value={contextName}
+          <span>Environment</span>
+          <select
             onChange={(event) => {
               clearReviewState();
-              setContextName(event.target.value);
+              setTargetEnvironment(event.target.value);
             }}
-            spellCheck={false}
-          />
+            value={targetEnvironment}
+          >
+            {environmentOptions.length ? (
+              environmentOptions.map((environment) => (
+                <option
+                  key={`${environment.context}:${environment.environment}`}
+                  value={environment.environment}
+                >
+                  {environment.environment} ({environment.context})
+                </option>
+              ))
+            ) : (
+              <option value={targetEnvironment || instanceDefault}>
+                {instanceName || "No environment target"}
+              </option>
+            )}
+          </select>
         </label>
-        <label className="config-label">
-          <span>Instance</span>
-          <input
-            value={instanceName}
-            onChange={(event) => {
-              clearReviewState();
-              setInstanceName(event.target.value);
-            }}
-            spellCheck={false}
-          />
-        </label>
+        <div className="config-label config-readonly-label">
+          <span>Routing target</span>
+          <div className="config-derived-routing">
+            <code>{contextName || "missing-context"}</code>
+            <small>{instanceName || "missing-instance"}</small>
+          </div>
+        </div>
         <label className="config-label">
           <span>Source</span>
           <input
@@ -2613,6 +2647,28 @@ function StateFixtureGallery({
     deployStatus: "fail",
     healthStatus: "fail",
   });
+  const configEnvironments: ProductEnvironmentSummary[] = [
+    {
+      environment: "testing",
+      context: "sellyouroutboard-testing",
+      base_url: "https://testing.sellyouroutboard.example",
+      health_url: "https://testing.sellyouroutboard.example/healthz",
+      trust_state: "verified",
+      provenance: readyTesting.provenance,
+      warnings: [],
+      available_actions: [],
+    },
+    {
+      environment: "prod",
+      context: "sellyouroutboard-prod",
+      base_url: "https://sellyouroutboard.example",
+      health_url: "https://sellyouroutboard.example/healthz",
+      trust_state: "verified",
+      provenance: readyProd.provenance,
+      warnings: [],
+      available_actions: [],
+    },
+  ];
 
   return (
     <section className="fixture-gallery">
@@ -2705,6 +2761,7 @@ function StateFixtureGallery({
           productDefault="sellyouroutboard"
           contextDefault="sellyouroutboard-testing"
           instanceDefault="prod"
+          environments={configEnvironments}
           disabled={false}
           applyConfig={fixtureProductConfigApply}
         />
