@@ -62,6 +62,10 @@ The manifest is applied idempotently and writes Launchplane-owned records for:
 - runtime-environment records for non-secret settings
 - disabled managed secret binding placeholders for required secret keys
 
+Each onboarding `dokploy_targets` entry must include the live provider
+`target_id`. Launchplane fails closed instead of seeding a target record that a
+later deploy cannot resolve.
+
 Then import or update DB-backed authz policy records for the product's GitHub
 Actions workflows. Authz policy merging remains a separate operator step so a
 new product onboarding manifest cannot accidentally replace unrelated product

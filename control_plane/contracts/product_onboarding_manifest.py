@@ -79,6 +79,8 @@ class ProductOnboardingTargetManifest(BaseModel):
             raise ValueError("product onboarding target requires context")
         if not self.instance.strip():
             raise ValueError("product onboarding target requires instance")
+        if not self.target_id.strip():
+            raise ValueError("product onboarding target requires target_id")
         if self.healthcheck_path and not self.healthcheck_path.startswith("/"):
             raise ValueError("product onboarding target healthcheck_path must start with /")
         return self

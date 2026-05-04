@@ -209,6 +209,8 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS`
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
+  - `DISCORD_BLUE_DOKPLOY_TARGET_ID` while this workflow seeds the Discord Blue
+    onboarding bundle
 
 The workflow should use GitHub OIDC to call Launchplane's own service API and
 update the image digest plus known OAuth env only. DB-backed authz policy records
