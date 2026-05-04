@@ -121,7 +121,10 @@ from control_plane.workflows.launchplane import (
     verify_github_webhook_signature,
 )
 from control_plane.workflows.inventory import build_environment_inventory
-from control_plane.workflows.dokploy_target_adoption import adopt_dokploy_target
+from control_plane.workflows.dokploy_target_adoption import (
+    adopt_dokploy_target,
+    create_dokploy_application_target,
+)
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
@@ -8826,6 +8829,25 @@ def _fetch_dokploy_target_payload_for_adoption(
     )
 
 
+def _mutate_dokploy_payload_for_target_creation(
+    host: str,
+    token: str,
+    path: str,
+    payload: dict[str, control_plane_dokploy.JsonValue],
+) -> dict[str, control_plane_dokploy.JsonValue]:
+    response = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path=path,
+        method="POST",
+        payload=payload,
+    )
+    response_object = control_plane_dokploy.as_json_object(response)
+    if response_object is None:
+        raise click.ClickException(f"Dokploy API POST {path} returned an invalid response.")
+    return response_object
+
+
 def _clone_dokploy_target_record(
     *,
     target_record: DokployTargetRecord,
@@ -12539,6 +12561,136 @@ def dokploy_targets_adopt(
                     target_id=result.target_id_record.target_id,
                 ),
                 "provider_fields": result.provider_fields,
+                "warnings": list(result.warnings),
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@dokploy_targets.command("create-application")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option("--target-name", required=True, help="Dokploy application display name.")
+@click.option("--project-id", default="", help="Existing Dokploy project id to use.")
+@click.option("--project-name", default="", help="Dokploy project name to create or record.")
+@click.option("--project-description", default="", help="Optional project description.")
+@click.option("--environment-id", default="", help="Existing Dokploy environment id to use.")
+@click.option(
+    "--environment-name",
+    default="",
+    help="Dokploy environment name to create; defaults to --instance.",
+)
+@click.option("--environment-description", default="", help="Optional environment description.")
+@click.option("--server-id", default="", help="Optional Dokploy server id for remote apps.")
+@click.option("--app-name", default="", help="Optional Dokploy internal app name.")
+@click.option("--application-description", default="", help="Optional application description.")
+@click.option("--source-git-ref", default="origin/main", show_default=True)
+@click.option("--healthcheck-path", default="", help="Healthcheck path stored on the record.")
+@click.option("--domain", "domains", multiple=True, help="Domain stored on the record.")
+@click.option(
+    "--deploy-timeout-seconds",
+    type=int,
+    default=None,
+    help="Optional rollout timeout stored on the record.",
+)
+@click.option(
+    "--source-label",
+    default="cli:dokploy-targets:create-application",
+    show_default=True,
+)
+@click.option("--updated-at", default="", help="Override updated timestamp.")
+@click.option(
+    "--apply", "apply_changes", is_flag=True, help="Create provider target and write records."
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
+)
+def dokploy_targets_create_application(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    target_name: str,
+    project_id: str,
+    project_name: str,
+    project_description: str,
+    environment_id: str,
+    environment_name: str,
+    environment_description: str,
+    server_id: str,
+    app_name: str,
+    application_description: str,
+    source_git_ref: str,
+    healthcheck_path: str,
+    domains: tuple[str, ...],
+    deploy_timeout_seconds: int | None,
+    source_label: str,
+    updated_at: str,
+    apply_changes: bool,
+    control_plane_root: Path | None,
+) -> None:
+    if deploy_timeout_seconds is not None and deploy_timeout_seconds < 1:
+        raise click.ClickException("--deploy-timeout-seconds must be at least 1.")
+    launchplane_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        result = create_dokploy_application_target(
+            record_store=postgres_store,
+            host=host,
+            token=token,
+            context=context_name,
+            instance=instance_name,
+            target_name=target_name,
+            project_id=project_id,
+            project_name=project_name,
+            project_description=project_description,
+            environment_id=environment_id,
+            environment_name=environment_name,
+            environment_description=environment_description,
+            server_id=server_id,
+            app_name=app_name,
+            application_description=application_description,
+            source_git_ref=source_git_ref,
+            healthcheck_path=healthcheck_path,
+            domains=domains,
+            deploy_timeout_seconds=deploy_timeout_seconds,
+            source_label=source_label,
+            updated_at=updated_at,
+            apply=apply_changes,
+            mutate_provider=_mutate_dokploy_payload_for_target_creation,
+            fetch_target_payload=_fetch_dokploy_target_payload_for_adoption,
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "mode": "apply" if result.applied else "dry_run",
+                "applied": result.applied,
+                "plan": result.plan.model_dump(mode="json"),
+                "project_id": result.project_id,
+                "environment_id": result.environment_id,
+                "record": _summarize_dokploy_target_record(
+                    result.target_record,
+                    target_id=result.target_id_record.target_id,
+                ),
+                "provider_fields": result.provider_fields,
+                "provider_requests": list(result.provider_requests),
                 "warnings": list(result.warnings),
             },
             indent=2,
