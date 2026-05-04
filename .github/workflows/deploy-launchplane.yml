@@ -362,6 +362,7 @@ jobs:
               echo "DISCORD_BLUE_DOKPLOY_TARGET_ID is required before Discord Blue onboarding." >&2
               return 1
             fi
+            idempotency_suffix="${idempotency_suffix}:${DISCORD_BLUE_DOKPLOY_TARGET_ID}"
 
             request_payload="$({
               jq -n \
