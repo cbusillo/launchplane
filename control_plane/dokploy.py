@@ -446,7 +446,11 @@ def read_control_plane_environment_values(*, control_plane_root: Path) -> dict[s
     return control_plane_secrets.overlay_dokploy_environment_values(environment_values={})
 
 
-def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> DokploySourceOfTruth:
+def read_control_plane_dokploy_source_of_truth(
+    *,
+    control_plane_root: Path,
+    allow_incomplete_target_ids: bool = False,
+) -> DokploySourceOfTruth:
     del control_plane_root
     database_url = resolve_database_url()
     if not database_url:
@@ -454,7 +458,8 @@ def read_control_plane_dokploy_source_of_truth(*, control_plane_root: Path) -> D
             "Missing Launchplane tracked Dokploy target authority. Configure DB-backed tracked target records."
         )
     source_of_truth = _load_optional_dokploy_source_of_truth_from_database(
-        database_url=database_url
+        database_url=database_url,
+        allow_incomplete_target_ids=allow_incomplete_target_ids,
     )
     if source_of_truth is None:
         raise click.ClickException("Missing DB-backed Launchplane tracked Dokploy target records.")
@@ -498,6 +503,8 @@ def build_dokploy_target_record_from_definition(
 def build_dokploy_source_of_truth_from_records(
     target_records: tuple[DokployTargetRecord, ...],
     target_id_records: tuple[DokployTargetIdRecord, ...],
+    *,
+    allow_incomplete_target_ids: bool = False,
 ) -> DokploySourceOfTruth:
     target_id_map = {
         (record.context.strip(), record.instance.strip()): record.target_id
@@ -509,6 +516,8 @@ def build_dokploy_source_of_truth_from_records(
         target_route = (record.context.strip(), record.instance.strip())
         target_id = target_id_map.get(target_route, "").strip()
         if not target_id:
+            if allow_incomplete_target_ids:
+                continue
             raise click.ClickException(
                 "Missing DB-backed Dokploy target-id record for "
                 f"{record.context}/{record.instance}."
@@ -554,23 +563,32 @@ def build_dokploy_source_of_truth_from_records(
 
 
 def load_optional_dokploy_source_of_truth_from_store(
-    *, record_store: DokployTargetRecordStore
+    *,
+    record_store: DokployTargetRecordStore,
+    allow_incomplete_target_ids: bool = False,
 ) -> DokploySourceOfTruth | None:
     target_records = record_store.list_dokploy_target_records()
     if not target_records:
         return None
     target_id_records = record_store.list_dokploy_target_id_records()
-    return build_dokploy_source_of_truth_from_records(target_records, target_id_records)
+    return build_dokploy_source_of_truth_from_records(
+        target_records,
+        target_id_records,
+        allow_incomplete_target_ids=allow_incomplete_target_ids,
+    )
 
 
 def _load_optional_dokploy_source_of_truth_from_database(
-    *, database_url: str
+    *, database_url: str, allow_incomplete_target_ids: bool = False
 ) -> DokploySourceOfTruth | None:
     record_store: PostgresRecordStore | None = None
     try:
         record_store = PostgresRecordStore(database_url=database_url)
         record_store.ensure_schema()
-        return load_optional_dokploy_source_of_truth_from_store(record_store=record_store)
+        return load_optional_dokploy_source_of_truth_from_store(
+            record_store=record_store,
+            allow_incomplete_target_ids=allow_incomplete_target_ids,
+        )
     except click.ClickException:
         raise
     except Exception as error:
