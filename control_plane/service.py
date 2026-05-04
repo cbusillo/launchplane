@@ -127,6 +127,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
+    GenericWebPreviewRefreshResult,
     GenericWebPreviewStore,
     discover_generic_web_preview_desired_state,
     evaluate_generic_web_preview_readiness,
@@ -134,6 +135,7 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_inventory,
     execute_generic_web_preview_refresh,
     resolve_generic_web_preview_profile,
+    preview_pr_number_from_slug,
 )
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
@@ -2441,6 +2443,129 @@ def _verireel_preview_manifest_fingerprint(request: VeriReelPreviewRefreshReques
     )
 
 
+def _image_reference_tail(value: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        return ""
+    for separator in ("@", ":"):
+        if separator in normalized:
+            normalized = normalized.rsplit(separator, maxsplit=1)[1]
+    return normalized.strip()
+
+
+def _generic_web_preview_manifest_fingerprint(
+    request: GenericWebPreviewRefreshRequest,
+) -> str:
+    artifact_token = _repo_token(_image_reference_tail(request.image_reference) or "image")
+    return f"{_repo_token(request.preview_slug)}-{artifact_token}"
+
+
+def _generic_web_preview_anchor_pr_number(
+    *,
+    request: GenericWebPreviewRefreshRequest,
+    profile: LaunchplaneProductProfileRecord,
+) -> int:
+    if request.anchor_pr_number is not None:
+        return request.anchor_pr_number
+    pr_number = preview_pr_number_from_slug(
+        preview_slug=request.preview_slug,
+        slug_template=profile.preview.slug_template,
+    )
+    if pr_number is None:
+        raise click.ClickException(
+            "Generic web preview refresh requires anchor_pr_number when preview_slug does not match the profile slug_template."
+        )
+    return pr_number
+
+
+def _generic_web_preview_anchor_pr_url(
+    *,
+    request: GenericWebPreviewRefreshRequest,
+    profile: LaunchplaneProductProfileRecord,
+    anchor_pr_number: int,
+) -> str:
+    if request.anchor_pr_url.strip():
+        return request.anchor_pr_url.strip()
+    return f"https://github.com/{profile.repository.strip()}/pull/{anchor_pr_number}"
+
+
+def _generic_web_preview_anchor_repo(profile: LaunchplaneProductProfileRecord) -> str:
+    _owner, separator, repo = profile.repository.strip().partition("/")
+    if not separator or not repo.strip():
+        raise click.ClickException(
+            "Generic web preview profile repository must use owner/repo format."
+        )
+    return repo.strip()
+
+
+def _generic_web_preview_anchor_head_sha(request: GenericWebPreviewRefreshRequest) -> str:
+    if request.anchor_head_sha.strip():
+        return request.anchor_head_sha.strip()
+    return _image_reference_tail(request.image_reference) or request.image_reference.strip()
+
+
+def _apply_generic_web_preview_refresh_records(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    request: GenericWebPreviewRefreshRequest,
+    driver_result: GenericWebPreviewRefreshResult,
+    profile: LaunchplaneProductProfileRecord,
+) -> dict[str, object]:
+    anchor_pr_number = _generic_web_preview_anchor_pr_number(
+        request=request,
+        profile=profile,
+    )
+    requested_at = (
+        driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
+    )
+    finished_at = driver_result.refresh_finished_at.strip() or requested_at
+    refresh_passed = driver_result.refresh_status == "pass"
+    failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
+    preview_request = PreviewMutationRequest(
+        context=profile.preview.context,
+        anchor_repo=_generic_web_preview_anchor_repo(profile),
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=_generic_web_preview_anchor_pr_url(
+            request=request,
+            profile=profile,
+            anchor_pr_number=anchor_pr_number,
+        ),
+        canonical_url=driver_result.preview_url.strip() or request.preview_url.strip(),
+        state="pending" if refresh_passed else "failed",
+        created_at=requested_at,
+        updated_at=finished_at,
+        eligible_at=requested_at,
+    )
+    generation_request = PreviewGenerationMutationRequest(
+        context=profile.preview.context,
+        anchor_repo=preview_request.anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=preview_request.anchor_pr_url,
+        anchor_head_sha=_generic_web_preview_anchor_head_sha(request),
+        state="verifying" if refresh_passed else "failed",
+        requested_reason="external_preview_refresh",
+        requested_at=requested_at,
+        started_at=requested_at,
+        finished_at="" if refresh_passed else finished_at,
+        failed_at="" if refresh_passed else finished_at,
+        resolved_manifest_fingerprint=_generic_web_preview_manifest_fingerprint(request),
+        artifact_id=request.image_reference,
+        deploy_status="pass" if refresh_passed else "fail",
+        verify_status="pending" if refresh_passed else "skipped",
+        overall_health_status="pending" if refresh_passed else "fail",
+        failure_stage="" if refresh_passed else "provision",
+        failure_summary="" if refresh_passed else failure_summary,
+    )
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    return apply_launchplane_generation_evidence(
+        control_plane_root_path=control_plane_root_path,
+        record_store=typed_record_store,
+        preview_request=preview_request,
+        generation_request=generation_request,
+    )
+
+
 def _apply_verireel_preview_refresh_records(
     *,
     control_plane_root_path: Path,
@@ -4230,13 +4355,24 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
+                _generic_web_preview_anchor_pr_number(
+                    request=generic_web_refresh_request.refresh,
+                    profile=profile,
+                )
                 driver_result = execute_generic_web_preview_refresh(
                     control_plane_root=resolved_root,
                     record_store=record_store,
                     request=generic_web_refresh_request.refresh,
                     profile=profile,
                 )
-                result = {}
+                driver_result = GenericWebPreviewRefreshResult.model_validate(driver_result)
+                result = _apply_generic_web_preview_refresh_records(
+                    control_plane_root_path=resolved_root,
+                    record_store=record_store,
+                    request=generic_web_refresh_request.refresh,
+                    driver_result=driver_result,
+                    profile=profile,
+                )
             elif path == _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path:
                 generic_web_readiness_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(

@@ -122,6 +122,9 @@ class GenericWebPreviewRefreshRequest(BaseModel):
     preview_slug: str
     preview_url: str
     image_reference: str
+    anchor_pr_number: int | None = Field(default=None, ge=1)
+    anchor_pr_url: str = ""
+    anchor_head_sha: str = ""
     source: str = "generic-web-preview-refresh"
     timeout_seconds: int = Field(default=300, ge=1)
     no_cache: bool = False
@@ -136,11 +139,19 @@ class GenericWebPreviewRefreshRequest(BaseModel):
             raise ValueError("Generic web preview refresh requires preview_url.")
         parsed = urlparse(self.preview_url.strip())
         if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError("Generic web preview refresh preview_url must be an absolute http(s) URL.")
+            raise ValueError(
+                "Generic web preview refresh preview_url must be an absolute http(s) URL."
+            )
         if not self.image_reference.strip():
             raise ValueError("Generic web preview refresh requires image_reference.")
         if not self.source.strip():
             raise ValueError("Generic web preview refresh requires source.")
+        if self.anchor_pr_url.strip():
+            parsed_pr_url = urlparse(self.anchor_pr_url.strip())
+            if parsed_pr_url.scheme not in {"http", "https"} or not parsed_pr_url.netloc:
+                raise ValueError(
+                    "Generic web preview refresh anchor_pr_url must be an absolute http(s) URL."
+                )
         return self
 
 
@@ -263,7 +274,9 @@ def preview_pr_number_from_slug(*, preview_slug: str, slug_template: str) -> int
 
 def _iter_dokploy_applications(raw_projects: object) -> Iterator[JsonObject]:
     if not isinstance(raw_projects, list):
-        raise click.ClickException("Dokploy project inventory returned an invalid response payload.")
+        raise click.ClickException(
+            "Dokploy project inventory returned an invalid response payload."
+        )
     for raw_project in raw_projects:
         project = control_plane_dokploy.as_json_object(raw_project)
         if project is None:
@@ -326,7 +339,9 @@ def _ensure_application(
     environment_id = str(template_application.get("environmentId") or "").strip()
     server_id = str(template_application.get("serverId") or "").strip()
     if not environment_id:
-        raise click.ClickException("Generic web preview template application is missing environmentId.")
+        raise click.ClickException(
+            "Generic web preview template application is missing environmentId."
+        )
     if not server_id:
         raise click.ClickException("Generic web preview template application is missing serverId.")
     created = control_plane_dokploy.dokploy_request(
@@ -518,9 +533,13 @@ def resolve_generic_web_preview_profile(
             f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, not generic-web."
         )
     if not profile.preview.enabled:
-        raise click.ClickException(f"Product {profile.product!r} does not have generic-web previews enabled.")
+        raise click.ClickException(
+            f"Product {profile.product!r} does not have generic-web previews enabled."
+        )
     if not profile.preview.context.strip():
-        raise click.ClickException(f"Product {profile.product!r} does not define a preview context.")
+        raise click.ClickException(
+            f"Product {profile.product!r} does not define a preview context."
+        )
     return profile
 
 
@@ -559,7 +578,11 @@ def _read_template_payload(
         instance_name=template_lane.instance,
     )
     if target_definition is None:
-        return None, None, f"No Dokploy target definition found for {template_lane.context}/{template_lane.instance}."
+        return (
+            None,
+            None,
+            f"No Dokploy target definition found for {template_lane.context}/{template_lane.instance}.",
+        )
     if target_definition.target_type != "application":
         return (
             target_definition,
@@ -582,7 +605,9 @@ def _read_template_payload(
     return target_definition, payload, ""
 
 
-def _transport_summary(*, profile: LaunchplaneProductProfileRecord) -> GenericWebPreviewTransportSummary:
+def _transport_summary(
+    *, profile: LaunchplaneProductProfileRecord
+) -> GenericWebPreviewTransportSummary:
     return GenericWebPreviewTransportSummary(
         data_transport_mode=profile.preview.data_transport_mode,
         copied_env_keys=profile.preview.copied_env_keys,
@@ -729,9 +754,15 @@ def evaluate_generic_web_preview_readiness(
             context=resolved_profile.preview.context,
             template_context=template_lane.context,
             template_instance=template_lane.instance,
-            template_target_type=(target_definition.target_type if target_definition is not None else ""),
-            template_target_id=(target_definition.target_id if target_definition is not None else ""),
-            template_target_name=(target_definition.target_name if target_definition is not None else ""),
+            template_target_type=(
+                target_definition.target_type if target_definition is not None else ""
+            ),
+            template_target_id=(
+                target_definition.target_id if target_definition is not None else ""
+            ),
+            template_target_name=(
+                target_definition.target_name if target_definition is not None else ""
+            ),
             source=request.source,
             missing_template_env_keys=(),
             missing_provider_fields=(),
@@ -762,7 +793,8 @@ def evaluate_generic_web_preview_readiness(
             GenericWebPreviewReadinessCheck(
                 check_id="template_env",
                 status="blocked",
-                message="Template lane is missing required env keys: " + ", ".join(missing_env_keys),
+                message="Template lane is missing required env keys: "
+                + ", ".join(missing_env_keys),
             )
         )
     else:
@@ -800,7 +832,9 @@ def evaluate_generic_web_preview_readiness(
             ),
         )
     )
-    status: Literal["pass", "blocked"] = "blocked" if missing_env_keys or missing_provider_fields else "pass"
+    status: Literal["pass", "blocked"] = (
+        "blocked" if missing_env_keys or missing_provider_fields else "pass"
+    )
     return GenericWebPreviewReadinessResult(
         readiness_status=status,
         checked_at=checked_at,
@@ -868,13 +902,17 @@ def execute_generic_web_preview_refresh(
     stale_domain_ids: tuple[str, ...] = ()
     application_id = ""
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+        host, token = control_plane_dokploy.read_dokploy_config(
+            control_plane_root=control_plane_root
+        )
         target_definition, template_application, target_error = _read_template_payload(
             control_plane_root=control_plane_root,
             template_lane=template_lane,
         )
         if target_error or template_application is None or target_definition is None:
-            raise click.ClickException(target_error or "Generic web preview template payload is unavailable.")
+            raise click.ClickException(
+                target_error or "Generic web preview template payload is unavailable."
+            )
         env_text = _render_preview_env_text(
             profile=resolved_profile,
             template_application=template_application,
@@ -1037,7 +1075,9 @@ def execute_generic_web_preview_inventory(
         )
         if not preview_slug:
             continue
-        application_id = str(application.get("applicationId") or application.get("id") or "").strip()
+        application_id = str(
+            application.get("applicationId") or application.get("id") or ""
+        ).strip()
         if not application_id:
             continue
         preview_items.append(

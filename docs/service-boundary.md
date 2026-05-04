@@ -365,6 +365,16 @@ product and optional pull-request label/page limit; Launchplane resolves the
 repository, preview context, anchor repo, and preview slug template from the
 DB-backed product profile before recording desired preview state.
 
+Generic web preview refresh uses
+`POST /v1/drivers/generic-web/preview-refresh`. The request names the product,
+preview slug, preview URL, and immutable image reference; Launchplane resolves
+the repository and preview context from the DB-backed product profile, derives
+the anchor pull request from the preview slug when possible, and records preview
+and generation evidence for both successful and failed provider results. Product
+workflows may send `anchor_pr_number`, `anchor_pr_url`, and `anchor_head_sha`
+when the preview slug cannot be parsed from the configured slug template or when
+the workflow has more precise anchor metadata than the image reference.
+
 Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-inventory` and
 `POST /v1/drivers/generic-web/preview-destroy`. They scan and delete stateless
