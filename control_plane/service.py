@@ -58,6 +58,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
 from control_plane.contracts.product_environment_read_model import (
     build_product_activity_read_model,
     build_product_environment_detail,
@@ -137,6 +138,7 @@ from control_plane.workflows.generic_web_preview import (
     resolve_generic_web_preview_profile,
     preview_pr_number_from_slug,
 )
+from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.preview_lifecycle import build_preview_lifecycle_plan
 from control_plane.workflows.preview_lifecycle_cleanup import (
@@ -1246,6 +1248,21 @@ class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
         return self
 
 
+class ProductOnboardingApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    manifest: ProductOnboardingManifest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "ProductOnboardingApplyEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Product onboarding writes require product 'launchplane'.")
+        self.product = "launchplane"
+        return self
+
+
 class ProductConfigApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1663,6 +1680,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
+        "/v1/product-onboarding/apply",
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
         "/v1/product-profiles/legacy-context-cleanup/apply",
@@ -1782,6 +1800,10 @@ def _accepted_payload(
                 "preview_lifecycle_plan_id",
                 "authz_policy_record_id",
                 "product_profile",
+                "dokploy_target_count",
+                "dokploy_target_id_count",
+                "runtime_environment_record_count",
+                "secret_binding_count",
                 "generation_id",
                 "promotion_record_id",
                 "target_id",
@@ -4074,6 +4096,104 @@ def create_launchplane_service_app(
                 driver_result = {
                     "authz_policy": _summarize_authz_policy_record(authz_policy_record),
                     "changed": changed,
+                }
+            elif path == "/v1/product-onboarding/apply":
+                onboarding_request = ProductOnboardingApplyEnvelope.model_validate(payload)
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Product onboarding writes require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=onboarding_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot apply Launchplane product onboarding manifests.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                onboarding_result = apply_product_onboarding_manifest(
+                    record_store=record_store,
+                    manifest=onboarding_request.manifest,
+                )
+                result = {
+                    "product_profile": onboarding_result.product_profile.product,
+                    "dokploy_target_count": len(onboarding_result.dokploy_targets),
+                    "dokploy_target_id_count": len(onboarding_result.dokploy_target_ids),
+                    "runtime_environment_record_count": len(
+                        onboarding_result.runtime_environments
+                    ),
+                    "secret_binding_count": len(onboarding_result.secret_bindings),
+                }
+                driver_result = {
+                    "product": onboarding_result.product,
+                    "product_profile": onboarding_result.product_profile.model_dump(mode="json"),
+                    "dokploy_targets": [
+                        record.model_dump(mode="json")
+                        for record in onboarding_result.dokploy_targets
+                    ],
+                    "dokploy_target_ids": [
+                        {
+                            "context": record.context,
+                            "instance": record.instance,
+                            "target_id_recorded": bool(record.target_id.strip()),
+                            "updated_at": record.updated_at,
+                            "source_label": record.source_label,
+                        }
+                        for record in onboarding_result.dokploy_target_ids
+                    ],
+                    "runtime_environment_records": [
+                        {
+                            "scope": record.scope,
+                            "context": record.context,
+                            "instance": record.instance,
+                            "env_keys": sorted(record.env),
+                            "updated_at": record.updated_at,
+                            "source_label": record.source_label,
+                        }
+                        for record in onboarding_result.runtime_environments
+                    ],
+                    "secret_bindings": [
+                        {
+                            "binding_id": binding.binding_id,
+                            "integration": binding.integration,
+                            "binding_key": binding.binding_key,
+                            "context": binding.context,
+                            "instance": binding.instance,
+                            "status": binding.status,
+                            "updated_at": binding.updated_at,
+                        }
+                        for binding in onboarding_result.secret_bindings
+                    ],
                 }
             elif path == "/v1/drivers/launchplane/self-deploy":
                 self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(payload)

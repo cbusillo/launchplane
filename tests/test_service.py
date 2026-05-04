@@ -1233,6 +1233,121 @@ class LaunchplaneServiceTests(unittest.TestCase):
             ["sellyouroutboard"],
         )
 
+    def test_product_onboarding_endpoint_writes_full_launchplane_owned_bundle(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-onboarding/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "manifest": {
+                        "product": "discord-blue",
+                        "display_name": "Discord Blue",
+                        "repository": "cbusillo/discord-blue",
+                        "driver_id": "generic-web",
+                        "image_repository": "ghcr.io/cbusillo/discord-blue",
+                        "runtime_port": 8787,
+                        "health_path": "/health",
+                        "lanes": [
+                            {
+                                "instance": "prod",
+                                "context": "discord-blue",
+                            }
+                        ],
+                        "dokploy_targets": [
+                            {
+                                "context": "discord-blue",
+                                "instance": "prod",
+                                "target_id": "app-discord-blue",
+                                "target_type": "application",
+                                "target_name": "discord-blue",
+                                "healthcheck_enabled": False,
+                            }
+                        ],
+                        "runtime_environments": [
+                            {
+                                "scope": "instance",
+                                "context": "discord-blue",
+                                "instance": "prod",
+                                "env": {"DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue"},
+                            }
+                        ],
+                        "secret_bindings": [
+                            {
+                                "binding_key": "DISCORD_TOKEN",
+                                "context": "discord-blue",
+                                "instance": "prod",
+                            }
+                        ],
+                        "updated_at": "2026-05-04T18:00:00Z",
+                        "source_label": "test:discord-blue-onboarding",
+                    },
+                },
+                headers={"Idempotency-Key": "product-onboarding-discord-blue"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                profile = store.read_product_profile_record("discord-blue")
+                target = store.read_dokploy_target_record(
+                    context_name="discord-blue", instance_name="prod"
+                )
+                target_id = store.read_dokploy_target_id_record(
+                    context_name="discord-blue", instance_name="prod"
+                )
+                runtime_records = store.list_runtime_environment_records()
+                secret_bindings = store.list_secret_bindings()
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["records"]["product_profile"], "discord-blue")
+        self.assertEqual(payload["records"]["dokploy_target_count"], "1")
+        self.assertEqual(payload["records"]["dokploy_target_id_count"], "1")
+        self.assertEqual(profile.driver_id, "generic-web")
+        self.assertEqual(profile.runtime_port, 8787)
+        self.assertEqual(target.target_type, "application")
+        self.assertFalse(target.healthcheck_enabled)
+        self.assertEqual(target_id.target_id, "app-discord-blue")
+        self.assertEqual(runtime_records[0].env, {"DISCORD_BLUE_STATE_DIR": "/var/lib/discord-blue"})
+        self.assertEqual(secret_bindings[0].binding_key, "DISCORD_TOKEN")
+        self.assertNotIn("secret_id", json.dumps(payload, sort_keys=True))
+
     def test_product_overview_endpoint_is_generic_web_profile_driven(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

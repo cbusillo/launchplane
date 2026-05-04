@@ -44,6 +44,8 @@ VeriReel product paths:
   - `POST /v1/product-profiles`
 - product config write route:
   - `POST /v1/product-config/apply`
+- product onboarding route:
+  - `POST /v1/product-onboarding/apply`
 - product context cutover route:
   - `POST /v1/product-profiles/context-cutover/apply`
 - product legacy context cleanup route:
@@ -344,6 +346,15 @@ is submitted without `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted
 Launchplane runtime. Request bodies for this route must not be copied into logs,
 issues, docs, or workflow artifacts because they can contain plaintext secret
 values.
+
+Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
+the same operator-approved manifest as `launchplane product-onboarding apply`
+and writes the full Launchplane-owned bundle: product profile, Dokploy target
+records, target-id records, runtime-environment records, and managed secret
+binding placeholders. It is restricted to Launchplane service deploy authority,
+requires DB-backed storage, returns only sanitized summaries, and exists so the
+Launchplane deploy workflow can seed product records without product repos
+storing live lifecycle truth.
 
 Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
