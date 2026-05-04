@@ -49,6 +49,7 @@ jobs:
       LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       LAUNCHPLANE_COOKIE_SECURE: ${{ vars.LAUNCHPLANE_COOKIE_SECURE }}
       LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: ${{ vars.LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS }}
+      DISCORD_BLUE_DOKPLOY_TARGET_ID: ${{ vars.DISCORD_BLUE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
       LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
     steps:
@@ -359,6 +360,7 @@ jobs:
 
             request_payload="$({
               jq -n \
+                --arg target_id "${DISCORD_BLUE_DOKPLOY_TARGET_ID:-}" \
                 '{
                   schema_version: 1,
                   product: "launchplane",
@@ -380,6 +382,7 @@ jobs:
                       {
                         context: "discord-blue",
                         instance: "prod",
+                        target_id: $target_id,
                         target_type: "application",
                         target_name: "discord-blue",
                         healthcheck_enabled: false,
