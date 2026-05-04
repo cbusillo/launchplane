@@ -35,6 +35,13 @@ Every Launchplane-operated web product should expose a small runtime contract:
 For most web products, `generic-web` can use this contract directly from the
 DB-backed product profile.
 
+Simple service products, such as bots or workers deployed as Dokploy
+applications, can also use `generic-web` when their lifecycle is image deploy,
+optional health verification, and Launchplane-owned provider mutation. See
+[dokploy-service-deployments.md](dokploy-service-deployments.md) for the
+service-specific contract, including persistent volumes and internal ports such
+as Discord Blue's Every Code bridge port `8787`.
+
 ## Launchplane Records
 
 Before wiring workflows, seed or verify these records in Launchplane with an
@@ -85,9 +92,10 @@ artifact reference, and optional run URL.
 
 ## Choose A Driver
 
-Use `generic-web` when the product is a stateless or mostly stateless web app
-whose lifecycle is image deploy, health check, preview refresh, preview cleanup,
-and PR feedback.
+Use `generic-web` when the product is a stateless or mostly stateless web app,
+or a simple service deployed as a Dokploy application, whose lifecycle is image
+deploy, health check, preview refresh when enabled, preview cleanup when
+enabled, and PR feedback.
 
 Create a product driver when the product has named extra obligations:
 

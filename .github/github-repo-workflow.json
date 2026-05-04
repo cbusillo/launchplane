@@ -6,6 +6,7 @@
     "architecture": "docs/architecture.md",
     "configBoundary": "docs/config-boundary.md",
     "serviceBoundary": "docs/service-boundary.md",
+    "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "driverDescriptors": "docs/driver-descriptors.md",
     "operatorExperience": "docs/operator-experience.md",
     "operations": "docs/operations.md",
