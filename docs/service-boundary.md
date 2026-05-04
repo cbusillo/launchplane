@@ -373,7 +373,10 @@ the anchor pull request from the preview slug when possible, and records preview
 and generation evidence for both successful and failed provider results. Product
 workflows may send `anchor_pr_number`, `anchor_pr_url`, and `anchor_head_sha`
 when the preview slug cannot be parsed from the configured slug template or when
-the workflow has more precise anchor metadata than the image reference.
+the workflow has more precise anchor metadata than the image reference. Preview
+health failures that return Dokploy Dead Host are classified as public preview
+ingress failures so workflow output and persisted generation evidence point at
+DNS/ingress routing instead of a generic provider timeout.
 
 Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-inventory` and
