@@ -286,27 +286,50 @@ function choiceFromProductProfile(profile: ProductProfileRecord): DriverChoice {
   };
 }
 
+const PRODUCT_ENVIRONMENT_ALIASES: Record<"testing" | "prod", Set<string>> = {
+  testing: new Set(["testing", "test", "staging", "stage", "qa"]),
+  prod: new Set(["prod", "production", "stable", "live"]),
+};
+
+function normalizedProductEnvironment(value: string): string {
+  return value.trim().toLowerCase().replaceAll("_", "-");
+}
+
 function contextForProductEnvironment(
   product: ProductSiteOverview,
   environment: "testing" | "prod",
+  reservedContext = "",
 ): string {
-  const summary = product.environments.find(
-    (candidate) => candidate.environment === environment,
+  const summaries = product.environments
+    .map((summary) => ({
+      environment: normalizedProductEnvironment(summary.environment),
+      context: summary.context.trim(),
+    }))
+    .filter((summary) => summary.context);
+  const aliases = PRODUCT_ENVIRONMENT_ALIASES[environment];
+  const summary = summaries.find((candidate) =>
+    aliases.has(candidate.environment),
   );
-  if (summary?.context.trim()) {
-    return summary.context.trim();
+  if (summary) {
+    return summary.context;
   }
-  const fallback = product.environments.find((candidate) =>
-    candidate.context.trim(),
+  const distinctFallback = summaries.find(
+    (candidate) => candidate.context !== reservedContext,
   );
-  return fallback?.context.trim() || "";
+  return distinctFallback?.context ?? summaries[0]?.context ?? "";
 }
 
 function choiceFromProductOverview(product: ProductSiteOverview): DriverChoice {
+  const prodContext = contextForProductEnvironment(product, "prod");
+  const testingContext = contextForProductEnvironment(
+    product,
+    "testing",
+    prodContext,
+  );
   return {
     driverId: product.product,
-    testingContext: contextForProductEnvironment(product, "testing"),
-    prodContext: contextForProductEnvironment(product, "prod"),
+    testingContext,
+    prodContext,
     previewContext: product.preview.enabled
       ? product.preview.context.trim()
       : "",
