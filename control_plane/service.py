@@ -339,8 +339,7 @@ _GENERIC_WEB_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/deploy",
     envelope_model=GenericWebDeployEnvelope,
     denial_message=(
-        "Workflow cannot execute the generic web deploy driver"
-        " for the requested product/context."
+        "Workflow cannot execute the generic web deploy driver for the requested product/context."
     ),
 )
 
@@ -444,8 +443,7 @@ _GENERIC_WEB_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/preview-refresh",
     envelope_model=GenericWebPreviewRefreshEnvelope,
     denial_message=(
-        "Workflow cannot refresh generic web preview state"
-        " for the requested product/context."
+        "Workflow cannot refresh generic web preview state for the requested product/context."
     ),
 )
 
@@ -454,8 +452,7 @@ _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/preview-inventory",
     envelope_model=GenericWebPreviewInventoryEnvelope,
     denial_message=(
-        "Workflow cannot read generic web preview inventory"
-        " for the requested product/context."
+        "Workflow cannot read generic web preview inventory for the requested product/context."
     ),
 )
 
@@ -477,8 +474,7 @@ _GENERIC_WEB_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/preview-readiness",
     envelope_model=GenericWebPreviewReadinessEnvelope,
     denial_message=(
-        "Workflow cannot evaluate generic web preview readiness"
-        " for the requested product/context."
+        "Workflow cannot evaluate generic web preview readiness for the requested product/context."
     ),
 )
 
@@ -500,8 +496,7 @@ _GENERIC_WEB_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/generic-web/preview-destroy",
     envelope_model=GenericWebPreviewDestroyEnvelope,
     denial_message=(
-        "Workflow cannot destroy generic web preview state"
-        " for the requested product/context."
+        "Workflow cannot destroy generic web preview state for the requested product/context."
     ),
 )
 
@@ -696,8 +691,7 @@ _ODOO_POST_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/post-deploy",
     envelope_model=OdooPostDeployEnvelope,
     denial_message=(
-        "Workflow cannot execute the Odoo post-deploy driver"
-        " for the requested product/context."
+        "Workflow cannot execute the Odoo post-deploy driver for the requested product/context."
     ),
 )
 
@@ -706,8 +700,7 @@ _ODOO_ARTIFACT_PUBLISH_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/artifact-publish",
     envelope_model=OdooArtifactPublishEnvelope,
     denial_message=(
-        "Workflow cannot write Odoo artifact publish evidence"
-        " for the requested product/context."
+        "Workflow cannot write Odoo artifact publish evidence for the requested product/context."
     ),
 )
 
@@ -716,8 +709,7 @@ _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/artifact-publish-inputs",
     envelope_model=OdooArtifactPublishInputsEnvelope,
     denial_message=(
-        "Workflow cannot read Odoo artifact publish inputs"
-        " for the requested product/context."
+        "Workflow cannot read Odoo artifact publish inputs for the requested product/context."
     ),
 )
 
@@ -766,8 +758,7 @@ _ODOO_PROD_PROMOTION_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/prod-promotion",
     envelope_model=OdooProdPromotionEnvelope,
     denial_message=(
-        "Workflow cannot execute the Odoo prod promotion driver"
-        " for the requested product/context."
+        "Workflow cannot execute the Odoo prod promotion driver for the requested product/context."
     ),
 )
 
@@ -776,8 +767,7 @@ _ODOO_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/prod-rollback",
     envelope_model=OdooProdRollbackEnvelope,
     denial_message=(
-        "Workflow cannot execute the Odoo prod rollback driver"
-        " for the requested product/context."
+        "Workflow cannot execute the Odoo prod rollback driver for the requested product/context."
     ),
 )
 
@@ -902,8 +892,7 @@ _VERIREEL_TESTING_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/verireel/testing-verification",
     envelope_model=VeriReelTestingVerificationEnvelope,
     denial_message=(
-        "Workflow cannot write VeriReel testing verification"
-        " for the requested product/context."
+        "Workflow cannot write VeriReel testing verification for the requested product/context."
     ),
 )
 
@@ -912,8 +901,7 @@ _VERIREEL_STABLE_ENVIRONMENT_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/verireel/stable-environment",
     envelope_model=VeriReelStableEnvironmentEnvelope,
     denial_message=(
-        "Workflow cannot read the VeriReel stable environment"
-        " for the requested product/context."
+        "Workflow cannot read the VeriReel stable environment for the requested product/context."
     ),
 )
 
@@ -972,8 +960,7 @@ _VERIREEL_PROD_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/verireel/prod-deploy",
     envelope_model=VeriReelProdDeployEnvelope,
     denial_message=(
-        "Workflow cannot execute the VeriReel prod deploy driver"
-        " for the requested product/context."
+        "Workflow cannot execute the VeriReel prod deploy driver for the requested product/context."
     ),
 )
 
@@ -1086,8 +1073,7 @@ _VERIREEL_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/verireel/preview-inventory",
     envelope_model=VeriReelPreviewInventoryEnvelope,
     denial_message=(
-        "Workflow cannot read the VeriReel preview inventory"
-        " for the requested product/context."
+        "Workflow cannot read the VeriReel preview inventory for the requested product/context."
     ),
 )
 
@@ -1106,8 +1092,7 @@ _VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/verireel/preview-verification",
     envelope_model=VeriReelPreviewVerificationEnvelope,
     denial_message=(
-        "Workflow cannot write VeriReel preview verification"
-        " for the requested product/context."
+        "Workflow cannot write VeriReel preview verification for the requested product/context."
     ),
 )
 
@@ -1125,9 +1110,7 @@ _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
         _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
     }
 )
-_PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES = frozenset(
-    {_VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path}
-)
+_PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES = frozenset({_VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path})
 
 
 class LaunchplaneSelfDeployRequest(BaseModel):
@@ -1745,6 +1728,24 @@ def _request_fingerprint(payload: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _canonical_request_payload_for_idempotency(
+    *, route_path: str, payload: dict[str, object]
+) -> dict[str, object]:
+    if route_path != _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
+        return payload
+    canonical_payload = json.loads(json.dumps(payload))
+    destroy_payload = canonical_payload.get("destroy")
+    if isinstance(destroy_payload, dict):
+        destroy_payload.pop("destroy_reason", None)
+    return cast(dict[str, object], canonical_payload)
+
+
+def _idempotency_request_fingerprint(*, route_path: str, payload: dict[str, object]) -> str:
+    return _request_fingerprint(
+        _canonical_request_payload_for_idempotency(route_path=route_path, payload=payload)
+    )
+
+
 def _accepted_payload(
     *,
     trace_id: str,
@@ -1906,6 +1907,42 @@ def _check_idempotent_request(
     )
 
 
+def _driver_result_status_values(
+    driver_result: BaseModel | dict[str, object] | object,
+) -> tuple[str, ...]:
+    if isinstance(driver_result, BaseModel):
+        items = driver_result.model_dump(mode="json").items()
+    elif isinstance(driver_result, dict):
+        items = driver_result.items()
+    elif hasattr(driver_result, "__dict__"):
+        items = vars(driver_result).items()
+    else:
+        return ()
+    return tuple(
+        str(value).strip() for key, value in items if key.endswith("_status") or key == "status"
+    )
+
+
+def _driver_result_contains_status(
+    driver_result: BaseModel | dict[str, object] | object, status: str
+) -> bool:
+    return status in _driver_result_status_values(driver_result)
+
+
+def _should_store_idempotency_record(
+    *, path: str, driver_result: BaseModel | dict[str, object] | None
+) -> bool:
+    if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
+        return False
+    if driver_result is None:
+        return True
+    if _driver_result_contains_status(driver_result, "fail"):
+        return False
+    if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
+        return not _driver_result_contains_status(driver_result, "pending")
+    return True
+
+
 def _read_json_request(environ: dict[str, object]) -> dict[str, object]:
     content_length = int(str(environ.get("CONTENT_LENGTH", "0") or "0"))
     body_stream = cast(BinaryIO | None, environ.get("wsgi.input"))
@@ -2040,9 +2077,8 @@ def _find_product_profile_lane(
     for lane in profile.lanes:
         lane_context = lane.context.strip()
         lane_instance = lane.instance.strip()
-        if (
-            (not normalized_context or lane_context == normalized_context)
-            and (not normalized_instance or lane_instance == normalized_instance)
+        if (not normalized_context or lane_context == normalized_context) and (
+            not normalized_instance or lane_instance == normalized_instance
         ):
             return lane
     return None
@@ -2072,7 +2108,9 @@ def _resolve_product_driver_context(
     if context.strip() or instance.strip():
         lane = _find_product_profile_lane(profile=profile, context=context, instance=instance)
         if lane is None:
-            raise ProductDriverMismatchError("Product profile does not own the requested driver lane.")
+            raise ProductDriverMismatchError(
+                "Product profile does not own the requested driver lane."
+            )
         return _ResolvedProductDriverContext(profile=profile, lane=lane)
     return _ResolvedProductDriverContext(profile=profile)
 
@@ -3670,7 +3708,7 @@ def create_launchplane_service_app(
             payload = _read_json_request(environ)
             request_idempotency_key = _idempotency_key(environ)
             request_scope = _idempotency_scope(identity)
-            request_fingerprint = _request_fingerprint(payload)
+            request_fingerprint = _idempotency_request_fingerprint(route_path=path, payload=payload)
             driver_result: BaseModel | dict[str, object] | None = None
             result: dict[str, object] = {}
             if path == "/v1/evidence/deployments":
@@ -3752,7 +3790,9 @@ def create_launchplane_service_app(
             elif path == "/v1/product-config/apply":
                 product_config_request = ProductConfigApplyEnvelope.model_validate(payload)
                 action = (
-                    "product_config.apply" if product_config_request.mode == "apply" else "product_config.plan"
+                    "product_config.apply"
+                    if product_config_request.mode == "apply"
+                    else "product_config.plan"
                 )
                 if not authz_policy.allows(
                     identity=identity,
@@ -3803,7 +3843,10 @@ def create_launchplane_service_app(
                     driver_result = control_plane_product_config.apply_product_config_bundle(
                         record_store=record_store,
                         payload=product_config_request.product_config_payload(),
-                        mode=cast(control_plane_product_config.ProductConfigMode, product_config_request.mode),
+                        mode=cast(
+                            control_plane_product_config.ProductConfigMode,
+                            product_config_request.mode,
+                        ),
                         actor=_identity_actor(identity),
                         source_label=product_config_request.source_label,
                     )
@@ -3939,7 +3982,9 @@ def create_launchplane_service_app(
                     request=self_deploy_request.deploy,
                 )
             elif path == _GENERIC_WEB_DEPLOY_ROUTE.route_path:
-                generic_web_deploy_request = _GENERIC_WEB_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                generic_web_deploy_request = (
+                    _GENERIC_WEB_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                )
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -3985,14 +4030,17 @@ def create_launchplane_service_app(
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path:
-                generic_web_promotion_request = _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
-                    payload
+                generic_web_promotion_request = (
+                    _GENERIC_WEB_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
                 )
                 _profile, _source_lane, destination_lane = resolve_generic_web_promotion_lanes(
                     record_store=record_store,
                     request=generic_web_promotion_request.promotion,
                 )
-                if isinstance(identity, GitHubHumanIdentity) and not generic_web_promotion_request.promotion.dry_run:
+                if (
+                    isinstance(identity, GitHubHumanIdentity)
+                    and not generic_web_promotion_request.promotion.dry_run
+                ):
                     return _json_response(
                         start_response=start_response,
                         status_code=403,
@@ -4046,8 +4094,10 @@ def create_launchplane_service_app(
                     "dry_run": driver_result.dry_run,
                 }
             elif path == _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path:
-                generic_web_workflow_request = _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
-                    payload
+                generic_web_workflow_request = (
+                    _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.envelope_model.model_validate(
+                        payload
+                    )
                 )
                 resolved_driver_context = _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -4092,14 +4142,16 @@ def create_launchplane_service_app(
                 )
                 result = driver_result.model_dump(mode="json")
             elif path == _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path:
-                generic_web_desired_state_request, profile, authorization_response = _authorize_generic_web_preview_route(
-                    route_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
-                    payload=payload,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                generic_web_desired_state_request, profile, authorization_response = (
+                    _authorize_generic_web_preview_route(
+                        route_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+                        payload=payload,
+                        record_store=record_store,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
                 )
                 if authorization_response is not None:
                     return authorization_response
@@ -4127,14 +4179,16 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
             elif path == _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path:
-                generic_web_inventory_request, profile, authorization_response = _authorize_generic_web_preview_route(
-                    route_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
-                    payload=payload,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                generic_web_inventory_request, profile, authorization_response = (
+                    _authorize_generic_web_preview_route(
+                        route_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+                        payload=payload,
+                        record_store=record_store,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
                 )
                 if authorization_response is not None:
                     return authorization_response
@@ -4152,14 +4206,16 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path:
-                generic_web_refresh_request, profile, authorization_response = _authorize_generic_web_preview_route(
-                    route_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
-                    payload=payload,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                generic_web_refresh_request, profile, authorization_response = (
+                    _authorize_generic_web_preview_route(
+                        route_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                        payload=payload,
+                        record_store=record_store,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
                 )
                 if authorization_response is not None:
                     return authorization_response
@@ -4182,14 +4238,16 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path:
-                generic_web_readiness_request, profile, authorization_response = _authorize_generic_web_preview_route(
-                    route_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
-                    payload=payload,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                generic_web_readiness_request, profile, authorization_response = (
+                    _authorize_generic_web_preview_route(
+                        route_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+                        payload=payload,
+                        record_store=record_store,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
                 )
                 if authorization_response is not None:
                     return authorization_response
@@ -4202,14 +4260,16 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
-                generic_web_destroy_request, profile, authorization_response = _authorize_generic_web_preview_route(
-                    route_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
-                    payload=payload,
-                    record_store=record_store,
-                    authz_policy=authz_policy,
-                    identity=identity,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
+                generic_web_destroy_request, profile, authorization_response = (
+                    _authorize_generic_web_preview_route(
+                        route_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                        payload=payload,
+                        record_store=record_store,
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
                 )
                 if authorization_response is not None:
                     return authorization_response
@@ -4232,7 +4292,9 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _ODOO_POST_DEPLOY_ROUTE.route_path:
-                odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                odoo_post_deploy_request = _ODOO_POST_DEPLOY_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_POST_DEPLOY_ROUTE,
                     record_store=record_store,
@@ -4267,7 +4329,9 @@ def create_launchplane_service_app(
                     )
                 }
             elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
-                odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(payload)
+                odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_ARTIFACT_PUBLISH_ROUTE,
                     record_store=record_store,
@@ -4303,8 +4367,8 @@ def create_launchplane_service_app(
                     "source_commit": driver_result.source_commit,
                 }
             elif path == _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.route_path:
-                odoo_inputs_request = _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(
-                    payload
+                odoo_inputs_request = (
+                    _ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE.envelope_model.model_validate(payload)
                 )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_ARTIFACT_PUBLISH_INPUTS_ROUTE,
@@ -4335,7 +4399,9 @@ def create_launchplane_service_app(
                 )
                 driver_result = result
             elif path == _ODOO_PROD_BACKUP_GATE_ROUTE.route_path:
-                odoo_backup_gate_request = _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
+                odoo_backup_gate_request = (
+                    _ODOO_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
+                )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_PROD_BACKUP_GATE_ROUTE,
                     record_store=record_store,
@@ -4373,7 +4439,9 @@ def create_launchplane_service_app(
                     "manifest_path": driver_result.manifest_path,
                 }
             elif path == _ODOO_PROD_PROMOTION_ROUTE.route_path:
-                odoo_promotion_request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
+                odoo_promotion_request = _ODOO_PROD_PROMOTION_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_PROD_PROMOTION_ROUTE,
                     record_store=record_store,
@@ -4415,7 +4483,9 @@ def create_launchplane_service_app(
                     "destination_health_status": driver_result.destination_health_status,
                 }
             elif path == _ODOO_PROD_ROLLBACK_ROUTE.route_path:
-                odoo_rollback_request = _ODOO_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
+                odoo_rollback_request = _ODOO_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(
+                    payload
+                )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_PROD_ROLLBACK_ROUTE,
                     record_store=record_store,
@@ -4451,7 +4521,9 @@ def create_launchplane_service_app(
                     "rollback_health_status": driver_result.rollback_health_status,
                 }
             elif path == _VERIREEL_TESTING_DEPLOY_ROUTE.route_path:
-                verireel_testing_deploy_request = _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                verireel_testing_deploy_request = (
+                    _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4489,8 +4561,8 @@ def create_launchplane_service_app(
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _VERIREEL_TESTING_VERIFICATION_ROUTE.route_path:
-                verireel_testing_verification_request = _VERIREEL_TESTING_VERIFICATION_ROUTE.envelope_model.model_validate(
-                    payload
+                verireel_testing_verification_request = (
+                    _VERIREEL_TESTING_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -4529,8 +4601,8 @@ def create_launchplane_service_app(
                     )
                 )
             elif path == _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path:
-                verireel_environment_request = _VERIREEL_STABLE_ENVIRONMENT_ROUTE.envelope_model.model_validate(
-                    payload
+                verireel_environment_request = (
+                    _VERIREEL_STABLE_ENVIRONMENT_ROUTE.envelope_model.model_validate(payload)
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -4557,8 +4629,8 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path:
-                verireel_runtime_verification_request = _VERIREEL_RUNTIME_VERIFICATION_ROUTE.envelope_model.model_validate(
-                    payload
+                verireel_runtime_verification_request = (
+                    _VERIREEL_RUNTIME_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -4585,7 +4657,9 @@ def create_launchplane_service_app(
                 )
                 result = {}
             elif path == _VERIREEL_APP_MAINTENANCE_ROUTE.route_path:
-                verireel_maintenance_request = _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
+                verireel_maintenance_request = (
+                    _VERIREEL_APP_MAINTENANCE_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4620,7 +4694,9 @@ def create_launchplane_service_app(
                 )
                 result = driver_result.model_dump(mode="json")
             elif path == _VERIREEL_PROD_DEPLOY_ROUTE.route_path:
-                verireel_prod_deploy_request = _VERIREEL_PROD_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                verireel_prod_deploy_request = (
+                    _VERIREEL_PROD_DEPLOY_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4658,8 +4734,8 @@ def create_launchplane_service_app(
                 )
                 result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _VERIREEL_PROD_BACKUP_GATE_ROUTE.route_path:
-                verireel_prod_backup_gate_request = _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(
-                    payload
+                verireel_prod_backup_gate_request = (
+                    _VERIREEL_PROD_BACKUP_GATE_ROUTE.envelope_model.model_validate(payload)
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -4699,7 +4775,9 @@ def create_launchplane_service_app(
                 )
                 result = {"backup_gate_record_id": driver_result.backup_record_id}
             elif path == _VERIREEL_PROD_PROMOTION_ROUTE.route_path:
-                verireel_prod_promotion_request = _VERIREEL_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
+                verireel_prod_promotion_request = (
+                    _VERIREEL_PROD_PROMOTION_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4747,7 +4825,9 @@ def create_launchplane_service_app(
                     "deployment_record_id": driver_result.deployment_record_id,
                 }
             elif path == _VERIREEL_PROD_ROLLBACK_ROUTE.route_path:
-                verireel_prod_rollback_request = _VERIREEL_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
+                verireel_prod_rollback_request = (
+                    _VERIREEL_PROD_ROLLBACK_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4788,7 +4868,9 @@ def create_launchplane_service_app(
                     "backup_record_id": driver_result.backup_record_id,
                 }
             elif path == _VERIREEL_PREVIEW_REFRESH_ROUTE.route_path:
-                verireel_preview_refresh_request = _VERIREEL_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload)
+                verireel_preview_refresh_request = (
+                    _VERIREEL_PREVIEW_REFRESH_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4828,8 +4910,8 @@ def create_launchplane_service_app(
                     driver_result=driver_result,
                 )
             elif path == _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path:
-                verireel_preview_inventory_request = _VERIREEL_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(
-                    payload
+                verireel_preview_inventory_request = (
+                    _VERIREEL_PREVIEW_INVENTORY_ROUTE.envelope_model.model_validate(payload)
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -4860,7 +4942,9 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
             elif path == _VERIREEL_PREVIEW_DESTROY_ROUTE.route_path:
-                verireel_preview_destroy_request = _VERIREEL_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload)
+                verireel_preview_destroy_request = (
+                    _VERIREEL_PREVIEW_DESTROY_ROUTE.envelope_model.model_validate(payload)
+                )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
                     route_path=path,
@@ -4899,8 +4983,8 @@ def create_launchplane_service_app(
                     driver_result=driver_result,
                 )
             elif path == _VERIREEL_PREVIEW_VERIFICATION_ROUTE.route_path:
-                verireel_preview_verification_request = _VERIREEL_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(
-                    payload
+                verireel_preview_verification_request = (
+                    _VERIREEL_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
                 )
                 _resolve_descriptor_product_driver_context(
                     record_store=record_store,
@@ -5175,7 +5259,9 @@ def create_launchplane_service_app(
                     )
                 )
             elif path == "/v1/evidence/previews/generations":
-                preview_generation_request = PreviewGenerationEvidenceEnvelope.model_validate(payload)
+                preview_generation_request = PreviewGenerationEvidenceEnvelope.model_validate(
+                    payload
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_generation.write",
@@ -5215,7 +5301,9 @@ def create_launchplane_service_app(
                     generation_request=preview_generation_request.generation,
                 )
             elif path == "/v1/previews/lifecycle-plan":
-                preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(payload)
+                preview_lifecycle_plan_request = PreviewLifecyclePlanEnvelope.model_validate(
+                    payload
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_lifecycle.plan",
@@ -5376,7 +5464,9 @@ def create_launchplane_service_app(
                 )
                 result = {"preview_pr_feedback_id": preview_pr_feedback_id}
             elif path == "/v1/previews/lifecycle-cleanup":
-                preview_lifecycle_cleanup_request = PreviewLifecycleCleanupEnvelope.model_validate(payload)
+                preview_lifecycle_cleanup_request = PreviewLifecycleCleanupEnvelope.model_validate(
+                    payload
+                )
                 if not authz_policy.allows(
                     identity=identity,
                     action="preview_lifecycle.cleanup",
@@ -5427,10 +5517,14 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                cleanup_driver_id = "verireel" if preview_lifecycle_cleanup_request.product == "verireel" else ""
+                cleanup_driver_id = (
+                    "verireel" if preview_lifecycle_cleanup_request.product == "verireel" else ""
+                )
                 cleanup_slug_template = "pr-{number}"
                 try:
-                    cleanup_profile = record_store.read_product_profile_record(preview_lifecycle_cleanup_request.product)
+                    cleanup_profile = record_store.read_product_profile_record(
+                        preview_lifecycle_cleanup_request.product
+                    )
                     cleanup_driver_id = cleanup_profile.driver_id
                     cleanup_slug_template = cleanup_profile.preview.slug_template
                 except FileNotFoundError:
@@ -5569,16 +5663,10 @@ def create_launchplane_service_app(
             result=result,
             driver_result=driver_result,
         )
-        should_store_idempotency = True
-        if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
-            should_store_idempotency = False
-        if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
-            driver_result_status = ""
-            if isinstance(driver_result, dict):
-                driver_result_status = str(driver_result.get("backup_status") or "")
-            elif driver_result is not None:
-                driver_result_status = str(getattr(driver_result, "backup_status", "") or "")
-            should_store_idempotency = driver_result_status != "pending"
+        should_store_idempotency = _should_store_idempotency_record(
+            path=path,
+            driver_result=driver_result,
+        )
         if method == "POST" and request_idempotency_key and should_store_idempotency:
             _write_idempotency_record(
                 record_store=record_store,
