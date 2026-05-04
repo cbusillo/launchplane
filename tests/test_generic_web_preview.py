@@ -1,7 +1,10 @@
 import unittest
+from email.message import Message
+from io import BytesIO
 from pathlib import Path
 from typing import cast
 from unittest.mock import patch
+from urllib.error import HTTPError
 
 import click
 
@@ -26,6 +29,7 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_refresh,
     preview_pr_number_from_slug,
     resolve_generic_web_preview_profile,
+    _wait_for_preview_health,
 )
 from control_plane.workflows.preview_desired_state import render_preview_slug
 
@@ -330,6 +334,26 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.refresh_status, "blocked")
         dokploy_request.assert_not_called()
 
+    def test_wait_for_preview_health_reports_dokploy_dead_host_as_ingress_failure(self) -> None:
+        dead_host = HTTPError(
+            url="https://preview-42.example.test/api/health",
+            code=404,
+            msg="Not Found",
+            hdrs=Message(),
+            fp=BytesIO(b"Dokploy Dead Host"),
+        )
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.urlopen",
+            side_effect=dead_host,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "Preview ingress"):
+                _wait_for_preview_health(
+                    preview_url="https://preview-42.example.test",
+                    health_path="/api/health",
+                    timeout_seconds=30,
+                )
+
     def test_execute_generic_web_preview_refresh_creates_application_from_template(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         source = DokploySourceOfTruth(
@@ -404,7 +428,9 @@ class GenericWebPreviewTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.generic_web_preview.control_plane_dokploy.wait_for_target_deployment",
             ),
-            patch("control_plane.workflows.generic_web_preview._wait_for_preview_health") as wait_health,
+            patch(
+                "control_plane.workflows.generic_web_preview._wait_for_preview_health"
+            ) as wait_health,
             patch(
                 "control_plane.workflows.generic_web_preview.utc_now_timestamp",
                 side_effect=["2026-04-30T21:00:00Z", "2026-04-30T21:00:05Z"],

@@ -679,7 +679,14 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
                     return
                 if payload.get("ok") is not False:
                     return
-        except (HTTPError, URLError, TimeoutError, ValueError):
+        except HTTPError as exc:
+            body = exc.read().decode("utf-8", errors="replace")
+            if "dokploy dead host" in body.lower():
+                raise click.ClickException(
+                    f"Preview ingress for {health_url} returned Dokploy Dead Host; "
+                    "public preview DNS or ingress is not routed to the expected Dokploy target."
+                ) from exc
+        except (URLError, TimeoutError, ValueError):
             pass
         sleep_seconds = min(5, deadline)
         time.sleep(sleep_seconds)
