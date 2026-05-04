@@ -5,14 +5,13 @@ import os
 import subprocess
 import tempfile
 from pathlib import Path
-from typing import Literal
+from typing import Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
-from control_plane.storage.filesystem import FilesystemRecordStore
 
 DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY = "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"
 PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
@@ -24,6 +23,10 @@ PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
     "OPENUPGRADELIB_INSTALL_SPEC",
     "ODOO_PYTHON_SYNC_SKIP_ADDONS",
 )
+
+
+class OdooArtifactPublishStore(Protocol):
+    def write_artifact_manifest(self, manifest: ArtifactIdentityManifest) -> Path | None: ...
 
 
 class OdooArtifactPublishRequest(BaseModel):
@@ -231,7 +234,7 @@ def _read_manifest(
 
 def ingest_odoo_artifact_publish_evidence(
     *,
-    record_store: FilesystemRecordStore,
+    record_store: OdooArtifactPublishStore,
     request: OdooArtifactPublishEvidenceRequest,
 ) -> OdooArtifactPublishResult:
     try:
@@ -261,7 +264,7 @@ def ingest_odoo_artifact_publish_evidence(
 def execute_odoo_artifact_publish(
     *,
     control_plane_root: Path,
-    record_store: FilesystemRecordStore,
+    record_store: OdooArtifactPublishStore,
     request: OdooArtifactPublishRequest,
 ) -> OdooArtifactPublishResult:
     runtime_payload = _runtime_environment_payload(
