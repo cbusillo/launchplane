@@ -3648,7 +3648,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch(
                 "control_plane.service.execute_generic_web_preview_refresh",
-                return_value={"refresh_status": "pass", "application_id": "app-preview"},
+                return_value={
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:05:00Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "pr-42",
+                    "application_name": "sellyouroutboard-pr-42",
+                    "application_id": "app-preview",
+                    "preview_url": "https://pr-42.example.test",
+                },
             ) as refresh:
                 status_code, payload = _invoke_app(
                     app,
@@ -3668,12 +3678,180 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
                 )
 
-        self.assertEqual(status_code, 202)
-        self.assertEqual(payload["result"]["refresh_status"], "pass")
-        self.assertEqual(payload["result"]["application_id"], "app-preview")
-        refresh.assert_called_once()
-        _, kwargs = refresh.call_args
-        self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
+                self.assertEqual(status_code, 202)
+                self.assertEqual(payload["records"]["transition"], "verifying")
+                self.assertEqual(payload["result"]["refresh_status"], "pass")
+                self.assertEqual(payload["result"]["application_id"], "app-preview")
+                store = FilesystemRecordStore(state_dir=state_dir)
+                preview = store.read_preview_record(
+                    "preview-sellyouroutboard-testing-sellyouroutboard-pr-42"
+                )
+                generation = store.read_preview_generation_record(
+                    "preview-sellyouroutboard-testing-sellyouroutboard-pr-42-generation-0001"
+                )
+                self.assertEqual(preview.state, "pending")
+                self.assertEqual(generation.state, "verifying")
+                self.assertEqual(generation.deploy_status, "pass")
+                self.assertEqual(generation.verify_status, "pending")
+                refresh.assert_called_once()
+                _, kwargs = refresh.call_args
+                self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
+
+    def test_generic_web_preview_refresh_route_persists_provider_failure_result(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={
+                    "refresh_status": "fail",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:05:00Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "pr-42",
+                    "application_name": "sellyouroutboard-pr-42",
+                    "application_id": "app-preview",
+                    "preview_url": "https://pr-42.example.test",
+                    "error_message": "Dokploy API POST /api/application.update failed (500): provider exploded",
+                },
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "refresh": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "preview_slug": "pr-42",
+                            "preview_url": "https://pr-42.example.test",
+                            "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
+                )
+
+                self.assertEqual(status_code, 202)
+                self.assertEqual(payload["records"]["transition"], "failed")
+                self.assertEqual(payload["result"]["refresh_status"], "fail")
+                store = FilesystemRecordStore(state_dir=state_dir)
+                preview = store.read_preview_record(
+                    "preview-sellyouroutboard-testing-sellyouroutboard-pr-42"
+                )
+                generation = store.read_preview_generation_record(
+                    "preview-sellyouroutboard-testing-sellyouroutboard-pr-42-generation-0001"
+                )
+                self.assertEqual(preview.state, "failed")
+                self.assertEqual(generation.state, "failed")
+                self.assertEqual(generation.deploy_status, "fail")
+                self.assertEqual(generation.verify_status, "skipped")
+                self.assertEqual(generation.failure_stage, "provision")
+                self.assertEqual(
+                    generation.failure_summary,
+                    "Dokploy API POST /api/application.update failed (500): provider exploded",
+                )
+
+    def test_generic_web_preview_refresh_route_rejects_unparseable_slug_before_provider_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch("control_plane.service.execute_generic_web_preview_refresh") as refresh:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "refresh": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "preview_slug": "custom-preview",
+                            "preview_url": "https://custom-preview.example.test",
+                            "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:custom"},
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+        refresh.assert_not_called()
 
     def test_generic_web_preview_refresh_retry_runs_again_after_failed_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -3730,10 +3908,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 side_effect=[
                     {
                         "refresh_status": "fail",
+                        "refresh_started_at": "2026-05-03T15:00:00Z",
+                        "refresh_finished_at": "2026-05-03T15:05:00Z",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard-testing",
+                        "preview_slug": "pr-42",
+                        "application_name": "sellyouroutboard-pr-42",
                         "application_id": "app-preview",
+                        "preview_url": "https://pr-42.example.test",
                         "error_message": "provider unavailable",
                     },
-                    {"refresh_status": "pass", "application_id": "app-preview"},
+                    {
+                        "refresh_status": "pass",
+                        "refresh_started_at": "2026-05-03T15:06:00Z",
+                        "refresh_finished_at": "2026-05-03T15:10:00Z",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard-testing",
+                        "preview_slug": "pr-42",
+                        "application_name": "sellyouroutboard-pr-42",
+                        "application_id": "app-preview",
+                        "preview_url": "https://pr-42.example.test",
+                    },
                 ],
             ) as refresh:
                 first_status_code, first_payload = _invoke_app(
@@ -3816,7 +4011,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             with patch(
                 "control_plane.service.execute_generic_web_preview_refresh",
-                return_value={"refresh_status": "pass", "application_id": "app-preview"},
+                return_value={
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:05:00Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "pr-42",
+                    "application_name": "sellyouroutboard-pr-42",
+                    "application_id": "app-preview",
+                    "preview_url": "https://pr-42.example.test",
+                },
             ) as refresh:
                 first_status_code, _ = _invoke_app(
                     app,
