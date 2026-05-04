@@ -28,6 +28,9 @@ jobs:
       - name: Run Ruff
         run: uv run --extra dev ruff check .
 
+      - name: Run mypy
+        run: uv run --extra dev mypy control_plane tests
+
       - name: Audit Python dependencies
         run: uv run --with pip-audit pip-audit
 
@@ -48,6 +51,9 @@ jobs:
 
       - name: Run Ruff
         run: uv run --extra dev ruff check .
+
+      - name: Run mypy
+        run: uv run --extra dev mypy control_plane tests
 
       - name: Audit Python dependencies
         run: uv run --with pip-audit pip-audit
