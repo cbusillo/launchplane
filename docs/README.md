@@ -9,6 +9,8 @@ Use these docs as the source of truth for `launchplane`.
   and the fallback-removal target.
 - [service-boundary.md](service-boundary.md) — Launchplane HTTP ingress, GitHub
   OIDC trust, and first API contracts.
+- [dokploy-service-deployments.md](dokploy-service-deployments.md) — contract
+  for simple image-backed services deployed through Dokploy applications.
 - [new-product-repo.md](new-product-repo.md) — checklist for building a new
   website or service repo operated by Launchplane.
 - [product-repo-contract.md](product-repo-contract.md) — thin product repo

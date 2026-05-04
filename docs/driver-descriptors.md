@@ -95,6 +95,12 @@ Generic web exposes base capabilities and common stable-lane actions:
 - preview lifecycle and inventory read models
 - PR feedback ownership
 
+Generic web can also operate simple service products deployed as Dokploy
+applications. In that shape, the product may be a bot or worker instead of a
+public website, but the driver still owns immutable image deployment, optional
+health evidence, and deployment records. The product-specific contract for this
+shape is [dokploy-service-deployments.md](dokploy-service-deployments.md).
+
 The `stable_deploy` action routes to `POST /v1/drivers/generic-web/deploy`. The
 route resolves product lane context from DB-backed product profile records and
 runtime target bindings from DB-backed Dokploy target records.

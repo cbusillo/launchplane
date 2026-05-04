@@ -188,6 +188,13 @@ health endpoint, tests, and source/build inputs. Launchplane owns the product
 profile that maps those app facts into preview, deploy, promotion, and evidence
 behavior.
 
+Simple service products deployed as Dokploy applications use the same product
+profile shape. For a bot or worker service, `runtime_port` is the internal HTTP
+port used for a bridge or health endpoint, `health_path` names the product-level
+health route, and lane `health_url` can point at an internal URL reachable by
+Launchplane. See [dokploy-service-deployments.md](dokploy-service-deployments.md)
+for the service-specific contract.
+
 The service exposes product profile records through `GET /v1/product-profiles`,
 `GET /v1/product-profiles/{product}`, and `POST /v1/product-profiles`. Writes
 require the `product_profile.write` action for the target product in the
@@ -366,6 +373,10 @@ state/
   `unset-shopify-protected-store-key`.
 - Repo-local Dokploy target TOML files are not a supported runtime authority or
   mutation surface for these records.
+- For service-shaped products, persistent volume mounts remain operator-owned
+  Dokploy target configuration. The product repo may document the expected mount
+  path, but Launchplane records own the live target identity and mutation path,
+  and managed secrets remain separate from volume contents.
 
 ## Odoo Instance Override Record
 

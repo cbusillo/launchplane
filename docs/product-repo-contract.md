@@ -44,6 +44,8 @@ in Launchplane DB-backed records.
 - Application source code and product-owned business behavior.
 - Product dependencies, lockfiles, and package/build tooling.
 - Dockerfile or image build contract.
+- Documented runtime ports, health paths, and persistent state mounts for
+  service-shaped products that run as Dokploy applications.
 - Local development helpers, including local-only databases when the product
   needs them.
 - CI checks that validate the source artifact before Launchplane sees it: lint,
@@ -69,6 +71,8 @@ profile data.
 - Runtime-environment records and managed secret records.
 - Driver request validation, idempotency policy, action safety, and audit
   evidence.
+- Dokploy application deploys for simple service products that follow the
+  [Dokploy service deployment contract](dokploy-service-deployments.md).
 - Provider mutations: create/update/delete preview apps, deploy stable lanes,
   promote, rollback, capture backup gates, and cleanup stale runtime state.
 - Readiness checks before provider mutation.
@@ -148,6 +152,10 @@ When creating a new website repo for Launchplane:
   Launchplane.
 - Use `generic-web` directly when the product is a stateless or mostly
   stateless web app with standard preview/deploy behavior.
+- Use the Dokploy service deployment contract when the product is a simple bot
+  or worker service whose deployment can be represented as a single immutable
+  image, one Dokploy application per lane, Launchplane-managed runtime
+  settings/secrets, and an optional health endpoint.
 - Add a product driver only when the product has named extra obligations such as
   database bootstrap, data migration, backup gates, restore/rollback behavior,
   product smoke checks, or platform-specific post-deploy actions.
