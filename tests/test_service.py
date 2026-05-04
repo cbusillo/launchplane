@@ -2564,7 +2564,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             root = Path(temporary_directory_name)
             store = FilesystemRecordStore(state_dir=root / "state")
             store.write_product_profile_record(
-                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload("generic-web"))
+                LaunchplaneProductProfileRecord.model_validate(
+                    _product_profile_payload("generic-web")
+                )
             )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
@@ -2613,7 +2615,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 )
 
         self.assertEqual(status_code, 202)
-        self.assertEqual(payload["records"]["deployment_record_id"], "deployment-generic-web-testing")
+        self.assertEqual(
+            payload["records"]["deployment_record_id"], "deployment-generic-web-testing"
+        )
         deploy.assert_called_once()
         _, kwargs = deploy.call_args
         self.assertEqual(kwargs["profile"].product, "generic-web")
@@ -3918,6 +3922,107 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn(
             driver["lane_summary"]["provenance"]["freshness_status"],
             {"verified", "recorded", "stale"},
+        )
+
+    def test_driver_context_view_uses_newer_deployment_over_stale_inventory_artifact(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _product_profile_payload("sellyouroutboard")
+                )
+            )
+            store.write_environment_inventory(
+                EnvironmentInventory(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:old"
+                    ),
+                    source_git_ref="old-ref",
+                    deploy=DeploymentEvidence(
+                        target_name="syo-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="deployment-provider-old",
+                        status="pass",
+                        started_at="2026-05-01T15:00:00Z",
+                        finished_at="2026-05-01T15:02:00Z",
+                    ),
+                    updated_at="2026-05-01T15:03:00Z",
+                    deployment_record_id="deployment-syo-testing-old",
+                )
+            )
+            store.write_deployment_record(
+                DeploymentRecord(
+                    record_id="deployment-syo-testing-new",
+                    artifact_identity=ArtifactIdentityReference(
+                        artifact_id="ghcr.io/cbusillo/sellyouroutboard@sha256:new"
+                    ),
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    source_git_ref="new-ref",
+                    resolved_target=ResolvedTargetEvidence(
+                        target_type="application",
+                        target_id="target-new",
+                        target_name="syo-testing",
+                    ),
+                    deploy=DeploymentEvidence(
+                        target_name="syo-testing",
+                        target_type="application",
+                        deploy_mode="dokploy-application-api",
+                        deployment_id="deployment-provider-new",
+                        status="pass",
+                        started_at="2026-05-01T16:00:00Z",
+                        finished_at="2026-05-01T16:02:00Z",
+                    ),
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["driver.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/contexts/sellyouroutboard-testing/instances/testing/driver-view",
+            )
+
+        self.assertEqual(status_code, 200)
+        driver = payload["view"]["drivers"][0]
+        lane_summary = driver["lane_summary"]
+        self.assertIsNone(lane_summary["inventory"])
+        self.assertEqual(
+            lane_summary["latest_deployment"]["artifact_identity"]["artifact_id"],
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:new",
+        )
+        self.assertEqual(lane_summary["latest_deployment"]["source_git_ref"], "new-ref")
+        self.assertEqual(
+            lane_summary["provenance"]["source_record_id"],
+            "deployment-syo-testing-new",
         )
 
     def test_driver_context_view_endpoint_returns_preview_summaries(self) -> None:
