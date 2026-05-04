@@ -54,6 +54,7 @@ def _manifest_payload() -> dict[str, object]:
             {
                 "context": "example-site-prod",
                 "instance": "prod",
+                "target_id": "app-prod-123",
                 "target_type": "application",
                 "target_name": "example-site-prod",
                 "domains": ["example.invalid"],
@@ -111,7 +112,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertEqual(profile.lanes[1].health_url, "https://example.invalid/status")
         self.assertEqual(len(targets), 2)
-        self.assertEqual(len(target_ids), 1)
+        self.assertEqual(len(target_ids), 2)
         self.assertEqual(len(runtime_records), 1)
         self.assertEqual(len(secret_bindings), 1)
         self.assertEqual(secret_bindings[0].binding_key, "SMTP_PASSWORD")
@@ -123,11 +124,26 @@ class ProductOnboardingTests(unittest.TestCase):
             {
                 "context": "other-product-prod",
                 "instance": "prod",
+                "target_id": "app-other-prod",
                 "target_type": "application",
             }
         ]
 
         with self.assertRaisesRegex(ValueError, "target must match a stable lane"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_onboarding_manifest_rejects_missing_target_id(self) -> None:
+        payload = _manifest_payload()
+        payload["dokploy_targets"] = [
+            {
+                "context": "example-site-prod",
+                "instance": "prod",
+                "target_id": "",
+                "target_type": "application",
+            }
+        ]
+
+        with self.assertRaisesRegex(ValueError, "target requires target_id"):
             ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_cli_applies_manifest_without_secret_values(self) -> None:

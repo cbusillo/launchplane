@@ -358,6 +358,11 @@ jobs:
             local idempotency_suffix="$1"
             local request_payload response_file status_code
 
+            if [ -z "${DISCORD_BLUE_DOKPLOY_TARGET_ID:-}" ]; then
+              echo "DISCORD_BLUE_DOKPLOY_TARGET_ID is required before Discord Blue onboarding." >&2
+              return 1
+            fi
+
             request_payload="$({
               jq -n \
                 --arg target_id "${DISCORD_BLUE_DOKPLOY_TARGET_ID:-}" \
