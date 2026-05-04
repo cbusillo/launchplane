@@ -66,6 +66,26 @@ Each onboarding `dokploy_targets` entry must include the live provider
 `target_id`. Launchplane fails closed instead of seeding a target record that a
 later deploy cannot resolve.
 
+When the Dokploy application or compose target already exists, adopt it into
+Launchplane before or after onboarding instead of hand-editing target ids into
+repo-local files:
+
+```sh
+uv run launchplane dokploy-targets adopt \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --context <product-context> \
+  --instance prod \
+  --target-type application \
+  --target-id <dokploy-application-id>
+```
+
+The command is a dry run unless `--apply` is supplied. It fetches the live
+Dokploy target, stores only Launchplane-owned target metadata and the target-id
+record, and intentionally does not copy provider env text or secret-shaped
+values. Use `--project-name`, `--target-name`, `--domain`, and
+`--healthcheck-path` when the provider payload does not expose enough redacted
+metadata for the record.
+
 Then import or update DB-backed authz policy records for the product's GitHub
 Actions workflows. Authz policy merging remains a separate operator step so a
 new product onboarding manifest cannot accidentally replace unrelated product

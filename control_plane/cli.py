@@ -121,6 +121,7 @@ from control_plane.workflows.launchplane import (
     verify_github_webhook_signature,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.dokploy_target_adoption import adopt_dokploy_target
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
@@ -8811,6 +8812,20 @@ def _summarize_dokploy_target_record(
     }
 
 
+def _fetch_dokploy_target_payload_for_adoption(
+    host: str,
+    token: str,
+    target_type: str,
+    target_id: str,
+) -> dict[str, control_plane_dokploy.JsonValue]:
+    return control_plane_dokploy.fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type=target_type,
+        target_id=target_id,
+    )
+
+
 def _clone_dokploy_target_record(
     *,
     target_record: DokployTargetRecord,
@@ -12424,6 +12439,108 @@ def dokploy_targets_show(database_url: str, context_name: str, instance_name: st
     click.echo(
         json.dumps(
             _summarize_dokploy_target_record(record, target_id=target_id_record.target_id),
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@dokploy_targets.command("adopt")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane tracked Dokploy target records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--target-type",
+    type=click.Choice(["application", "compose"]),
+    required=True,
+    help="Dokploy target type to adopt.",
+)
+@click.option("--target-id", required=True, help="Live Dokploy application or compose id.")
+@click.option("--project-name", default="", help="Override project name stored on the record.")
+@click.option("--target-name", default="", help="Override target name stored on the record.")
+@click.option("--source-git-ref", default="origin/main", show_default=True)
+@click.option("--healthcheck-path", default="", help="Healthcheck path stored on the record.")
+@click.option("--domain", "domains", multiple=True, help="Domain stored on the record.")
+@click.option(
+    "--deploy-timeout-seconds",
+    type=int,
+    default=None,
+    help="Optional rollout timeout stored on the record.",
+)
+@click.option("--source-label", default="cli:dokploy-targets:adopt", show_default=True)
+@click.option("--updated-at", default="", help="Override updated timestamp.")
+@click.option("--apply", "apply_changes", is_flag=True, help="Write the adopted records.")
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
+)
+def dokploy_targets_adopt(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    target_type: str,
+    target_id: str,
+    project_name: str,
+    target_name: str,
+    source_git_ref: str,
+    healthcheck_path: str,
+    domains: tuple[str, ...],
+    deploy_timeout_seconds: int | None,
+    source_label: str,
+    updated_at: str,
+    apply_changes: bool,
+    control_plane_root: Path | None,
+) -> None:
+    if deploy_timeout_seconds is not None and deploy_timeout_seconds < 1:
+        raise click.ClickException("--deploy-timeout-seconds must be at least 1.")
+    launchplane_root = control_plane_root or _control_plane_root()
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=launchplane_root)
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        result = adopt_dokploy_target(
+            record_store=postgres_store,
+            host=host,
+            token=token,
+            context=context_name,
+            instance=instance_name,
+            target_type=_normalize_dokploy_target_type(target_type),
+            target_id=target_id,
+            project_name=project_name,
+            target_name=target_name,
+            source_git_ref=source_git_ref,
+            healthcheck_path=healthcheck_path,
+            domains=domains,
+            deploy_timeout_seconds=deploy_timeout_seconds,
+            source_label=source_label,
+            updated_at=updated_at,
+            apply=apply_changes,
+            fetch_target_payload=_fetch_dokploy_target_payload_for_adoption,
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "mode": "apply" if result.applied else "dry_run",
+                "applied": result.applied,
+                "record": _summarize_dokploy_target_record(
+                    result.target_record,
+                    target_id=result.target_id_record.target_id,
+                ),
+                "provider_fields": result.provider_fields,
+                "warnings": list(result.warnings),
+            },
             indent=2,
             sort_keys=True,
         )
