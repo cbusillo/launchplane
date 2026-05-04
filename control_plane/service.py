@@ -1938,6 +1938,8 @@ def _should_store_idempotency_record(
         return False
     if driver_result is None:
         return True
+    if _driver_result_contains_status(driver_result, "blocked"):
+        return False
     if _driver_result_contains_status(driver_result, "fail"):
         return False
     if path in _PENDING_RESULT_IDEMPOTENCY_SKIP_ROUTES:
@@ -2512,6 +2514,8 @@ def _apply_generic_web_preview_refresh_records(
     driver_result: GenericWebPreviewRefreshResult,
     profile: LaunchplaneProductProfileRecord,
 ) -> dict[str, object]:
+    if driver_result.refresh_status == "blocked":
+        return {}
     anchor_pr_number = _generic_web_preview_anchor_pr_number(
         request=request,
         profile=profile,
