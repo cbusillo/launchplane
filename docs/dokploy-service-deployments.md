@@ -62,6 +62,13 @@ Each stable lane also needs DB-backed Dokploy target records:
 - `env` only for non-secret provider settings that Launchplane owns
 - sibling `DokployTargetIdRecord` carrying the live Dokploy application id
 
+For an existing Dokploy app, use `launchplane dokploy-targets adopt` to create
+or refresh those target and target-id records from the live provider id. The
+adoption command is dry-run by default and requires `--apply` to write records;
+it does not copy provider env text into Launchplane. Provider application
+creation remains an operator-approved setup step until Launchplane grows a
+first-class create-target action.
+
 Product repos may document these expected facts, but they must not store live
 Launchplane product profiles, target ids, provider credentials, or lifecycle
 records as repo-local authority.
