@@ -1,5 +1,6 @@
 import base64
 import hashlib
+import hmac
 import io
 import json
 import os
@@ -391,6 +392,32 @@ def _product_config_payload() -> dict[str, object]:
     }
 
 
+def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
+    body_bytes = json.dumps(payload).encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), body_bytes, hashlib.sha256).hexdigest()
+    return f"sha256={signature}"
+
+
+def _every_code_github_issue_labeled_payload(
+    *,
+    label: str = "every-code",
+    action: str = "labeled",
+    repository: str = "cbusillo/code",
+    issue_number: int = 123,
+) -> dict[str, object]:
+    return {
+        "action": action,
+        "label": {"name": label},
+        "repository": {"full_name": repository},
+        "issue": {
+            "number": issue_number,
+            "html_url": f"https://github.com/{repository}/issues/{issue_number}",
+            "title": "Wire local automation",
+        },
+        "sender": {"login": "cbusillo"},
+    }
+
+
 def _invoke_app(
     app: WsgiApp,
     *,
@@ -743,6 +770,261 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
+    def test_every_code_github_webhook_creates_work_request(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.read"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        webhook_payload = _every_code_github_issue_labeled_payload(label="EVERY-CODE")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            webhook_status, webhook_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+            list_status, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests",
+                query_string="state=queued",
+            )
+
+        self.assertEqual(webhook_status, 202)
+        self.assertFalse(webhook_response["deduped"])
+        self.assertEqual(webhook_response["records"]["state"], "queued")
+        self.assertEqual(webhook_response["github_delivery_id"], "delivery-1")
+        self.assertEqual(list_status, 200)
+        self.assertEqual(len(list_payload["requests"]), 1)
+        request = list_payload["requests"][0]
+        self.assertEqual(request["source"], "github_issue_label")
+        self.assertEqual(request["repository"], "cbusillo/code")
+        self.assertEqual(request["issue_number"], 123)
+        self.assertEqual(request["trigger_label"], "every-code")
+        self.assertEqual(request["trigger_actor"], "cbusillo")
+        self.assertEqual(request["github_delivery_id"], "delivery-1")
+
+    def test_every_code_github_webhook_dedupes_existing_request(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "every_code_work_request.read",
+                            "every_code_work_request.claim",
+                        ],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            first_status, first_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+            request_id = str(first_payload["records"]["request_id"])
+            claim_status, _claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                headers={"Idempotency-Key": "every-code-webhook-claim"},
+            )
+            second_status, second_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-2",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+            show_status, show_payload = _invoke_app(
+                app,
+                method="GET",
+                path=f"/v1/every-code/work-requests/{request_id}",
+            )
+
+        self.assertEqual(first_status, 202)
+        self.assertEqual(claim_status, 202)
+        self.assertEqual(second_status, 202)
+        self.assertTrue(second_payload["deduped"])
+        self.assertEqual(second_payload["records"]["state"], "claimed")
+        self.assertEqual(show_status, 200)
+        self.assertEqual(show_payload["request"]["state"], "claimed")
+        self.assertEqual(show_payload["request"]["github_delivery_id"], "delivery-1")
+
+    def test_every_code_github_webhook_rejects_invalid_signature(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": "sha256=invalid",
+                },
+            )
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "webhook_signature_invalid")
+
+    def test_every_code_github_webhook_ignores_other_labels(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        webhook_payload = _every_code_github_issue_labeled_payload(label="bug")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(webhook_payload, secret),
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertTrue(payload["skipped"])
+        self.assertEqual(payload["reason"], "label_not_matched")
+
+    def test_every_code_github_webhook_requires_configured_secret(self) -> None:
+        webhook_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ""},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=webhook_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(
+                        webhook_payload, "unused-secret"
+                    ),
+                },
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "webhook_secret_not_configured")
+
     def test_every_code_work_request_create_list_claim_and_status_flow(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {

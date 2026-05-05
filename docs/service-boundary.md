@@ -53,6 +53,7 @@ VeriReel product paths:
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
 - Every Code local automation work-request routes:
+  - `POST /v1/every-code/github-webhook`
   - `GET /v1/every-code/work-requests`
   - `GET /v1/every-code/work-requests/{request_id}`
   - `POST /v1/every-code/work-requests/create`

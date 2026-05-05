@@ -545,6 +545,11 @@ state/
 - Launchplane owns this coordination record so GitHub webhooks, reconciliation,
   local Mac workers, and the future operator UI share one inspectable source of
   truth instead of relying on GitHub API polling or local shell lock files.
+- GitHub webhook ingress accepts signed `issues.labeled` deliveries for the
+  `every-code` label through `POST /v1/every-code/github-webhook`. The route
+  uses `X-Hub-Signature-256`, requires `X-GitHub-Delivery`, and dedupes repeated
+  deliveries by the deterministic repository/issue/label request id without
+  overwriting a request that is already claimed or finished.
 
 ## Inventory
 
