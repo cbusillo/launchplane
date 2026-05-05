@@ -343,9 +343,10 @@ It reuses the same planner/writer as `launchplane product-config apply`, returns
 only actions, keys, counts, actor/source metadata, and secret IDs, uses generic
 validation messages for rejected requests, and fails closed when a secret bundle
 is submitted without `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted
-Launchplane runtime. Request bodies for this route must not be copied into logs,
-issues, docs, or workflow artifacts because they can contain plaintext secret
-values.
+Launchplane runtime or without an active runtime key-safety policy that allows
+the requested managed secret binding for the target runtime class. Request
+bodies for this route must not be copied into logs, issues, docs, or workflow
+artifacts because they can contain plaintext secret values.
 
 Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`

@@ -360,6 +360,12 @@ def expected_secret_binding_id(*, secret_id: str, binding_key: str) -> str:
     return _binding_id(secret_id=secret_id, binding_key=binding_key)
 
 
+def expected_secret_id(
+    *, integration: str, name: str, context: str = "", instance: str = ""
+) -> str:
+    return _secret_id(integration=integration, name=name, context=context, instance=instance)
+
+
 def relabel_secret_binding(
     *,
     record_store: SecretWriteStore,

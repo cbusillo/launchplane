@@ -10,7 +10,17 @@ from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentScope
 from control_plane.contracts.runtime_environment_record import ScalarValue
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeEnvironmentClass,
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeKeySafetyTarget,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretScope
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety,
+    latest_active_runtime_key_safety_policy,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -26,6 +36,13 @@ class ProductConfigStore(control_plane_secrets.SecretWriteStore, Protocol):
     ) -> tuple[RuntimeEnvironmentRecord, ...]: ...
 
     def write_runtime_environment_record(self, record: RuntimeEnvironmentRecord) -> None: ...
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
 
 
 class ProductConfigError(ValueError):
@@ -124,6 +141,12 @@ def apply_product_config_bundle(
         source_label=source_label,
     )
     secret_summaries: list[dict[str, object]] = []
+    runtime_key_safety_summary = _evaluate_product_config_runtime_key_safety(
+        record_store=record_store,
+        context_name=context_name,
+        instance_name=instance_name,
+        secrets=secrets,
+    )
     apply_changes = mode == "apply"
     for secret in secrets:
         planned_action, existing_secret_id = _product_config_secret_current_action(
@@ -178,6 +201,7 @@ def apply_product_config_bundle(
         "actor": actor,
         "source_label": source_label,
         "runtime_environment": runtime_summary,
+        "runtime_key_safety": runtime_key_safety_summary,
         "secrets": secret_summaries,
         "summary": {
             "runtime_changed_key_count": len(
@@ -426,6 +450,126 @@ def _product_config_secret_current_action(
     ):
         return "unchanged", existing_record.secret_id
     return "rotated", existing_record.secret_id
+
+
+def _evaluate_product_config_runtime_key_safety(
+    *,
+    record_store: ProductConfigStore,
+    context_name: str,
+    instance_name: str,
+    secrets: tuple[dict[str, object], ...],
+) -> dict[str, object]:
+    runtime_secrets = tuple(
+        secret
+        for secret in secrets
+        if secret["integration"] == control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION
+    )
+    if not runtime_secrets:
+        return {"required": False, "status": "skipped", "checked_binding_keys": []}
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(record_store)
+    except ValueError as error:
+        raise ProductConfigError(
+            "Product config runtime key-safety policy is unavailable.",
+            code="runtime_key_safety_unavailable",
+        ) from error
+    target = RuntimeKeySafetyTarget(
+        context=context_name,
+        instance=instance_name,
+        environment_class=_product_config_runtime_environment_class(instance_name),
+    )
+    evaluation = evaluate_runtime_key_safety(
+        target=target,
+        required_binding_keys=(str(secret["binding_key"]) for secret in runtime_secrets),
+        secret_bindings=_planned_runtime_secret_bindings(
+            record_store=record_store,
+            secrets=runtime_secrets,
+        ),
+        secret_rules=policy_record.rules,
+    )
+    summary: dict[str, object] = {
+        "required": True,
+        "status": evaluation.status,
+        "policy_record_id": policy_record.record_id,
+        "policy_sha256": policy_record.policy_sha256,
+        "target": evaluation.target.model_dump(mode="json"),
+        "checked_binding_keys": list(evaluation.checked_binding_keys),
+        "findings": [finding.model_dump(mode="json") for finding in evaluation.findings],
+    }
+    if evaluation.status != "pass":
+        raise ProductConfigError(
+            "Product config runtime key-safety gate failed.",
+            code="runtime_key_safety_failed",
+        )
+    return summary
+
+
+def _planned_runtime_secret_bindings(
+    *,
+    record_store: ProductConfigStore,
+    secrets: tuple[dict[str, object], ...],
+) -> tuple[SecretBinding, ...]:
+    existing_bindings = {
+        binding.binding_id: binding
+        for binding in record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            limit=None,
+        )
+    }
+    planned_bindings: list[SecretBinding] = []
+    for secret in secrets:
+        existing_record = record_store.find_secret_record(
+            scope=str(secret["scope"]),
+            integration=str(secret["integration"]),
+            name=str(secret["name"]),
+            context=str(secret["context"]),
+            instance=str(secret["instance"]),
+        )
+        secret_id = (
+            existing_record.secret_id
+            if existing_record is not None
+            else control_plane_secrets.expected_secret_id(
+                integration=str(secret["integration"]),
+                name=str(secret["name"]),
+                context=str(secret["context"]),
+                instance=str(secret["instance"]),
+            )
+        )
+        binding_id = control_plane_secrets.expected_secret_binding_id(
+            secret_id=secret_id,
+            binding_key=str(secret["binding_key"]),
+        )
+        existing_binding = existing_bindings.get(binding_id)
+        now = utc_now_timestamp()
+        planned_bindings.append(
+            SecretBinding(
+                binding_id=binding_id,
+                secret_id=secret_id,
+                integration=str(secret["integration"]),
+                binding_key=str(secret["binding_key"]),
+                context=str(secret["context"]),
+                instance=str(secret["instance"]),
+                status="configured",
+                created_at=existing_binding.created_at if existing_binding is not None else now,
+                updated_at=now,
+            )
+        )
+    return tuple(planned_bindings)
+
+
+def _product_config_runtime_environment_class(
+    instance_name: str,
+) -> RuntimeEnvironmentClass:
+    normalized_instance = instance_name.strip().lower()
+    if normalized_instance in {"prod", "production"}:
+        return "prod"
+    if normalized_instance in {"testing", "test", "staging", "stage"}:
+        return "testing"
+    if normalized_instance in {"preview", "pr"} or normalized_instance.startswith("pr-"):
+        return "preview"
+    if normalized_instance in {"dev", "local", "development"}:
+        return "dev"
+    return "unknown"
 
 
 def _summarize_product_config_secret_input(

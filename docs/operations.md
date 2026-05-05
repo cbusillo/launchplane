@@ -401,15 +401,17 @@ Current derived-state behavior:
   `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Runtime and secret scopes default from
   the top-level `context`/`instance`; nested `runtime_env` and secret routes must
   match that top-level target. Dry-run validates secret scope/route
-  compatibility before reporting a plan, so apply does not discover invalid
-  secret scopes after writing earlier secrets.
+  compatibility and runtime key-safety policy before reporting a plan, so apply
+  does not discover invalid secret scopes or disallowed runtime secret bindings
+  after writing earlier secrets.
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
   authenticated service API for operator UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
   `product_config.apply` after review. The service response is redacted and the
   route rejects nested runtime or secret targets that differ from the authorized
   top-level context/instance. It fails closed when secret writes are requested
-  without the Launchplane master encryption key in the service runtime.
+  without the Launchplane master encryption key in the service runtime or when
+  no active runtime key-safety policy allows the requested binding.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.
