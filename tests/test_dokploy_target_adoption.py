@@ -597,6 +597,40 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(requests[0][1]["environmentId"], "env-existing")
         self.assertEqual(target_id_record.target_id, "app-456")
 
+    def test_create_application_target_rejects_healthcheck_path_before_provider_mutation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            requests: list[tuple[str, JsonObject]] = []
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                requests.append((path, payload))
+                return {"projectId": "project-123"}
+
+            with self.assertRaisesRegex(ValueError, "healthcheck-path to start with /"):
+                create_dokploy_application_target(
+                    record_store=store,
+                    host="https://dokploy.example.invalid",
+                    token="token",
+                    context="discord-blue",
+                    instance="prod",
+                    target_name="discord-blue-prod",
+                    project_name="Discord Blue",
+                    healthcheck_path="health",
+                    apply=True,
+                    mutate_provider=mutate_provider,
+                    fetch_target_payload=lambda *_args: {},
+                )
+            store.close()
+
+        self.assertEqual(requests, [])
+
     def test_cli_create_application_dry_run_outputs_plan(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
