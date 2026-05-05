@@ -1,0 +1,17 @@
+<svg viewBox="0 0 1024 1024" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="Launchplane">
+  <title>Launchplane</title>
+
+  <rect width="1024" height="1024" rx="224" fill="#101113"/>
+  <rect x="3" y="3" width="1018" height="1018" rx="221" fill="none" stroke="#262a30" stroke-width="2"/>
+
+  <g transform="translate(612 460) rotate(-25)">
+    <g stroke-linecap="round" stroke-width="34" fill="none">
+      <line x1="-540" y1="-120" x2="-273" y2="-120" stroke="#6e9bd9"/>
+      <line x1="-540" y1="0"    x2="-273" y2="0"    stroke="#d4a24a"/>
+      <line x1="-540" y1="120"  x2="-273" y2="120"  stroke="#4fb286"/>
+    </g>
+
+    <path d="M -273 -252 L 273 0 L 135 0 L -273 -72 Z" fill="#ffffff"/>
+    <path d="M -273 252 L 273 0 L 135 0 L -273 72 Z" fill="#a3a8b0"/>
+  </g>
+</svg>

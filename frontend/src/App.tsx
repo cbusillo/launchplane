@@ -63,6 +63,9 @@ import type {
 } from "./types";
 
 type Theme = "dark" | "light";
+const assetUrl = (path: string) => `${import.meta.env.BASE_URL}${path}`;
+const launchplaneIconUrl = assetUrl("assets/brand/launchplane-icon.svg");
+
 type AuthStatus = "checking" | "signed_out" | "signed_in";
 type DriverChoice = {
   driverId: string;
@@ -735,7 +738,7 @@ function Header({
     <header className="topbar">
       <div className="brand-block">
         <div className="brand-mark" aria-hidden="true">
-          LP
+          <img src={launchplaneIconUrl} alt="" />
         </div>
         <div>
           <div className="brand-title">{selected.label}</div>
