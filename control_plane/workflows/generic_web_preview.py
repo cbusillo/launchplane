@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Iterator, Literal, Protocol
+from typing import Iterator, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -12,18 +12,50 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import secrets as control_plane_secrets
 from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeKeySafetyTarget,
+)
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety,
+    latest_active_runtime_key_safety_policy,
+)
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
 from control_plane.workflows.ship import utc_now_timestamp
 
 
-class GenericWebPreviewStore(Protocol):
+_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
+
+
+class GenericWebPreviewProfileStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
+
+
+@runtime_checkable
+class GenericWebPreviewRuntimeKeySafetyStore(Protocol):
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
 
 
 class GenericWebPreviewDesiredStateRequest(BaseModel):
@@ -525,7 +557,7 @@ def _delete_application(*, host: str, token: str, application_id: str) -> None:
 
 
 def resolve_generic_web_preview_profile(
-    *, record_store: GenericWebPreviewStore, product: str
+    *, record_store: GenericWebPreviewProfileStore, product: str
 ) -> LaunchplaneProductProfileRecord:
     profile = record_store.read_product_profile_record(product)
     if profile.driver_id != "generic-web":
@@ -657,6 +689,80 @@ def _render_preview_env_text(
     )
 
 
+def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
+    return any(
+        key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
+        for key_part in key_name.strip().upper().split("_")
+    )
+
+
+def _copied_secret_shaped_runtime_keys(
+    *, profile: LaunchplaneProductProfileRecord, template_application: JsonObject
+) -> tuple[str, ...]:
+    template_env = control_plane_dokploy.parse_dokploy_env_text(
+        str(template_application.get("env") or "")
+    )
+    copied_keys: list[str] = []
+    for key in profile.preview.copied_env_keys:
+        value = template_env.get(key, "")
+        if value and _runtime_environment_key_requires_secret_store(key):
+            copied_keys.append(key)
+    return tuple(dict.fromkeys(copied_keys))
+
+
+def _enforce_preview_copied_runtime_key_safety(
+    *,
+    record_store: GenericWebPreviewProfileStore,
+    profile: LaunchplaneProductProfileRecord,
+    template_lane: ProductLaneProfile,
+    template_application: JsonObject,
+    preview_slug: str,
+) -> None:
+    required_binding_keys = _copied_secret_shaped_runtime_keys(
+        profile=profile,
+        template_application=template_application,
+    )
+    if not required_binding_keys:
+        return
+    if not isinstance(record_store, GenericWebPreviewRuntimeKeySafetyStore):
+        raise click.ClickException(
+            "Generic web preview copied secret-shaped runtime keys require a "
+            "runtime key-safety-capable record store."
+        )
+
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(record_store)
+    except ValueError as exc:
+        raise click.ClickException(
+            "Generic web preview copied secret-shaped runtime keys require an active "
+            "runtime key-safety policy."
+        ) from exc
+
+    evaluation = evaluate_runtime_key_safety(
+        target=RuntimeKeySafetyTarget(
+            context=profile.preview.context,
+            instance=preview_slug,
+            environment_class="preview",
+        ),
+        required_binding_keys=required_binding_keys,
+        secret_bindings=record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=template_lane.context,
+            instance_name=template_lane.instance,
+            limit=None,
+        ),
+        secret_rules=policy_record.rules,
+    )
+    if evaluation.status == "pass":
+        return
+    finding_codes = ", ".join(finding.code for finding in evaluation.findings)
+    checked_keys = ", ".join(evaluation.checked_binding_keys)
+    raise click.ClickException(
+        "Generic web preview copied runtime key-safety gate failed for "
+        f"{checked_keys}: {finding_codes}."
+    )
+
+
 def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seconds: int) -> None:
     parsed = urlparse(preview_url.rstrip("/"))
     health_url = parsed._replace(path=health_path, params="", query="", fragment="").geturl()
@@ -699,7 +805,7 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
 def evaluate_generic_web_preview_readiness(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewReadinessRequest,
     checked_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
@@ -865,7 +971,7 @@ def evaluate_generic_web_preview_readiness(
 def execute_generic_web_preview_refresh(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewRefreshRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewRefreshResult:
@@ -922,6 +1028,13 @@ def execute_generic_web_preview_refresh(
             raise click.ClickException(
                 target_error or "Generic web preview template payload is unavailable."
             )
+        _enforce_preview_copied_runtime_key_safety(
+            record_store=record_store,
+            profile=resolved_profile,
+            template_lane=template_lane,
+            template_application=template_application,
+            preview_slug=request.preview_slug,
+        )
         env_text = _render_preview_env_text(
             profile=resolved_profile,
             template_application=template_application,
@@ -1029,7 +1142,7 @@ def execute_generic_web_preview_refresh(
 def discover_generic_web_preview_desired_state(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewDesiredStateRequest,
     discovered_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
@@ -1058,7 +1171,7 @@ def discover_generic_web_preview_desired_state(
 def execute_generic_web_preview_inventory(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewInventoryRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewInventoryResult:
@@ -1108,7 +1221,7 @@ def execute_generic_web_preview_inventory(
 def execute_generic_web_preview_destroy(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewDestroyRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewDestroyResult:
