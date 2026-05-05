@@ -5174,6 +5174,9 @@ def create_launchplane_service_app(
                     return idempotent_response
                 driver_result = execute_verireel_preview_refresh(
                     control_plane_root=resolved_root,
+                    record_store=record_store
+                    if isinstance(record_store, PostgresRecordStore)
+                    else None,
                     request=verireel_preview_refresh_request.refresh,
                 )
                 result = _apply_verireel_preview_refresh_records(

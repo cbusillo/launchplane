@@ -6,12 +6,125 @@ from unittest.mock import patch
 
 import click
 
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
+from control_plane.dokploy import DokployTargetDefinition
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewDestroyRequest
 from control_plane.workflows.verireel_preview_driver import VeriReelPreviewRefreshRequest
 from control_plane.workflows.verireel_preview_driver import _build_preview_database_command
+from control_plane.workflows.verireel_preview_driver import (
+    _enforce_verireel_preview_runtime_key_safety,
+)
 from control_plane.workflows.verireel_preview_driver import _preview_database_admin_module_source
 from control_plane.workflows.verireel_preview_driver import _resolve_preview_url
 from control_plane.workflows.verireel_preview_driver import _run_application_command_with_retries
+from control_plane.workflows.verireel_preview_driver import execute_verireel_preview_refresh
+
+
+class _RuntimeKeySafetyStore:
+    def __init__(
+        self,
+        *,
+        policies: tuple[RuntimeKeySafetyPolicyRecord, ...] = (),
+        bindings: tuple[SecretBinding, ...] = (),
+    ) -> None:
+        self.policies = policies
+        self.bindings = bindings
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        records = tuple(record for record in self.policies if not status or record.status == status)
+        if limit is not None:
+            return records[:limit]
+        return records
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = tuple(
+            binding
+            for binding in self.bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        if limit is not None:
+            return bindings[:limit]
+        return bindings
+
+
+def _runtime_policy(
+    *, secret_class: RuntimeSecretClass = "preview"
+) -> RuntimeKeySafetyPolicyRecord:
+    return RuntimeKeySafetyPolicyRecord(
+        record_id="runtime-key-safety-policy-test",
+        status="active",
+        source="test",
+        updated_at="2026-05-05T22:15:00Z",
+        rules=(
+            RuntimeSecretSafetyRule(
+                binding_key="DATABASE_URL",
+                secret_class=secret_class,
+                allowed_contexts=("verireel-testing",),
+            ),
+            RuntimeSecretSafetyRule(
+                binding_key="BETTER_AUTH_SECRET",
+                secret_class=secret_class,
+                allowed_contexts=("verireel-testing",),
+            ),
+        ),
+    )
+
+
+def _runtime_binding(binding_key: str) -> SecretBinding:
+    normalized_key = binding_key.lower().replace("_", "-")
+    return SecretBinding(
+        binding_id=f"secret-{normalized_key}-binding-{normalized_key}",
+        secret_id=f"secret-{normalized_key}",
+        integration="runtime_environment",
+        binding_key=binding_key,
+        context="verireel",
+        instance="testing",
+        status="configured",
+        created_at="2026-05-05T22:15:00Z",
+        updated_at="2026-05-05T22:15:00Z",
+    )
+
+
+def _template_target() -> DokployTargetDefinition:
+    return DokployTargetDefinition(
+        context="verireel",
+        instance="testing",
+        target_type="application",
+        target_id="app-template",
+        target_name="verireel-testing",
+    )
+
+
+def _refresh_request() -> VeriReelPreviewRefreshRequest:
+    return VeriReelPreviewRefreshRequest.model_validate(
+        {
+            "anchor_pr_number": 71,
+            "anchor_pr_url": "https://github.com/every/verireel/pull/71",
+            "anchor_head_sha": "6b3c9d7e8f901234567890abcdef1234567890ab",
+            "preview_slug": "pr-71",
+            "preview_url": "https://pr-71.ver-preview.shinycomputers.com",
+            "image_reference": "ghcr.io/every/verireel-app:pr-71-sha-6b3c9d7",
+        }
+    )
 
 
 class VeriReelPreviewDriverTests(unittest.TestCase):
@@ -77,7 +190,9 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch(
                 "control_plane.workflows.verireel_preview_driver.control_plane_runtime_environments.resolve_runtime_context_values",
-                return_value={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://ver-preview.shinycomputers.com"},
+                return_value={
+                    "LAUNCHPLANE_PREVIEW_BASE_URL": "https://ver-preview.shinycomputers.com"
+                },
             ) as resolve_values,
         ):
             preview_url = _resolve_preview_url(
@@ -90,6 +205,88 @@ class VeriReelPreviewDriverTests(unittest.TestCase):
             control_plane_root=Path(temporary_directory_name),
             context_name="verireel-testing",
         )
+
+    def test_verireel_preview_runtime_key_safety_rejects_missing_store(self) -> None:
+        with self.assertRaisesRegex(click.ClickException, "database storage"):
+            _enforce_verireel_preview_runtime_key_safety(
+                record_store=None,
+                template_target=_template_target(),
+                template_env_map={
+                    "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
+                },
+                request=_refresh_request(),
+            )
+
+    def test_verireel_preview_runtime_key_safety_blocks_prod_only_template_secret(
+        self,
+    ) -> None:
+        store = _RuntimeKeySafetyStore(
+            policies=(_runtime_policy(secret_class="prod_only"),),
+            bindings=(_runtime_binding("DATABASE_URL"),),
+        )
+
+        with self.assertRaisesRegex(click.ClickException, "secret_class_not_allowed"):
+            _enforce_verireel_preview_runtime_key_safety(
+                record_store=store,
+                template_target=_template_target(),
+                template_env_map={
+                    "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
+                },
+                request=_refresh_request(),
+            )
+
+    def test_verireel_preview_runtime_key_safety_allows_preview_template_secrets(
+        self,
+    ) -> None:
+        store = _RuntimeKeySafetyStore(
+            policies=(_runtime_policy(),),
+            bindings=(
+                _runtime_binding("DATABASE_URL"),
+                _runtime_binding("BETTER_AUTH_SECRET"),
+            ),
+        )
+
+        _enforce_verireel_preview_runtime_key_safety(
+            record_store=store,
+            template_target=_template_target(),
+            template_env_map={
+                "DATABASE_URL": "postgresql://user:pass@db.example/verireel_testing",
+                "BETTER_AUTH_SECRET": "auth-secret",
+                "NEXT_PUBLIC_SITE_URL": "https://testing.example",
+            },
+            request=_refresh_request(),
+        )
+
+    def test_preview_refresh_blocks_before_database_bootstrap_without_key_safety_store(
+        self,
+    ) -> None:
+        with (
+            patch(
+                "control_plane.workflows.verireel_preview_driver.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._template_application_payload",
+                return_value=(
+                    _template_target(),
+                    {
+                        "applicationId": "app-template",
+                        "env": "DATABASE_URL=postgresql://user:pass@db.example/verireel_testing\n",
+                    },
+                ),
+            ),
+            patch(
+                "control_plane.workflows.verireel_preview_driver._run_application_command"
+            ) as run_command,
+        ):
+            with self.assertRaisesRegex(click.ClickException, "database storage"):
+                execute_verireel_preview_refresh(
+                    control_plane_root=Path("."),
+                    request=_refresh_request(),
+                    record_store=None,
+                )
+
+        run_command.assert_not_called()
 
     def test_preview_destroy_request_requires_pr_scoped_preview_slug(self) -> None:
         with self.assertRaisesRegex(ValueError, "preview_slug to match anchor_pr_number"):

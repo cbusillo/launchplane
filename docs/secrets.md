@@ -70,6 +70,12 @@ title: Secrets
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
+- Product-specific preview drivers that derive runtime secrets from a template,
+  such as VeriReel's preview database bootstrap, must run the same metadata-only
+  gate before creating databases, rendering preview env, or starting preview
+  instances. Template secret-shaped keys and semantic secret keys such as
+  `DATABASE_URL` must resolve to managed template-lane bindings, and the active
+  policy must allow those bindings for the preview target.
 
 ## Bootstrap-Only Env
 
