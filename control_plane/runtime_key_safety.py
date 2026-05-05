@@ -24,6 +24,19 @@ ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT: dict[RuntimeEnvironmentClass, set[Runtime
 }
 
 
+def runtime_key_safety_environment_class(instance_name: str) -> RuntimeEnvironmentClass:
+    normalized_instance = instance_name.strip().lower()
+    if normalized_instance in {"prod", "production"}:
+        return "prod"
+    if normalized_instance in {"testing", "test", "staging", "stage"}:
+        return "testing"
+    if normalized_instance in {"preview", "pr"} or normalized_instance.startswith("pr-"):
+        return "preview"
+    if normalized_instance in {"dev", "local", "development"}:
+        return "dev"
+    return "unknown"
+
+
 class RuntimeKeySafetyPolicyReadStore(Protocol):
     def list_runtime_key_safety_policy_records(
         self,

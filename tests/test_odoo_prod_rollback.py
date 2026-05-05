@@ -23,6 +23,12 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
@@ -163,7 +169,46 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
         record_store.read_promotion_record.return_value = _promotion_record()
         record_store.read_dokploy_target_record.return_value = _target_record()
         record_store.read_dokploy_target_id_record.return_value = _target_id_record()
+        record_store.list_secret_bindings.return_value = ()
+        record_store.list_runtime_key_safety_policy_records.return_value = ()
         return record_store
+
+    def _write_prod_secret_binding(
+        self,
+        record_store: Mock,
+        *,
+        secret_class: RuntimeSecretClass = "prod_only",
+    ) -> None:
+        binding_key = "ODOO_DB_PASSWORD"
+        record_store.list_secret_bindings.return_value = (
+            SecretBinding(
+                binding_id="secret-odoo-db-password-binding",
+                secret_id="secret-odoo-db-password",
+                integration="runtime_environment",
+                binding_key=binding_key,
+                context="opw",
+                instance="prod",
+                status="configured",
+                created_at="2026-05-05T22:45:00Z",
+                updated_at="2026-05-05T22:45:00Z",
+            ),
+        )
+        record_store.list_runtime_key_safety_policy_records.return_value = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T22:45:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=binding_key,
+                        secret_class=secret_class,
+                        allowed_contexts=("opw",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            ),
+        )
 
     def test_rollback_to_testing_tuple_records_successful_evidence(self) -> None:
         record_store = self._record_store()
@@ -367,6 +412,47 @@ class OdooProdRollbackWorkflowTests(unittest.TestCase):
 
         self.assertEqual(result.rollback_status, "fail")
         self.assertIn("deploy failed", result.error_message)
+        final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
+        self.assertEqual(final_promotion.rollback.status, "fail")
+
+    def test_runtime_key_safety_blocks_managed_secret_target_env_sync(self) -> None:
+        record_store = self._record_store()
+        self._write_prod_secret_binding(record_store, secret_class="testing")
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={"env": ""},
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_DB_PASSWORD": "managed-secret-value"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.sync_dokploy_compose_raw_source"
+            ) as sync_compose_mock,
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.update_dokploy_target_env"
+            ) as update_env_mock,
+            patch(
+                "control_plane.workflows.odoo_prod_rollback.control_plane_dokploy.trigger_deployment"
+            ) as trigger_deployment_mock,
+        ):
+            result = execute_odoo_prod_rollback(
+                control_plane_root=Path("/control-plane"),
+                record_store=record_store,
+                request=OdooProdRollbackRequest(context="opw"),
+            )
+
+        self.assertEqual(result.rollback_status, "fail")
+        self.assertIn("Runtime key-safety gate failed", result.error_message)
+        sync_compose_mock.assert_not_called()
+        update_env_mock.assert_not_called()
+        trigger_deployment_mock.assert_not_called()
         final_promotion = record_store.write_promotion_record.call_args_list[-1].args[0]
         self.assertEqual(final_promotion.rollback.status, "fail")
 
