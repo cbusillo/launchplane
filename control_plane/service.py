@@ -1760,13 +1760,17 @@ def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretR
 
 
 class _EveryCodeWorkRequestStore(Protocol):
-    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object: ...
+    def write_every_code_work_request_record(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> object: ...
 
     def create_every_code_work_request_record_if_absent(
         self, record: EveryCodeWorkRequestRecord
     ) -> tuple[EveryCodeWorkRequestRecord, bool]: ...
 
-    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord: ...
+    def read_every_code_work_request_record(
+        self, request_id: str
+    ) -> EveryCodeWorkRequestRecord: ...
 
     def list_every_code_work_request_records(
         self,
@@ -1802,9 +1806,7 @@ def _github_webhook_header(environ: dict[str, object], name: str) -> str:
     return str(environ.get(f"HTTP_{name.upper().replace('-', '_')}", "")).strip()
 
 
-def _github_webhook_mapping(
-    payload: dict[str, object], key: str
-) -> dict[str, object] | None:
+def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, object] | None:
     value = payload.get(key)
     if isinstance(value, dict):
         return cast(dict[str, object], value)
@@ -1841,11 +1843,10 @@ def _handle_every_code_github_webhook(
         )
 
     body_bytes = _read_request_body(environ)
-    signature_header = _github_webhook_header(environ, "X-Hub-Signature-256")
     try:
         verify_github_webhook_signature(
             payload_bytes=body_bytes,
-            signature_header=signature_header,
+            signature_header=_github_webhook_header(environ, "X-Hub-Signature-256"),
             secret=secret,
         )
     except click.ClickException:
@@ -1862,7 +1863,6 @@ def _handle_every_code_github_webhook(
             },
         )
 
-    event_name = _github_webhook_header(environ, "X-GitHub-Event")
     delivery_id = _github_webhook_header(environ, "X-GitHub-Delivery")
     if not delivery_id:
         return _json_response(
@@ -1879,6 +1879,7 @@ def _handle_every_code_github_webhook(
         )
 
     payload = _decode_json_request_body(body_bytes)
+    event_name = _github_webhook_header(environ, "X-GitHub-Event")
     if event_name != "issues":
         return _json_response(
             start_response=start_response,
@@ -1904,7 +1905,7 @@ def _handle_every_code_github_webhook(
 
     label = _github_webhook_mapping(payload, "label")
     label_name = _github_webhook_string(label, "name")
-    if label_name != _EVERY_CODE_TRIGGER_LABEL:
+    if label_name.strip().lower() != _EVERY_CODE_TRIGGER_LABEL:
         return _json_response(
             start_response=start_response,
             status_code=202,
@@ -1919,16 +1920,16 @@ def _handle_every_code_github_webhook(
     repository_payload = _github_webhook_mapping(payload, "repository")
     issue_payload = _github_webhook_mapping(payload, "issue")
     sender_payload = _github_webhook_mapping(payload, "sender")
-    repository = _github_webhook_string(repository_payload, "full_name")
-    issue_number_value = issue_payload.get("number") if issue_payload else None
+    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
     if not isinstance(issue_number_value, int):
         raise ValueError("GitHub issue webhook requires integer issue.number")
+
     request = EveryCodeWorkRequestCreateEnvelope(
-        repository=repository,
+        repository=_github_webhook_string(repository_payload, "full_name"),
         issue_number=issue_number_value,
         issue_url=_github_webhook_string(issue_payload, "html_url"),
         issue_title=_github_webhook_string(issue_payload, "title"),
-        trigger_label=label_name,
+        trigger_label=_EVERY_CODE_TRIGGER_LABEL,
         trigger_actor=_github_webhook_string(sender_payload, "login"),
         github_delivery_id=delivery_id,
         source="github_issue_label",
@@ -1948,11 +1949,7 @@ def _handle_every_code_github_webhook(
     )
     accepted_payload["deduped"] = deduped
     accepted_payload["github_delivery_id"] = delivery_id
-    return _json_response(
-        start_response=start_response,
-        status_code=202,
-        payload=accepted_payload,
-    )
+    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
 
 
 def _idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -3874,9 +3871,7 @@ def create_launchplane_service_app(
                             },
                         )
                     state_filter = str((query.get("state") or [""])[0] or "").strip()
-                    repository_filter = str(
-                        (query.get("repository") or [""])[0] or ""
-                    ).strip()
+                    repository_filter = str((query.get("repository") or [""])[0] or "").strip()
                     limit = int(str((query.get("limit") or ["50"])[0] or "50"))
                     records = every_code_store.list_every_code_work_request_records(
                         state=state_filter,

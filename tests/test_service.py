@@ -793,10 +793,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
             event_name="workflow_dispatch",
         )
-        webhook_payload = _every_code_github_issue_labeled_payload()
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+        webhook_payload = _every_code_github_issue_labeled_payload(label="EVERY-CODE")
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -826,12 +829,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(webhook_status, 202)
         self.assertFalse(webhook_response["deduped"])
         self.assertEqual(webhook_response["records"]["state"], "queued")
+        self.assertEqual(webhook_response["github_delivery_id"], "delivery-1")
         self.assertEqual(list_status, 200)
         self.assertEqual(len(list_payload["requests"]), 1)
         request = list_payload["requests"][0]
         self.assertEqual(request["source"], "github_issue_label")
         self.assertEqual(request["repository"], "cbusillo/code")
         self.assertEqual(request["issue_number"], 123)
+        self.assertEqual(request["trigger_label"], "every-code")
         self.assertEqual(request["trigger_actor"], "cbusillo")
         self.assertEqual(request["github_delivery_id"], "delivery-1")
 
@@ -862,9 +867,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             event_name="workflow_dispatch",
         )
         webhook_payload = _every_code_github_issue_labeled_payload()
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -947,9 +955,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
             event_name="workflow_dispatch",
         )
         webhook_payload = _every_code_github_issue_labeled_payload()
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -1016,9 +1027,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_every_code_github_webhook_rejects_invalid_signature(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         webhook_payload = _every_code_github_issue_labeled_payload()
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -1045,9 +1059,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_every_code_github_webhook_ignores_other_labels(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         webhook_payload = _every_code_github_issue_labeled_payload(label="bug")
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -1074,9 +1091,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_every_code_github_webhook_requires_configured_secret(self) -> None:
         webhook_payload = _every_code_github_issue_labeled_payload()
-        with TemporaryDirectory() as temporary_directory_name, patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ""},
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ""},
+            ),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
