@@ -169,6 +169,33 @@ The action requests a GitHub OIDC token, sends the JSON request with a stable
 to GitHub outputs. Product repos may still need small payload-builder scripts
 until Launchplane owns the next layer of product-specific request assembly.
 
+For asynchronous Launchplane routes that report a temporary status, configure
+polling instead of reimplementing OIDC and retry logic in the product repo:
+
+```yaml
+- name: Request Launchplane backup gate
+  uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  with:
+    launchplane-url: ${{ vars.LAUNCHPLANE_URL }}
+    audience: ${{ vars.LAUNCHPLANE_AUDIENCE }}
+    route-path: /v1/drivers/verireel/prod-backup-gate
+    payload: ${{ steps.backup_payload.outputs.payload }}
+    idempotency-key: ${{ steps.backup_payload.outputs.idempotency_key }}
+    poll-result-path: result.backup_status
+    poll-result-statuses: pending
+    poll-interval-ms: "30000"
+    poll-timeout-ms: "2400000"
+    fail-result-paths: result.backup_status
+    output-paths: >-
+      backup_status=result.backup_status,
+      snapshot_name=result.snapshot_name,
+      backup_gate_record_id=records.backup_gate_record_id
+```
+
+Polling repeats the same idempotent request while the configured JSON path
+matches a polling status. After polling finishes, the normal fail-result and
+output mapping rules still apply.
+
 ## New Repo Checklist
 
 When creating a new website repo for Launchplane:

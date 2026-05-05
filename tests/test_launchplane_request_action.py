@@ -37,15 +37,19 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
 
         script = f"""
 const calls = [];
+let launchplaneRequestCount = 0;
 global.fetch = async (url, init) => {{
   calls.push({{url, init}});
   if (url.startsWith('https://oidc.example/token')) {{
     return new Response(JSON.stringify({{value: 'oidc-token'}}), {{status: 200}});
   }}
+  launchplaneRequestCount += 1;
+  const configuredStatuses = String(process.env.TEST_REFRESH_STATUSES || '').split(',').filter(Boolean);
+  const refreshStatus = configuredStatuses[launchplaneRequestCount - 1] || process.env.TEST_REFRESH_STATUS || 'pass';
   return new Response(JSON.stringify({{
     ok: true,
     result: {{
-      refresh_status: process.env.TEST_REFRESH_STATUS || 'pass',
+      refresh_status: refreshStatus,
       error_message: process.env.TEST_ERROR_MESSAGE || '',
       application_id: 'app-123'
     }}
@@ -116,6 +120,52 @@ process.on('beforeExit', () => {{
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Preview refresh blocked.", result.stderr)
+
+    def test_polls_until_driver_status_leaves_pending(self) -> None:
+        with TemporaryDirectory() as temporary_directory:
+            output_path = Path(temporary_directory) / "github-output.txt"
+            result = self.run_action(
+                output_path=output_path,
+                inputs={
+                    "launchplane-url": "https://launchplane.example",
+                    "route-path": "/v1/drivers/generic-web/preview-refresh",
+                    "payload": '{"schema_version":1,"product":"sellyouroutboard"}',
+                    "poll-result-path": "result.refresh_status",
+                    "poll-result-statuses": "pending",
+                    "poll-interval-ms": "1",
+                    "poll-timeout-ms": "1000",
+                    "output-paths": "refresh_status=result.refresh_status",
+                },
+                environment={"TEST_REFRESH_STATUSES": "pending,pending,pass"},
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            calls = json.loads(result.stderr.strip().splitlines()[-1])
+            launchplane_calls = [
+                call
+                for call in calls
+                if call["url"]
+                == "https://launchplane.example/v1/drivers/generic-web/preview-refresh"
+            ]
+            self.assertEqual(len(launchplane_calls), 3)
+            self.assertIn("refresh_status<<", output_path.read_text(encoding="utf-8"))
+
+    def test_fails_when_polling_times_out(self) -> None:
+        result = self.run_action(
+            inputs={
+                "launchplane-url": "https://launchplane.example",
+                "route-path": "/v1/drivers/generic-web/preview-refresh",
+                "payload": '{"schema_version":1,"product":"sellyouroutboard"}',
+                "poll-result-path": "result.refresh_status",
+                "poll-result-statuses": "pending",
+                "poll-interval-ms": "1",
+                "poll-timeout-ms": "1",
+            },
+            environment={"TEST_REFRESH_STATUS": "pending"},
+        )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Timed out waiting for Launchplane result", result.stderr)
 
 
 if __name__ == "__main__":
