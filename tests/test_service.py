@@ -743,6 +743,135 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
+    def test_every_code_work_request_create_list_claim_and_status_flow(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "every_code_work_request.write",
+                            "every_code_work_request.read",
+                            "every_code_work_request.claim",
+                            "every_code_work_request.update",
+                        ],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/code",
+                    "issue_number": 123,
+                    "issue_url": "https://github.com/cbusillo/code/issues/123",
+                    "issue_title": "Wire local automation",
+                    "trigger_label": "every-code",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-05T22:00:00Z",
+                },
+                headers={"Idempotency-Key": "every-code-create-code-123"},
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            list_status, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests",
+                query_string="state=queued",
+            )
+            claim_status, claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                headers={"Idempotency-Key": "every-code-claim-code-123"},
+            )
+            second_claim_status, second_claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Other-Host"},
+                headers={"Idempotency-Key": "every-code-claim-code-123-other"},
+            )
+            status_status, status_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "updated_at": "2026-05-05T22:05:00Z",
+                },
+                headers={"Idempotency-Key": "every-code-status-code-123-done"},
+            )
+            show_status, show_payload = _invoke_app(
+                app,
+                method="GET",
+                path=f"/v1/every-code/work-requests/{request_id}",
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(create_payload["records"]["state"], "queued")
+        self.assertEqual(list_status, 200)
+        self.assertEqual(len(list_payload["requests"]), 1)
+        self.assertEqual(claim_status, 202)
+        self.assertEqual(claim_payload["records"]["state"], "claimed")
+        self.assertEqual(second_claim_status, 409)
+        self.assertEqual(second_claim_payload["error"]["code"], "work_request_already_claimed")
+        self.assertEqual(status_status, 202)
+        self.assertEqual(status_payload["records"]["state"], "done")
+        self.assertEqual(show_status, 200)
+        self.assertEqual(show_payload["request"]["state"], "done")
+        self.assertEqual(
+            show_payload["request"]["result_pr_url"],
+            "https://github.com/cbusillo/code/pull/26",
+        )
+
+    def test_every_code_work_request_create_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/code",
+                    "issue_number": 123,
+                    "issue_url": "https://github.com/cbusillo/code/issues/123",
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_health_endpoint_reports_storage_backend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(

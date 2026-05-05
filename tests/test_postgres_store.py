@@ -21,6 +21,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
@@ -219,6 +220,35 @@ def _dokploy_target_record(*, context: str = "opw", instance: str = "prod") -> D
         updated_at="2026-04-21T18:30:00Z",
         source_label="import:test",
     )
+
+
+def _every_code_work_request(
+    *,
+    request_id: str = "every-code-cbusillo-code-123-test",
+    state: str = "queued",
+    updated_at: str = "2026-05-05T22:00:00Z",
+) -> EveryCodeWorkRequestRecord:
+    payload = {
+        "request_id": request_id,
+        "source": "manual",
+        "state": state,
+        "repository": "cbusillo/code",
+        "issue_number": 123,
+        "issue_url": "https://github.com/cbusillo/code/issues/123",
+        "trigger_label": "every-code",
+        "queued_at": "2026-05-05T22:00:00Z",
+        "updated_at": updated_at,
+    }
+    if state in {"claimed", "running", "done", "blocked"}:
+        payload["claimed_at"] = "2026-05-05T22:01:00Z"
+        payload["claimed_by_host"] = "Chris-Studio"
+    if state in {"running", "done"}:
+        payload["started_at"] = "2026-05-05T22:02:00Z"
+    if state in {"done", "blocked"}:
+        payload["finished_at"] = "2026-05-05T22:03:00Z"
+    if state == "blocked":
+        payload["error_message"] = "checkout missing"
+    return EveryCodeWorkRequestRecord.model_validate(payload)
 
 
 def _runtime_environment_record(
@@ -524,6 +554,41 @@ class PostgresRecordStoreTests(unittest.TestCase):
             assert loaded is not None
             self.assertEqual(loaded.request_fingerprint, "fingerprint-123")
             self.assertEqual(loaded.response_payload["records"]["preview_id"], "preview-35")
+
+    def test_every_code_work_requests_round_trip_list_and_claim_once(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+
+            older_record = _every_code_work_request(
+                request_id="every-code-cbusillo-code-122-test",
+                updated_at="2026-05-05T21:00:00Z",
+            )
+            newer_record = _every_code_work_request()
+            store.write_every_code_work_request_record(older_record)
+            store.write_every_code_work_request_record(newer_record)
+
+            listed = store.list_every_code_work_request_records(state="queued")
+            claimed = store.claim_every_code_work_request_record(
+                request_id=newer_record.request_id,
+                host="Chris-Studio",
+                claimed_at="2026-05-05T22:01:00Z",
+            )
+            second_claim = store.claim_every_code_work_request_record(
+                request_id=newer_record.request_id,
+                host="Other-Host",
+                claimed_at="2026-05-05T22:02:00Z",
+            )
+            loaded = store.read_every_code_work_request_record(newer_record.request_id)
+
+        self.assertEqual([record.request_id for record in listed], [newer_record.request_id, older_record.request_id])
+        self.assertIsNotNone(claimed)
+        assert claimed is not None
+        self.assertEqual(claimed.state, "claimed")
+        self.assertEqual(claimed.claimed_by_host, "Chris-Studio")
+        self.assertIsNone(second_claim)
+        self.assertEqual(loaded.state, "claimed")
 
     def test_human_sessions_round_trip_and_delete(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
