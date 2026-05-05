@@ -110,6 +110,11 @@ image reference; it should not pass secret values or render a Dokploy env file.
 Launchplane live-target runtime sync evaluates runtime key-safety policy for
 managed runtime secret bindings before updating Dokploy environment variables,
 and records only key-safety status and policy hash evidence.
+Generic-web preview refresh applies the same rule to secret-shaped env keys
+copied from a template lane: the copied key must resolve to a managed runtime
+secret binding on the template lane and the active runtime key-safety policy
+must allow that binding for the preview target before Launchplane writes the
+preview app env.
 
 Dokploy-owned persistent volumes are allowed for service state, but the volume
 mapping is provider target configuration, not product-repo lifecycle state.

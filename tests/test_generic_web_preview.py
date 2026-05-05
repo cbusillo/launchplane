@@ -16,6 +16,12 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductPreviewProfile,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding, SecretStatus
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDesiredStateRequest,
     GenericWebPreviewDestroyRequest,
@@ -35,13 +41,55 @@ from control_plane.workflows.preview_desired_state import render_preview_slug
 
 
 class _GenericWebPreviewStore:
-    def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        *,
+        runtime_key_safety_policies: tuple[RuntimeKeySafetyPolicyRecord, ...] = (),
+        secret_bindings: tuple[SecretBinding, ...] = (),
+    ) -> None:
         self.profile = profile
+        self.runtime_key_safety_policies = runtime_key_safety_policies
+        self.secret_bindings = secret_bindings
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
             raise FileNotFoundError(product)
         return self.profile
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        records = tuple(
+            record
+            for record in self.runtime_key_safety_policies
+            if not status or record.status == status
+        )
+        if limit is not None:
+            return records[:limit]
+        return records
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        bindings = tuple(
+            binding
+            for binding in self.secret_bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        if limit is not None:
+            return bindings[:limit]
+        return bindings
 
 
 def _profile(*, preview_enabled: bool = True) -> LaunchplaneProductProfileRecord:
@@ -76,6 +124,38 @@ def _profile(*, preview_enabled: bool = True) -> LaunchplaneProductProfileRecord
         ),
         updated_at="2026-04-30T21:00:00Z",
         source="test",
+    )
+
+
+def _preview_runtime_policy(
+    *, secret_class: RuntimeSecretClass = "preview"
+) -> RuntimeKeySafetyPolicyRecord:
+    return RuntimeKeySafetyPolicyRecord(
+        record_id="runtime-key-safety-policy-test",
+        status="active",
+        source="test",
+        updated_at="2026-05-05T20:00:00Z",
+        rules=(
+            RuntimeSecretSafetyRule(
+                binding_key="SMTP_PASSWORD",
+                secret_class=secret_class,
+                allowed_contexts=("sellyouroutboard-testing",),
+            ),
+        ),
+    )
+
+
+def _runtime_secret_binding(*, status: SecretStatus = "configured") -> SecretBinding:
+    return SecretBinding(
+        binding_id="secret-smtp-password-binding-smtp-password",
+        secret_id="secret-smtp-password",
+        integration="runtime_environment",
+        binding_key="SMTP_PASSWORD",
+        context="sellyouroutboard-testing",
+        instance="testing",
+        status=status,
+        created_at="2026-05-05T20:00:00Z",
+        updated_at="2026-05-05T20:00:00Z",
     )
 
 
@@ -528,6 +608,187 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertNotIn("SMTP_HOST=", env_text)
         trigger_deployment.assert_called_once()
         wait_health.assert_called_once()
+
+    def test_execute_generic_web_preview_refresh_blocks_unsafe_copied_secret_key(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(
+                    update={
+                        "required_template_env_keys": ("SMTP_HOST",),
+                        "copied_env_keys": ("SMTP_PASSWORD",),
+                    }
+                )
+            }
+        )
+        store = _GenericWebPreviewStore(
+            profile,
+            runtime_key_safety_policies=(_preview_runtime_policy(secret_class="prod_only"),),
+            secret_bindings=(_runtime_secret_binding(),),
+        )
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_id="app-testing",
+                    target_name="sellyouroutboard-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "applicationId": "app-testing",
+                    "env": "SMTP_HOST=smtp.example\nSMTP_PASSWORD=secret-value\n",
+                    "dockerImage": "ghcr.io/cbusillo/sellyouroutboard:old",
+                    "username": "github-actions",
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request"
+            ) as dokploy_request,
+        ):
+            result = execute_generic_web_preview_refresh(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewRefreshRequest(
+                    product="sellyouroutboard",
+                    preview_slug="preview-42-site",
+                    preview_url="https://preview-42.example.test",
+                    image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                ),
+            )
+
+        self.assertEqual(result.refresh_status, "fail")
+        self.assertIn("runtime key-safety gate failed", result.error_message)
+        self.assertIn("secret_class_not_allowed", result.error_message)
+        dokploy_request.assert_not_called()
+
+    def test_execute_generic_web_preview_refresh_allows_preview_safe_copied_secret_key(
+        self,
+    ) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(
+                    update={
+                        "required_template_env_keys": ("SMTP_HOST",),
+                        "copied_env_keys": ("SMTP_PASSWORD",),
+                    }
+                )
+            }
+        )
+        store = _GenericWebPreviewStore(
+            profile,
+            runtime_key_safety_policies=(_preview_runtime_policy(),),
+            secret_bindings=(_runtime_secret_binding(),),
+        )
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="application",
+                    target_id="app-testing",
+                    target_name="sellyouroutboard-testing",
+                ),
+            ),
+        )
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [{"environments": [{"applications": []}]}]
+            if path == "/api/application.create":
+                return {"applicationId": "app-preview"}
+            if path == "/api/domain.byApplicationId":
+                return []
+            if path == "/api/domain.create":
+                return {"domainId": "domain-preview"}
+            return {}
+
+        def _fake_fetch(**kwargs: object) -> dict[str, object]:
+            target_id = kwargs["target_id"]
+            if target_id == "app-testing":
+                return {
+                    "applicationId": "app-testing",
+                    "environmentId": "env-1",
+                    "serverId": "server-1",
+                    "env": "SMTP_HOST=smtp.example\nSMTP_PASSWORD=secret-value\n",
+                    "dockerImage": "ghcr.io/cbusillo/sellyouroutboard:old",
+                    "username": "github-actions",
+                    "password": "registry-token",
+                    "registryUrl": "ghcr.io",
+                    "buildType": "dockerfile",
+                }
+            if target_id == "app-preview":
+                return {"applicationId": "app-preview", "description": ""}
+            raise AssertionError(target_id)
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fake_fetch,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.latest_deployment_for_target",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.trigger_deployment",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.wait_for_target_deployment",
+            ),
+            patch("control_plane.workflows.generic_web_preview._wait_for_preview_health"),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-04-30T21:00:00Z", "2026-04-30T21:00:05Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_refresh(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewRefreshRequest(
+                    product="sellyouroutboard",
+                    preview_slug="preview-42-site",
+                    preview_url="https://preview-42.example.test",
+                    image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                ),
+            )
+
+        self.assertEqual(result.refresh_status, "pass")
+        save_environment = [
+            request for request in requests if request["path"] == "/api/application.saveEnvironment"
+        ][0]
+        save_environment_payload = cast("dict[str, object]", save_environment["payload"])
+        self.assertIn("SMTP_PASSWORD=secret-value", str(save_environment_payload["env"]))
 
     def test_execute_generic_web_preview_destroy_deletes_domains_and_application(self) -> None:
         store = _GenericWebPreviewStore(_profile())
