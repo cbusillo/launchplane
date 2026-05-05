@@ -32,6 +32,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.storage.filesystem import FilesystemRecordStore
 
 
@@ -94,7 +98,52 @@ class FilesystemRecordStoreTests(unittest.TestCase):
 
         self.assertEqual(loaded_record.driver_id, "generic-web")
         self.assertEqual(loaded_record.preview.context, "sellyouroutboard-testing")
-        self.assertEqual([listed_record.product for listed_record in listed_records], ["sellyouroutboard"])
+        self.assertEqual(
+            [listed_record.product for listed_record in listed_records], ["sellyouroutboard"]
+        )
+
+    def test_write_and_list_runtime_key_safety_policy_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-20260505T190000Z-old",
+                status="superseded",
+                source="test",
+                updated_at="2026-05-05T19:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SHOPIFY_ACCESS_TOKEN",
+                        secret_class="testing",
+                    ),
+                ),
+            )
+            active_record = RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-20260505T200000Z-active",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SHOPIFY_ACCESS_TOKEN",
+                        secret_class="testing",
+                        allowed_contexts=("opw",),
+                        allowed_instances=("testing",),
+                    ),
+                ),
+            )
+
+            store.write_runtime_key_safety_policy_record(older_record)
+            written_path = store.write_runtime_key_safety_policy_record(active_record)
+            listed_records = store.list_runtime_key_safety_policy_records(status="active")
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_runtime_key_safety_policies/"
+            "runtime-key-safety-policy-20260505T200000Z-active.json",
+        )
+        self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
+        self.assertEqual(listed_records[0].rules[0].allowed_contexts, ("opw",))
 
     def test_write_and_read_artifact_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -250,12 +299,17 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 )
             )
 
-            listed_records = store.list_backup_gate_records(context_name="opw", instance_name="prod", limit=2)
+            listed_records = store.list_backup_gate_records(
+                context_name="opw", instance_name="prod", limit=2
+            )
 
-            self.assertEqual([record.record_id for record in listed_records], [
-                "backup-opw-prod-20260411T182231Z",
-                "backup-opw-prod-20260410T182231Z",
-            ])
+            self.assertEqual(
+                [record.record_id for record in listed_records],
+                [
+                    "backup-opw-prod-20260411T182231Z",
+                    "backup-opw-prod-20260410T182231Z",
+                ],
+            )
 
     def test_write_and_read_promotion_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -344,8 +398,12 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     context="opw",
                     from_instance="testing",
                     to_instance="prod",
-                    deploy=DeploymentEvidence(target_name="opw-prod", target_type="compose",
-                                              deploy_mode="dokploy-compose-api", started_at="2026-04-13T18:22:31Z"),
+                    deploy=DeploymentEvidence(
+                        target_name="opw-prod",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        started_at="2026-04-13T18:22:31Z",
+                    ),
                 )
             )
 
@@ -356,10 +414,13 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 limit=2,
             )
 
-            self.assertEqual([record.record_id for record in listed_records], [
-                "promotion-20260413T182231Z-opw-testing-to-prod",
-                "promotion-20260411T182231Z-opw-testing-to-prod",
-            ])
+            self.assertEqual(
+                [record.record_id for record in listed_records],
+                [
+                    "promotion-20260413T182231Z-opw-testing-to-prod",
+                    "promotion-20260411T182231Z-opw-testing-to-prod",
+                ],
+            )
 
     def test_write_and_read_deployment_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -455,17 +516,26 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     context="opw",
                     instance="prod",
                     source_git_ref="jkl012",
-                    deploy=DeploymentEvidence(target_name="opw-prod", target_type="compose",
-                                              deploy_mode="dokploy-compose-api", started_at="2026-04-13T18:22:31Z"),
+                    deploy=DeploymentEvidence(
+                        target_name="opw-prod",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        started_at="2026-04-13T18:22:31Z",
+                    ),
                 )
             )
 
-            listed_records = store.list_deployment_records(context_name="opw", instance_name="prod", limit=2)
+            listed_records = store.list_deployment_records(
+                context_name="opw", instance_name="prod", limit=2
+            )
 
-            self.assertEqual([record.record_id for record in listed_records], [
-                "deployment-20260413T182231Z-opw-prod",
-                "deployment-20260411T182231Z-opw-prod",
-            ])
+            self.assertEqual(
+                [record.record_id for record in listed_records],
+                [
+                    "deployment-20260413T182231Z-opw-prod",
+                    "deployment-20260411T182231Z-opw-prod",
+                ],
+            )
 
     def test_artifacts_ingest_writes_manifest(self) -> None:
         runner = CliRunner()
@@ -479,9 +549,7 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                     source_commit="f45db648",
                     enterprise_base_digest="sha256:enterprise123",
                     addon_sources=(
-                        ArtifactAddonSource(
-                            repository="cbusillo/disable_odoo_online", ref="main"
-                        ),
+                        ArtifactAddonSource(repository="cbusillo/disable_odoo_online", ref="main"),
                     ),
                     image=ArtifactImageReference(
                         repository="ghcr.io/cbusillo/odoo-private",
@@ -584,13 +652,17 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             )
 
             written_path = store.write_environment_inventory(record)
-            loaded_record = store.read_environment_inventory(context_name="opw", instance_name="prod")
+            loaded_record = store.read_environment_inventory(
+                context_name="opw", instance_name="prod"
+            )
             listed_records = store.list_environment_inventory()
 
             self.assertTrue(written_path.exists())
             self.assertEqual(loaded_record.context, "opw")
             self.assertEqual(loaded_record.instance, "prod")
-            self.assertEqual(loaded_record.promotion_record_id, "promotion-20260410T182231Z-opw-testing-to-prod")
+            self.assertEqual(
+                loaded_record.promotion_record_id, "promotion-20260410T182231Z-opw-testing-to-prod"
+            )
             self.assertEqual(len(listed_records), 1)
 
     def test_write_and_read_odoo_instance_override_record(self) -> None:
@@ -603,7 +675,9 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 config_parameters=(
                     OdooConfigParameterOverride(
                         key="web.base.url",
-                        value=OdooOverrideValue(source="literal", value="https://opw-prod.example.com"),
+                        value=OdooOverrideValue(
+                            source="literal", value="https://opw-prod.example.com"
+                        ),
                     ),
                 ),
                 addon_settings=(
@@ -621,9 +695,19 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             )
 
             written_path = store.write_odoo_instance_override_record(record)
-            loaded_record = store.read_odoo_instance_override_record(context_name="opw", instance_name="prod")
+            loaded_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
             listed_records = store.list_odoo_instance_override_records()
 
-            self.assertEqual(written_path.relative_to(state_dir).as_posix(), "odoo_instance_overrides/opw-prod.json")
-            self.assertEqual(loaded_record.addon_settings[0].value.secret_binding_id, "secret-binding-shopify-token")
-            self.assertEqual([(record.context, record.instance) for record in listed_records], [("opw", "prod")])
+            self.assertEqual(
+                written_path.relative_to(state_dir).as_posix(),
+                "odoo_instance_overrides/opw-prod.json",
+            )
+            self.assertEqual(
+                loaded_record.addon_settings[0].value.secret_binding_id,
+                "secret-binding-shopify-token",
+            )
+            self.assertEqual(
+                [(record.context, record.instance) for record in listed_records], [("opw", "prod")]
+            )

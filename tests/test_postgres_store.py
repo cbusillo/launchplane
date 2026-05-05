@@ -58,6 +58,10 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
     RuntimeEnvironmentScope,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -76,7 +80,9 @@ def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
 
 
-def _product_profile_record(*, product: str = "sellyouroutboard") -> LaunchplaneProductProfileRecord:
+def _product_profile_record(
+    *, product: str = "sellyouroutboard"
+) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product=product,
         display_name="SellYourOutboard.com",
@@ -802,8 +808,134 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(len(listed_records), 1)
-        self.assertEqual(listed_records[0].record_id, "launchplane-authz-policy-20260420T100500Z-test")
-        self.assertEqual(listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane")
+        self.assertEqual(
+            listed_records[0].record_id, "launchplane-authz-policy-20260420T100500Z-test"
+        )
+        self.assertEqual(
+            listed_records[0].policy.github_actions[0].repository, "cbusillo/launchplane"
+        )
+
+    def test_runtime_key_safety_policy_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-20260505T200000Z-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-05T20:00:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="SHOPIFY_ACCESS_TOKEN",
+                            secret_class="testing",
+                            allowed_contexts=("opw",),
+                            allowed_instances=("testing",),
+                        ),
+                    ),
+                )
+            )
+            listed_records = store.list_runtime_key_safety_policy_records(status="active", limit=1)
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(
+            listed_records[0].record_id,
+            "runtime-key-safety-policy-20260505T200000Z-test",
+        )
+        self.assertEqual(listed_records[0].rules[0].secret_class, "testing")
+
+    def test_runtime_key_safety_cli_imports_lists_and_evaluates_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            policy_file = Path(temporary_directory_name) / "runtime-key-safety.json"
+            policy_file.write_text(
+                json.dumps(
+                    {
+                        "updated_at": "2026-05-05T20:00:00Z",
+                        "rules": [
+                            {
+                                "binding_key": "SHOPIFY_ACCESS_TOKEN",
+                                "secret_class": "testing",
+                                "allowed_contexts": ["opw"],
+                                "allowed_instances": ["testing"],
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="binding-shopify-token",
+                    secret_id="secret-shopify-token",
+                    integration="runtime_environment",
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    context="opw",
+                    instance="testing",
+                    created_at="2026-05-05T20:00:00Z",
+                    updated_at="2026-05-05T20:00:00Z",
+                )
+            )
+            store.close()
+            runner = CliRunner()
+
+            import_result = runner.invoke(
+                main,
+                [
+                    "runtime-key-safety",
+                    "import-policy",
+                    "--database-url",
+                    database_url,
+                    "--policy-file",
+                    str(policy_file),
+                    "--source-label",
+                    "test",
+                ],
+            )
+            list_result = runner.invoke(
+                main,
+                [
+                    "runtime-key-safety",
+                    "list-policies",
+                    "--database-url",
+                    database_url,
+                    "--status",
+                    "active",
+                ],
+            )
+            evaluate_result = runner.invoke(
+                main,
+                [
+                    "runtime-key-safety",
+                    "evaluate",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--environment-class",
+                    "testing",
+                    "--binding-key",
+                    "SHOPIFY_ACCESS_TOKEN",
+                ],
+            )
+
+        self.assertEqual(import_result.exit_code, 0, import_result.output)
+        self.assertIn('"rule_count": 1', import_result.output)
+        self.assertEqual(list_result.exit_code, 0, list_result.output)
+        self.assertIn('"count": 1', list_result.output)
+        self.assertEqual(evaluate_result.exit_code, 0, evaluate_result.output)
+        self.assertIn('"status": "pass"', evaluate_result.output)
 
     def test_product_profile_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -822,11 +954,15 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded_record.driver_id, "generic-web")
         self.assertEqual(loaded_record.image.repository, "ghcr.io/cbusillo/sellyouroutboard")
         self.assertEqual(loaded_record.preview.context, "sellyouroutboard-testing")
-        self.assertEqual([record.product for record in listed_records], ["internal-tool", "sellyouroutboard"])
+        self.assertEqual(
+            [record.product for record in listed_records], ["internal-tool", "sellyouroutboard"]
+        )
 
     def test_product_profiles_cli_upserts_lists_and_shows_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
-            database_url = _sqlite_database_url(Path(temporary_directory_name) / "launchplane.sqlite3")
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
             lanes_json = json.dumps(
                 [
                     {
@@ -1193,17 +1329,13 @@ class PostgresRecordStoreTests(unittest.TestCase):
         assert inventory is not None
         inventory_artifact_identity = inventory.artifact_identity
         assert inventory_artifact_identity is not None
-        self.assertEqual(
-            inventory_artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4"
-        )
+        self.assertEqual(inventory_artifact_identity.artifact_id, "artifact-20260420-a1b2c3d4")
         release_tuple = summary.release_tuple
         assert release_tuple is not None
         self.assertEqual(release_tuple.channel, "testing")
         latest_deployment = summary.latest_deployment
         assert latest_deployment is not None
-        self.assertEqual(
-            latest_deployment.record_id, "deployment-20260420T153000Z-opw-testing"
-        )
+        self.assertEqual(latest_deployment.record_id, "deployment-20260420T153000Z-opw-testing")
         self.assertIsNone(summary.latest_promotion)
         self.assertIsNone(summary.latest_backup_gate)
         dokploy_target_id = summary.dokploy_target_id
@@ -1451,6 +1583,20 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
             filesystem_store.write_release_tuple_record(_release_tuple_record())
             filesystem_store.write_product_profile_record(_product_profile_record())
+            filesystem_store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-20260505T200000Z-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-05T20:00:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="SHOPIFY_ACCESS_TOKEN",
+                            secret_class="testing",
+                        ),
+                    ),
+                )
+            )
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
             self.assertEqual(
@@ -1472,6 +1618,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_lifecycle_plans": 1,
                     "preview_pr_feedback": 1,
                     "release_tuples": 1,
+                    "runtime_key_safety_policies": 1,
                 },
             )
             self.assertEqual(
@@ -1520,5 +1667,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     limit=1,
                 )[0].feedback_id,
                 "preview-pr-feedback-verireel-testing-pr-123-20260420T100800Z",
+            )
+            self.assertEqual(
+                store.list_runtime_key_safety_policy_records(status="active", limit=1)[0]
+                .rules[0]
+                .binding_key,
+                "SHOPIFY_ACCESS_TOKEN",
             )
             store.close()

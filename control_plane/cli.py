@@ -82,6 +82,13 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentRecord,
     ScalarValue,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeEnvironmentClass,
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeKeySafetyPolicyStatus,
+    RuntimeKeySafetyTarget,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
@@ -95,6 +102,10 @@ from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_record_store, resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety_from_store,
+    latest_active_runtime_key_safety_policy,
+)
 from control_plane.service_auth import load_authz_policy
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.workflows.launchplane import (
@@ -308,6 +319,52 @@ def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict
         "github_actions_rule_count": len(record.policy.github_actions),
         "github_humans_rule_count": len(record.policy.github_humans),
     }
+
+
+def _summarize_runtime_key_safety_policy_record(
+    record: RuntimeKeySafetyPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "status": record.status,
+        "source": record.source,
+        "updated_at": record.updated_at,
+        "policy_sha256": record.policy_sha256,
+        "rule_count": len(record.rules),
+        "binding_keys": [rule.binding_key for rule in record.rules],
+    }
+
+
+def _build_runtime_key_safety_policy_record(
+    *,
+    policy_file: Path,
+    source_label: str,
+    status: RuntimeKeySafetyPolicyStatus = "active",
+) -> RuntimeKeySafetyPolicyRecord:
+    payload = _load_json_file(policy_file)
+    raw_rules = payload.get("rules")
+    if not isinstance(raw_rules, list):
+        raise click.ClickException("Runtime key-safety policy JSON requires a rules array.")
+    try:
+        rules = tuple(RuntimeSecretSafetyRule.model_validate(rule) for rule in raw_rules)
+        updated_at = str(payload.get("updated_at") or utc_now_timestamp())
+        source = str(payload.get("source") or source_label).strip() or source_label
+        record = RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-pending",
+            status=status,
+            source=source,
+            updated_at=updated_at,
+            rules=rules,
+        )
+    except ValidationError as error:
+        raise click.ClickException(str(error)) from error
+    final_record = record.model_copy(
+        update={
+            "record_id": "runtime-key-safety-policy-"
+            f"{_launchplane_action_slug(updated_at)}-{record.policy_sha256[:12]}",
+        }
+    )
+    return RuntimeKeySafetyPolicyRecord.model_validate(final_record.model_dump(mode="json"))
 
 
 def _summarize_product_profile_record(record: LaunchplaneProductProfileRecord) -> dict[str, object]:
@@ -12094,6 +12151,11 @@ def authz_policies() -> None:
     """DB-backed Launchplane authorization policy commands."""
 
 
+@main.group("runtime-key-safety")
+def runtime_key_safety() -> None:
+    """DB-backed runtime key-safety policy and evaluation commands."""
+
+
 @main.group("product-profiles")
 def product_profiles() -> None:
     """DB-backed Launchplane product profile commands."""
@@ -12151,6 +12213,129 @@ def authz_policies_import_toml(database_url: str, policy_file: Path, source_labe
     click.echo(
         json.dumps(
             {"status": "ok", "record": _summarize_authz_policy_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@runtime_key_safety.command("list-policies")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for runtime key-safety policy records.",
+)
+@click.option("--status", "status_filter", default="", help="Optional policy status filter.")
+def runtime_key_safety_list_policies(database_url: str, status_filter: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        records = postgres_store.list_runtime_key_safety_policy_records(status=status_filter)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [
+                    _summarize_runtime_key_safety_policy_record(record) for record in records
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@runtime_key_safety.command("import-policy")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for runtime key-safety policy records.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="JSON policy file containing runtime key-safety rules.",
+)
+@click.option("--status", type=click.Choice(["active", "superseded"]), default="active")
+@click.option("--source-label", default="cli:import-policy", show_default=True)
+def runtime_key_safety_import_policy(
+    database_url: str,
+    policy_file: Path,
+    status: RuntimeKeySafetyPolicyStatus,
+    source_label: str,
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    record = _build_runtime_key_safety_policy_record(
+        policy_file=policy_file,
+        source_label=source_label,
+        status=status,
+    )
+    try:
+        postgres_store.write_runtime_key_safety_policy_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_runtime_key_safety_policy_record(record)},
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@runtime_key_safety.command("evaluate")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for runtime key-safety policy records.",
+)
+@click.option("--context", "context_name", required=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--environment-class",
+    "environment_class",
+    type=click.Choice(["prod", "testing", "preview", "dev", "unknown"]),
+    required=True,
+)
+@click.option("--binding-key", "binding_keys", multiple=True, required=True)
+def runtime_key_safety_evaluate(
+    database_url: str,
+    context_name: str,
+    instance_name: str,
+    environment_class: RuntimeEnvironmentClass,
+    binding_keys: tuple[str, ...],
+) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(postgres_store)
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=postgres_store,
+            policy_record=policy_record,
+            target=RuntimeKeySafetyTarget(
+                context=context_name,
+                instance=instance_name,
+                environment_class=environment_class,
+            ),
+            required_binding_keys=binding_keys,
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "policy": _summarize_runtime_key_safety_policy_record(policy_record),
+                "evaluation": evaluation.model_dump(mode="json"),
+            },
             indent=2,
             sort_keys=True,
         )

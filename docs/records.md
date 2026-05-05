@@ -404,6 +404,19 @@ state/
   environment key for each managed secret binding, and the driver asserts those
   keys before invoking Odoo.
 
+## Runtime Key-Safety Policy Record
+
+- One record per imported runtime key-safety policy version under
+  `launchplane_runtime_key_safety_policies`.
+- Store policy metadata, status, source, timestamp, and binding-key
+  classifications only. Do not store secret plaintext, ciphertext, provider env
+  dumps, token prefixes, or operator-local overrides in these records.
+- Active policy records are the Launchplane-owned authority for deciding whether
+  a managed secret binding may be used by a target runtime class. Evaluation
+  fails closed when no active policy record exists or when a required binding is
+  missing, disabled, ambiguous, unclassified, or outside the allowed
+  context/instance.
+
 ## Launchplane Preview Record
 
 - One file per stable Launchplane preview identity.
