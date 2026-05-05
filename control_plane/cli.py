@@ -103,6 +103,7 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_record_store, resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
 )
@@ -7860,6 +7861,70 @@ def _runtime_env_live_target_delta(
     }
 
 
+def _runtime_key_safety_environment_class(instance_name: str) -> RuntimeEnvironmentClass:
+    normalized_instance = instance_name.strip().lower()
+    if normalized_instance in {"prod", "production"}:
+        return "prod"
+    if normalized_instance in {"testing", "test", "staging", "stage"}:
+        return "testing"
+    if normalized_instance in {"preview", "pr"} or normalized_instance.startswith("pr-"):
+        return "preview"
+    if normalized_instance in {"dev", "local", "development"}:
+        return "dev"
+    return "unknown"
+
+
+def _evaluate_runtime_key_safety_for_live_target_sync(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    context_name: str,
+    instance_name: str,
+) -> dict[str, object]:
+    bindings = record_store.list_secret_bindings(
+        integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=None,
+    )
+    binding_keys = tuple(binding.binding_key for binding in bindings)
+    if not binding_keys:
+        return {"required": False, "status": "skipped", "checked_binding_keys": []}
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(record_store)
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=record_store,
+            policy_record=policy_record,
+            target=RuntimeKeySafetyTarget(
+                context=context_name,
+                instance=instance_name,
+                environment_class=_runtime_key_safety_environment_class(instance_name),
+            ),
+            required_binding_keys=binding_keys,
+        )
+    except ValueError as error:
+        raise click.ClickException(
+            "Runtime key-safety policy is unavailable for live target runtime sync."
+        ) from error
+    summary: dict[str, object] = {
+        "required": True,
+        "status": evaluation.status,
+        "policy_record_id": policy_record.record_id,
+        "policy_sha256": policy_record.policy_sha256,
+        "target": evaluation.target.model_dump(mode="json"),
+        "checked_binding_keys": list(evaluation.checked_binding_keys),
+        "findings": [finding.model_dump(mode="json") for finding in evaluation.findings],
+    }
+    if evaluation.status != "pass":
+        finding_codes = sorted({finding.code for finding in evaluation.findings})
+        suffix = f": {', '.join(finding_codes)}" if finding_codes else ""
+        raise click.ClickException(f"Runtime key-safety gate failed for live target sync{suffix}.")
+    return summary
+
+
+def _skipped_runtime_key_safety_summary() -> dict[str, object]:
+    return {"required": False, "status": "skipped", "checked_binding_keys": []}
+
+
 def _apply_live_target_runtime_environment(
     *,
     context_name: str,
@@ -7905,11 +7970,26 @@ def _apply_live_target_runtime_environment(
     )
     changed_keys = initial_delta["changed_keys"]
     changed_key_count = len(changed_keys) if isinstance(changed_keys, list) else 0
+    runtime_key_safety = _skipped_runtime_key_safety_summary()
     deploy_result: dict[str, str] | None = None
     verification: dict[str, object] = {
         "status": "skipped",
         "reason": "dry_run" if not apply_changes else "no_runtime_env_changes",
     }
+
+    if not apply_changes or changed_key_count or deploy:
+        database_url = resolve_database_url(None)
+        if database_url is not None:
+            postgres_store = PostgresRecordStore(database_url=database_url)
+            postgres_store.ensure_schema()
+            try:
+                runtime_key_safety = _evaluate_runtime_key_safety_for_live_target_sync(
+                    record_store=postgres_store,
+                    context_name=context_name,
+                    instance_name=instance_name,
+                )
+            finally:
+                postgres_store.close()
 
     if apply_changes and changed_key_count:
         refreshed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
@@ -7980,6 +8060,7 @@ def _apply_live_target_runtime_environment(
             "target_name": target_definition.target_name,
         },
         "runtime_environment": initial_delta,
+        "runtime_key_safety": runtime_key_safety,
         "apply": {
             "applied": apply_changes,
             "env_updated": bool(apply_changes and changed_key_count),
@@ -8016,6 +8097,19 @@ def _sync_artifact_image_reference_for_target(
             instance_name=instance_name,
         )
     )
+    database_url = resolve_database_url(None)
+    runtime_key_safety = _skipped_runtime_key_safety_summary()
+    if database_url is not None:
+        postgres_store = PostgresRecordStore(database_url=database_url)
+        postgres_store.ensure_schema()
+        try:
+            runtime_key_safety = _evaluate_runtime_key_safety_for_live_target_sync(
+                record_store=postgres_store,
+                context_name=context_name,
+                instance_name=instance_name,
+            )
+        finally:
+            postgres_store.close()
     desired_env_map = dict(env_map)
     desired_env_map.update(runtime_environment_values)
 
@@ -8053,6 +8147,13 @@ def _sync_artifact_image_reference_for_target(
             runtime_environment_values=runtime_environment_values,
             changed=desired_env_map != env_map,
         )
+    )
+    runtime_source_evidence["runtime_key_safety_status"] = str(runtime_key_safety["status"])
+    runtime_source_evidence["runtime_key_safety_required"] = (
+        "true" if runtime_key_safety["required"] else "false"
+    )
+    runtime_source_evidence["runtime_key_safety_policy_sha256"] = str(
+        runtime_key_safety.get("policy_sha256", "")
     )
     if desired_env_map != env_map:
         control_plane_dokploy.update_dokploy_target_env(

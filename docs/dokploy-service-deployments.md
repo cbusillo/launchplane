@@ -107,6 +107,9 @@ Non-secret runtime settings belong in Launchplane runtime-environment records.
 Secret settings belong in Launchplane managed secret records and bindings. A
 product workflow may pass the product key, source ref, run URL, and immutable
 image reference; it should not pass secret values or render a Dokploy env file.
+Launchplane live-target runtime sync evaluates runtime key-safety policy for
+managed runtime secret bindings before updating Dokploy environment variables,
+and records only key-safety status and policy hash evidence.
 
 Dokploy-owned persistent volumes are allowed for service state, but the volume
 mapping is provider target configuration, not product-repo lifecycle state.
