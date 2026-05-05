@@ -68,6 +68,21 @@ async function fetchWithRetry(url, init, options) {
   );
 }
 
+async function readJsonResponse(response) {
+  const responseText = await response.text();
+  let responseBody = {};
+  if (responseText) {
+    try {
+      responseBody = JSON.parse(responseText);
+    } catch (error) {
+      if (response.ok) {
+        throw error;
+      }
+    }
+  }
+  return { responseBody, responseText };
+}
+
 function buildAbortSignal(timeoutMs) {
   const normalizedTimeoutMs = parseNonNegativeInteger(timeoutMs, "timeout-ms");
   if (!normalizedTimeoutMs) {
@@ -202,9 +217,70 @@ function assertResultStatuses(responseBody) {
 function getActionOptions() {
   return {
     oidcTimeoutMs: getInput("oidc-timeout-ms", { defaultValue: "30000" }),
+    pollIntervalMs: getInput("poll-interval-ms", { defaultValue: "30000" }),
+    pollResultPath: getInput("poll-result-path"),
+    pollResultStatuses: getInput("poll-result-statuses", { defaultValue: "pending" }),
+    pollTimeoutMs: getInput("poll-timeout-ms", { defaultValue: "600000" }),
     retryAttempts: getInput("retry-attempts", { defaultValue: "3" }),
     retryDelayMs: getInput("retry-delay-ms", { defaultValue: "250" }),
   };
+}
+
+function shouldPollResponse(responseBody, options) {
+  const pollResultPath = String(options.pollResultPath ?? "").trim();
+  if (!pollResultPath) {
+    return false;
+  }
+  const pollStatuses = new Set(
+    splitCommaSeparated(options.pollResultStatuses).map((status) =>
+      status.toLowerCase(),
+    ),
+  );
+  if (pollStatuses.size === 0) {
+    return false;
+  }
+  const value = readJsonPath(responseBody, pollResultPath);
+  const normalizedValue = String(value ?? "").trim().toLowerCase();
+  return Boolean(normalizedValue && pollStatuses.has(normalizedValue));
+}
+
+async function requestLaunchplaneUntilComplete(requestUrl, requestInit, options) {
+  const pollResultPath = String(options.pollResultPath ?? "").trim();
+  const pollTimeoutMs = parseNonNegativeInteger(
+    options.pollTimeoutMs,
+    "poll-timeout-ms",
+  );
+  const pollIntervalMs = parseNonNegativeInteger(
+    options.pollIntervalMs,
+    "poll-interval-ms",
+  );
+  const deadline = Date.now() + pollTimeoutMs;
+  let lastPollValue = "";
+  let attempt = 0;
+
+  while (true) {
+    attempt += 1;
+    const response = await fetchWithRetry(requestUrl, requestInit, {
+      ...options,
+      label: "Launchplane request",
+    });
+    const { responseBody, responseText } = await readJsonResponse(response);
+    if (!response.ok || !shouldPollResponse(responseBody, options)) {
+      return { response, responseBody, responseText };
+    }
+
+    lastPollValue = String(readJsonPath(responseBody, pollResultPath) ?? "").trim();
+    if (!pollTimeoutMs || Date.now() + pollIntervalMs > deadline) {
+      throw new Error(
+        `Timed out waiting for Launchplane result ${pollResultPath} to leave ` +
+          `${lastPollValue || "the polling status"} after ${pollTimeoutMs}ms.`,
+      );
+    }
+    process.stderr.write(
+      `Launchplane result ${pollResultPath} is ${lastPollValue}; polling again in ${pollIntervalMs}ms.\n`,
+    );
+    await sleep(pollIntervalMs);
+  }
 }
 
 async function main() {
@@ -234,21 +310,11 @@ async function main() {
     requestInit.body = JSON.stringify(payload);
   }
 
-  const response = await fetchWithRetry(requestUrl, requestInit, {
-    ...options,
-    label: "Launchplane request",
-  });
-  const responseText = await response.text();
-  let responseBody = {};
-  if (responseText) {
-    try {
-      responseBody = JSON.parse(responseText);
-    } catch (error) {
-      if (response.ok) {
-        throw error;
-      }
-    }
-  }
+  const { response, responseBody, responseText } = await requestLaunchplaneUntilComplete(
+    requestUrl,
+    requestInit,
+    options,
+  );
 
   setOutput("launchplane-url", requestUrl);
   setOutput("route-path", routePath);

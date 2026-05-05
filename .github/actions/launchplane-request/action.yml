@@ -51,6 +51,25 @@ inputs:
     description: Base retry delay in milliseconds.
     required: false
     default: "250"
+  poll-result-path:
+    description: >-
+      JSON path to inspect after each Launchplane response. When set, the action
+      repeats the request while the value matches poll-result-statuses.
+    required: false
+    default: ""
+  poll-result-statuses:
+    description: >-
+      Comma-separated result status values that should keep polling.
+    required: false
+    default: pending
+  poll-interval-ms:
+    description: Delay between polling requests in milliseconds.
+    required: false
+    default: "30000"
+  poll-timeout-ms:
+    description: Maximum polling duration in milliseconds.
+    required: false
+    default: "600000"
   fail-result-statuses:
     description: >-
       Comma-separated result status values that should fail the action.
