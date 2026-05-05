@@ -130,13 +130,44 @@ For an existing repo, classify each workflow and script before deleting code:
   driver route.
 - `delete`: stale compatibility code with no active caller or with a proven
   Launchplane replacement.
-- `adapter`: temporary OIDC trigger glue that should shrink or move into a
-  reusable Launchplane GitHub Action/CLI.
+- `adapter`: temporary OIDC trigger glue. Prefer the reusable
+  `cbusillo/launchplane/.github/actions/launchplane-request` GitHub Action for
+  raw Launchplane HTTP calls, then keep only the product-specific payload
+  assembly that cannot yet move into a driver route.
 
 Start with low-risk deletions and documentation, then replace active workflow
 behavior in small slices. Do not remove active backup, promotion, rollback,
 runtime health, or cleanup safety gates until Launchplane owns the equivalent
 behavior and tests.
+
+## Reusable Launchplane Request Action
+
+Product workflows that only need to send JSON to an existing Launchplane route
+should not carry their own GitHub OIDC transport client. Use the Launchplane
+repo action instead:
+
+```yaml
+- name: Request Launchplane preview refresh
+  uses: cbusillo/launchplane/.github/actions/launchplane-request@main
+  with:
+    launchplane-url: ${{ vars.LAUNCHPLANE_URL }}
+    audience: ${{ vars.LAUNCHPLANE_AUDIENCE }}
+    route-path: /v1/drivers/generic-web/preview-refresh
+    payload-file: ${{ runner.temp }}/launchplane-preview-refresh.json
+    idempotency-key: >-
+      generic-web-preview-refresh:${{ github.event.number }}:${{ github.sha }}
+    timeout-ms: "900000"
+    output-paths: >-
+      refresh_status=result.refresh_status,
+      application_id=result.application_id,
+      preview_url=result.preview_url,
+      error_message=result.error_message
+```
+
+The action requests a GitHub OIDC token, sends the JSON request with a stable
+`Idempotency-Key`, exposes the raw response body, and can map response JSON paths
+to GitHub outputs. Product repos may still need small payload-builder scripts
+until Launchplane owns the next layer of product-specific request assembly.
 
 ## New Repo Checklist
 

@@ -133,6 +133,12 @@ The Launchplane trigger steps should use GitHub Actions OIDC and pass minimal
 facts only: product key, source ref or SHA, PR number when relevant, immutable
 artifact reference, and optional run URL.
 
+For direct JSON calls to Launchplane service routes, use the reusable
+`cbusillo/launchplane/.github/actions/launchplane-request` action rather than
+copying an OIDC/fetch helper into the product repo. Product repos can still keep
+small scripts that assemble product-specific payload JSON until Launchplane owns
+that request-shaping layer too.
+
 ## Choose A Driver
 
 Use `generic-web` when the product is a stateless or mostly stateless web app,
