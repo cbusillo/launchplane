@@ -16,7 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane import secrets as control_plane_secrets
 from control_plane.dokploy import JsonObject
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
+    evaluate_runtime_key_safety,
+    latest_active_runtime_key_safety_policy,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -24,6 +31,7 @@ DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
 PREVIEW_APP_PREFIX = "ver-preview"
 PREVIEW_DATABASE_PREFIX = "verireel_preview_"
 PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
+_SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 
 
 def _expected_preview_slug(anchor_pr_number: int) -> str:
@@ -274,6 +282,73 @@ def _parse_database_url(database_url: str) -> _DatabaseParts:
         database=database_name,
         username=username,
         password=password,
+    )
+
+
+def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
+    return any(
+        key_part in _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS
+        for key_part in key_name.strip().upper().split("_")
+    )
+
+
+def _verireel_template_runtime_secret_keys(
+    template_env_map: dict[str, str],
+) -> tuple[str, ...]:
+    required_keys: list[str] = []
+    for key, value in template_env_map.items():
+        normalized_key = key.strip()
+        if not normalized_key or not str(value).strip():
+            continue
+        if normalized_key == "DATABASE_URL" or _runtime_environment_key_requires_secret_store(
+            normalized_key
+        ):
+            required_keys.append(normalized_key)
+    return tuple(dict.fromkeys(required_keys))
+
+
+def _enforce_verireel_preview_runtime_key_safety(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore | None,
+    template_target: control_plane_dokploy.DokployTargetDefinition,
+    template_env_map: dict[str, str],
+    request: VeriReelPreviewRefreshRequest,
+) -> None:
+    required_binding_keys = _verireel_template_runtime_secret_keys(template_env_map)
+    if not required_binding_keys:
+        return
+    if record_store is None:
+        raise click.ClickException(
+            "VeriReel preview refresh copied runtime secrets require Launchplane database storage."
+        )
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(record_store)
+    except ValueError as exc:
+        raise click.ClickException(
+            "VeriReel preview refresh copied runtime secrets require an active runtime "
+            "key-safety policy."
+        ) from exc
+    evaluation = evaluate_runtime_key_safety(
+        target=RuntimeKeySafetyTarget(
+            context=request.context,
+            instance=request.preview_slug,
+            environment_class="preview",
+        ),
+        required_binding_keys=required_binding_keys,
+        secret_bindings=record_store.list_secret_bindings(
+            integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+            context_name=template_target.context,
+            instance_name=template_target.instance,
+            limit=None,
+        ),
+        secret_rules=policy_record.rules,
+    )
+    if evaluation.status == "pass":
+        return
+    finding_codes = ", ".join(finding.code for finding in evaluation.findings)
+    checked_keys = ", ".join(evaluation.checked_binding_keys)
+    raise click.ClickException(
+        f"VeriReel preview runtime key-safety gate failed for {checked_keys}: {finding_codes}."
     )
 
 
@@ -1003,6 +1078,7 @@ def execute_verireel_preview_refresh(
     *,
     control_plane_root: Path,
     request: VeriReelPreviewRefreshRequest,
+    record_store: RuntimeKeySafetyPolicyReadStore | None = None,
 ) -> VeriReelPreviewRefreshResult:
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     template_target, template_application = _template_application_payload(
@@ -1016,6 +1092,12 @@ def execute_verireel_preview_refresh(
     template_database_url = str(template_env_map.get("DATABASE_URL") or "").strip()
     if not template_database_url:
         raise click.ClickException("VeriReel testing template application is missing DATABASE_URL.")
+    _enforce_verireel_preview_runtime_key_safety(
+        record_store=record_store,
+        template_target=template_target,
+        template_env_map=template_env_map,
+        request=request,
+    )
     template_database = _parse_database_url(template_database_url)
 
     started_at = utc_now_timestamp()
