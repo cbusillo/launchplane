@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import time
 from pathlib import Path
-from typing import Iterator, Literal, Protocol
+from typing import Iterator, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import Request, urlopen
@@ -35,9 +35,12 @@ from control_plane.workflows.ship import utc_now_timestamp
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 
 
-class GenericWebPreviewStore(Protocol):
+class GenericWebPreviewProfileStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
+
+@runtime_checkable
+class GenericWebPreviewRuntimeKeySafetyStore(Protocol):
     def list_runtime_key_safety_policy_records(
         self,
         *,
@@ -554,7 +557,7 @@ def _delete_application(*, host: str, token: str, application_id: str) -> None:
 
 
 def resolve_generic_web_preview_profile(
-    *, record_store: GenericWebPreviewStore, product: str
+    *, record_store: GenericWebPreviewProfileStore, product: str
 ) -> LaunchplaneProductProfileRecord:
     profile = record_store.read_product_profile_record(product)
     if profile.driver_id != "generic-web":
@@ -709,7 +712,7 @@ def _copied_secret_shaped_runtime_keys(
 
 def _enforce_preview_copied_runtime_key_safety(
     *,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     profile: LaunchplaneProductProfileRecord,
     template_lane: ProductLaneProfile,
     template_application: JsonObject,
@@ -721,6 +724,11 @@ def _enforce_preview_copied_runtime_key_safety(
     )
     if not required_binding_keys:
         return
+    if not isinstance(record_store, GenericWebPreviewRuntimeKeySafetyStore):
+        raise click.ClickException(
+            "Generic web preview copied secret-shaped runtime keys require a "
+            "runtime key-safety-capable record store."
+        )
 
     try:
         policy_record = latest_active_runtime_key_safety_policy(record_store)
@@ -797,7 +805,7 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
 def evaluate_generic_web_preview_readiness(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewReadinessRequest,
     checked_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
@@ -963,7 +971,7 @@ def evaluate_generic_web_preview_readiness(
 def execute_generic_web_preview_refresh(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewRefreshRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewRefreshResult:
@@ -1134,7 +1142,7 @@ def execute_generic_web_preview_refresh(
 def discover_generic_web_preview_desired_state(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewDesiredStateRequest,
     discovered_at: str,
     profile: LaunchplaneProductProfileRecord | None = None,
@@ -1163,7 +1171,7 @@ def discover_generic_web_preview_desired_state(
 def execute_generic_web_preview_inventory(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewInventoryRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewInventoryResult:
@@ -1213,7 +1221,7 @@ def execute_generic_web_preview_inventory(
 def execute_generic_web_preview_destroy(
     *,
     control_plane_root: Path,
-    record_store: GenericWebPreviewStore,
+    record_store: GenericWebPreviewProfileStore,
     request: GenericWebPreviewDestroyRequest,
     profile: LaunchplaneProductProfileRecord | None = None,
 ) -> GenericWebPreviewDestroyResult:
