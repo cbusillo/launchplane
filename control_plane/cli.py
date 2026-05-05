@@ -183,6 +183,7 @@ _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
 _SERVICE_TARGET_TYPE_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_TYPE",)
 _SERVICE_TARGET_ID_ENV_KEYS = ("LAUNCHPLANE_DOKPLOY_TARGET_ID",)
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
+_REDACTED_RUNTIME_ENVIRONMENT_VALUE = "<redacted>"
 _SUCCESSFUL_DOKPLOY_STATUSES = {"success", "succeeded", "done", "completed", "healthy", "finished"}
 
 
@@ -8599,6 +8600,17 @@ def _runtime_environment_key_requires_secret_store(key_name: str) -> bool:
     )
 
 
+def _redact_runtime_environment_values(environment_values: dict[str, str]) -> dict[str, str]:
+    return {
+        key: (
+            _REDACTED_RUNTIME_ENVIRONMENT_VALUE
+            if _runtime_environment_key_requires_secret_store(key)
+            else value
+        )
+        for key, value in environment_values.items()
+    }
+
+
 def _validate_runtime_environment_scope_route(
     *,
     scope: str,
@@ -12165,11 +12177,27 @@ def environments_list(database_url: str) -> None:
 @click.option("--context", "context_name", required=True)
 @click.option("--instance", "instance_name", default="local", show_default=True)
 @click.option("--json-output", is_flag=True, default=False)
-def environments_resolve(context_name: str, instance_name: str, json_output: bool) -> None:
+@click.option(
+    "--include-secret-values",
+    is_flag=True,
+    default=False,
+    help="Print resolved secret-shaped values. Use only in trusted operator shells.",
+)
+def environments_resolve(
+    context_name: str,
+    instance_name: str,
+    json_output: bool,
+    include_secret_values: bool,
+) -> None:
     environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=_control_plane_root(),
         context_name=context_name,
         instance_name=instance_name,
+    )
+    output_values = (
+        environment_values
+        if include_secret_values
+        else _redact_runtime_environment_values(environment_values)
     )
     if json_output:
         click.echo(
@@ -12177,15 +12205,16 @@ def environments_resolve(context_name: str, instance_name: str, json_output: boo
                 {
                     "context": context_name,
                     "instance": instance_name,
-                    "environment": environment_values,
+                    "environment": output_values,
+                    "redacted": not include_secret_values,
                 },
                 indent=2,
                 sort_keys=True,
             )
         )
         return
-    for environment_key in sorted(environment_values):
-        click.echo(f"{environment_key}={environment_values[environment_key]}")
+    for environment_key in sorted(output_values):
+        click.echo(f"{environment_key}={output_values[environment_key]}")
 
 
 @environments.command("show-live-target")

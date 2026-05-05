@@ -1426,7 +1426,7 @@ ODOO_DB_PASSWORD = "file-secret"
                         control_plane_root=control_plane_root,
                     )
 
-    def test_environments_resolve_command_emits_json_payload(self) -> None:
+    def test_environments_resolve_command_redacts_json_payload_by_default(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
@@ -1469,8 +1469,102 @@ ODOO_DB_PASSWORD = "file-secret"
         payload = json.loads(result.output)
         self.assertEqual(payload["context"], "opw")
         self.assertEqual(payload["instance"], "local")
+        self.assertTrue(payload["redacted"])
+        self.assertEqual(payload["environment"]["ODOO_MASTER_PASSWORD"], "<redacted>")
+        self.assertEqual(payload["environment"]["ODOO_DB_PASSWORD"], "<redacted>")
+        self.assertNotIn("shared-master", result.output)
+        self.assertNotIn("local-secret", result.output)
+
+    def test_environments_resolve_command_can_emit_secret_json_payload_when_requested(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ODOO_MASTER_PASSWORD": "shared-master"},
+                    contexts={
+                        "opw": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "local": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"ODOO_DB_PASSWORD": "local-secret"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+            command_runner = CliRunner()
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+            ):
+                result = command_runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "resolve",
+                        "--context",
+                        "opw",
+                        "--instance",
+                        "local",
+                        "--json-output",
+                        "--include-secret-values",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0)
+        payload = json.loads(result.output)
+        self.assertFalse(payload["redacted"])
         self.assertEqual(payload["environment"]["ODOO_MASTER_PASSWORD"], "shared-master")
         self.assertEqual(payload["environment"]["ODOO_DB_PASSWORD"], "local-secret")
+
+    def test_environments_resolve_command_redacts_key_value_output_by_default(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _seed_runtime_environment_records(
+                database_url=database_url,
+                definition=control_plane_runtime_environments.RuntimeEnvironmentDefinition(
+                    schema_version=1,
+                    shared_env={"ODOO_DB_USER": "odoo"},
+                    contexts={
+                        "opw": control_plane_runtime_environments.RuntimeEnvironmentContextDefinition(
+                            shared_env={},
+                            instances={
+                                "local": control_plane_runtime_environments.RuntimeEnvironmentInstanceDefinition(
+                                    env={"SMTP_PASSWORD": "smtp-secret"}
+                                )
+                            },
+                        )
+                    },
+                ),
+            )
+            command_runner = CliRunner()
+            with (
+                patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
+                patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+            ):
+                result = command_runner.invoke(
+                    main,
+                    [
+                        "environments",
+                        "resolve",
+                        "--context",
+                        "opw",
+                        "--instance",
+                        "local",
+                    ],
+                )
+
+        self.assertEqual(result.exit_code, 0)
+        self.assertIn("ODOO_DB_USER=odoo", result.output)
+        self.assertIn("SMTP_PASSWORD=<redacted>", result.output)
+        self.assertNotIn("smtp-secret", result.output)
 
     def test_product_config_apply_dry_run_redacts_and_does_not_write(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

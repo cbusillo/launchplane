@@ -124,7 +124,9 @@ title: Secrets
 
 - `uv run launchplane environments resolve --context <ctx> --instance
 <instance> --json-output`
-  emits the resolved runtime environment payload for a tenant environment.
+  emits the resolved runtime environment payload for a tenant environment with
+  secret-shaped values redacted by default. Use `--include-secret-values` only
+  from a trusted operator shell when plaintext resolved values are required.
 - `uv run launchplane environments put --scope <scope> --set KEY=VALUE` writes
   non-secret runtime values directly to DB-backed runtime-environment records
   and redacts values from command output. Secret-shaped keys are rejected and
