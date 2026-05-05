@@ -13,6 +13,12 @@ from control_plane.contracts.promotion_record import (
     DeploymentEvidence,
     PromotionRecord,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_rollback_worker
@@ -33,6 +39,43 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
 
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
+
+    def _write_prod_worker_secret_binding(
+        self,
+        store: PostgresRecordStore,
+        *,
+        secret_class: RuntimeSecretClass = "prod_only",
+    ) -> None:
+        binding_key = "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="secret-verireel-prod-proxmox-ssh-private-key-binding",
+                secret_id="secret-verireel-prod-proxmox-ssh-private-key",
+                integration="runtime_environment",
+                binding_key=binding_key,
+                context="verireel",
+                instance="prod",
+                status="configured",
+                created_at="2026-05-05T22:30:00Z",
+                updated_at="2026-05-05T22:30:00Z",
+            )
+        )
+        store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T22:30:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=binding_key,
+                        secret_class=secret_class,
+                        allowed_contexts=("verireel",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+        )
 
     def _write_backup_gate(self, record_store: FilesystemRecordStore) -> None:
         record_store.write_backup_gate_record(
@@ -165,6 +208,35 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"], "runtime-private-key")
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
 
+    def test_run_delegated_worker_blocks_unsafe_managed_runtime_secret(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = self._sqlite_database_url(root)
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                self._write_prod_worker_secret_binding(store, secret_class="testing")
+            finally:
+                store.close()
+
+            with (
+                patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+                patch("control_plane.workflows.verireel_prod_rollback.subprocess.run") as run,
+            ):
+                with self.assertRaisesRegex(click.ClickException, "key-safety gate failed"):
+                    _run_delegated_worker(
+                        control_plane_root=root,
+                        request=VeriReelProdRollbackWorkerRequest(
+                            context="verireel",
+                            instance="prod",
+                            promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
+                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                            snapshot_name="ver-predeploy-20260421-180000",
+                        ),
+                    )
+
+        run.assert_not_called()
+
     def test_rollout_base_url_resolution_accepts_rollback_request_shape(self) -> None:
         request = VeriReelProdRollbackRequest(
             promotion_record_id="promotion-verireel-testing-to-prod-run-12345-attempt-1",
@@ -184,7 +256,9 @@ class VeriReelProdRollbackWorkflowTests(unittest.TestCase):
             ) as find_target,
             patch(
                 "control_plane.workflows.verireel_rollout.control_plane_runtime_environments.resolve_runtime_environment_values",
-                return_value={"VERIREEL_PROD_OPERATOR_BASE_URL": "https://ver-prod.shinycomputers.com"},
+                return_value={
+                    "VERIREEL_PROD_OPERATOR_BASE_URL": "https://ver-prod.shinycomputers.com"
+                },
             ) as resolve_environment,
             patch(
                 "control_plane.workflows.verireel_rollout.control_plane_dokploy.resolve_healthcheck_base_urls",

@@ -21,6 +21,7 @@ from control_plane.contracts.promotion_record import (
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 from control_plane.workflows.verireel_prod_promotion import (
     _read_backup_gate_record,
 )
@@ -314,6 +315,12 @@ def _worker_environment(
     control_plane_root: Path,
     request: VeriReelProdRollbackWorkerRequest,
 ) -> dict[str, str]:
+    enforce_worker_runtime_key_safety(
+        context_name=request.context,
+        instance_name=request.instance,
+        allowed_worker_keys=WORKER_RUNTIME_ENV_KEYS,
+        operation_name="VeriReel prod rollback worker",
+    )
     environment = {
         key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS
     }

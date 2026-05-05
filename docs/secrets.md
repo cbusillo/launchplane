@@ -76,6 +76,11 @@ title: Secrets
   instances. Template secret-shaped keys and semantic secret keys such as
   `DATABASE_URL` must resolve to managed template-lane bindings, and the active
   policy must allow those bindings for the preview target.
+- Delegated worker workflows that overlay managed runtime secrets into
+  subprocess environments, such as VeriReel prod backup and rollback workers,
+  must evaluate the managed bindings for the worker target before the worker
+  process starts. The worker receives plaintext only after the metadata gate has
+  confirmed the active policy allows those bindings for that runtime class.
 
 ## Bootstrap-Only Env
 

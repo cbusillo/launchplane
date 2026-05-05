@@ -8,6 +8,12 @@ import click
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows import verireel_prod_backup_gate_worker
@@ -27,6 +33,43 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
 
     def _record_store(self, root: Path) -> FilesystemRecordStore:
         return FilesystemRecordStore(root / "state")
+
+    def _write_prod_worker_secret_binding(
+        self,
+        store: PostgresRecordStore,
+        *,
+        secret_class: RuntimeSecretClass = "prod_only",
+    ) -> None:
+        binding_key = "VERIREEL_PROD_PROXMOX_SSH_PRIVATE_KEY"
+        store.write_secret_binding(
+            SecretBinding(
+                binding_id="secret-verireel-prod-proxmox-ssh-private-key-binding",
+                secret_id="secret-verireel-prod-proxmox-ssh-private-key",
+                integration="runtime_environment",
+                binding_key=binding_key,
+                context="verireel",
+                instance="prod",
+                status="configured",
+                created_at="2026-05-05T22:30:00Z",
+                updated_at="2026-05-05T22:30:00Z",
+            )
+        )
+        store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T22:30:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=binding_key,
+                        secret_class=secret_class,
+                        allowed_contexts=("verireel",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+        )
 
     def test_run_delegated_worker_prefers_runtime_environment_values(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -111,7 +154,13 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(result.status, "pass")
         self.assertEqual(
             captured["command"],
-            ["uv", "run", "python", "-m", "control_plane.workflows.verireel_prod_backup_gate_worker"],
+            [
+                "uv",
+                "run",
+                "python",
+                "-m",
+                "control_plane.workflows.verireel_prod_backup_gate_worker",
+            ],
         )
         worker_env = captured["env"]
         assert isinstance(worker_env, dict)
@@ -122,6 +171,33 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(worker_env["VERIREEL_PROD_PROXMOX_SSH_KNOWN_HOSTS"], "runtime-known-hosts")
         self.assertEqual(worker_env["VERIREEL_PROD_BACKUP_STORAGE"], "pbs-runtime")
         self.assertEqual(worker_env["VERIREEL_PROD_GATE_HEALTH_TIMEOUT_MS"], "25000")
+
+    def test_run_delegated_worker_blocks_unsafe_managed_runtime_secret(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = self._sqlite_database_url(root)
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                self._write_prod_worker_secret_binding(store, secret_class="testing")
+            finally:
+                store.close()
+
+            with (
+                patch.dict("os.environ", {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
+                patch("control_plane.workflows.verireel_prod_backup_gate.subprocess.run") as run,
+            ):
+                with self.assertRaisesRegex(click.ClickException, "key-safety gate failed"):
+                    _run_delegated_worker(
+                        control_plane_root=root,
+                        request=VeriReelProdBackupGateWorkerRequest(
+                            context="verireel",
+                            instance="prod",
+                            backup_record_id="backup-gate-verireel-prod-run-12345-attempt-1",
+                        ),
+                    )
+
+        run.assert_not_called()
 
     def test_prod_backup_gate_default_timeout_allows_longer_vzdump_backup(self) -> None:
         self.assertEqual(DEFAULT_TIMEOUT_SECONDS, 1800)
@@ -190,9 +266,7 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
             with (
                 patch(
                     "control_plane.workflows.verireel_prod_backup_gate._worker_environment",
-                    return_value={
-                        "LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "worker"
-                    },
+                    return_value={"LAUNCHPLANE_VERIREEL_PROD_BACKUP_GATE_WORKER_COMMAND": "worker"},
                 ),
                 patch(
                     "control_plane.workflows.verireel_prod_backup_gate.subprocess.run",
@@ -270,7 +344,9 @@ class VeriReelProdBackupGateWorkflowTests(unittest.TestCase):
         self.assertEqual(command[0], "ssh")
         self.assertIn("runtime-user@proxmox.runtime.example", command)
         remote_command_start = command.index("runtime-user@proxmox.runtime.example") + 1
-        self.assertEqual(command[remote_command_start:remote_command_start + 3], ["pct", "snapshot", "211"])
+        self.assertEqual(
+            command[remote_command_start : remote_command_start + 3], ["pct", "snapshot", "211"]
+        )
         self.assertRegex(
             command[remote_command_start + 3],
             r"^ver-predeploy-\d{8}-\d{6}-[0-9a-f]{6}$",
