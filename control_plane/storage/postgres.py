@@ -27,6 +27,10 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestRecord,
+    claim_every_code_work_request,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -427,6 +431,32 @@ class LaunchplaneOdooInstanceOverrideRow(Base):
     context: Mapped[str] = mapped_column(String, primary_key=True)
     instance: Mapped[str] = mapped_column(String, primary_key=True)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodeWorkRequestRow(Base):
+    __tablename__ = "launchplane_every_code_work_requests"
+    __table_args__ = (
+        Index(
+            "launchplane_every_code_work_requests_state_updated_idx",
+            "state",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_every_code_work_requests_repo_issue_idx",
+            "repository",
+            "issue_number",
+        ),
+    )
+
+    request_id: Mapped[str] = mapped_column(String, primary_key=True)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    state: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    issue_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    trigger_label: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    claimed_by_host: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1130,6 +1160,84 @@ class PostgresRecordStore(HumanSessionStore):
             ),
             limit=limit,
         )
+
+    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> None:
+        self._write_row(
+            LaunchplaneEveryCodeWorkRequestRow(
+                request_id=record.request_id,
+                source=record.source,
+                state=record.state,
+                repository=record.repository,
+                issue_number=record.issue_number,
+                trigger_label=record.trigger_label,
+                updated_at=record.updated_at,
+                claimed_by_host=record.claimed_by_host,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
+        return self._read_model(
+            model_type=EveryCodeWorkRequestRecord,
+            orm_model=LaunchplaneEveryCodeWorkRequestRow,
+            filters=(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id,),
+        )
+
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        filters: list[_SqlFilter] = []
+        if state:
+            filters.append(LaunchplaneEveryCodeWorkRequestRow.state == state)
+        if repository:
+            filters.append(LaunchplaneEveryCodeWorkRequestRow.repository == repository)
+        return self._list_models(
+            model_type=EveryCodeWorkRequestRecord,
+            orm_model=LaunchplaneEveryCodeWorkRequestRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodeWorkRequestRow.updated_at.desc(),
+                LaunchplaneEveryCodeWorkRequestRow.request_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def claim_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        claimed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        with self._session_factory() as session:
+            statement = (
+                select(LaunchplaneEveryCodeWorkRequestRow)
+                .where(LaunchplaneEveryCodeWorkRequestRow.request_id == request_id)
+                .limit(1)
+            )
+            if not self.database_url.startswith("sqlite"):
+                statement = statement.with_for_update()
+            row = session.scalar(statement)
+            if row is None:
+                raise FileNotFoundError(request_id)
+            record = self._read_payload(model_type=EveryCodeWorkRequestRecord, payload=row.payload)
+            claimed_record = claim_every_code_work_request(
+                record,
+                host=host,
+                claimed_at=claimed_at,
+            )
+            if claimed_record is None:
+                return None
+            row.state = claimed_record.state
+            row.updated_at = claimed_record.updated_at
+            row.claimed_by_host = claimed_record.claimed_by_host
+            row.payload = self._payload_dict(claimed_record)
+            session.commit()
+            return claimed_record
 
     def write_preview_lifecycle_plan_record(self, record: PreviewLifecyclePlanRecord) -> None:
         self._write_row(

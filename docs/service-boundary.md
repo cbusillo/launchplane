@@ -52,6 +52,12 @@ VeriReel product paths:
   - `POST /v1/product-profiles/legacy-context-cleanup/apply`
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
+- Every Code local automation work-request routes:
+  - `GET /v1/every-code/work-requests`
+  - `GET /v1/every-code/work-requests/{request_id}`
+  - `POST /v1/every-code/work-requests/create`
+  - `POST /v1/every-code/work-requests/claim`
+  - `POST /v1/every-code/work-requests/status`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
