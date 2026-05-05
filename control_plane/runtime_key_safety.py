@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from typing import Protocol
 
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeEnvironmentClass,
     RuntimeKeySafetyEvaluation,
+    RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyFinding,
     RuntimeKeySafetyTarget,
     RuntimeSecretClass,
@@ -20,6 +22,54 @@ ALLOWED_SECRET_CLASSES_BY_ENVIRONMENT: dict[RuntimeEnvironmentClass, set[Runtime
     "dev": {"non_prod", "shared_safe"},
     "unknown": set(),
 }
+
+
+class RuntimeKeySafetyPolicyReadStore(Protocol):
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]: ...
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]: ...
+
+
+def latest_active_runtime_key_safety_policy(
+    record_store: RuntimeKeySafetyPolicyReadStore,
+) -> RuntimeKeySafetyPolicyRecord:
+    records = record_store.list_runtime_key_safety_policy_records(status="active", limit=1)
+    if not records:
+        raise ValueError("No active runtime key-safety policy record found.")
+    return records[0]
+
+
+def evaluate_runtime_key_safety_from_store(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    target: RuntimeKeySafetyTarget,
+    required_binding_keys: Iterable[str],
+    policy_record: RuntimeKeySafetyPolicyRecord | None = None,
+) -> RuntimeKeySafetyEvaluation:
+    policy = policy_record or latest_active_runtime_key_safety_policy(record_store)
+    return evaluate_runtime_key_safety(
+        target=target,
+        required_binding_keys=required_binding_keys,
+        secret_bindings=record_store.list_secret_bindings(
+            integration="runtime_environment",
+            context_name=target.context,
+            instance_name=target.instance,
+            limit=None,
+        ),
+        secret_rules=policy.rules,
+    )
 
 
 def evaluate_runtime_key_safety(

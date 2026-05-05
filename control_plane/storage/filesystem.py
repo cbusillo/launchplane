@@ -22,6 +22,7 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.contracts.promotion_record import PromotionRecord
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 
 RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
@@ -42,7 +43,9 @@ class FilesystemRecordStore:
         )
         return record_path
 
-    def _read_model(self, model_type: type[BaseModel], record_type: str, record_id: str) -> BaseModel:
+    def _read_model(
+        self, model_type: type[BaseModel], record_type: str, record_id: str
+    ) -> BaseModel:
         record_path = self._record_path(record_type, record_id)
         payload = json.loads(record_path.read_text(encoding="utf-8"))
         return model_type.model_validate(payload)
@@ -50,7 +53,9 @@ class FilesystemRecordStore:
     def _record_dir(self, record_type: str) -> Path:
         return self.state_dir / record_type
 
-    def _list_models(self, model_type: type[RecordModel], record_type: str) -> tuple[RecordModel, ...]:
+    def _list_models(
+        self, model_type: type[RecordModel], record_type: str
+    ) -> tuple[RecordModel, ...]:
         record_dir = self._record_dir(record_type)
         if not record_dir.exists():
             return ()
@@ -70,7 +75,9 @@ class FilesystemRecordStore:
 
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest:
         return ArtifactIdentityManifest.model_validate(
-            self._read_model(ArtifactIdentityManifest, "artifacts", artifact_id).model_dump(mode="json")
+            self._read_model(ArtifactIdentityManifest, "artifacts", artifact_id).model_dump(
+                mode="json"
+            )
         )
 
     def list_artifact_manifests(self) -> tuple[ArtifactIdentityManifest, ...]:
@@ -83,6 +90,30 @@ class FilesystemRecordStore:
 
     def write_authz_policy_record(self, record: LaunchplaneAuthzPolicyRecord) -> Path:
         return self._write_model("launchplane_authz_policies", record.record_id, record)
+
+    def write_runtime_key_safety_policy_record(self, record: RuntimeKeySafetyPolicyRecord) -> Path:
+        return self._write_model(
+            "launchplane_runtime_key_safety_policies", record.record_id, record
+        )
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                RuntimeKeySafetyPolicyRecord,
+                "launchplane_runtime_key_safety_policies",
+            )
+            if not status or record.status == status
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> Path:
         return self._write_model("launchplane_product_profiles", record.product, record)
@@ -127,7 +158,9 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def read_release_tuple_record(self, *, context_name: str, channel_name: str) -> ReleaseTupleRecord:
+    def read_release_tuple_record(
+        self, *, context_name: str, channel_name: str
+    ) -> ReleaseTupleRecord:
         return ReleaseTupleRecord.model_validate(
             self._read_model(
                 ReleaseTupleRecord,
@@ -178,7 +211,8 @@ class FilesystemRecordStore:
         records = [
             record
             for record in self._list_models(BackupGateRecord, "backup_gates")
-            if (not context_name or record.context == context_name) and (not instance_name or record.instance == instance_name)
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
         ]
         records.sort(key=lambda record: (record.created_at, record.record_id), reverse=True)
         if limit is not None:
@@ -209,7 +243,10 @@ class FilesystemRecordStore:
             and (not to_instance_name or record.to_instance == to_instance_name)
         ]
         records.sort(
-            key=lambda record: (*self._record_sort_timestamp(record.deploy.finished_at, record.deploy.started_at), record.record_id),
+            key=lambda record: (
+                *self._record_sort_timestamp(record.deploy.finished_at, record.deploy.started_at),
+                record.record_id,
+            ),
             reverse=True,
         )
         if limit is not None:
@@ -234,10 +271,14 @@ class FilesystemRecordStore:
         records = [
             record
             for record in self._list_models(DeploymentRecord, "deployments")
-            if (not context_name or record.context == context_name) and (not instance_name or record.instance == instance_name)
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
         ]
         records.sort(
-            key=lambda record: (*self._record_sort_timestamp(record.deploy.finished_at, record.deploy.started_at), record.record_id),
+            key=lambda record: (
+                *self._record_sort_timestamp(record.deploy.finished_at, record.deploy.started_at),
+                record.record_id,
+            ),
             reverse=True,
         )
         if limit is not None:
@@ -247,7 +288,9 @@ class FilesystemRecordStore:
     def write_environment_inventory(self, record: EnvironmentInventory) -> Path:
         return self._write_model("inventory", f"{record.context}-{record.instance}", record)
 
-    def read_environment_inventory(self, *, context_name: str, instance_name: str) -> EnvironmentInventory:
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory:
         record_id = f"{context_name}-{instance_name}"
         return EnvironmentInventory.model_validate(
             self._read_model(EnvironmentInventory, "inventory", record_id).model_dump(mode="json")
@@ -257,12 +300,18 @@ class FilesystemRecordStore:
         return self._list_models(EnvironmentInventory, "inventory")
 
     def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> Path:
-        return self._write_model("odoo_instance_overrides", f"{record.context}-{record.instance}", record)
+        return self._write_model(
+            "odoo_instance_overrides", f"{record.context}-{record.instance}", record
+        )
 
-    def read_odoo_instance_override_record(self, *, context_name: str, instance_name: str) -> OdooInstanceOverrideRecord:
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord:
         record_id = f"{context_name}-{instance_name}"
         return OdooInstanceOverrideRecord.model_validate(
-            self._read_model(OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id).model_dump(mode="json")
+            self._read_model(
+                OdooInstanceOverrideRecord, "odoo_instance_overrides", record_id
+            ).model_dump(mode="json")
         )
 
     def list_odoo_instance_override_records(self) -> tuple[OdooInstanceOverrideRecord, ...]:
@@ -275,7 +324,9 @@ class FilesystemRecordStore:
 
     def read_preview_record(self, preview_id: str) -> PreviewRecord:
         return PreviewRecord.model_validate(
-            self._read_model(PreviewRecord, "launchplane_previews", preview_id).model_dump(mode="json")
+            self._read_model(PreviewRecord, "launchplane_previews", preview_id).model_dump(
+                mode="json"
+            )
         )
 
     def list_preview_records(
@@ -303,9 +354,9 @@ class FilesystemRecordStore:
 
     def read_preview_enablement_record(self, record_id: str) -> PreviewEnablementRecord:
         return PreviewEnablementRecord.model_validate(
-            self._read_model(PreviewEnablementRecord, "launchplane_preview_enablement", record_id).model_dump(
-                mode="json"
-            )
+            self._read_model(
+                PreviewEnablementRecord, "launchplane_preview_enablement", record_id
+            ).model_dump(mode="json")
         )
 
     def list_preview_enablement_records(
@@ -318,7 +369,9 @@ class FilesystemRecordStore:
     ) -> tuple[PreviewEnablementRecord, ...]:
         records = [
             record
-            for record in self._list_models(PreviewEnablementRecord, "launchplane_preview_enablement")
+            for record in self._list_models(
+                PreviewEnablementRecord, "launchplane_preview_enablement"
+            )
             if (not context_name or record.context == context_name)
             and (not anchor_repo or record.anchor_repo == anchor_repo)
             and (not pr_state or record.pr_state == pr_state)
@@ -348,7 +401,9 @@ class FilesystemRecordStore:
     ) -> tuple[PreviewGenerationRecord, ...]:
         records = [
             record
-            for record in self._list_models(PreviewGenerationRecord, "launchplane_preview_generations")
+            for record in self._list_models(
+                PreviewGenerationRecord, "launchplane_preview_generations"
+            )
             if not preview_id or record.preview_id == preview_id
         ]
         records.sort(key=lambda record: (record.sequence, record.generation_id), reverse=True)
@@ -378,7 +433,9 @@ class FilesystemRecordStore:
         return tuple(records)
 
     def write_preview_desired_state_record(self, record: PreviewDesiredStateRecord) -> Path:
-        return self._write_model("launchplane_preview_desired_states", record.desired_state_id, record)
+        return self._write_model(
+            "launchplane_preview_desired_states", record.desired_state_id, record
+        )
 
     def list_preview_desired_state_records(
         self,
@@ -393,7 +450,9 @@ class FilesystemRecordStore:
             )
             if not context_name or record.context == context_name
         ]
-        records.sort(key=lambda record: (record.discovered_at, record.desired_state_id), reverse=True)
+        records.sort(
+            key=lambda record: (record.discovered_at, record.desired_state_id), reverse=True
+        )
         if limit is not None:
             records = records[:limit]
         return tuple(records)
@@ -419,10 +478,10 @@ class FilesystemRecordStore:
             records = records[:limit]
         return tuple(records)
 
-    def write_preview_lifecycle_cleanup_record(
-        self, record: PreviewLifecycleCleanupRecord
-    ) -> Path:
-        return self._write_model("launchplane_preview_lifecycle_cleanups", record.cleanup_id, record)
+    def write_preview_lifecycle_cleanup_record(self, record: PreviewLifecycleCleanupRecord) -> Path:
+        return self._write_model(
+            "launchplane_preview_lifecycle_cleanups", record.cleanup_id, record
+        )
 
     def list_preview_lifecycle_cleanup_records(
         self,

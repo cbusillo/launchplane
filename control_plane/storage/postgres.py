@@ -45,6 +45,7 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
 )
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyPolicyRecord
 from control_plane.contracts.secret_record import (
     SecretAuditEvent,
     SecretBinding,
@@ -337,6 +338,19 @@ class LaunchplaneAuthzPolicyRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneRuntimeKeySafetyPolicyRow(Base):
+    __tablename__ = "launchplane_runtime_key_safety_policies"
+    __table_args__ = (
+        Index("launchplane_runtime_key_safety_policies_updated_idx", desc("updated_at")),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1594,6 +1608,37 @@ class PostgresRecordStore(HumanSessionStore):
             ),
         )
 
+    def write_runtime_key_safety_policy_record(self, record: RuntimeKeySafetyPolicyRecord) -> None:
+        self._write_row(
+            LaunchplaneRuntimeKeySafetyPolicyRow(
+                record_id=record.record_id,
+                status=record.status,
+                source=record.source,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        filters: list[object] = []
+        if status:
+            filters.append(LaunchplaneRuntimeKeySafetyPolicyRow.status == status)
+        return self._list_models(
+            model_type=RuntimeKeySafetyPolicyRecord,
+            orm_model=LaunchplaneRuntimeKeySafetyPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneRuntimeKeySafetyPolicyRow.updated_at.desc(),
+                LaunchplaneRuntimeKeySafetyPolicyRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def read_lane_summary(self, *, context_name: str, instance_name: str) -> LaunchplaneLaneSummary:
         runtime_environment_records = (
             *self.list_runtime_environment_records(scope="global"),
@@ -1903,6 +1948,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_lifecycle_plans": 0,
             "preview_pr_feedback": 0,
             "release_tuples": 0,
+            "runtime_key_safety_policies": 0,
         }
         for artifact_manifest in filesystem_store.list_artifact_manifests():
             self.write_artifact_manifest(artifact_manifest)
@@ -1910,6 +1956,9 @@ class PostgresRecordStore(HumanSessionStore):
         for authz_policy_record in filesystem_store.list_authz_policy_records():
             self.write_authz_policy_record(authz_policy_record)
             counts["authz_policies"] += 1
+        for policy_record in filesystem_store.list_runtime_key_safety_policy_records():
+            self.write_runtime_key_safety_policy_record(policy_record)
+            counts["runtime_key_safety_policies"] += 1
         for backup_gate_record in filesystem_store.list_backup_gate_records():
             self.write_backup_gate_record(backup_gate_record)
             counts["backup_gates"] += 1

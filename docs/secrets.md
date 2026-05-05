@@ -61,6 +61,15 @@ title: Secrets
 - Gate output may include binding keys, binding ids, secret ids,
   classifications, and finding codes. It must not include secret plaintext,
   ciphertext, provider env dumps, or token prefixes.
+- Runtime key-safety policy records live in
+  `launchplane_runtime_key_safety_policies`. Operators import JSON policy
+  records with `launchplane runtime-key-safety import-policy`, inspect active
+  records with `launchplane runtime-key-safety list-policies`, and run a
+  metadata-only check with `launchplane runtime-key-safety evaluate` before a
+  workflow mutates runtime keys.
+- Evaluation reads only Launchplane managed secret bindings for the requested
+  context and instance. If no active policy record exists, the gate fails closed
+  instead of falling back to service-host env or product-local scripts.
 
 ## Bootstrap-Only Env
 

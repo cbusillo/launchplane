@@ -1,12 +1,58 @@
 import unittest
 
 from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
     RuntimeSecretSafetyRule,
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretStatus
-from control_plane.runtime_key_safety import evaluate_runtime_key_safety
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety,
+    evaluate_runtime_key_safety_from_store,
+    latest_active_runtime_key_safety_policy,
+)
+
+
+class _FakeRuntimeKeySafetyStore:
+    def __init__(
+        self,
+        *,
+        policies: tuple[RuntimeKeySafetyPolicyRecord, ...],
+        bindings: tuple[SecretBinding, ...],
+    ) -> None:
+        self.policies = policies
+        self.bindings = bindings
+        self.requested_context = ""
+        self.requested_instance = ""
+
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        records = tuple(record for record in self.policies if not status or record.status == status)
+        return records[:limit] if limit is not None else records
+
+    def list_secret_bindings(
+        self,
+        *,
+        integration: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        limit: int | None = None,
+    ) -> tuple[SecretBinding, ...]:
+        self.requested_context = context_name
+        self.requested_instance = instance_name
+        records = tuple(
+            binding
+            for binding in self.bindings
+            if (not integration or binding.integration == integration)
+            and (not context_name or binding.context == context_name)
+            and (not instance_name or binding.instance == instance_name)
+        )
+        return records[:limit] if limit is not None else records
 
 
 def _binding(
@@ -158,6 +204,93 @@ class RuntimeKeySafetyTests(unittest.TestCase):
             [finding.code for finding in evaluation.findings],
             ["context_not_allowed", "instance_not_allowed"],
         )
+
+    def test_policy_record_rejects_duplicate_binding_keys(self) -> None:
+        with self.assertRaisesRegex(ValueError, "unique by binding_key"):
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SHOPIFY_ACCESS_TOKEN",
+                        secret_class="testing",
+                    ),
+                    RuntimeSecretSafetyRule(
+                        binding_key="SHOPIFY_ACCESS_TOKEN",
+                        secret_class="preview",
+                    ),
+                ),
+            )
+
+    def test_policy_sha256_ignores_record_metadata(self) -> None:
+        first_record = RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-first",
+            source="test:first",
+            updated_at="2026-05-05T20:00:00Z",
+            rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    secret_class="testing",
+                ),
+            ),
+        )
+        second_record = first_record.model_copy(
+            update={
+                "record_id": "runtime-key-safety-policy-second",
+                "source": "test:second",
+                "updated_at": "2026-05-05T21:00:00Z",
+            }
+        )
+
+        self.assertEqual(first_record.policy_sha256, second_record.policy_sha256)
+
+    def test_evaluate_from_store_uses_latest_active_policy_and_target_bindings(self) -> None:
+        policy = RuntimeKeySafetyPolicyRecord(
+            record_id="runtime-key-safety-policy-20260505T200000Z-test",
+            status="active",
+            source="test",
+            updated_at="2026-05-05T20:00:00Z",
+            rules=(
+                RuntimeSecretSafetyRule(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    secret_class="testing",
+                    allowed_contexts=("opw",),
+                    allowed_instances=("testing",),
+                ),
+            ),
+        )
+        store = _FakeRuntimeKeySafetyStore(
+            policies=(policy,),
+            bindings=(
+                _binding(binding_key="SHOPIFY_ACCESS_TOKEN"),
+                _binding(
+                    binding_key="SHOPIFY_ACCESS_TOKEN",
+                    binding_id="binding-other-token",
+                    secret_id="secret-other-token",
+                ).model_copy(update={"context": "other", "instance": "testing"}),
+            ),
+        )
+
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=store,
+            target=RuntimeKeySafetyTarget(
+                context="opw",
+                instance="testing",
+                environment_class="testing",
+            ),
+            required_binding_keys=("SHOPIFY_ACCESS_TOKEN",),
+        )
+
+        self.assertEqual(evaluation.status, "pass")
+        self.assertEqual(store.requested_context, "opw")
+        self.assertEqual(store.requested_instance, "testing")
+
+    def test_missing_active_policy_fails_closed(self) -> None:
+        store = _FakeRuntimeKeySafetyStore(policies=(), bindings=())
+
+        with self.assertRaisesRegex(ValueError, "No active runtime key-safety policy"):
+            latest_active_runtime_key_safety_policy(store)
 
 
 if __name__ == "__main__":
