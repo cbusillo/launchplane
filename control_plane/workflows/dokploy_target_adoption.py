@@ -109,7 +109,8 @@ def adopt_dokploy_target(
         target_type=target_type,
         target_name=resolved_target_name,
         source_git_ref=normalized_source_git_ref,
-        git_branch=str(provider_fields.get("git_branch") or ""),
+        git_branch=_provider_string_field(provider_fields, "git_branch")
+        or _provider_string_field(provider_fields, "branch"),
         source_type=_provider_string_field(provider_fields, "source_type"),
         custom_git_url=_provider_string_field(provider_fields, "custom_git_url"),
         custom_git_branch=_provider_string_field(provider_fields, "custom_git_branch"),
