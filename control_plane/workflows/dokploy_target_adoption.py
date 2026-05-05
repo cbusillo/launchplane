@@ -172,8 +172,8 @@ def create_dokploy_application_target(
     mutate_provider: MutateDokployPayload,
     fetch_target_payload: FetchDokployTargetPayload,
 ) -> DokployTargetCreateResult:
-    normalized_context = _require_non_empty(context, "context")
-    normalized_instance = _require_non_empty(instance, "instance")
+    normalized_context = _normalize_route_part(context, "context")
+    normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_name = _require_non_empty(target_name, "target_name")
     normalized_project_id = project_id.strip()
     normalized_project_name = project_name.strip()
