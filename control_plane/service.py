@@ -12,7 +12,7 @@ import secrets
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import BinaryIO, Callable, Generic, Protocol, TypeVar, cast
+from typing import BinaryIO, Callable, Generic, Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 from wsgiref.types import WSGIApplication
@@ -33,6 +33,12 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestRecord,
+    EveryCodeWorkRequestStatusUpdate,
+    apply_every_code_work_request_status,
+    build_every_code_work_request_id,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.preview_mutation_request import (
@@ -1183,6 +1189,47 @@ class LaunchplaneSelfDeployEnvelope(BaseModel):
         return self
 
 
+class EveryCodeWorkRequestCreateEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    issue_number: int = Field(ge=1)
+    issue_url: str
+    issue_title: str = ""
+    trigger_label: str = "every-code"
+    trigger_actor: str = ""
+    github_delivery_id: str = ""
+    source: Literal["github_issue_label", "manual", "reconciliation"] = "manual"
+    queued_at: str = ""
+
+
+class EveryCodeWorkRequestClaimEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    host: str
+
+    @model_validator(mode="after")
+    def _validate_claim(self) -> "EveryCodeWorkRequestClaimEnvelope":
+        if not self.request_id.strip():
+            raise ValueError("Every Code work request claim requires request_id")
+        if not self.host.strip():
+            raise ValueError("Every Code work request claim requires host")
+        return self
+
+
+class EveryCodeWorkRequestStatusEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    host: str
+    state: Literal["running", "done", "blocked"]
+    result_pr_url: str = ""
+    result_summary: str = ""
+    error_message: str = ""
+    updated_at: str = ""
+
+
 class AuthzPolicyGitHubActionsGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1565,6 +1612,10 @@ def _serve_ui_route(
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
+    if len(segments) == 3 and segments == ["v1", "every-code", "work-requests"]:
+        return "every_code_work_request.read", {}
+    if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
+        return "every_code_work_request.read", {"request_id": segments[3]}
     if len(segments) == 2 and segments == ["v1", "drivers"]:
         return "driver.read", {}
     if len(segments) == 3 and segments[:2] == ["v1", "drivers"]:
@@ -1675,6 +1726,9 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
+        "/v1/every-code/work-requests/create",
+        "/v1/every-code/work-requests/claim",
+        "/v1/every-code/work-requests/status",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
@@ -1699,6 +1753,40 @@ def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretR
     if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
         return cast(control_plane_secrets.SecretReadStore, record_store)
     return None
+
+
+class _EveryCodeWorkRequestStore(Protocol):
+    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object: ...
+
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord: ...
+
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+    def claim_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        claimed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None: ...
+
+
+def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
+    required_methods = (
+        "write_every_code_work_request_record",
+        "read_every_code_work_request_record",
+        "list_every_code_work_request_records",
+        "claim_every_code_work_request_record",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_EveryCodeWorkRequestStore, record_store)
+    raise TypeError("record store does not support Every Code work requests")
 
 
 def _idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -1811,6 +1899,8 @@ def _accepted_payload(
                 "image_reference",
                 "artifact_id",
                 "transition",
+                "request_id",
+                "state",
             }
         },
         **({"result": serialized_driver_result} if serialized_driver_result else {}),
@@ -2179,6 +2269,29 @@ def _safe_return_to(value: str) -> str:
 
 def _now_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _build_every_code_work_request_record(
+    request: EveryCodeWorkRequestCreateEnvelope, *, queued_at: str
+) -> EveryCodeWorkRequestRecord:
+    return EveryCodeWorkRequestRecord(
+        request_id=build_every_code_work_request_id(
+            repository=request.repository,
+            issue_number=request.issue_number,
+            trigger_label=request.trigger_label,
+        ),
+        source=request.source,
+        state="queued",
+        repository=request.repository.strip(),
+        issue_number=request.issue_number,
+        issue_url=request.issue_url.strip(),
+        issue_title=request.issue_title.strip(),
+        trigger_label=request.trigger_label.strip(),
+        trigger_actor=request.trigger_actor.strip(),
+        github_delivery_id=request.github_delivery_id.strip(),
+        queued_at=queued_at,
+        updated_at=queued_at,
+    )
 
 
 def _bootstrap_policy_source_from_env() -> str:
@@ -3532,6 +3645,60 @@ def create_launchplane_service_app(
                             ),
                         },
                     )
+                if action == "every_code_work_request.read":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Every Code work requests.",
+                                },
+                            },
+                        )
+                    every_code_store = _every_code_work_request_store(record_store)
+                    if "request_id" in params:
+                        record = every_code_store.read_every_code_work_request_record(
+                            params["request_id"]
+                        )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "request": record.model_dump(mode="json"),
+                            },
+                        )
+                    state_filter = str((query.get("state") or [""])[0] or "").strip()
+                    repository_filter = str(
+                        (query.get("repository") or [""])[0] or ""
+                    ).strip()
+                    limit = int(str((query.get("limit") or ["50"])[0] or "50"))
+                    records = every_code_store.list_every_code_work_request_records(
+                        state=state_filter,
+                        repository=repository_filter,
+                        limit=limit,
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "state": state_filter,
+                            "repository": repository_filter,
+                            "requests": [record.model_dump(mode="json") for record in records],
+                        },
+                    )
                 if action == "product_profile.read":
                     if "product" in params:
                         profile = record_store.read_product_profile_record(params["product"])
@@ -3872,7 +4039,147 @@ def create_launchplane_service_app(
             request_fingerprint = _idempotency_request_fingerprint(route_path=path, payload=payload)
             driver_result: BaseModel | dict[str, object] | None = None
             result: dict[str, object] = {}
-            if path == "/v1/evidence/deployments":
+            if path == "/v1/every-code/work-requests/create":
+                every_code_request = EveryCodeWorkRequestCreateEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="every_code_work_request.write",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot create Every Code work requests.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                every_code_store = _every_code_work_request_store(record_store)
+                record = _build_every_code_work_request_record(
+                    every_code_request,
+                    queued_at=every_code_request.queued_at.strip() or _utc_now_timestamp(),
+                )
+                every_code_store.write_every_code_work_request_record(record)
+                result = {"request_id": record.request_id, "state": record.state}
+                driver_result = {"request": record.model_dump(mode="json")}
+            elif path == "/v1/every-code/work-requests/claim":
+                claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="every_code_work_request.claim",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot claim Every Code work requests.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                every_code_store = _every_code_work_request_store(record_store)
+                claimed_record = every_code_store.claim_every_code_work_request_record(
+                    request_id=claim_request.request_id.strip(),
+                    host=claim_request.host.strip(),
+                    claimed_at=_utc_now_timestamp(),
+                )
+                if claimed_record is None:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=409,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "work_request_already_claimed",
+                                "message": "Every Code work request is not queued for claim.",
+                            },
+                        },
+                    )
+                result = {"request_id": claimed_record.request_id, "state": claimed_record.state}
+                driver_result = {"request": claimed_record.model_dump(mode="json")}
+            elif path == "/v1/every-code/work-requests/status":
+                status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="every_code_work_request.update",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot update Every Code work requests.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                every_code_store = _every_code_work_request_store(record_store)
+                existing_record = every_code_store.read_every_code_work_request_record(
+                    status_request.request_id.strip()
+                )
+                updated_record = apply_every_code_work_request_status(
+                    existing_record,
+                    EveryCodeWorkRequestStatusUpdate(
+                        state=status_request.state,
+                        host=status_request.host,
+                        updated_at=status_request.updated_at.strip() or _utc_now_timestamp(),
+                        result_pr_url=status_request.result_pr_url,
+                        result_summary=status_request.result_summary,
+                        error_message=status_request.error_message,
+                    ),
+                )
+                every_code_store.write_every_code_work_request_record(updated_record)
+                result = {"request_id": updated_record.request_id, "state": updated_record.state}
+                driver_result = {"request": updated_record.model_dump(mode="json")}
+            elif path == "/v1/evidence/deployments":
                 deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,

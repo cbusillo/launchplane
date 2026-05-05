@@ -533,6 +533,19 @@ state/
   GitHub comments themselves. This keeps PR feedback aligned with Launchplane's
   durable preview lifecycle records.
 
+## Every Code Work Request Record
+
+- One durable request per approved Every Code automation trigger.
+- Record the source, repository, issue number and URL, trigger label, trigger
+  actor, optional GitHub delivery id, queue/update timestamps, claim host, run
+  timestamps, PR URL, result summary, and blocked error message.
+- State is `queued`, `claimed`, `running`, `done`, or `blocked`. Workers claim a
+  queued request before reporting progress. Terminal states are immutable through
+  the service status route.
+- Launchplane owns this coordination record so GitHub webhooks, reconciliation,
+  local Mac workers, and the future operator UI share one inspectable source of
+  truth instead of relying on GitHub API polling or local shell lock files.
+
 ## Inventory
 
 - Inventory records are keyed by environment.

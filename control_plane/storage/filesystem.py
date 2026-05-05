@@ -9,6 +9,10 @@ from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRe
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_work_request import (
+    EveryCodeWorkRequestRecord,
+    claim_every_code_work_request,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
@@ -114,6 +118,53 @@ class FilesystemRecordStore:
         if limit is not None:
             records = records[:limit]
         return tuple(records)
+
+    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> Path:
+        return self._write_model("launchplane_every_code_work_requests", record.request_id, record)
+
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
+        return EveryCodeWorkRequestRecord.model_validate(
+            self._read_model(
+                EveryCodeWorkRequestRecord,
+                "launchplane_every_code_work_requests",
+                request_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodeWorkRequestRecord,
+                "launchplane_every_code_work_requests",
+            )
+            if (not state or record.state == state)
+            and (not repository or record.repository == repository)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.request_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def claim_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        claimed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        record = self.read_every_code_work_request_record(request_id)
+        claimed_record = claim_every_code_work_request(record, host=host, claimed_at=claimed_at)
+        if claimed_record is None:
+            return None
+        self.write_every_code_work_request_record(claimed_record)
+        return claimed_record
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> Path:
         return self._write_model("launchplane_product_profiles", record.product, record)
