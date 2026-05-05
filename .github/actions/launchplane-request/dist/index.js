@@ -2,7 +2,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 
 function inputNameToEnvKey(name) {
-  return `INPUT_${name.replace(/ /g, "_").replace(/-/g, "_").toUpperCase()}`;
+  return `INPUT_${name.replace(/ /g, "_").toUpperCase()}`;
 }
 
 function getInput(name, options = {}) {

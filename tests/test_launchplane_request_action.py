@@ -33,7 +33,7 @@ class LaunchplaneRequestActionTests(unittest.TestCase):
         if environment:
             env.update(environment)
         for name, value in inputs.items():
-            env[f"INPUT_{name.replace('-', '_').upper()}"] = value
+            env[f"INPUT_{name.upper()}"] = value
 
         script = f"""
 const calls = [];
