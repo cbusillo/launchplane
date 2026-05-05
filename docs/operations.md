@@ -430,7 +430,8 @@ Current derived-state behavior:
 - `environments list` shows DB-backed runtime-environment record metadata and
   keys without echoing plaintext values.
 - `environments resolve` reads the control-plane-owned runtime environment
-  contract for a context and instance.
+  contract for a context and instance. Output redacts secret-shaped keys by
+  default; use `--include-secret-values` only in a trusted operator shell.
 - `environments apply-live-target --dry-run|--apply` resolves the DB-backed
   runtime environment and managed secret overlay for a tracked Dokploy target,
   compares it against the live target env by key, and can apply those keys
