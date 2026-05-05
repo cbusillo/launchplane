@@ -179,6 +179,9 @@ def create_dokploy_application_target(
     normalized_project_name = project_name.strip()
     normalized_environment_id = environment_id.strip()
     normalized_environment_name = environment_name.strip() or normalized_instance
+    normalized_healthcheck_path = healthcheck_path.strip()
+    if normalized_healthcheck_path and not normalized_healthcheck_path.startswith("/"):
+        raise ValueError("Dokploy target creation requires --healthcheck-path to start with /")
     if not normalized_environment_id and not normalized_project_id and not normalized_project_name:
         raise ValueError(
             "Dokploy target creation requires --project-id or --project-name when --environment-id is not supplied"
@@ -227,7 +230,7 @@ def create_dokploy_application_target(
             target_name=normalized_target_name,
             source_git_ref=source_git_ref.strip() or "origin/main",
             deploy_timeout_seconds=deploy_timeout_seconds,
-            healthcheck_path=healthcheck_path.strip(),
+            healthcheck_path=normalized_healthcheck_path,
             domains=domains,
             updated_at=updated_at.strip() or utc_now_timestamp(),
             source_label=source_label.strip() or "cli:dokploy-targets:create-application",
@@ -297,7 +300,7 @@ def create_dokploy_application_target(
         project_name=normalized_project_name,
         target_name=normalized_target_name,
         source_git_ref=source_git_ref,
-        healthcheck_path=healthcheck_path,
+        healthcheck_path=normalized_healthcheck_path,
         domains=domains,
         deploy_timeout_seconds=deploy_timeout_seconds,
         source_label=source_label,
