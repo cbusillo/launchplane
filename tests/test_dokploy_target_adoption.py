@@ -239,6 +239,43 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertFalse(target_record.enable_submodules)
         self.assertEqual(result.provider_fields["source_git_ref"], "origin/release")
 
+    def test_adopt_compose_target_uses_branch_when_git_branch_is_absent(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            result = adopt_dokploy_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="odoo-tenant-cm",
+                instance="testing",
+                target_type="compose",
+                target_id="compose-123",
+                source_git_ref="",
+                updated_at="2026-05-05T19:30:00Z",
+                apply=True,
+                fetch_target_payload=lambda *_args: {
+                    "name": "cm-testing",
+                    "sourceType": "git",
+                    "branch": "feature/adopted-branch",
+                    "composePath": "docker-compose.yml",
+                    "project": {"name": "CM"},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="odoo-tenant-cm", instance_name="testing"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(target_record.source_git_ref, "feature/adopted-branch")
+        self.assertEqual(target_record.git_branch, "feature/adopted-branch")
+        self.assertEqual(result.provider_fields["branch"], "feature/adopted-branch")
+
     def test_cli_adopt_uses_live_source_ref_by_default(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
