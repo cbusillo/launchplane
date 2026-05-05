@@ -92,6 +92,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
+from control_plane.every_code_worker import run_every_code_worker_once
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence as shared_apply_launchplane_generation_evidence,
@@ -9493,6 +9494,76 @@ def odoo_rollbacks() -> None:
 @main.group()
 def service() -> None:
     """Launchplane service commands."""
+
+
+@main.group("every-code")
+def every_code() -> None:
+    """Every Code local worker commands."""
+
+
+@every_code.command("run-once")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory used when --database-url is not set.",
+)
+@click.option("--host", default="", help="Worker host name recorded on the claim.")
+@click.option(
+    "--workspace-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path.home() / "Developer",
+    show_default=True,
+    help="Directory containing repository checkouts.",
+)
+@click.option(
+    "--checkout-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Explicit checkout root for the claimed request.",
+)
+@click.option("--repository", default="", help="Optional owner/repo queue filter.")
+@click.option(
+    "--command-template",
+    default="",
+    help="Optional shell command template for tmux. Fields include {issue_url} and {request_id}.",
+)
+@click.option("--tmux-binary", default="tmux", show_default=True)
+def every_code_run_once(
+    database_url: str,
+    state_dir: Path,
+    host: str,
+    workspace_root: Path,
+    checkout_root: Path | None,
+    repository: str,
+    command_template: str,
+    tmux_binary: str,
+) -> None:
+    resolved_host = host.strip() or os.uname().nodename
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    try:
+        result = run_every_code_worker_once(
+            record_store=record_store,
+            host=resolved_host,
+            workspace_root=workspace_root,
+            checkout_root=checkout_root,
+            repository=repository,
+            command_template=command_template,
+            tmux_binary=tmux_binary,
+        )
+    finally:
+        close = getattr(record_store, "close", None)
+        if callable(close):
+            close()
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
 
 
 @main.group()
