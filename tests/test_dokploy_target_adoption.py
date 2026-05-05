@@ -560,6 +560,59 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(target_record.healthcheck_path, "/health")
         self.assertEqual(target_id_record.target_id, "app-123")
 
+    def test_create_application_target_canonicalizes_route_keys_before_persisting(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+
+            def mutate_provider(
+                _host: str, _token: str, path: str, payload: JsonObject
+            ) -> JsonObject:
+                if path == "/api/project.create":
+                    return {"projectId": "project-123"}
+                if path == "/api/environment.create":
+                    return {"environmentId": "env-123"}
+                if path == "/api/application.create":
+                    return {"applicationId": "app-123"}
+                raise AssertionError(path)
+
+            result = create_dokploy_application_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="Discord-Blue",
+                instance="PrOd",
+                target_name="discord-blue-prod",
+                project_name="Discord Blue",
+                environment_name="PrOd",
+                updated_at="2026-05-04T23:06:00Z",
+                apply=True,
+                mutate_provider=mutate_provider,
+                fetch_target_payload=lambda *_args: {
+                    "name": "discord-blue-prod",
+                    "environment": {"project": {"name": "Discord Blue"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(result.target_record.context, "discord-blue")
+        self.assertEqual(result.target_record.instance, "prod")
+        self.assertEqual(target_record.context, "discord-blue")
+        self.assertEqual(target_record.instance, "prod")
+        self.assertEqual(target_id_record.context, "discord-blue")
+        self.assertEqual(target_id_record.instance, "prod")
+
     def test_create_application_target_reuses_existing_environment(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
