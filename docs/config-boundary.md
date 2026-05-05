@@ -38,6 +38,7 @@ it can reach, trust, or decrypt DB-backed state.
 | Authz bootstrap | `LAUNCHPLANE_POLICY_TOML`, `LAUNCHPLANE_POLICY_B64`, `LAUNCHPLANE_POLICY_FILE` | Minimal bootstrap env/file | Root of trust for first start and DB policy repair only. Live product/workflow grants are DB-backed authz policy records. |
 | Launchplane self image ref | `DOCKER_IMAGE_REFERENCE` | Service target env | Needed for Launchplane self-deploy and rollback posture. |
 | Process wiring | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT` | Service target env | Runtime/process wiring, not product config. |
+| Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config. |
 
 ### DB Authoritative
 

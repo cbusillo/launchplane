@@ -154,7 +154,7 @@ from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     build_preview_pr_feedback_record,
 )
-from control_plane.workflows.launchplane import find_preview_record
+from control_plane.workflows.launchplane import find_preview_record, verify_github_webhook_signature
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceRequest,
     OdooArtifactPublishInputsRequest,
@@ -218,6 +218,9 @@ from control_plane.workflows.verireel_preview_driver import (
 
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
+_EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
+_EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
+_EVERY_CODE_TRIGGER_LABEL = "every-code"
 
 
 @dataclass(frozen=True)
@@ -1726,6 +1729,7 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
+        _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
         "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/status",
@@ -1756,9 +1760,13 @@ def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretR
 
 
 class _EveryCodeWorkRequestStore(Protocol):
-    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object: ...
+    def write_every_code_work_request_record(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> object: ...
 
-    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord: ...
+    def read_every_code_work_request_record(
+        self, request_id: str
+    ) -> EveryCodeWorkRequestRecord: ...
 
     def list_every_code_work_request_records(
         self,
@@ -1787,6 +1795,159 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
+
+
+def _github_webhook_header(environ: dict[str, object], name: str) -> str:
+    return str(environ.get(f"HTTP_{name.upper().replace('-', '_')}", "")).strip()
+
+
+def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, object] | None:
+    value = payload.get(key)
+    if isinstance(value, dict):
+        return cast(dict[str, object], value)
+    return None
+
+
+def _github_webhook_string(mapping: dict[str, object] | None, key: str) -> str:
+    if mapping is None:
+        return ""
+    value = mapping.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _handle_every_code_github_webhook(
+    *,
+    environ: dict[str, object],
+    start_response: _StartResponse,
+    trace_id: str,
+    record_store: object,
+) -> list[bytes]:
+    secret = os.environ.get(_EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
+    if not secret:
+        return _json_response(
+            start_response=start_response,
+            status_code=503,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "webhook_secret_not_configured",
+                    "message": "Every Code GitHub webhook secret is not configured.",
+                },
+            },
+        )
+
+    body_bytes = _read_request_body(environ)
+    try:
+        verify_github_webhook_signature(
+            payload_bytes=body_bytes,
+            signature_header=_github_webhook_header(environ, "X-Hub-Signature-256"),
+            secret=secret,
+        )
+    except click.ClickException:
+        return _json_response(
+            start_response=start_response,
+            status_code=401,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "webhook_signature_invalid",
+                    "message": "GitHub webhook signature verification failed.",
+                },
+            },
+        )
+
+    delivery_id = _github_webhook_header(environ, "X-GitHub-Delivery")
+    if not delivery_id:
+        return _json_response(
+            start_response=start_response,
+            status_code=400,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "github_delivery_required",
+                    "message": "GitHub webhook delivery id is required.",
+                },
+            },
+        )
+
+    payload = _decode_json_request_body(body_bytes)
+    event_name = _github_webhook_header(environ, "X-GitHub-Event")
+    if event_name != "issues":
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "unsupported_event",
+            },
+        )
+    if payload.get("action") != "labeled":
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "unsupported_action",
+            },
+        )
+
+    label = _github_webhook_mapping(payload, "label")
+    label_name = _github_webhook_string(label, "name")
+    if label_name.strip().lower() != _EVERY_CODE_TRIGGER_LABEL:
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "label_not_matched",
+            },
+        )
+
+    repository_payload = _github_webhook_mapping(payload, "repository")
+    issue_payload = _github_webhook_mapping(payload, "issue")
+    sender_payload = _github_webhook_mapping(payload, "sender")
+    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
+    if not isinstance(issue_number_value, int):
+        raise ValueError("GitHub issue webhook requires integer issue.number")
+
+    request = EveryCodeWorkRequestCreateEnvelope(
+        repository=_github_webhook_string(repository_payload, "full_name"),
+        issue_number=issue_number_value,
+        issue_url=_github_webhook_string(issue_payload, "html_url"),
+        issue_title=_github_webhook_string(issue_payload, "title"),
+        trigger_label=_EVERY_CODE_TRIGGER_LABEL,
+        trigger_actor=_github_webhook_string(sender_payload, "login"),
+        github_delivery_id=delivery_id,
+        source="github_issue_label",
+        queued_at=_utc_now_timestamp(),
+    )
+    record = _build_every_code_work_request_record(request, queued_at=request.queued_at)
+    every_code_store = _every_code_work_request_store(record_store)
+    try:
+        stored_record = every_code_store.read_every_code_work_request_record(record.request_id)
+        deduped = True
+    except FileNotFoundError:
+        every_code_store.write_every_code_work_request_record(record)
+        stored_record = record
+        deduped = False
+
+    accepted_payload = _accepted_payload(
+        trace_id=trace_id,
+        result={"request_id": stored_record.request_id, "state": stored_record.state},
+        driver_result={"request": stored_record.model_dump(mode="json")},
+    )
+    accepted_payload["deduped"] = deduped
+    accepted_payload["github_delivery_id"] = delivery_id
+    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
 
 
 def _idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:
@@ -2060,11 +2221,19 @@ def _should_store_idempotency_record(
 
 
 def _read_json_request(environ: dict[str, object]) -> dict[str, object]:
-    content_length = int(str(environ.get("CONTENT_LENGTH", "0") or "0"))
-    body_stream = cast(BinaryIO | None, environ.get("wsgi.input"))
-    body_bytes = body_stream.read(content_length) if body_stream is not None else b""
+    body_bytes = _read_request_body(environ)
     if not body_bytes:
         raise ValueError("Request body is required.")
+    return _decode_json_request_body(body_bytes)
+
+
+def _read_request_body(environ: dict[str, object]) -> bytes:
+    content_length = int(str(environ.get("CONTENT_LENGTH", "0") or "0"))
+    body_stream = cast(BinaryIO | None, environ.get("wsgi.input"))
+    return body_stream.read(content_length) if body_stream is not None else b""
+
+
+def _decode_json_request_body(body_bytes: bytes) -> dict[str, object]:
     try:
         payload = json.loads(body_bytes.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -3240,6 +3409,27 @@ def create_launchplane_service_app(
                     },
                 },
             )
+        if method == "POST" and path == _EVERY_CODE_GITHUB_WEBHOOK_ROUTE:
+            try:
+                return _handle_every_code_github_webhook(
+                    environ=environ,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                )
+            except ValueError:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "invalid_request",
+                            "message": "GitHub webhook payload is invalid.",
+                        },
+                    },
+                )
         try:
             if method == "GET":
                 identity = _read_identity(
@@ -3679,9 +3869,7 @@ def create_launchplane_service_app(
                             },
                         )
                     state_filter = str((query.get("state") or [""])[0] or "").strip()
-                    repository_filter = str(
-                        (query.get("repository") or [""])[0] or ""
-                    ).strip()
+                    repository_filter = str((query.get("repository") or [""])[0] or "").strip()
                     limit = int(str((query.get("limit") or ["50"])[0] or "50"))
                     records = every_code_store.list_every_code_work_request_records(
                         state=state_filter,
