@@ -568,6 +568,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             newer_record = _every_code_work_request()
             store.write_every_code_work_request_record(older_record)
             store.write_every_code_work_request_record(newer_record)
+            created_duplicate, duplicate_created = (
+                store.create_every_code_work_request_record_if_absent(
+                    newer_record.model_copy(update={"updated_at": "2026-05-05T23:00:00Z"})
+                )
+            )
 
             listed = store.list_every_code_work_request_records(state="queued")
             claimed = store.claim_every_code_work_request_record(
@@ -583,6 +588,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
             loaded = store.read_every_code_work_request_record(newer_record.request_id)
 
         self.assertEqual([record.request_id for record in listed], [newer_record.request_id, older_record.request_id])
+        self.assertFalse(duplicate_created)
+        self.assertEqual(created_duplicate.updated_at, newer_record.updated_at)
         self.assertIsNotNone(claimed)
         assert claimed is not None
         self.assertEqual(claimed.state, "claimed")

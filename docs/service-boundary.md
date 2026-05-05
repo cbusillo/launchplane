@@ -53,6 +53,7 @@ VeriReel product paths:
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
 - Every Code local automation work-request routes:
+  - `POST /v1/every-code/github-webhook`
   - `GET /v1/every-code/work-requests`
   - `GET /v1/every-code/work-requests/{request_id}`
   - `POST /v1/every-code/work-requests/create`
@@ -97,6 +98,15 @@ The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a compatibility alias. Built assets live under `/ui/assets/...`, while
 `/ui/*` falls back to the app shell so the frontend can own client-side routes.
 Versioned API ingress remains under `/v1`.
+
+`POST /v1/every-code/github-webhook` is the only unauthenticated write route.
+It trusts the request body through GitHub webhook HMAC verification instead of
+OIDC. The route requires `X-Hub-Signature-256`, `X-GitHub-Delivery`, and
+`X-GitHub-Event`, supports only `issues` events with action `labeled`, and only
+queues work for the `every-code` label. Other signed events, actions, or labels
+return `202` with `skipped: true`. Matching deliveries create or return the
+durable Every Code work request and include `deduped` plus the delivery id in
+the response.
 
 ## Host Assumption
 
