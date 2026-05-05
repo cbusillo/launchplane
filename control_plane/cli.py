@@ -7879,6 +7879,7 @@ def _evaluate_runtime_key_safety_for_live_target_sync(
     record_store: RuntimeKeySafetyPolicyReadStore,
     context_name: str,
     instance_name: str,
+    require_policy: bool = True,
 ) -> dict[str, object]:
     bindings = record_store.list_secret_bindings(
         integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
@@ -7902,6 +7903,12 @@ def _evaluate_runtime_key_safety_for_live_target_sync(
             required_binding_keys=binding_keys,
         )
     except ValueError as error:
+        if not require_policy:
+            return {
+                "required": True,
+                "status": "unavailable",
+                "checked_binding_keys": list(binding_keys),
+            }
         raise click.ClickException(
             "Runtime key-safety policy is unavailable for live target runtime sync."
         ) from error
@@ -7987,6 +7994,7 @@ def _apply_live_target_runtime_environment(
                     record_store=postgres_store,
                     context_name=context_name,
                     instance_name=instance_name,
+                    require_policy=apply_changes,
                 )
             finally:
                 postgres_store.close()
