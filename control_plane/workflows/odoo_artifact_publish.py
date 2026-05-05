@@ -32,8 +32,14 @@ PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
 )
 
 
-class OdooArtifactPublishStore(RuntimeKeySafetyPolicyReadStore, Protocol):
+class OdooArtifactPublishEvidenceStore(Protocol):
     def write_artifact_manifest(self, manifest: ArtifactIdentityManifest) -> Path | None: ...
+
+
+class OdooArtifactPublishStore(
+    RuntimeKeySafetyPolicyReadStore, OdooArtifactPublishEvidenceStore, Protocol
+):
+    pass
 
 
 class OdooArtifactPublishRequest(BaseModel):
@@ -293,7 +299,7 @@ def _read_manifest(
 
 def ingest_odoo_artifact_publish_evidence(
     *,
-    record_store: OdooArtifactPublishStore,
+    record_store: OdooArtifactPublishEvidenceStore,
     request: OdooArtifactPublishEvidenceRequest,
 ) -> OdooArtifactPublishResult:
     try:
