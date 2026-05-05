@@ -14,6 +14,7 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.worker_runtime_key_safety import enforce_worker_runtime_key_safety
 
 
 DEFAULT_TIMEOUT_SECONDS = 1800
@@ -117,6 +118,12 @@ def _worker_environment(
     control_plane_root: Path,
     request: VeriReelProdBackupGateWorkerRequest,
 ) -> dict[str, str]:
+    enforce_worker_runtime_key_safety(
+        context_name=request.context,
+        instance_name=request.instance,
+        allowed_worker_keys=WORKER_RUNTIME_ENV_KEYS,
+        operation_name="VeriReel prod backup gate worker",
+    )
     environment = {
         key: value for key, value in os.environ.items() if key not in WORKER_RUNTIME_ENV_KEYS
     }
