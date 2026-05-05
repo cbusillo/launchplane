@@ -101,6 +101,8 @@ class DokployTargetAdoptionTests(unittest.TestCase):
                     "customGitUrl": "git@github.com:cbusillo/odoo-tenant-cm.git",
                     "customGitBranch": "main",
                     "composePath": "docker-compose.yml",
+                    "watchPaths": ["addons", "docker", ""],
+                    "enableSubmodules": True,
                     "project": {"name": "CM"},
                 },
             )
@@ -116,8 +118,183 @@ class DokployTargetAdoptionTests(unittest.TestCase):
         self.assertEqual(target_record.target_name, "cm-testing")
         self.assertEqual(target_record.source_type, "git")
         self.assertEqual(target_record.compose_path, "docker-compose.yml")
+        self.assertEqual(target_record.watch_paths, ("addons", "docker"))
+        self.assertTrue(target_record.enable_submodules)
+        self.assertTrue(target_record.healthcheck_enabled)
+        self.assertIsNone(target_record.healthcheck_timeout_seconds)
         self.assertEqual(target_record.healthcheck_path, "/web/health")
         self.assertEqual(target_id_record.target_id, "compose-123")
+
+    def test_adopt_target_preserves_live_healthcheck_settings(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            result = adopt_dokploy_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="discord-blue",
+                instance="prod",
+                target_type="application",
+                target_id="app-123",
+                healthcheck_path="/health",
+                updated_at="2026-05-04T22:36:00Z",
+                apply=True,
+                fetch_target_payload=lambda *_args: {
+                    "name": "discord-blue-lxc",
+                    "healthcheckEnabled": False,
+                    "healthcheckTimeoutSeconds": 45,
+                    "environment": {"project": {"name": "Discord Blue"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertFalse(target_record.healthcheck_enabled)
+        self.assertEqual(target_record.healthcheck_timeout_seconds, 45)
+
+    def test_adopt_target_canonicalizes_route_keys_before_persisting(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            result = adopt_dokploy_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="Discord-Blue",
+                instance="PrOd",
+                target_type="application",
+                target_id="app-123",
+                healthcheck_path="/health",
+                updated_at="2026-05-04T22:37:00Z",
+                apply=True,
+                fetch_target_payload=lambda *_args: {
+                    "name": "discord-blue-lxc",
+                    "environment": {"project": {"name": "Discord Blue"}},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            target_id_record = store.read_dokploy_target_id_record(
+                context_name="discord-blue", instance_name="prod"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(result.target_record.context, "discord-blue")
+        self.assertEqual(result.target_record.instance, "prod")
+        self.assertEqual(target_record.context, "discord-blue")
+        self.assertEqual(target_record.instance, "prod")
+        self.assertEqual(target_id_record.context, "discord-blue")
+        self.assertEqual(target_id_record.instance, "prod")
+
+    def test_adopt_compose_target_copies_live_git_provider_fields(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(Path(temporary_directory_name) / "db.sqlite3")
+            )
+            store.ensure_schema()
+            result = adopt_dokploy_target(
+                record_store=store,
+                host="https://dokploy.example.invalid",
+                token="token",
+                context="odoo-tenant-cm",
+                instance="testing",
+                target_type="compose",
+                target_id="compose-123",
+                source_git_ref="",
+                updated_at="2026-05-04T22:38:00Z",
+                apply=True,
+                fetch_target_payload=lambda *_args: {
+                    "name": "cm-testing",
+                    "sourceType": "git",
+                    "sourceGitRef": "origin/release",
+                    "gitBranch": "release",
+                    "customGitUrl": "git@github.com:cbusillo/odoo-tenant-cm.git",
+                    "customGitBranch": "release",
+                    "composePath": "docker-compose.yml",
+                    "watchPaths": ["addons", "docker"],
+                    "enableSubmodules": False,
+                    "project": {"name": "CM"},
+                },
+            )
+            target_record = store.read_dokploy_target_record(
+                context_name="odoo-tenant-cm", instance_name="testing"
+            )
+            store.close()
+
+        self.assertTrue(result.applied)
+        self.assertEqual(target_record.source_git_ref, "origin/release")
+        self.assertEqual(target_record.git_branch, "release")
+        self.assertEqual(target_record.custom_git_branch, "release")
+        self.assertEqual(target_record.watch_paths, ("addons", "docker"))
+        self.assertFalse(target_record.enable_submodules)
+        self.assertEqual(result.provider_fields["source_git_ref"], "origin/release")
+
+    def test_cli_adopt_uses_live_source_ref_by_default(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temporary_directory / "db.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            with patch.dict(
+                "os.environ",
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                },
+                clear=True,
+            ):
+                _write_dokploy_managed_secrets(store=store)
+            store.close()
+
+            with patch(
+                "control_plane.cli.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "discord-blue-lxc",
+                    "sourceGitRef": "origin/feature-branch",
+                    "environment": {"project": {"name": "Discord Blue"}},
+                },
+            ):
+                with patch.dict(
+                    "os.environ",
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ):
+                    result = CliRunner().invoke(
+                        main,
+                        [
+                            "dokploy-targets",
+                            "adopt",
+                            "--database-url",
+                            database_url,
+                            "--context",
+                            "discord-blue",
+                            "--instance",
+                            "prod",
+                            "--target-type",
+                            "application",
+                            "--target-id",
+                            "app-123",
+                            "--healthcheck-path",
+                            "/health",
+                        ],
+                    )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["record"]["source_git_ref"], "origin/feature-branch")
 
     def test_cli_adopt_defaults_to_dry_run(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

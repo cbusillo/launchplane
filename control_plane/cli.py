@@ -12485,7 +12485,11 @@ def dokploy_targets_show(database_url: str, context_name: str, instance_name: st
 @click.option("--target-id", required=True, help="Live Dokploy application or compose id.")
 @click.option("--project-name", default="", help="Override project name stored on the record.")
 @click.option("--target-name", default="", help="Override target name stored on the record.")
-@click.option("--source-git-ref", default="origin/main", show_default=True)
+@click.option(
+    "--source-git-ref",
+    default="",
+    help="Override source git ref stored on the record. Defaults to the live provider ref or origin/main.",
+)
 @click.option("--healthcheck-path", default="", help="Healthcheck path stored on the record.")
 @click.option("--domain", "domains", multiple=True, help="Domain stored on the record.")
 @click.option(
