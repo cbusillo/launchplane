@@ -21,7 +21,7 @@ class DokployTargetAdoptionResult(BaseModel):
     applied: bool
     target_record: DokployTargetRecord
     target_id_record: DokployTargetIdRecord
-    provider_fields: dict[str, str] = {}
+    provider_fields: dict[str, str | tuple[str, ...] | bool | int | None] = {}
     warnings: tuple[str, ...] = ()
 
 
@@ -46,7 +46,7 @@ class DokployTargetCreateResult(BaseModel):
     environment_id: str = ""
     target_record: DokployTargetRecord
     target_id_record: DokployTargetIdRecord
-    provider_fields: dict[str, str] = {}
+    provider_fields: dict[str, str | tuple[str, ...] | bool | int | None] = {}
     provider_requests: tuple[dict[str, object], ...] = ()
     warnings: tuple[str, ...] = ()
 
@@ -71,18 +71,27 @@ def adopt_dokploy_target(
     apply: bool = False,
     fetch_target_payload: FetchDokployTargetPayload,
 ) -> DokployTargetAdoptionResult:
-    normalized_context = _require_non_empty(context, "context")
-    normalized_instance = _require_non_empty(instance, "instance")
+    normalized_context = _normalize_route_part(context, "context")
+    normalized_instance = _normalize_route_part(instance, "instance")
     normalized_target_id = _require_non_empty(target_id, "target_id")
-    normalized_source_git_ref = source_git_ref.strip() or "origin/main"
     recorded_at = updated_at.strip() or utc_now_timestamp()
     provider_payload = fetch_target_payload(host, token, target_type, normalized_target_id)
     provider_fields = _provider_fields(provider_payload=provider_payload, target_type=target_type)
-    resolved_target_name = target_name.strip() or provider_fields.get("target_name", "")
-    resolved_project_name = project_name.strip() or provider_fields.get("project_name", "")
+    normalized_source_git_ref = _resolved_source_git_ref(
+        explicit_source_git_ref=source_git_ref,
+        provider_fields=provider_fields,
+    )
+    resolved_target_name = target_name.strip() or _provider_string_field(
+        provider_fields, "target_name"
+    )
+    resolved_project_name = project_name.strip() or _provider_string_field(
+        provider_fields, "project_name"
+    )
     resolved_healthcheck_path = healthcheck_path.strip()
     if target_type == "compose" and not resolved_healthcheck_path:
         resolved_healthcheck_path = "/web/health"
+    if resolved_healthcheck_path and not resolved_healthcheck_path.startswith("/"):
+        raise ValueError("Dokploy target adoption requires --healthcheck-path to start with /")
 
     warnings = _adoption_warnings(
         target_type=target_type,
@@ -90,6 +99,9 @@ def adopt_dokploy_target(
         target_name=resolved_target_name,
         project_name=resolved_project_name,
     )
+    healthcheck_enabled = _bool_field(provider_payload, "healthcheckEnabled")
+    if healthcheck_enabled is None:
+        healthcheck_enabled = True
     target_record = DokployTargetRecord(
         context=normalized_context,
         instance=normalized_instance,
@@ -97,12 +109,17 @@ def adopt_dokploy_target(
         target_type=target_type,
         target_name=resolved_target_name,
         source_git_ref=normalized_source_git_ref,
-        source_type=provider_fields.get("source_type", ""),
-        custom_git_url=provider_fields.get("custom_git_url", ""),
-        custom_git_branch=provider_fields.get("custom_git_branch", ""),
-        compose_path=provider_fields.get("compose_path", ""),
+        git_branch=str(provider_fields.get("git_branch") or ""),
+        source_type=_provider_string_field(provider_fields, "source_type"),
+        custom_git_url=_provider_string_field(provider_fields, "custom_git_url"),
+        custom_git_branch=_provider_string_field(provider_fields, "custom_git_branch"),
+        compose_path=_provider_string_field(provider_fields, "compose_path"),
+        watch_paths=_tuple_string_field(provider_fields.get("watch_paths")),
+        enable_submodules=_optional_bool_field(provider_fields.get("enable_submodules")),
         deploy_timeout_seconds=deploy_timeout_seconds,
+        healthcheck_enabled=healthcheck_enabled,
         healthcheck_path=resolved_healthcheck_path,
+        healthcheck_timeout_seconds=_int_field(provider_payload, "healthcheckTimeoutSeconds"),
         domains=domains,
         updated_at=recorded_at,
         source_label=source_label.strip() or "cli:dokploy-targets:adopt",
@@ -308,6 +325,36 @@ def _require_non_empty(value: str, field_name: str) -> str:
     return normalized_value
 
 
+def _normalize_route_part(value: str, field_name: str) -> str:
+    return _require_non_empty(value, field_name).lower()
+
+
+def _resolved_source_git_ref(
+    *,
+    explicit_source_git_ref: str,
+    provider_fields: dict[str, str | tuple[str, ...] | bool | int | None],
+) -> str:
+    resolved_source_git_ref = explicit_source_git_ref.strip()
+    if resolved_source_git_ref:
+        return resolved_source_git_ref
+    provider_source_git_ref = str(provider_fields.get("source_git_ref") or "").strip()
+    if provider_source_git_ref:
+        return provider_source_git_ref
+    provider_branch = str(provider_fields.get("branch") or "").strip()
+    if provider_branch:
+        return provider_branch
+    return "origin/main"
+
+
+def _provider_string_field(
+    provider_fields: dict[str, str | tuple[str, ...] | bool | int | None], key: str
+) -> str:
+    value = provider_fields.get(key)
+    if isinstance(value, str):
+        return value
+    return ""
+
+
 def _planned_provider_requests(
     *,
     project_id: str,
@@ -371,11 +418,14 @@ def _extract_provider_id(payload: JsonObject, id_key: str, object_key: str) -> s
 
 def _provider_fields(
     *, provider_payload: JsonObject, target_type: DokployTargetType
-) -> dict[str, str]:
-    fields: dict[str, str] = {}
+) -> dict[str, str | tuple[str, ...] | bool | int | None]:
+    fields: dict[str, str | tuple[str, ...] | bool | int | None] = {}
     name = _string_field(provider_payload, "name")
     if name:
         fields["target_name"] = name
+    _put_if_present(fields, "source_git_ref", _string_field(provider_payload, "sourceGitRef"))
+    _put_if_present(fields, "branch", _string_field(provider_payload, "branch"))
+    _put_if_present(fields, "git_branch", _string_field(provider_payload, "gitBranch"))
     project_name = _nested_string_field(provider_payload, ("project",), "name")
     if project_name:
         fields["project_name"] = project_name
@@ -391,7 +441,19 @@ def _provider_fields(
         _put_if_present(
             fields, "custom_git_branch", _string_field(provider_payload, "customGitBranch")
         )
+        _put_if_present(
+            fields, "custom_git_build_path", _string_field(provider_payload, "customGitBuildPath")
+        )
+        _put_if_present(
+            fields, "custom_git_ssh_key_id", _string_field(provider_payload, "customGitSSHKeyId")
+        )
         _put_if_present(fields, "compose_path", _string_field(provider_payload, "composePath"))
+        watch_paths = _string_list_field(provider_payload, "watchPaths")
+        if watch_paths:
+            fields["watch_paths"] = watch_paths
+        enable_submodules = _bool_field(provider_payload, "enableSubmodules")
+        if enable_submodules is not None:
+            fields["enable_submodules"] = enable_submodules
     return fields
 
 
@@ -416,9 +478,49 @@ def _adoption_warnings(
     return tuple(warnings)
 
 
-def _put_if_present(fields: dict[str, str], key: str, value: str) -> None:
+def _put_if_present(
+    fields: dict[str, str | tuple[str, ...] | bool | int | None], key: str, value: str
+) -> None:
     if value:
         fields[key] = value
+
+
+def _string_list_field(payload: JsonObject, key: str) -> tuple[str, ...]:
+    value = payload.get(key)
+    if not isinstance(value, list):
+        return ()
+    items: list[str] = []
+    for raw_item in value:
+        item = str(raw_item).strip()
+        if item:
+            items.append(item)
+    return tuple(items)
+
+
+def _tuple_string_field(value: object) -> tuple[str, ...]:
+    if not isinstance(value, tuple):
+        return ()
+    return tuple(str(item).strip() for item in value if str(item).strip())
+
+
+def _optional_bool_field(value: object) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _bool_field(payload: JsonObject, key: str) -> bool | None:
+    value = payload.get(key)
+    if isinstance(value, bool):
+        return value
+    return None
+
+
+def _int_field(payload: JsonObject, key: str) -> int | None:
+    value = payload.get(key)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    return None
 
 
 def _string_field(payload: JsonObject, key: str) -> str:
