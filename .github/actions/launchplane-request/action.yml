@@ -1,0 +1,86 @@
+---
+name: Launchplane request
+description: Send an OIDC-authenticated JSON request to Launchplane.
+
+inputs:
+  launchplane-url:
+    description: Base URL for the Launchplane service.
+    required: true
+  route-path:
+    description: >-
+      Absolute Launchplane API route path, such as
+      /v1/drivers/generic-web/deploy.
+    required: true
+  payload:
+    description: Inline JSON request payload.
+    required: false
+    default: ""
+  payload-file:
+    description: >-
+      Path to a JSON request payload file. Used when payload is empty.
+    required: false
+    default: ""
+  method:
+    description: HTTP method to use.
+    required: false
+    default: POST
+  audience:
+    description: GitHub OIDC audience. Defaults to the Launchplane URL host.
+    required: false
+    default: ""
+  idempotency-key:
+    description: Stable idempotency key for mutation requests.
+    required: false
+    default: ""
+  timeout-ms:
+    description: >-
+      Launchplane request timeout in milliseconds. Use 0 to disable.
+    required: false
+    default: "0"
+  oidc-timeout-ms:
+    description: >-
+      GitHub OIDC token request timeout in milliseconds. Use 0 to disable.
+    required: false
+    default: "30000"
+  retry-attempts:
+    description: >-
+      Number of network retry attempts for OIDC and Launchplane calls.
+    required: false
+    default: "3"
+  retry-delay-ms:
+    description: Base retry delay in milliseconds.
+    required: false
+    default: "250"
+  fail-result-statuses:
+    description: >-
+      Comma-separated result status values that should fail the action.
+    required: false
+    default: fail,blocked
+  fail-result-paths:
+    description: >-
+      Comma-separated JSON paths to inspect for fail-result-statuses.
+    required: false
+    default: >-
+      result.refresh_status,result.deploy_status,result.rollout_status,
+      result.migration_status,result.health_status
+  output-paths:
+    description: >-
+      Comma-separated output=json.path mappings to expose as action outputs.
+    required: false
+    default: ""
+
+outputs:
+  launchplane-url:
+    description: Fully resolved Launchplane request URL.
+  route-path:
+    description: Launchplane route path called by the action.
+  audience:
+    description: GitHub OIDC audience used for the request.
+  status-code:
+    description: HTTP status code returned by Launchplane.
+  response-body:
+    description: Raw Launchplane response body.
+
+runs:
+  using: node20
+  main: dist/index.js
