@@ -11,6 +11,7 @@ from unittest.mock import patch
 import click
 from click.testing import CliRunner
 
+from control_plane import secrets as control_plane_secrets
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.cli import (
@@ -35,6 +36,12 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.workflows.ship import build_deployment_record
@@ -175,6 +182,60 @@ def _write_runtime_environments_file(repo_root: Path, payload: str) -> Path:
     finally:
         store.close()
     return runtime_environments_file
+
+
+def _write_runtime_secret_and_safety_policy(
+    repo_root: Path,
+    *,
+    context: str,
+    instance: str,
+    binding_key: str = "SMTP_PASSWORD",
+    secret_class: RuntimeSecretClass = "testing",
+) -> None:
+    store = PostgresRecordStore(database_url=_runtime_environments_database_url(repo_root))
+    store.ensure_schema()
+    try:
+        with patch.dict(os.environ, {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"}):
+            control_plane_secrets.write_secret_value(
+                record_store=store,
+                scope="context_instance",
+                integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                name=binding_key.lower().replace("_", "-"),
+                plaintext_value="managed-secret-value",
+                binding_key=binding_key,
+                context_name=context,
+                instance_name=instance,
+                actor="test",
+                source_label="test",
+            )
+        store.write_runtime_environment_record(
+            RuntimeEnvironmentRecord(
+                scope="instance",
+                context=context,
+                instance=instance,
+                env={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons,/opt/project/addons/shared"},
+                updated_at="2026-05-05T21:00:00Z",
+                source_label="test",
+            )
+        )
+        store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-promote-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T21:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=binding_key,
+                        secret_class=secret_class,
+                        allowed_contexts=(context,),
+                        allowed_instances=(instance,),
+                    ),
+                ),
+            )
+        )
+    finally:
+        store.close()
 
 
 def _runtime_environments_database_url(repo_root: Path) -> str:
@@ -436,44 +497,109 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons"
         )
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.runtime_environments.resolve_runtime_environment_values",
-            return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons,/opt/project/addons/shared"},
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            side_effect=[
-                {"env": stale_env},
-                {
-                    "env": (
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
-                        "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared"
-                    )
-                },
-            ],
-        ), patch(
-            "control_plane.dokploy.sync_dokploy_compose_raw_source",
-            return_value={"source_type": "raw", "compose_sha256": "abc123"},
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-            side_effect=lambda **kwargs: captured_update.update(kwargs),
-        ):
-            runtime_source = _sync_artifact_image_reference_for_target(
-                context_name="cm",
-                instance_name="testing",
-                artifact_manifest=artifact_manifest,
-                resolved_target=resolved_target,
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            database_url = _runtime_environments_database_url(repo_root)
+            _write_runtime_secret_and_safety_policy(
+                repo_root,
+                context="cm",
+                instance="testing",
             )
+            with patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ), patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                side_effect=[
+                    {"env": stale_env},
+                    {
+                        "env": (
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
+                            "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared\n"
+                            "SMTP_PASSWORD=managed-secret-value"
+                        )
+                    },
+                ],
+            ), patch(
+                "control_plane.dokploy.sync_dokploy_compose_raw_source",
+                return_value={"source_type": "raw", "compose_sha256": "abc123"},
+            ), patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: captured_update.update(kwargs),
+            ), patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": database_url,
+                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key",
+                },
+                clear=True,
+            ):
+                runtime_source = _sync_artifact_image_reference_for_target(
+                    context_name="cm",
+                    instance_name="testing",
+                    artifact_manifest=artifact_manifest,
+                    resolved_target=resolved_target,
+                )
 
         self.assertIn(
             "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared",
             str(captured_update["env_text"]),
         )
+        self.assertIn("SMTP_PASSWORD=managed-secret-value", str(captured_update["env_text"]))
         self.assertEqual(runtime_source["runtime_env_source"], "launchplane-db")
         self.assertEqual(runtime_source["runtime_env_changed"], "true")
+        self.assertEqual(runtime_source["runtime_key_safety_required"], "true")
+        self.assertEqual(runtime_source["runtime_key_safety_status"], "pass")
         self.assertEqual(runtime_source["runtime_env_verified"], "true")
+
+    def test_sync_artifact_image_reference_blocks_unsafe_runtime_secret_binding(self) -> None:
+        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="cm-prod")
+        artifact_manifest = ArtifactIdentityManifest.model_validate(
+            {
+                "artifact_id": "artifact-sha256-image456",
+                "source_commit": "abc1234",
+                "enterprise_base_digest": "sha256:enterprise123",
+                "image": {
+                    "repository": "ghcr.io/cbusillo/odoo-private",
+                    "digest": "sha256:image456",
+                    "tags": ["sha-abc123"],
+                },
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            repo_root = Path(temporary_directory_name)
+            database_url = _runtime_environments_database_url(repo_root)
+            _write_runtime_secret_and_safety_policy(
+                repo_root,
+                context="cm",
+                instance="prod",
+                secret_class="testing",
+            )
+            with patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ), patch(
+                "control_plane.runtime_environments.resolve_runtime_environment_values",
+                return_value={"SMTP_PASSWORD": "managed-secret-value"},
+            ), patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:old"},
+            ), patch(
+                "control_plane.dokploy.update_dokploy_target_env"
+            ) as update_target_env, patch.dict(
+                os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True
+            ):
+                with self.assertRaises(click.ClickException) as error_context:
+                    _sync_artifact_image_reference_for_target(
+                        context_name="cm",
+                        instance_name="prod",
+                        artifact_manifest=artifact_manifest,
+                        resolved_target=resolved_target,
+                    )
+
+        self.assertIn("Runtime key-safety gate failed", str(error_context.exception))
+        self.assertIn("secret_class_not_allowed", str(error_context.exception))
+        update_target_env.assert_not_called()
 
     def test_sync_artifact_image_reference_rejects_legacy_monorepo_target_source(self) -> None:
         resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-testing")
