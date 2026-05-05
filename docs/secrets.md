@@ -84,6 +84,9 @@ title: Secrets
 - Product-specific workflows that sync resolved runtime environment values into
   live Dokploy targets, such as Odoo prod rollback target env updates, must
   evaluate managed runtime secret bindings before writing the live env payload.
+- Product-specific artifact/build workflows that pass resolved runtime
+  environment payloads to delegated tooling, such as Odoo artifact publish,
+  must evaluate managed runtime secret bindings before starting that tooling.
 
 ## Bootstrap-Only Env
 

@@ -8,7 +8,7 @@ import subprocess
 import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, overload
+from typing import Literal, cast, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -140,6 +140,7 @@ from control_plane.workflows.dokploy_target_adoption import (
 from control_plane.workflows.product_onboarding import apply_product_onboarding_manifest
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishRequest,
+    OdooArtifactPublishStore,
     execute_odoo_artifact_publish,
 )
 from control_plane.workflows.odoo_prod_backup_gate import (
@@ -10200,7 +10201,7 @@ def odoo_artifacts_publish(
     record_store = _store(Path("state"), database_url=database_url)
     result = execute_odoo_artifact_publish(
         control_plane_root=_control_plane_root(),
-        record_store=record_store,
+        record_store=cast(OdooArtifactPublishStore, record_store),
         request=OdooArtifactPublishRequest(
             context=context,
             instance=instance,
