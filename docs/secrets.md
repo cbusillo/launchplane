@@ -10,10 +10,10 @@ title: Secrets
 ## Current Contract
 
 - Dokploy credentials belong to `launchplane`.
-- Launchplane can now persist managed secret values in the Postgres shared-service
-  backend when `LAUNCHPLANE_DATABASE_URL` is configured.
-- Managed secret values are encrypted before Launchplane stores them; the master key
-  stays outside the database in `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
+- Launchplane can now persist managed secret values in the Postgres
+  shared-service backend when `LAUNCHPLANE_DATABASE_URL` is configured.
+- Managed secret values are encrypted before Launchplane stores them; the master
+  key stays outside the database in `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`.
 - Keep bootstrap values only in process env long enough to write the real
   Launchplane-managed secret records.
 - Runtime environment truth should live in Launchplane DB records in steady
@@ -44,8 +44,23 @@ title: Secrets
 - Runtime environment records do not fall back to repo or XDG files.
 - Dokploy credentials do not fall back to repo files, XDG files, or process
   env. Missing managed bindings are a hard error.
-- Secret status surfaces return metadata only. Launchplane does not expose routine
-  plaintext read commands or service endpoints.
+- Secret status surfaces return metadata only. Launchplane does not expose
+  routine plaintext read commands or service endpoints.
+
+## Runtime Key-Safety Gates
+
+- Runtime key-safety gates classify managed secret bindings by binding key and
+  Launchplane metadata, not by plaintext value. The initial classification
+  contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
+- Gates fail closed when a required binding is missing, disabled, ambiguous,
+  unclassified, or scoped outside the target context/instance. A target with an
+  unknown environment class also fails closed.
+- `prod_only` bindings are allowed only for `prod` runtime targets. `testing`
+  targets may use `testing`, `non_prod`, or `shared_safe` bindings. `preview`
+  targets may use `preview`, `non_prod`, or `shared_safe` bindings.
+- Gate output may include binding keys, binding ids, secret ids,
+  classifications, and finding codes. It must not include secret plaintext,
+  ciphertext, provider env dumps, or token prefixes.
 
 ## Bootstrap-Only Env
 
@@ -69,15 +84,15 @@ title: Secrets
 - Never commit alternate secret files or rendered env artifacts.
 - Do not rely on a repo-local `.env` for control-plane-owned secrets.
 - Missing Dokploy credentials are a hard error, not a silent fallback.
-- Missing `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` is a hard error when Launchplane needs to
-  read or write DB-backed managed secrets.
+- Missing `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` is a hard error when Launchplane
+  needs to read or write DB-backed managed secrets.
 - The live Launchplane Dokploy target should expose bootstrap env such as
   `LAUNCHPLANE_DATABASE_URL` and `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`, while
   Dokploy credentials and runtime/product values should resolve from
   Launchplane-managed records instead of target env.
-- Use `uv run launchplane service inspect-dokploy-target ...` to verify that the
-  live Launchplane target has the required secret-backed contract without printing
-  plaintext secret values.
+- Use `uv run launchplane service inspect-dokploy-target ...` to verify that
+  the live Launchplane target has the required secret-backed contract without
+  printing plaintext secret values.
 
 ## Local Runtime Contract
 
@@ -103,9 +118,9 @@ title: Secrets
   updates stale source metadata without changing runtime values.
 - In steady state that payload comes from Launchplane DB-backed runtime
   environment records.
-- Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL` from the
-  shared plus context-scoped runtime environment contract, with shared values
-  providing the default and context values allowed to override it.
+- Launchplane preview write/build helpers read `LAUNCHPLANE_PREVIEW_BASE_URL`
+  from the shared plus context-scoped runtime environment contract, with shared
+  values providing the default and context values allowed to override it.
 - `odoo-devkit` may consume that contract when the operator points
   `ODOO_CONTROL_PLANE_ROOT` at a valid `launchplane` checkout.
 - When `odoo-devkit` is configured to use the control-plane contract, legacy
