@@ -6,6 +6,12 @@ from unittest.mock import Mock, patch
 from pydantic import ValidationError
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretClass,
+    RuntimeSecretSafetyRule,
+)
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.workflows.odoo_artifact_publish import (
     DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY,
     OdooArtifactPublishEvidenceRequest,
@@ -34,6 +40,49 @@ def _artifact_manifest(payload: dict[str, object] | None = None) -> ArtifactIden
 
 
 class OdooArtifactPublishWorkflowTests(unittest.TestCase):
+    def _record_store(self) -> Mock:
+        record_store = Mock()
+        record_store.list_secret_bindings.return_value = ()
+        record_store.list_runtime_key_safety_policy_records.return_value = ()
+        return record_store
+
+    def _write_secret_binding(
+        self,
+        record_store: Mock,
+        *,
+        secret_class: RuntimeSecretClass = "testing",
+    ) -> None:
+        binding_key = "ODOO_MASTER_PASSWORD"
+        record_store.list_secret_bindings.return_value = (
+            SecretBinding(
+                binding_id="secret-odoo-master-password-binding",
+                secret_id="secret-odoo-master-password",
+                integration="runtime_environment",
+                binding_key=binding_key,
+                context="cm",
+                instance="testing",
+                status="configured",
+                created_at="2026-05-05T23:00:00Z",
+                updated_at="2026-05-05T23:00:00Z",
+            ),
+        )
+        record_store.list_runtime_key_safety_policy_records.return_value = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T23:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=binding_key,
+                        secret_class=secret_class,
+                        allowed_contexts=("cm",),
+                        allowed_instances=("testing",),
+                    ),
+                ),
+            ),
+        )
+
     def test_publish_requests_accept_profile_owned_contexts(self) -> None:
         publish_request = OdooArtifactPublishRequest(
             context=" New-Site ",
@@ -74,7 +123,8 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
             OdooArtifactPublishInputsRequest(context=" ", instance="testing")
 
     def test_publish_resolves_launchplane_env_and_writes_artifact(self) -> None:
-        record_store = Mock()
+        record_store = self._record_store()
+        self._write_secret_binding(record_store)
         captured_env: dict[str, str] = {}
 
         def fake_run(
@@ -126,8 +176,36 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         written_manifest = record_store.write_artifact_manifest.call_args.args[0]
         self.assertEqual(written_manifest.artifact_id, "artifact-cm-005c291b63b6")
 
+    def test_publish_blocks_unsafe_managed_secret_payload(self) -> None:
+        record_store = self._record_store()
+        self._write_secret_binding(record_store, secret_class="prod_only")
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_artifact_publish.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_MASTER_PASSWORD": "managed-secret"},
+            ),
+            patch("control_plane.workflows.odoo_artifact_publish.subprocess.run") as run_mock,
+        ):
+            result = execute_odoo_artifact_publish(
+                control_plane_root=Path("/launchplane"),
+                record_store=record_store,
+                request=OdooArtifactPublishRequest(
+                    context="cm",
+                    manifest_path=Path("/work/cm/workspace.toml"),
+                    devkit_root=Path("/work/odoo-devkit"),
+                    image_repository="ghcr.io/cbusillo/odoo-tenant-cm",
+                    image_tag="cm-20260426-005c291b",
+                ),
+            )
+
+        self.assertEqual(result.status, "fail")
+        self.assertIn("Runtime key-safety gate failed", result.error_message)
+        run_mock.assert_not_called()
+        record_store.write_artifact_manifest.assert_not_called()
+
     def test_publish_rejects_wrong_context_artifact(self) -> None:
-        record_store = Mock()
+        record_store = self._record_store()
 
         def fake_run(
             command: list[str], *, capture_output: bool, text: bool, env: dict[str, str]
@@ -165,7 +243,7 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
         record_store.write_artifact_manifest.assert_not_called()
 
     def test_ingest_publish_evidence_writes_artifact_manifest(self) -> None:
-        record_store = Mock()
+        record_store = self._record_store()
 
         result = ingest_odoo_artifact_publish_evidence(
             record_store=record_store,

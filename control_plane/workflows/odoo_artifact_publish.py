@@ -12,6 +12,13 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
+    evaluate_runtime_key_safety_from_store,
+    latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
+)
 
 DEVKIT_RUNTIME_ENVIRONMENT_PAYLOAD_KEY = "ODOO_DEVKIT_RUNTIME_ENVIRONMENT_JSON"
 PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
@@ -25,7 +32,7 @@ PUBLISH_RUNTIME_ENVIRONMENT_KEYS = (
 )
 
 
-class OdooArtifactPublishStore(Protocol):
+class OdooArtifactPublishStore(RuntimeKeySafetyPolicyReadStore, Protocol):
     def write_artifact_manifest(self, manifest: ArtifactIdentityManifest) -> Path | None: ...
 
 
@@ -128,12 +135,21 @@ def _validate_manifest_context(*, manifest: ArtifactIdentityManifest, context: s
 
 
 def _runtime_environment_payload(
-    *, request: OdooArtifactPublishRequest, control_plane_root: Path
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    request: OdooArtifactPublishRequest,
+    control_plane_root: Path,
 ) -> str:
     environment_values = control_plane_runtime_environments.resolve_runtime_environment_values(
         control_plane_root=control_plane_root,
         context_name=request.context,
         instance_name=request.instance,
+    )
+    _enforce_runtime_key_safety_for_publish_payload(
+        record_store=record_store,
+        context_name=request.context,
+        instance_name=request.instance,
+        environment_values=environment_values,
     )
     return json.dumps(
         {
@@ -142,6 +158,49 @@ def _runtime_environment_payload(
             "environment": environment_values,
         },
         sort_keys=True,
+    )
+
+
+def _enforce_runtime_key_safety_for_publish_payload(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    context_name: str,
+    instance_name: str,
+    environment_values: dict[str, str],
+) -> None:
+    bindings = record_store.list_secret_bindings(
+        integration="runtime_environment",
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=None,
+    )
+    binding_keys = tuple(
+        binding.binding_key for binding in bindings if binding.binding_key in environment_values
+    )
+    if not binding_keys:
+        return
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(record_store)
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=record_store,
+            policy_record=policy_record,
+            target=RuntimeKeySafetyTarget(
+                context=context_name,
+                instance=instance_name,
+                environment_class=runtime_key_safety_environment_class(instance_name),
+            ),
+            required_binding_keys=binding_keys,
+        )
+    except ValueError as exc:
+        raise click.ClickException(
+            "Runtime key-safety policy is unavailable for Odoo artifact publish runtime payload."
+        ) from exc
+    if evaluation.status == "pass":
+        return
+    finding_codes = sorted({finding.code for finding in evaluation.findings})
+    suffix = f": {', '.join(finding_codes)}" if finding_codes else ""
+    raise click.ClickException(
+        f"Runtime key-safety gate failed for Odoo artifact publish runtime payload{suffix}."
     )
 
 
@@ -267,13 +326,14 @@ def execute_odoo_artifact_publish(
     record_store: OdooArtifactPublishStore,
     request: OdooArtifactPublishRequest,
 ) -> OdooArtifactPublishResult:
-    runtime_payload = _runtime_environment_payload(
-        request=request,
-        control_plane_root=control_plane_root,
-    )
     with tempfile.TemporaryDirectory(prefix="launchplane-odoo-artifact-") as temporary_directory:
         output_file = request.output_file or Path(temporary_directory) / "artifact.json"
         try:
+            runtime_payload = _runtime_environment_payload(
+                record_store=record_store,
+                request=request,
+                control_plane_root=control_plane_root,
+            )
             _run_devkit_publish(
                 request=request,
                 runtime_payload=runtime_payload,
