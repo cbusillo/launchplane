@@ -3,29 +3,14 @@ from __future__ import annotations
 import click
 
 from control_plane import secrets as control_plane_secrets
-from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeEnvironmentClass,
-    RuntimeKeySafetyTarget,
-)
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety_from_store,
     latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
 )
 from control_plane.storage.factory import resolve_database_url
 from control_plane.storage.postgres import PostgresRecordStore
-
-
-def _runtime_key_safety_environment_class(instance_name: str) -> RuntimeEnvironmentClass:
-    normalized_instance = instance_name.strip().lower()
-    if normalized_instance in {"prod", "production"}:
-        return "prod"
-    if normalized_instance in {"testing", "test", "staging", "stage"}:
-        return "testing"
-    if normalized_instance in {"preview", "pr"} or normalized_instance.startswith("pr-"):
-        return "preview"
-    if normalized_instance in {"dev", "local", "development"}:
-        return "dev"
-    return "unknown"
 
 
 def enforce_worker_runtime_key_safety(
@@ -62,7 +47,7 @@ def enforce_worker_runtime_key_safety(
                 target=RuntimeKeySafetyTarget(
                     context=context_name,
                     instance=instance_name,
-                    environment_class=_runtime_key_safety_environment_class(instance_name),
+                    environment_class=runtime_key_safety_environment_class(instance_name),
                 ),
                 required_binding_keys=binding_keys,
             )

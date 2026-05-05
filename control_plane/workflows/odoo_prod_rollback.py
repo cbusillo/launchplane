@@ -25,8 +25,15 @@ from control_plane.contracts.promotion_record import (
     RollbackExecutionEvidence,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.release_tuples import build_release_tuple_record_from_artifact_manifest
+from control_plane.runtime_key_safety import (
+    RuntimeKeySafetyPolicyReadStore,
+    evaluate_runtime_key_safety_from_store,
+    latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
+)
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.ship import (
@@ -48,7 +55,7 @@ class _RollbackSource:
     detail: str
 
 
-class OdooProdRollbackStore(Protocol):
+class OdooProdRollbackStore(RuntimeKeySafetyPolicyReadStore, Protocol):
     def read_release_tuple_record(
         self, *, context_name: str, channel_name: str
     ) -> ReleaseTupleRecord: ...
@@ -373,6 +380,7 @@ def _resolve_ship_request(
 def _sync_artifact_image_reference_for_target(
     *,
     control_plane_root: Path,
+    record_store: RuntimeKeySafetyPolicyReadStore,
     target_definition: control_plane_dokploy.DokployTargetDefinition,
     artifact_manifest: ArtifactIdentityManifest,
 ) -> None:
@@ -390,6 +398,12 @@ def _sync_artifact_image_reference_for_target(
             context_name=target_definition.context,
             instance_name=target_definition.instance,
         )
+    )
+    _enforce_runtime_key_safety_for_target_env_sync(
+        record_store=record_store,
+        context_name=target_definition.context,
+        instance_name=target_definition.instance,
+        runtime_environment_values=runtime_environment_values,
     )
     desired_image_reference = _artifact_image_reference_from_manifest(artifact_manifest)
     if target_definition.target_type == "compose":
@@ -436,6 +450,51 @@ def _sync_artifact_image_reference_for_target(
             "Dokploy target env did not persist Launchplane DB-backed runtime key(s): "
             + ", ".join(missing_or_mismatched_keys)
         )
+
+
+def _enforce_runtime_key_safety_for_target_env_sync(
+    *,
+    record_store: RuntimeKeySafetyPolicyReadStore,
+    context_name: str,
+    instance_name: str,
+    runtime_environment_values: dict[str, str],
+) -> None:
+    bindings = record_store.list_secret_bindings(
+        integration="runtime_environment",
+        context_name=context_name,
+        instance_name=instance_name,
+        limit=None,
+    )
+    binding_keys = tuple(
+        binding.binding_key
+        for binding in bindings
+        if binding.binding_key in runtime_environment_values
+    )
+    if not binding_keys:
+        return
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(record_store)
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=record_store,
+            policy_record=policy_record,
+            target=RuntimeKeySafetyTarget(
+                context=context_name,
+                instance=instance_name,
+                environment_class=runtime_key_safety_environment_class(instance_name),
+            ),
+            required_binding_keys=binding_keys,
+        )
+    except ValueError as exc:
+        raise click.ClickException(
+            "Runtime key-safety policy is unavailable for Odoo prod rollback target env sync."
+        ) from exc
+    if evaluation.status == "pass":
+        return
+    finding_codes = sorted({finding.code for finding in evaluation.findings})
+    suffix = f": {', '.join(finding_codes)}" if finding_codes else ""
+    raise click.ClickException(
+        f"Runtime key-safety gate failed for Odoo prod rollback target env sync{suffix}."
+    )
 
 
 def _trigger_dokploy_deploy(
@@ -629,6 +688,7 @@ def execute_odoo_prod_rollback(
     try:
         _sync_artifact_image_reference_for_target(
             control_plane_root=control_plane_root,
+            record_store=typed_record_store,
             target_definition=target_definition,
             artifact_manifest=artifact_manifest,
         )

@@ -81,6 +81,9 @@ title: Secrets
   must evaluate the managed bindings for the worker target before the worker
   process starts. The worker receives plaintext only after the metadata gate has
   confirmed the active policy allows those bindings for that runtime class.
+- Product-specific workflows that sync resolved runtime environment values into
+  live Dokploy targets, such as Odoo prod rollback target env updates, must
+  evaluate managed runtime secret bindings before writing the live env payload.
 
 ## Bootstrap-Only Env
 
