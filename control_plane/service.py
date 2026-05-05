@@ -4020,6 +4020,11 @@ def create_launchplane_service_app(
                         error_message = (
                             "Launchplane service is missing required secret write configuration."
                         )
+                    if error_code == "runtime_key_safety_unavailable":
+                        status_code = 503
+                        error_message = "Launchplane runtime key-safety policy is unavailable."
+                    if error_code == "runtime_key_safety_failed":
+                        error_message = "Product config runtime key-safety gate failed."
                     return _json_response(
                         start_response=start_response,
                         status_code=status_code,

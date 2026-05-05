@@ -20,6 +20,11 @@ from control_plane.contracts.runtime_environment_record import (
     RuntimeEnvironmentDeleteEvent,
     RuntimeEnvironmentRecord,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeSecretClass,
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.secret_record import SecretAuditEvent
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.secret_record import SecretRecord
@@ -81,6 +86,37 @@ def _seed_dokploy_target_records(*, database_url: str, payload: str) -> None:
         store.close()
 
 
+def _write_runtime_key_safety_policy(
+    *,
+    database_url: str,
+    binding_key: str = "SMTP_PASSWORD",
+    secret_class: RuntimeSecretClass = "prod_only",
+    context_name: str = "sellyouroutboard",
+    instance_name: str = "prod",
+) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id=f"runtime-key-safety-policy-{binding_key.lower().replace('_', '-')}",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key=binding_key,
+                        secret_class=secret_class,
+                        allowed_contexts=(context_name,),
+                        allowed_instances=(instance_name,),
+                    ),
+                ),
+            )
+        )
+    finally:
+        store.close()
+
+
 class _FakeProductConfigStore:
     def __init__(self) -> None:
         self.runtime_environment_records: dict[tuple[str, str, str], RuntimeEnvironmentRecord] = {}
@@ -88,6 +124,22 @@ class _FakeProductConfigStore:
         self.secret_versions: dict[str, SecretVersion] = {}
         self.secret_bindings: dict[str, SecretBinding] = {}
         self.secret_audit_events: list[SecretAuditEvent] = []
+        self.runtime_key_safety_policy_records: tuple[RuntimeKeySafetyPolicyRecord, ...] = (
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SMTP_PASSWORD",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            ),
+        )
 
     def list_runtime_environment_records(
         self, *, context_name: str = "", instance_name: str = ""
@@ -182,6 +234,19 @@ class _FakeProductConfigStore:
     def list_secret_audit_events(self, *, secret_id: str) -> tuple[SecretAuditEvent, ...]:
         return tuple(event for event in self.secret_audit_events if event.secret_id == secret_id)
 
+    def list_runtime_key_safety_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[RuntimeKeySafetyPolicyRecord, ...]:
+        records = tuple(
+            record
+            for record in self.runtime_key_safety_policy_records
+            if not status or record.status == status
+        )
+        return records[:limit] if limit is not None else records
+
 
 class _FakeRuntimeEnvironmentStore:
     def __init__(self, records: tuple[RuntimeEnvironmentRecord, ...]) -> None:
@@ -243,6 +308,7 @@ class RuntimeEnvironmentTests(unittest.TestCase):
         )
 
         self.assertIsNone(definition)
+
     def test_product_config_apply_uses_structural_store_boundary(self) -> None:
         store = _FakeProductConfigStore()
 
@@ -1411,6 +1477,7 @@ ODOO_DB_PASSWORD = "file-secret"
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             input_file = control_plane_root / "product-config.json"
+            _write_runtime_key_safety_policy(database_url=database_url)
             input_file.write_text(
                 json.dumps(
                     {
@@ -1476,6 +1543,7 @@ ODOO_DB_PASSWORD = "file-secret"
             control_plane_root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
             input_file = control_plane_root / "product-config.json"
+            _write_runtime_key_safety_policy(database_url=database_url)
             input_file.write_text(
                 json.dumps(
                     {
@@ -1592,6 +1660,99 @@ ODOO_DB_PASSWORD = "file-secret"
                 self.assertEqual(store.list_runtime_environment_records(), ())
             finally:
                 store.close()
+
+    def test_product_config_apply_requires_active_runtime_key_safety_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                        "runtime_env": {},
+                        "secrets": [
+                            {
+                                "name": "smtp-password",
+                                "binding_key": "SMTP_PASSWORD",
+                                "value": "smtp-secret-value",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--database-url",
+                        database_url,
+                        "--input-file",
+                        str(input_file),
+                        "--dry-run",
+                    ],
+                )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("runtime key-safety policy is unavailable", result.output)
+
+    def test_product_config_apply_rejects_disallowed_runtime_key_secret_class(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            control_plane_root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(control_plane_root / "launchplane.sqlite3")
+            _write_runtime_key_safety_policy(database_url=database_url, secret_class="testing")
+            input_file = control_plane_root / "product-config.json"
+            input_file.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                        "runtime_env": {},
+                        "secrets": [
+                            {
+                                "name": "smtp-password",
+                                "binding_key": "SMTP_PASSWORD",
+                                "value": "smtp-secret-value",
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key"},
+                clear=True,
+            ):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "product-config",
+                        "apply",
+                        "--database-url",
+                        database_url,
+                        "--input-file",
+                        str(input_file),
+                        "--dry-run",
+                    ],
+                )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("runtime key-safety gate failed", result.output)
 
     def test_product_config_apply_rejects_secret_route_that_differs_from_top_level(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

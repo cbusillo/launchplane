@@ -119,7 +119,9 @@ title: Secrets
   from a trusted Launchplane context with current `LAUNCHPLANE_DATABASE_URL` and,
   when secrets are present, `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`. Dry-run and
   apply both reject invalid secret scopes or scope/context/instance mismatches
-  before any managed secret write starts.
+  before any managed secret write starts. Runtime-environment secret bundles
+  also require an active runtime key-safety policy that allows each requested
+  binding for the target runtime class.
 - `uv run launchplane environments unset --scope <scope> --key KEY` removes
   stale keys from DB-backed runtime-environment records without reading or
   printing plaintext values.

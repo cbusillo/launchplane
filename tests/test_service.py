@@ -44,6 +44,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -297,6 +301,32 @@ def _generic_site_profile_payload(product: str = "example-site") -> dict[str, ob
 
 def _sqlite_database_url(database_path: Path) -> str:
     return f"sqlite+pysqlite:///{database_path}"
+
+
+def _write_runtime_key_safety_policy(
+    *, database_url: str, context_name: str = "sellyouroutboard-prod", instance_name: str = "prod"
+) -> None:
+    store = PostgresRecordStore(database_url=database_url)
+    store.ensure_schema()
+    try:
+        store.write_runtime_key_safety_policy_record(
+            RuntimeKeySafetyPolicyRecord(
+                record_id="runtime-key-safety-policy-service-test",
+                status="active",
+                source="test",
+                updated_at="2026-05-05T20:00:00Z",
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="SMTP_PASSWORD",
+                        secret_class="prod_only",
+                        allowed_contexts=(context_name,),
+                        allowed_instances=(instance_name,),
+                    ),
+                ),
+            )
+        )
+    finally:
+        store.close()
 
 
 def _seed_tracked_target_records(
@@ -2079,6 +2109,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
             )
+            _write_runtime_key_safety_policy(database_url=database_url)
 
             with patch.dict(
                 os.environ,
@@ -2137,6 +2168,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
                 database_url=database_url,
             )
+            _write_runtime_key_safety_policy(database_url=database_url)
             request_payload = {**_product_config_payload(), "mode": "apply"}
 
             with patch.dict(
@@ -2229,6 +2261,54 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "Launchplane service is missing required secret write configuration.",
         )
         self.assertNotIn("LAUNCHPLANE_MASTER_ENCRYPTION_KEY", json.dumps(payload))
+
+    def test_product_config_api_requires_runtime_key_safety_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_product_config_payload(),
+                    headers={"Idempotency-Key": "product-config-missing-key-policy"},
+                )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "runtime_key_safety_unavailable")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Launchplane runtime key-safety policy is unavailable.",
+        )
 
     def test_product_config_api_rejects_secret_shaped_runtime_key(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
