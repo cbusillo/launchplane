@@ -740,6 +740,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(feedback.status, "applied")
         send_call = next(call for call in runner.calls if call[1] == "send-keys")
         self.assertIn("Please tighten the README wording", send_call[4])
+        self.assertEqual(send_call[-1], "C-m")
 
     def test_apply_feedback_relaunches_terminal_session_in_saved_worktree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
