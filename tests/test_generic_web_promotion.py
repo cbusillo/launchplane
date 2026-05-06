@@ -23,7 +23,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
 )
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest, GenericWebDeployResult
+from control_plane.workflows.generic_web_deploy import (
+    GenericWebDeployRequest,
+    GenericWebDeployResult,
+)
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     execute_generic_web_prod_promotion,
@@ -160,6 +163,8 @@ def _deploy_result(*, deploy_status: Literal["pass", "fail"] = "pass") -> Generi
         target_id="app-123",
         error_message="provider failed" if deploy_status == "fail" else "",
     )
+
+
 class GenericWebProdPromotionTests(unittest.TestCase):
     def test_execute_records_source_destination_health_promotion_and_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())

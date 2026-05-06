@@ -68,7 +68,9 @@ class PreviewPrFeedbackRecord(BaseModel):
         return self
 
 
-def build_preview_pr_feedback_id(*, context_name: str, anchor_pr_number: int, requested_at: str) -> str:
+def build_preview_pr_feedback_id(
+    *, context_name: str, anchor_pr_number: int, requested_at: str
+) -> str:
     normalized_timestamp = (
         requested_at.strip()
         .replace(":", "")

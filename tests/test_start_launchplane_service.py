@@ -9,13 +9,14 @@ from tempfile import TemporaryDirectory
 
 class StartLaunchplaneServiceScriptTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.script_path = Path(__file__).resolve().parents[1] / "scripts" / "start-launchplane-service.sh"
+        self.script_path = (
+            Path(__file__).resolve().parents[1] / "scripts" / "start-launchplane-service.sh"
+        )
 
     def _write_fake_uv(self, bin_dir: Path) -> None:
         uv_path = bin_dir / "uv"
         uv_path.write_text(
-            "#!/bin/sh\n"
-            "printf '%s\\n' \"$@\" >\"$UV_CAPTURE_FILE\"\n",
+            '#!/bin/sh\nprintf \'%s\\n\' "$@" >"$UV_CAPTURE_FILE"\n',
             encoding="utf-8",
         )
         uv_path.chmod(uv_path.stat().st_mode | stat.S_IXUSR)
@@ -89,7 +90,9 @@ class StartLaunchplaneServiceScriptTests(unittest.TestCase):
                         "UV_CAPTURE_FILE": str(capture_file),
                         "LAUNCHPLANE_APP_ROOT": str(app_root),
                         "LAUNCHPLANE_STATE_DIR": str(temporary_directory / "state"),
-                        "LAUNCHPLANE_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode("ascii"),
+                        "LAUNCHPLANE_POLICY_B64": base64.b64encode(b"schema_version = 1\n").decode(
+                            "ascii"
+                        ),
                     },
                     check=False,
                 )

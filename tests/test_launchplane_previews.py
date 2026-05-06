@@ -246,7 +246,9 @@ def _backup_gate_record(
     status: ReleaseStatus = "pass",
     evidence: dict[str, str] | None = None,
 ) -> BackupGateRecord:
-    resolved_evidence = evidence if evidence is not None else {"snapshot": "s3://launchplane/opw/prod/2026-04-14"}
+    resolved_evidence = (
+        evidence if evidence is not None else {"snapshot": "s3://launchplane/opw/prod/2026-04-14"}
+    )
     return BackupGateRecord(
         record_id=record_id,
         context=context,
@@ -292,7 +294,9 @@ def _promotion_record(
             started_at="2026-04-13T08:56:00Z",
             finished_at="2026-04-13T09:00:00Z",
         ),
-        post_deploy_update=PostDeployUpdateEvidence(attempted=True, status="pass", detail="Updated"),
+        post_deploy_update=PostDeployUpdateEvidence(
+            attempted=True, status="pass", detail="Updated"
+        ),
         destination_health=HealthcheckEvidence(status=destination_health_status),
     )
 
@@ -353,7 +357,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
     try:
-        for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        for (
+            record
+        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
             control_plane_runtime_environments._parse_runtime_environment_definition(
                 tomllib.loads(payload),
                 source_file=control_plane_root / "config" / "runtime-environments.toml",
@@ -380,12 +386,7 @@ def _github_pull_request_webhook_payload(
     repo: str = "tenant-opw",
     pr_number: int = 123,
     pr_url: str = "https://github.com/every/tenant-opw/pull/123",
-    body: str = (
-        "```launchplane-preview\n"
-        "schema_version = 1\n"
-        'baseline_channel = "testing"\n'
-        "```\n"
-    ),
+    body: str = ('```launchplane-preview\nschema_version = 1\nbaseline_channel = "testing"\n```\n'),
     state: str = "open",
     merged: bool = False,
     head_sha: str = "aaaa1111",
@@ -418,7 +419,9 @@ def _github_pull_request_webhook_payload(
     return payload
 
 
-def _github_webhook_signature(payload: dict[str, object], secret: str = "launchplane-webhook-secret") -> str:
+def _github_webhook_signature(
+    payload: dict[str, object], secret: str = "launchplane-webhook-secret"
+) -> str:
     payload_bytes = json.dumps(payload).encode("utf-8")
     digest = hmac.new(secret.encode("utf-8"), payload_bytes, hashlib.sha256).hexdigest()
     return f"sha256={digest}"
@@ -534,7 +537,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
 [contexts.opw.instances.local.env]
 ODOO_DB_PASSWORD = "local-secret"
-""".strip()
+""".strip(),
             )
 
             with patch.dict(os.environ, _runtime_environments_env(control_plane_root), clear=True):
@@ -555,7 +558,7 @@ schema_version = 1
 
 [contexts.opw.instances.local.env]
 ODOO_DB_PASSWORD = "local-secret"
-""".strip()
+""".strip(),
             )
 
             with patch.dict(os.environ, _runtime_environments_env(control_plane_root), clear=True):
@@ -670,7 +673,9 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(transitioned.latest_generation_id, "hgen_01jabc_2")
         self.assertEqual(transitioned.serving_generation_id, "hgen_01jabc_1")
 
-    def test_apply_preview_destroyed_transition_clears_runtime_links_and_keeps_evidence(self) -> None:
+    def test_apply_preview_destroyed_transition_clears_runtime_links_and_keeps_evidence(
+        self,
+    ) -> None:
         preview = _preview_record(
             state="teardown_pending",
             active_generation_id="hgen_01jabc_2",
@@ -691,7 +696,9 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(transitioned.destroy_reason, "merged_after_grace_window")
 
     def test_launchplane_preview_label_enabled_matches_configured_label(self) -> None:
-        self.assertTrue(launchplane_preview_label_enabled(label_names=("bug", "launchplane-preview")))
+        self.assertTrue(
+            launchplane_preview_label_enabled(label_names=("bug", "launchplane-preview"))
+        )
         self.assertFalse(launchplane_preview_label_enabled(label_names=("bug", "needs-review")))
 
     def test_launchplane_anchor_repo_resolution_accepts_tenant_repos_only(self) -> None:
@@ -702,7 +709,9 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertFalse(launchplane_anchor_repo_eligible(repo="shared-addons"))
         self.assertFalse(launchplane_anchor_repo_eligible(repo="control-plane"))
 
-    def test_classify_pull_request_event_for_launchplane_enables_preview_when_label_added(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_enables_preview_when_label_added(
+        self,
+    ) -> None:
         event = GitHubPullRequestEvent(
             action="labeled",
             repo="tenant-opw",
@@ -718,7 +727,9 @@ ODOO_DB_PASSWORD = "local-secret"
 
         self.assertEqual(action, "enable_preview")
 
-    def test_classify_pull_request_event_for_launchplane_refreshes_enabled_preview_on_sync(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_refreshes_enabled_preview_on_sync(
+        self,
+    ) -> None:
         event = GitHubPullRequestEvent(
             action="synchronize",
             repo="tenant-opw",
@@ -755,7 +766,9 @@ ODOO_DB_PASSWORD = "local-secret"
 
         self.assertEqual(action, "destroy_preview")
 
-    def test_classify_pull_request_event_for_launchplane_reenables_destroyed_preview_on_reopen(self) -> None:
+    def test_classify_pull_request_event_for_launchplane_reenables_destroyed_preview_on_reopen(
+        self,
+    ) -> None:
         event = GitHubPullRequestEvent(
             action="reopened",
             repo="tenant-opw",
@@ -810,7 +823,9 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(result.metadata.companions[0].pr_number, 456)
 
     def test_parse_preview_request_metadata_is_missing_without_launchplane_block(self) -> None:
-        result = parse_preview_request_metadata(pr_body="Regular PR body without Launchplane metadata.")
+        result = parse_preview_request_metadata(
+            pr_body="Regular PR body without Launchplane metadata."
+        )
 
         self.assertEqual(result.status, "missing")
         self.assertIsNone(result.metadata)
@@ -864,10 +879,13 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(len(previews), 1)
             self.assertEqual(previews[0].preview_label, "opw/tenant-opw/pr-123")
-            self.assertEqual([record.generation_id for record in generations], [
-                "hgen_01jabc_2",
-                "hgen_01jabc_1",
-            ])
+            self.assertEqual(
+                [record.generation_id for record in generations],
+                [
+                    "hgen_01jabc_2",
+                    "hgen_01jabc_1",
+                ],
+            )
 
     def test_launchplane_previews_show_active_preview(self) -> None:
         runner = CliRunner()
@@ -1022,7 +1040,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn('class="preview-detail-grid"', rendered_html)
             self.assertIn("tenant-opw PR 123", rendered_html)
             self.assertIn("opw/tenant-opw/pr-123", rendered_html)
-            self.assertIn("https://launchplane.example/previews/opw/tenant-opw/pr-123", rendered_html)
+            self.assertIn(
+                "https://launchplane.example/previews/opw/tenant-opw/pr-123", rendered_html
+            )
             self.assertIn("artifact-opw-123", rendered_html)
             self.assertIn("launchplane-manifest-001", rendered_html)
             self.assertIn("Serving the latest requested generation.", rendered_html)
@@ -1161,17 +1181,30 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(payload["preview_enablement_counts"]["candidate"], 1)
             self.assertEqual(payload["preview_enablement_counts"]["requested"], 1)
             self.assertEqual(payload["preview_enablement_counts"]["running"], 2)
-            self.assertEqual(payload["environments"]["testing"]["live"]["artifact_id"], "artifact-testing")
-            self.assertEqual(payload["environments"]["prod"]["live"]["artifact_id"], "artifact-prod")
+            self.assertEqual(
+                payload["environments"]["testing"]["live"]["artifact_id"], "artifact-testing"
+            )
+            self.assertEqual(
+                payload["environments"]["prod"]["live"]["artifact_id"], "artifact-prod"
+            )
             self.assertEqual(payload["promotion_summary"]["status"], "candidate")
             self.assertEqual(payload["promotion_action"]["status"], "blocked")
             self.assertEqual(payload["environment_actions"]["testing"]["status"], "actionable")
             self.assertEqual(payload["environment_actions"]["prod"]["status"], "actionable")
             self.assertIn("ship resolve", payload["environment_actions"]["testing"]["recipe"])
-            self.assertEqual(payload["promotion_action"]["candidate_artifact_id"], "artifact-testing")
-            self.assertEqual(payload["promotion_action"]["current_prod_artifact_id"], "artifact-prod")
-            self.assertEqual(payload["promotion_action"]["evidence_checks"][3]["label"], "Prod backup gate")
-            self.assertIn("no prod backup-gate evidence", payload["promotion_action"]["evidence_checks"][3]["detail"].lower())
+            self.assertEqual(
+                payload["promotion_action"]["candidate_artifact_id"], "artifact-testing"
+            )
+            self.assertEqual(
+                payload["promotion_action"]["current_prod_artifact_id"], "artifact-prod"
+            )
+            self.assertEqual(
+                payload["promotion_action"]["evidence_checks"][3]["label"], "Prod backup gate"
+            )
+            self.assertIn(
+                "no prod backup-gate evidence",
+                payload["promotion_action"]["evidence_checks"][3]["detail"].lower(),
+            )
             self.assertIn("backup-gates write", payload["promotion_action"]["backup_gate_recipe"])
             self.assertEqual(payload["promotion_action"]["resolve_recipe"], "")
             self.assertEqual(payload["promotion_action"]["execute_recipe"], "")
@@ -1282,7 +1315,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(record.request_metadata_status, "valid")
             self.assertEqual(record.request_metadata_baseline_channel, "testing")
 
-    def test_launchplane_previews_ingest_pr_event_persists_valid_preview_metadata_snapshot(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_persists_valid_preview_metadata_snapshot(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1333,7 +1368,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(record.request_metadata_companions[0].repo, "shared-addons")
             self.assertEqual(record.request_metadata_companions[0].pr_number, 456)
 
-    def test_launchplane_previews_show_tenant_uses_valid_metadata_snapshot_for_enablement_actions(self) -> None:
+    def test_launchplane_previews_show_tenant_uses_valid_metadata_snapshot_for_enablement_actions(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1371,7 +1408,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(enablement_by_pr[129]["request_metadata_status"], "valid")
             self.assertEqual(enablement_by_pr[129]["action"]["status"], "actionable")
 
-    def test_launchplane_previews_render_site_release_tuple_records_resolve_enablement_recipe(self) -> None:
+    def test_launchplane_previews_render_site_release_tuple_records_resolve_enablement_recipe(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             temporary_directory = Path(temporary_directory_name)
@@ -1414,7 +1453,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertNotIn("&lt;resolved-baseline-tuple-id&gt;", index_html)
             self.assertNotIn("&lt;resolved-manifest-fingerprint&gt;", index_html)
 
-    def test_launchplane_previews_render_index_page_leads_with_tenant_environment_when_scoped(self) -> None:
+    def test_launchplane_previews_render_index_page_leads_with_tenant_environment_when_scoped(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1511,19 +1552,28 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Testing lane", rendered_html)
             self.assertIn("Prod lane", rendered_html)
             self.assertIn("Main feeds testing.", rendered_html)
-            self.assertIn("Testing is carrying a newer artifact than prod and is the current promotion candidate.", rendered_html)
+            self.assertIn(
+                "Testing is carrying a newer artifact than prod and is the current promotion candidate.",
+                rendered_html,
+            )
             self.assertIn("Testing is ready to promote into prod.", rendered_html)
             self.assertIn("Rebuild long-lived lanes", rendered_html)
             self.assertIn("Re-ship current testing artifact", rendered_html)
             self.assertIn("ship resolve -&gt; ship execute", rendered_html)
             self.assertIn("Promotion candidate", rendered_html)
-            self.assertIn("Latest prod backup gate backup-opw-prod-20260414T111500Z passed and can authorize promotion.", rendered_html)
+            self.assertIn(
+                "Latest prod backup gate backup-opw-prod-20260414T111500Z passed and can authorize promotion.",
+                rendered_html,
+            )
             self.assertIn("promote resolve", rendered_html)
             self.assertIn("promote execute", rendered_html)
             self.assertNotIn("backup-gates write", rendered_html)
             self.assertIn("Why each PR does or does not have a preview", rendered_html)
             self.assertIn("Eligible tenant PR. No preview request is active yet.", rendered_html)
-            self.assertIn("GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet.", rendered_html)
+            self.assertIn(
+                "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet.",
+                rendered_html,
+            )
             self.assertIn("Request Launchplane preview", rendered_html)
             self.assertIn("Show Launchplane request recipe", rendered_html)
             self.assertIn("request-generation", rendered_html)
@@ -1531,7 +1581,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("artifact-prod", rendered_html)
             self.assertIn("Pull request previews", rendered_html)
 
-    def test_launchplane_previews_render_index_page_surfaces_backup_gate_recipe_when_promotion_blocked(self) -> None:
+    def test_launchplane_previews_render_index_page_surfaces_backup_gate_recipe_when_promotion_blocked(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1573,11 +1625,16 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("A newer testing artifact exists, but Launchplane cannot promote it yet.", rendered_html)
+            self.assertIn(
+                "A newer testing artifact exists, but Launchplane cannot promote it yet.",
+                rendered_html,
+            )
             self.assertIn("backup-gates write", rendered_html)
             self.assertNotIn("promote resolve", rendered_html)
 
-    def test_launchplane_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(self) -> None:
+    def test_launchplane_previews_render_index_page_leads_with_enablement_when_no_lane_evidence_exists(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1612,13 +1669,17 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Preview enablement is the first meaningful control surface", rendered_html)
+            self.assertIn(
+                "Preview enablement is the first meaningful control surface", rendered_html
+            )
             self.assertIn("Why each PR does or does not have a preview", rendered_html)
             self.assertIn("Materialize requested Launchplane preview", rendered_html)
             self.assertNotIn("Rebuild long-lived lanes", rendered_html)
             self.assertNotIn("Launchplane cannot plan the next promotion yet.", rendered_html)
 
-    def test_launchplane_previews_render_index_page_marks_missing_lane_action_evidence(self) -> None:
+    def test_launchplane_previews_render_index_page_marks_missing_lane_action_evidence(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1841,14 +1902,16 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Retained evidence", rendered_html)
             self.assertIn("Policy snapshot", rendered_html)
             self.assertIn('data-filter-control="attention"', rendered_html)
-            self.assertIn('data-preview-row', rendered_html)
+            self.assertIn("data-preview-row", rendered_html)
             self.assertIn("Serving older generation", rendered_html)
             self.assertIn("Evidence only", rendered_html)
             self.assertIn("opw/tenant-opw/pr-123", rendered_html)
             self.assertIn("opw/tenant-opw/pr-124", rendered_html)
             self.assertIn("opw/tenant-opw/pr-125", rendered_html)
 
-    def test_launchplane_previews_render_index_page_surfaces_scope_controls_for_multi_context_inventory(self) -> None:
+    def test_launchplane_previews_render_index_page_surfaces_scope_controls_for_multi_context_inventory(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -1975,7 +2038,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("tenant-cm", rendered_html)
             self.assertIn("testing", rendered_html)
 
-    def test_launchplane_previews_render_policy_page_shows_context_distribution_for_multi_context_inventory(self) -> None:
+    def test_launchplane_previews_render_policy_page_shows_context_distribution_for_multi_context_inventory(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2100,13 +2165,15 @@ ODOO_DB_PASSWORD = "local-secret"
             policy_html = policy_file.read_text(encoding="utf-8")
             detail_html = detail_file.read_text(encoding="utf-8")
             self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', index_html)
-            self.assertIn('#operator-actions', index_html)
+            self.assertIn("#operator-actions", index_html)
             self.assertIn('href="policy.html"', index_html)
             self.assertIn('href="../../../index.html"', detail_html)
             self.assertIn('href="../../../policy.html"', detail_html)
             self.assertIn('href="previews/opw/tenant-opw/pr-123.html"', policy_html)
 
-    def test_launchplane_previews_render_site_enablement_row_links_to_existing_preview_detail(self) -> None:
+    def test_launchplane_previews_render_site_enablement_row_links_to_existing_preview_detail(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2157,7 +2224,9 @@ ODOO_DB_PASSWORD = "local-secret"
                 index_html,
             )
 
-    def test_launchplane_previews_render_site_writes_environment_detail_pages_and_links_from_overview(self) -> None:
+    def test_launchplane_previews_render_site_writes_environment_detail_pages_and_links_from_overview(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2231,7 +2300,9 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn("Recent promotions into this lane", prod_detail_html)
             self.assertIn("promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", prod_detail_html)
 
-    def test_launchplane_previews_render_site_environment_detail_marks_partial_evidence_cleanly(self) -> None:
+    def test_launchplane_previews_render_site_environment_detail_marks_partial_evidence_cleanly(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2266,12 +2337,18 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertTrue(testing_detail_file.exists())
 
             testing_detail_html = testing_detail_file.read_text(encoding="utf-8")
-            self.assertIn("No live promotion record is attached to this lane inventory.", testing_detail_html)
-            self.assertIn("No authorized backup gate is attached to this lane yet.", testing_detail_html)
+            self.assertIn(
+                "No live promotion record is attached to this lane inventory.", testing_detail_html
+            )
+            self.assertIn(
+                "No authorized backup gate is attached to this lane yet.", testing_detail_html
+            )
             self.assertIn("No deployment history recorded for this lane yet.", testing_detail_html)
             self.assertIn("No promotion history recorded into this lane yet.", testing_detail_html)
 
-    def test_launchplane_previews_render_site_writes_promotion_detail_page_and_link_from_overview(self) -> None:
+    def test_launchplane_previews_render_site_writes_promotion_detail_page_and_link_from_overview(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2338,9 +2415,13 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn('href="../../policy.html"', promotion_detail_html)
             self.assertIn("Recent promotions into prod", promotion_detail_html)
             self.assertIn("Recent prod backup authorization", promotion_detail_html)
-            self.assertIn("promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", promotion_detail_html)
+            self.assertIn(
+                "promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", promotion_detail_html
+            )
 
-    def test_launchplane_previews_render_status_page_calls_out_failed_latest_replacement(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_failed_latest_replacement(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2401,12 +2482,17 @@ ODOO_DB_PASSWORD = "local-secret"
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             rendered_html = output_file.read_text(encoding="utf-8")
-            self.assertIn("Latest replacement failed. Launchplane is still serving the older preview.", rendered_html)
+            self.assertIn(
+                "Latest replacement failed. Launchplane is still serving the older preview.",
+                rendered_html,
+            )
             self.assertIn("Replacement generation failed during deploy.", rendered_html)
             self.assertIn("hgen_01jabc_1", rendered_html)
             self.assertIn("hgen_01jabc_2", rendered_html)
 
-    def test_launchplane_previews_render_status_page_preserves_destroyed_preview_evidence(self) -> None:
+    def test_launchplane_previews_render_status_page_preserves_destroyed_preview_evidence(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2586,7 +2672,9 @@ ODOO_DB_PASSWORD = "local-secret"
                 rendered_html,
             )
 
-    def test_launchplane_previews_render_status_page_calls_out_in_progress_replacement(self) -> None:
+    def test_launchplane_previews_render_status_page_calls_out_in_progress_replacement(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
@@ -2892,7 +2980,7 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
-""".strip()
+""".strip(),
             )
             input_file = control_plane_root / "preview-request.json"
             input_file.write_text(
@@ -2933,7 +3021,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "https://launchplane.example/previews/opw/tenant-opw/pr-123",
             )
 
-    def test_launchplane_previews_write_preview_reuses_existing_identity_and_created_at(self) -> None:
+    def test_launchplane_previews_write_preview_reuses_existing_identity_and_created_at(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -2948,7 +3038,7 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
-""".strip()
+""".strip(),
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
@@ -3006,7 +3096,7 @@ schema_version = 1
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
-""".strip()
+""".strip(),
             )
             input_file = control_plane_root / "preview-request.json"
             input_file.write_text(
@@ -3040,7 +3130,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("LAUNCHPLANE_PREVIEW_BASE_URL", result.output)
 
-    def test_launchplane_previews_write_preview_accepts_explicit_canonical_url_without_base_url(self) -> None:
+    def test_launchplane_previews_write_preview_accepts_explicit_canonical_url_without_base_url(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3172,7 +3264,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("No Launchplane preview found", result.output)
 
-    def test_launchplane_previews_request_generation_updates_preview_and_generation_together(self) -> None:
+    def test_launchplane_previews_request_generation_updates_preview_and_generation_together(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3187,7 +3281,7 @@ LAUNCHPLANE_PREVIEW_BASE_URL = "https://launchplane.example"
 
 [contexts.opw.shared_env]
 ENV_OVERRIDE_DISABLE_CRON = true
-""".strip()
+""".strip(),
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             store.write_preview_record(
@@ -3263,7 +3357,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "hgen_01jabc_1")
             self.assertEqual(generation.sequence, 2)
 
-    def test_launchplane_previews_write_from_generation_accepts_external_preview_evidence(self) -> None:
+    def test_launchplane_previews_write_from_generation_accepts_external_preview_evidence(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3417,7 +3513,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.serving_generation_id, "hpr_01jabc-generation-0002")
             self.assertEqual(preview.active_generation_id, "hpr_01jabc-generation-0002")
 
-    def test_launchplane_previews_mark_generation_failed_keeps_existing_serving_generation(self) -> None:
+    def test_launchplane_previews_mark_generation_failed_keeps_existing_serving_generation(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3599,7 +3697,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.destroy_reason, "external_preview_cleanup_completed")
             self.assertEqual(preview.active_generation_id, "")
             self.assertEqual(preview.serving_generation_id, "")
-            self.assertEqual(preview.latest_generation_id, "preview-verireel-pr-123-generation-0003")
+            self.assertEqual(
+                preview.latest_generation_id, "preview-verireel-pr-123-generation-0003"
+            )
 
     def test_launchplane_previews_ingest_pr_event_enables_preview_when_label_added(self) -> None:
         runner = CliRunner()
@@ -3657,9 +3757,16 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["mutation"]["command"], "request-generation")
             self.assertFalse(payload["mutation"]["manifest_resolution_required"])
             self.assertEqual(payload["mutation"]["preview_request"]["context"], "opw")
-            self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "2026-04-13T12:15:00Z")
-            self.assertEqual(payload["mutation"]["generation_request"]["baseline_release_tuple_id"], "opw-testing-2026-04-13")
-            self.assertEqual(payload["mutation"]["generation_request"]["source_map"][0]["git_sha"], "aaaa1111")
+            self.assertEqual(
+                payload["mutation"]["preview_request"]["created_at"], "2026-04-13T12:15:00Z"
+            )
+            self.assertEqual(
+                payload["mutation"]["generation_request"]["baseline_release_tuple_id"],
+                "opw-testing-2026-04-13",
+            )
+            self.assertEqual(
+                payload["mutation"]["generation_request"]["source_map"][0]["git_sha"], "aaaa1111"
+            )
             self.assertEqual(
                 payload["mutation"]["generation_request"]["requested_reason"],
                 "github_pr_event_enable_preview",
@@ -3668,7 +3775,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 payload["mutation"]["generation_request"]["requested_at"],
                 "2026-04-13T12:15:00Z",
             )
-            self.assertEqual(payload["manifest"]["baseline_release_tuple_id"], "opw-testing-2026-04-13")
+            self.assertEqual(
+                payload["manifest"]["baseline_release_tuple_id"], "opw-testing-2026-04-13"
+            )
             self.assertIsNone(payload["preview"])
 
     def test_launchplane_previews_ingest_pr_event_refreshes_existing_preview(self) -> None:
@@ -3732,7 +3841,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["request_metadata"]["status"], "missing")
             self.assertEqual(payload["mutation"]["command"], "request-generation")
             self.assertEqual(payload["mutation"]["preview_request"]["created_at"], "")
-            self.assertEqual(payload["mutation"]["preview_request"]["updated_at"], "2026-04-13T12:16:00Z")
+            self.assertEqual(
+                payload["mutation"]["preview_request"]["updated_at"], "2026-04-13T12:16:00Z"
+            )
             self.assertEqual(
                 payload["mutation"]["generation_request"]["requested_reason"],
                 "github_pr_event_refresh_preview",
@@ -3803,7 +3914,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(payload["mutation"]["manifest_resolution_required"])
             self.assertIn("generation_request_seed", payload["mutation"])
 
-    def test_launchplane_previews_ingest_pr_event_resolves_allowlisted_companion_when_lookup_succeeds(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_resolves_allowlisted_companion_when_lookup_succeeds(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -3838,7 +3951,10 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch("control_plane.workflows.launchplane.resolve_launchplane_github_token", return_value="token"),
+                patch(
+                    "control_plane.workflows.launchplane.resolve_launchplane_github_token",
+                    return_value="token",
+                ),
                 patch(
                     "control_plane.workflows.launchplane.fetch_github_pull_request_head",
                     return_value=(
@@ -3869,9 +3985,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "shared-addons",
             )
             self.assertEqual(
-                payload["enablement_record"]["request_metadata_companion_summaries"][0][
-                    "head_sha"
-                ],
+                payload["enablement_record"]["request_metadata_companion_summaries"][0]["head_sha"],
                 "bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222",
             )
             record = FilesystemRecordStore(state_dir=state_dir).read_preview_enablement_record(
@@ -4069,12 +4183,19 @@ ENV_OVERRIDE_DISABLE_CRON = true
             )
             store = FilesystemRecordStore(state_dir=state_dir)
             preview = store.read_preview_record(payload["apply"]["result"]["preview_id"])
-            generation = store.read_preview_generation_record(payload["apply"]["result"]["generation_id"])
+            generation = store.read_preview_generation_record(
+                payload["apply"]["result"]["generation_id"]
+            )
             self.assertEqual(preview.state, "pending")
             self.assertEqual(preview.active_generation_id, generation.generation_id)
-            self.assertEqual(generation.resolved_manifest_fingerprint, payload["manifest"]["resolved_manifest_fingerprint"])
+            self.assertEqual(
+                generation.resolved_manifest_fingerprint,
+                payload["manifest"]["resolved_manifest_fingerprint"],
+            )
 
-    def test_launchplane_previews_ingest_pr_event_apply_reports_noop_when_manifest_unresolved(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_apply_reports_noop_when_manifest_unresolved(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4133,7 +4254,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             store = FilesystemRecordStore(state_dir=state_dir)
             self.assertEqual(store.list_preview_records(), ())
 
-    def test_launchplane_previews_ingest_pr_event_emits_destroy_intent_for_closed_preview(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_emits_destroy_intent_for_closed_preview(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4232,7 +4355,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(preview.state, "destroyed")
             self.assertEqual(preview.destroy_reason, "pull_request_closed")
 
-    def test_launchplane_previews_ingest_pr_event_delivers_feedback_by_creating_comment(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_delivers_feedback_by_creating_comment(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4259,8 +4384,14 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch("control_plane.workflows.launchplane.resolve_launchplane_github_token", return_value="token"),
-                patch("control_plane.workflows.launchplane.find_github_issue_comment_by_marker", return_value=None),
+                patch(
+                    "control_plane.workflows.launchplane.resolve_launchplane_github_token",
+                    return_value="token",
+                ),
+                patch(
+                    "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
+                    return_value=None,
+                ),
                 patch(
                     "control_plane.workflows.launchplane.create_github_issue_comment",
                     return_value={
@@ -4291,7 +4422,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertIn("launchplane-control-plane:pr-feedback", create_kwargs["body"])
             self.assertIn("Launchplane resolved preview inputs", create_kwargs["body"])
 
-    def test_launchplane_previews_ingest_pr_event_delivers_feedback_by_updating_existing_comment(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_delivers_feedback_by_updating_existing_comment(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4318,10 +4451,16 @@ ENV_OVERRIDE_DISABLE_CRON = true
 
             with (
                 patch("control_plane.cli._control_plane_root", return_value=control_plane_root),
-                patch("control_plane.workflows.launchplane.resolve_launchplane_github_token", return_value="token"),
+                patch(
+                    "control_plane.workflows.launchplane.resolve_launchplane_github_token",
+                    return_value="token",
+                ),
                 patch(
                     "control_plane.workflows.launchplane.find_github_issue_comment_by_marker",
-                    return_value={"id": 321, "body": "<!-- launchplane-control-plane:pr-feedback -->\nold"},
+                    return_value={
+                        "id": 321,
+                        "body": "<!-- launchplane-control-plane:pr-feedback -->\nold",
+                    },
                 ),
                 patch(
                     "control_plane.workflows.launchplane.update_github_issue_comment",
@@ -4352,7 +4491,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             update_kwargs = update_comment.call_args.kwargs
             self.assertIn("launchplane-control-plane:pr-feedback", update_kwargs["body"])
 
-    def test_launchplane_previews_ingest_pr_event_feedback_delivery_fails_closed_without_token(self) -> None:
+    def test_launchplane_previews_ingest_pr_event_feedback_delivery_fails_closed_without_token(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4396,7 +4537,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertFalse(payload["feedback_delivery"]["delivered"])
             self.assertEqual(payload["feedback_delivery"]["reason"], "github_token_missing")
 
-    def test_launchplane_previews_ingest_github_webhook_adapts_pull_request_event_and_reuses_apply_flow(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_adapts_pull_request_event_and_reuses_apply_flow(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4437,7 +4580,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "gh-delivery-123")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "github-webhook")
 
-    def test_launchplane_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_adapts_closed_pull_request_destroy_intent(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4483,7 +4628,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "pull_request_merged",
             )
 
-    def test_launchplane_previews_ingest_github_webhook_fails_closed_for_unsupported_event_name(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_fails_closed_for_unsupported_event_name(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4508,7 +4655,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("event_name='pull_request'", result.output)
 
-    def test_launchplane_previews_ingest_github_webhook_fails_closed_for_malformed_payload(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_fails_closed_for_malformed_payload(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4557,7 +4706,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("signature verification failed", result.output)
 
-    def test_launchplane_previews_ingest_github_webhook_allows_explicit_unsigned_bypass(self) -> None:
+    def test_launchplane_previews_ingest_github_webhook_allows_explicit_unsigned_bypass(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4635,7 +4786,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "replay-456")
             self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "local-capture")
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_emits_minimal_envelope(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_emits_minimal_envelope(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             payload_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4661,7 +4814,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(envelope["payload_text"], json.dumps(webhook_payload))
             self.assertNotIn("capture", envelope)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_round_trips_into_replay(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_round_trips_into_replay(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4749,13 +4904,17 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(replay_payload["decision"]["action"], "enable_preview")
             self.assertTrue(replay_payload["apply"]["applied"])
             self.assertTrue(replay_payload["webhook"]["signature_verification"]["verified"])
-            self.assertEqual(replay_payload["webhook"]["delivery"]["delivery_id"], "replay-builder-123")
+            self.assertEqual(
+                replay_payload["webhook"]["delivery"]["delivery_id"], "replay-builder-123"
+            )
             self.assertEqual(
                 replay_payload["webhook_replay"]["capture"]["source"],
                 "local-http-capture",
             )
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_string_headers(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_string_headers(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             payload_file = Path(temporary_directory_name) / "github-webhook.json"
@@ -4879,7 +5038,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "1.1 proxy.example",
             )
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_accepts_http_capture_file(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_accepts_http_capture_file(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             control_plane_root = Path(temporary_directory_name)
@@ -4959,10 +5120,16 @@ ENV_OVERRIDE_DISABLE_CRON = true
             replay_payload = json.loads(replay_result.output)
             self.assertEqual(replay_payload["decision"]["action"], "enable_preview")
             self.assertTrue(replay_payload["webhook"]["signature_verification"]["verified"])
-            self.assertEqual(replay_payload["webhook"]["delivery"]["delivery_id"], "http-capture-123")
-            self.assertEqual(replay_payload["webhook_replay"]["capture"]["source"], "saved-http-capture")
             self.assertEqual(
-                replay_payload["webhook_replay"]["capture"]["evidence"]["http_request"]["request_line"],
+                replay_payload["webhook"]["delivery"]["delivery_id"], "http-capture-123"
+            )
+            self.assertEqual(
+                replay_payload["webhook_replay"]["capture"]["source"], "saved-http-capture"
+            )
+            self.assertEqual(
+                replay_payload["webhook_replay"]["capture"]["evidence"]["http_request"][
+                    "request_line"
+                ],
                 "POST /github/webhook HTTP/1.1",
             )
 
@@ -5621,7 +5788,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 result.output,
             )
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_request_evidence(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_request_evidence(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5665,7 +5834,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("request_line conflicts", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_mismatched_http_capture_content_length(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_mismatched_http_capture_content_length(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5697,7 +5868,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Length does not match", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_integer_http_capture_content_length(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_integer_http_capture_content_length(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5729,7 +5902,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Length header must be an integer", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_json_http_capture_content_type(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_non_json_http_capture_content_type(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5761,7 +5936,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Type must be JSON", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_method_override(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_conflicting_http_method_override(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5793,7 +5970,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("X-HTTP-Method-Override must not conflict", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_unsupported_transfer_encoding(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_unsupported_transfer_encoding(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5825,7 +6004,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Transfer-Encoding is unsupported", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_unsupported_content_encoding(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_unsupported_content_encoding(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5857,7 +6038,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Content-Encoding is unsupported", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_trailer_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_trailer_declarations(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5889,7 +6072,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Trailer declarations are unsupported", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_expect_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_expect_declarations(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5921,7 +6106,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Expect declarations are unsupported", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_connection_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_connection_declarations(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5953,7 +6140,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Connection declarations are unsupported", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_pragma_declarations(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_pragma_declarations(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -5985,7 +6174,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("Pragma declarations are unsupported", result.output)
 
-    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(self) -> None:
+    def test_launchplane_previews_build_github_webhook_replay_envelope_rejects_malformed_http_capture(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             http_capture_file = Path(temporary_directory_name) / "github-webhook.http"
@@ -6067,9 +6258,13 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertTrue(payload["apply"]["applied"])
             self.assertTrue(payload["webhook"]["signature_verification"]["verified"])
             self.assertEqual(payload["webhook"]["delivery"]["delivery_id"], "replay-789")
-            self.assertEqual(payload["webhook"]["delivery"]["delivery_source"], "captured-http-request")
+            self.assertEqual(
+                payload["webhook"]["delivery"]["delivery_source"], "captured-http-request"
+            )
             self.assertEqual(payload["webhook_replay"]["event_name"], "pull_request")
-            self.assertEqual(payload["webhook_replay"]["capture"]["recorded_at"], "2026-04-13T12:20:00Z")
+            self.assertEqual(
+                payload["webhook_replay"]["capture"]["recorded_at"], "2026-04-13T12:20:00Z"
+            )
             self.assertEqual(
                 payload["webhook_replay"]["capture"]["headers"]["X-GitHub-Hook-ID"],
                 "hook-42",
@@ -6079,7 +6274,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
                 "fixtures/github/replay-789.json",
             )
 
-    def test_launchplane_previews_replay_github_webhook_fails_closed_for_conflicting_capture_headers(self) -> None:
+    def test_launchplane_previews_replay_github_webhook_fails_closed_for_conflicting_capture_headers(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook-replay.json"
@@ -6111,7 +6308,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertNotEqual(result.exit_code, 0)
             self.assertIn("conflicts with capture header X-GitHub-Event", result.output)
 
-    def test_launchplane_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(self) -> None:
+    def test_launchplane_previews_replay_github_webhook_fails_closed_for_signed_envelope_without_payload_text(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             input_file = Path(temporary_directory_name) / "github-webhook-replay.json"
@@ -6192,7 +6391,9 @@ ENV_OVERRIDE_DISABLE_CRON = true
             self.assertEqual(payload["request_metadata"]["status"], "invalid")
             self.assertIsNone(payload["mutation"])
 
-    def test_launchplane_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(self) -> None:
+    def test_launchplane_previews_list_keeps_destroyed_previews_visible_and_filters_by_context(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"

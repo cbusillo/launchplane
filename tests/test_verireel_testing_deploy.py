@@ -40,36 +40,40 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                 destination_health=HealthcheckEvidence(status="skipped"),
             )
 
-            with patch(
-                "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
-                return_value="deployment-verireel-testing-run-12345-attempt-1",
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
-                side_effect=[
-                    "2026-04-20T18:20:00Z",
-                    "2026-04-20T18:21:15Z",
-                ],
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
-                return_value=(
-                    ship_request,
-                    ResolvedTargetEvidence(
-                        target_type="application",
-                        target_id="testing-app-123",
-                        target_name="ver-testing-app",
-                    ),
-                    300,
+            with (
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
+                    return_value="deployment-verireel-testing-run-12345-attempt-1",
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy"
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy._verify_rollout",
-                return_value=VeriReelRolloutVerificationResult(
-                    status="pass",
-                    base_url="https://ver-testing.shinycomputers.com",
-                    health_urls=("https://ver-testing.shinycomputers.com/api/health",),
-                    started_at="2026-04-20T18:21:16Z",
-                    finished_at="2026-04-20T18:21:45Z",
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
+                    side_effect=[
+                        "2026-04-20T18:20:00Z",
+                        "2026-04-20T18:21:15Z",
+                    ],
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
+                    return_value=(
+                        ship_request,
+                        ResolvedTargetEvidence(
+                            target_type="application",
+                            target_id="testing-app-123",
+                            target_name="ver-testing-app",
+                        ),
+                        300,
+                    ),
+                ),
+                patch("control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy"),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy._verify_rollout",
+                    return_value=VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-testing.shinycomputers.com",
+                        health_urls=("https://ver-testing.shinycomputers.com/api/health",),
+                        started_at="2026-04-20T18:21:16Z",
+                        finished_at="2026-04-20T18:21:45Z",
+                    ),
                 ),
             ):
                 result = execute_verireel_stable_deploy(
@@ -78,10 +82,14 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                     request=request,
                 )
 
-            self.assertEqual(result.deployment_record_id, "deployment-verireel-testing-run-12345-attempt-1")
+            self.assertEqual(
+                result.deployment_record_id, "deployment-verireel-testing-run-12345-attempt-1"
+            )
             self.assertEqual(result.deploy_status, "pass")
             self.assertEqual(result.target_id, "testing-app-123")
-            deployment = store.read_deployment_record("deployment-verireel-testing-run-12345-attempt-1")
+            deployment = store.read_deployment_record(
+                "deployment-verireel-testing-run-12345-attempt-1"
+            )
             self.assertEqual(deployment.deploy.status, "pass")
             self.assertEqual(deployment.deploy.started_at, "2026-04-20T18:20:00Z")
             self.assertEqual(deployment.deploy.finished_at, "2026-04-20T18:21:15Z")
@@ -110,29 +118,34 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                 destination_health=HealthcheckEvidence(status="skipped"),
             )
 
-            with patch(
-                "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
-                return_value="deployment-verireel-testing-run-12345-attempt-1",
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
-                side_effect=[
-                    "2026-04-20T18:20:00Z",
-                    "2026-04-20T18:21:15Z",
-                ],
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
-                return_value=(
-                    ship_request,
-                    ResolvedTargetEvidence(
-                        target_type="application",
-                        target_id="testing-app-123",
-                        target_name="ver-testing-app",
-                    ),
-                    300,
+            with (
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.generate_deployment_record_id",
+                    return_value="deployment-verireel-testing-run-12345-attempt-1",
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy",
-                side_effect=click.ClickException("deploy failed"),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.utc_now_timestamp",
+                    side_effect=[
+                        "2026-04-20T18:20:00Z",
+                        "2026-04-20T18:21:15Z",
+                    ],
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy._resolve_ship_request",
+                    return_value=(
+                        ship_request,
+                        ResolvedTargetEvidence(
+                            target_type="application",
+                            target_id="testing-app-123",
+                            target_name="ver-testing-app",
+                        ),
+                        300,
+                    ),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy._execute_dokploy_deploy",
+                    side_effect=click.ClickException("deploy failed"),
+                ),
             ):
                 result = execute_verireel_stable_deploy(
                     control_plane_root=root,
@@ -142,14 +155,18 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
 
             self.assertEqual(result.deploy_status, "fail")
             self.assertEqual(result.error_message, "deploy failed")
-            deployment = store.read_deployment_record("deployment-verireel-testing-run-12345-attempt-1")
+            deployment = store.read_deployment_record(
+                "deployment-verireel-testing-run-12345-attempt-1"
+            )
             self.assertEqual(deployment.deploy.status, "fail")
             resolved_target = deployment.resolved_target
             self.assertIsNotNone(resolved_target)
             assert resolved_target is not None
             self.assertEqual(resolved_target.target_id, "testing-app-123")
 
-    def test_execute_dokploy_deploy_updates_application_image_before_triggering_deploy(self) -> None:
+    def test_execute_dokploy_deploy_updates_application_image_before_triggering_deploy(
+        self,
+    ) -> None:
         captured_dokploy_requests: list[dict[str, object]] = []
         captured_trigger_calls: list[dict[str, object]] = []
         with TemporaryDirectory() as temporary_directory_name:
@@ -167,30 +184,37 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
                 destination_health=HealthcheckEvidence(status="skipped"),
             )
 
-            with patch(
-                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.latest_deployment_for_target",
-                return_value={"deploymentId": "deploy-old"},
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
-                return_value={
-                    "applicationId": "testing-app-123",
-                    "dockerImage": "ghcr.io/every/verireel-app:prod",
-                    "username": "every",
-                    "password": "ghp_test",
-                    "registryUrl": "ghcr.io",
-                },
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.dokploy_request",
-                side_effect=lambda **kwargs: captured_dokploy_requests.append(kwargs),
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.trigger_deployment",
-                side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
-            ), patch(
-                "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.wait_for_target_deployment",
-                return_value="deployment=deploy-new status=done",
+            with (
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.latest_deployment_for_target",
+                    return_value={"deploymentId": "deploy-old"},
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "testing-app-123",
+                        "dockerImage": "ghcr.io/every/verireel-app:prod",
+                        "username": "every",
+                        "password": "ghp_test",
+                        "registryUrl": "ghcr.io",
+                    },
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.dokploy_request",
+                    side_effect=lambda **kwargs: captured_dokploy_requests.append(kwargs),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.trigger_deployment",
+                    side_effect=lambda **kwargs: captured_trigger_calls.append(kwargs),
+                ),
+                patch(
+                    "control_plane.workflows.verireel_stable_deploy.control_plane_dokploy.wait_for_target_deployment",
+                    return_value="deployment=deploy-new status=done",
+                ),
             ):
                 _execute_dokploy_deploy(
                     control_plane_root=root,

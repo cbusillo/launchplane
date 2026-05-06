@@ -1,6 +1,10 @@
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence, HealthcheckEvidence
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+)
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
 
 
@@ -33,5 +37,7 @@ class EnvironmentInventory(BaseModel):
         if not self.deployment_record_id.strip():
             raise ValueError("environment inventory requires deployment_record_id")
         if self.promotion_record_id.strip() and not self.promoted_from_instance.strip():
-            raise ValueError("environment inventory with promotion_record_id requires promoted_from_instance")
+            raise ValueError(
+                "environment inventory with promotion_record_id requires promoted_from_instance"
+            )
         return self
