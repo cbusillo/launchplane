@@ -59,6 +59,7 @@ jobs:
       LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_GH_BINARY: ${{ vars.LAUNCHPLANE_WORK_GRAPH_GH_BINARY }}
+      LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS: ${{ vars.LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS }}
       DISCORD_BLUE_DOKPLOY_TARGET_ID: ${{ vars.DISCORD_BLUE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
       LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
@@ -224,6 +225,7 @@ jobs:
                 --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
                 --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
+                --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
                 --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
                 --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
@@ -237,13 +239,14 @@ jobs:
                   LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
                   }
                   + (
-                    if $omit_every_code_env then
-                      {}
-                    else
+                    if (not $omit_every_code_env)
+                      and (($enable_every_code_runtime_secrets | ascii_downcase) == "true") then
                       {
                         LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
                         LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret
                       }
+                    else
+                      {}
                     end
                   )
                   + (
