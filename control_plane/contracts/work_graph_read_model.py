@@ -82,6 +82,8 @@ class WorkGraphPlanningIssueFacts(BaseModel):
 
     repository: str
     number: int = Field(ge=1)
+    title: str = ""
+    url: str = ""
     state: Literal["open", "closed"] | None = None
     focus: WorkItemFocus | None = None
     manager: str = ""
@@ -205,17 +207,29 @@ def build_work_graph_snapshot_from_records(
     planning_facts_by_issue = {
         (facts.repository.strip().lower(), facts.number): facts for facts in planning_issue_facts
     }
-    issues = tuple(
-        _apply_planning_issue_facts(
-            _work_request_issue_snapshot(request),
-            planning_facts_by_issue.get((request.repository.strip().lower(), request.issue_number)),
+    request_issue_keys: set[tuple[str, int]] = set()
+    issues: list[WorkGraphIssueSnapshot] = []
+    for request in work_requests:
+        key = (request.repository.strip().lower(), request.issue_number)
+        request_issue_keys.add(key)
+        issues.append(
+            _apply_planning_issue_facts(
+                _work_request_issue_snapshot(request),
+                planning_facts_by_issue.get(key),
+            )
         )
-        for request in work_requests
-    )
+    for facts in planning_issue_facts:
+        repository_key = facts.repository.strip().lower()
+        key = (repository_key, facts.number)
+        if key in request_issue_keys or repository_key not in repo_snapshots:
+            continue
+        issue = _planning_facts_issue_snapshot(facts)
+        if issue is not None:
+            issues.append(issue)
     return WorkGraphSnapshot(
         generated_at=generated_at,
         repos=tuple(repo_snapshots.values()),
-        issues=issues,
+        issues=tuple(issues),
     )
 
 
@@ -254,6 +268,24 @@ def _work_request_issue_snapshot(request: EveryCodeWorkRequestRecord) -> WorkGra
         blocked_by=1 if request.state == "blocked" else 0,
         updated_at=request.updated_at or request.queued_at,
         check_state="failure" if request.state == "blocked" else "unknown",
+    )
+
+
+def _planning_facts_issue_snapshot(
+    facts: WorkGraphPlanningIssueFacts,
+) -> WorkGraphIssueSnapshot | None:
+    title = facts.title.strip()
+    url = facts.url.strip()
+    if not title or not url:
+        return None
+    return _apply_planning_issue_facts(
+        WorkGraphIssueSnapshot(
+            repository=facts.repository,
+            number=facts.number,
+            title=title,
+            url=url,
+        ),
+        facts,
     )
 
 
