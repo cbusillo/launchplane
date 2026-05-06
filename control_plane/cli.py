@@ -93,7 +93,14 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.drivers.registry import build_driver_context_view
-from control_plane.every_code_worker import run_every_code_worker_loop, run_every_code_worker_once
+from control_plane.every_code_worker import (
+    build_every_code_worker_daemon_spec,
+    every_code_worker_daemon_status,
+    run_every_code_worker_loop,
+    run_every_code_worker_once,
+    start_every_code_worker_daemon,
+    stop_every_code_worker_daemon,
+)
 from control_plane.launchplane_mutations import (
     apply_launchplane_destroy_preview as shared_apply_launchplane_destroy_preview,
     apply_launchplane_generation_evidence as shared_apply_launchplane_generation_evidence,
@@ -9649,6 +9656,103 @@ def every_code_run(
         close = getattr(record_store, "close", None)
         if callable(close):
             close()
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("start")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory used when --database-url is not set.",
+)
+@click.option("--host", default="", help="Worker host name recorded on claims.")
+@click.option(
+    "--workspace-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path.home() / "Developer",
+    show_default=True,
+    help="Directory containing repository checkouts.",
+)
+@click.option(
+    "--checkout-root",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="Explicit checkout root for claimed requests.",
+)
+@click.option("--repository", default="", help="Optional owner/repo queue filter.")
+@click.option(
+    "--command-template",
+    default="",
+    help="Optional shell command template for tmux. Fields include {issue_url} and {request_id}.",
+)
+@click.option("--tmux-binary", default="tmux", show_default=True)
+@click.option(
+    "--interval-seconds",
+    type=click.FloatRange(min=0),
+    default=60.0,
+    show_default=True,
+    help="Seconds to sleep between queue scans.",
+)
+def every_code_start(
+    database_url: str,
+    state_dir: Path,
+    host: str,
+    workspace_root: Path,
+    checkout_root: Path | None,
+    repository: str,
+    command_template: str,
+    tmux_binary: str,
+    interval_seconds: float,
+) -> None:
+    spec = build_every_code_worker_daemon_spec(
+        state_dir=state_dir,
+        database_url=database_url,
+        host=host.strip() or os.uname().nodename,
+        workspace_root=workspace_root,
+        checkout_root=checkout_root,
+        repository=repository,
+        command_template=command_template,
+        tmux_binary=tmux_binary,
+        interval_seconds=interval_seconds,
+    )
+    result = start_every_code_worker_daemon(spec=spec, cwd=Path.cwd())
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("stop")
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory containing the worker pid file.",
+)
+def every_code_stop(state_dir: Path) -> None:
+    spec = build_every_code_worker_daemon_spec(state_dir=state_dir)
+    result = stop_every_code_worker_daemon(spec=spec)
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("status")
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory containing the worker pid file.",
+)
+def every_code_status(state_dir: Path) -> None:
+    spec = build_every_code_worker_daemon_spec(state_dir=state_dir)
+    result = every_code_worker_daemon_status(spec=spec)
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
 
 
