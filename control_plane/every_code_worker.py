@@ -103,9 +103,7 @@ class EveryCodeWorkerApiStore:
         if not self.worker_token.strip():
             raise ValueError("Every Code API worker requires worker_token")
 
-    def read_every_code_work_request_record(
-        self, request_id: str
-    ) -> EveryCodeWorkRequestRecord:
+    def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
         payload = self._request("GET", f"/v1/every-code/work-requests/{request_id.strip()}")
         return EveryCodeWorkRequestRecord.model_validate(payload["request"])
 
@@ -159,9 +157,7 @@ class EveryCodeWorkerApiStore:
             raise EveryCodeWorkerApiError("Launchplane claim response is invalid")
         return EveryCodeWorkRequestRecord.model_validate(request_payload)
 
-    def write_every_code_work_request_record(
-        self, record: EveryCodeWorkRequestRecord
-    ) -> object:
+    def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> object:
         payload = self._request(
             "POST",
             "/v1/every-code/work-requests/status",
@@ -600,12 +596,7 @@ def build_every_code_session_command(
     finish_shell = " ".join(
         "$status" if part == "$status" else shlex.quote(part) for part in finish_command
     )
-    return (
-        f"{command}\n"
-        "status=$?\n"
-        f"{finish_shell}\n"
-        "exit $status"
-    )
+    return f"{command}\nstatus=$?\n{finish_shell}\nexit $status"
 
 
 def build_every_code_feedback_session_command(
@@ -769,7 +760,9 @@ def run_every_code_worker_once(
 
     session_name = every_code_tmux_session_name(claimed_record.request_id)
     run = runner or _run_subprocess
-    resolved_worktree_state_dir = worktree_state_dir if worktree_state_dir is not None else state_dir
+    resolved_worktree_state_dir = (
+        worktree_state_dir if worktree_state_dir is not None else state_dir
+    )
     try:
         prepared_checkout = prepare_every_code_checkout(
             claimed_record,
@@ -1323,9 +1316,7 @@ def build_every_code_worker_daemon_spec(
     if checkout_root is not None:
         command.extend(("--checkout-root", str(checkout_root.expanduser().resolve())))
     if worktree_state_dir is not None:
-        command.extend(
-            ("--worktree-state-dir", str(worktree_state_dir.expanduser().resolve()))
-        )
+        command.extend(("--worktree-state-dir", str(worktree_state_dir.expanduser().resolve())))
     if repository.strip():
         command.extend(("--repository", repository.strip()))
     if command_template.strip():
@@ -1384,9 +1375,7 @@ def start_every_code_worker_daemon(
 ) -> EveryCodeWorkerStartResult:
     status = every_code_worker_daemon_status(spec=spec)
     if status.running and status.pid is not None:
-        return EveryCodeWorkerStartResult(
-            status="already_running", pid=status.pid, spec=spec
-        )
+        return EveryCodeWorkerStartResult(status="already_running", pid=status.pid, spec=spec)
     spec.pid_file.parent.mkdir(parents=True, exist_ok=True)
     spec.log_file.parent.mkdir(parents=True, exist_ok=True)
     lock_file = spec.pid_file.with_suffix(".lock")
@@ -1423,9 +1412,7 @@ def stop_every_code_worker_daemon(
     if not status.running or status.pid is None:
         if spec.pid_file.exists():
             spec.pid_file.unlink()
-        return EveryCodeWorkerStopResult(
-            status="not_running", pid=status.pid, detail=status.detail
-        )
+        return EveryCodeWorkerStopResult(status="not_running", pid=status.pid, detail=status.detail)
     os.kill(status.pid, signal.SIGTERM)
     deadline = time.monotonic() + max(timeout_seconds, 0)
     while time.monotonic() < deadline:
@@ -1462,15 +1449,30 @@ def finish_every_code_work_request(
 ) -> EveryCodeWorkerFinishResult:
     record = record_store.read_every_code_work_request_record(request_id.strip())
     if record.state in TERMINAL_EVERY_CODE_STATES:
+        preview_label_summary = ""
+        terminal_pr_url = result_pr_url.strip() or record.result_pr_url
+        if record.state == "done" and exit_code == 0 and terminal_pr_url:
+            preview_label_summary = request_every_code_pr_preview_label(
+                result_pr_url=terminal_pr_url,
+                runner=runner,
+            )
+        detail_parts = [
+            part
+            for part in (
+                record.result_summary
+                or record.error_message
+                or "Every Code request is already terminal.",
+                preview_label_summary,
+            )
+            if part
+        ]
         return EveryCodeWorkerFinishResult(
             status="done" if record.state == "done" else "blocked",
-            detail=record.result_summary
-            or record.error_message
-            or "Every Code request is already terminal.",
+            detail="; ".join(detail_parts),
             request_id=record.request_id,
             repository=record.repository,
             issue_number=record.issue_number,
-            result_pr_url=record.result_pr_url,
+            result_pr_url=terminal_pr_url,
         )
     succeeded = exit_code == 0
     preview_label_summary = ""
@@ -1650,7 +1652,14 @@ def _ensure_every_code_worktree(
 
 def _git_default_branch(source_checkout_root: Path, *, runner: Runner) -> str:
     origin_head = _git_output(
-        ("git", "-C", str(source_checkout_root), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"),
+        (
+            "git",
+            "-C",
+            str(source_checkout_root),
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ),
         runner=runner,
         detail="inspect origin default branch",
     )
@@ -1716,9 +1725,7 @@ def _safe_branch_component(value: str) -> str:
     return normalized or "request"
 
 
-def _launch_daemon_process(
-    args: Sequence[str], log_file: Path, cwd: Path
-) -> subprocess.Popen[str]:
+def _launch_daemon_process(args: Sequence[str], log_file: Path, cwd: Path) -> subprocess.Popen[str]:
     log_handle = log_file.open("a", encoding="utf-8")
     try:
         return subprocess.Popen(
@@ -1776,9 +1783,7 @@ def _read_pid_file(pid_file: Path) -> tuple[int, tuple[str, ...]] | None:
     pid = payload.get("pid") if isinstance(payload, dict) else None
     if isinstance(pid, int) and pid > 0:
         command = payload.get("command")
-        if isinstance(command, list) and all(
-            isinstance(part, str) for part in command
-        ):
+        if isinstance(command, list) and all(isinstance(part, str) for part in command):
             return pid, tuple(command)
         return pid, ()
     return None
