@@ -1596,7 +1596,7 @@ def _send_every_code_pr_feedback_to_session(
 ) -> bool:
     prompt = every_code_pr_feedback_prompt(feedback)
     try:
-        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt, "Enter"))
+        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt, "C-m"))
     except OSError:
         return False
     return result.returncode == 0
