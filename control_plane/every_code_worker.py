@@ -10,6 +10,9 @@ import signal
 import subprocess
 import time
 from typing import Callable, Literal, Protocol, Sequence
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
@@ -57,6 +60,135 @@ class DaemonProcess(Protocol):
 
 
 ProcessLauncher = Callable[[Sequence[str], Path, Path], DaemonProcess]
+
+
+class EveryCodeWorkerApiError(RuntimeError):
+    pass
+
+
+@dataclass(frozen=True)
+class EveryCodeWorkerApiStore:
+    service_url: str
+    worker_token: str
+    timeout_seconds: float = 30.0
+
+    def __post_init__(self) -> None:
+        if not self.service_url.strip():
+            raise ValueError("Every Code API worker requires service_url")
+        if not self.worker_token.strip():
+            raise ValueError("Every Code API worker requires worker_token")
+
+    def read_every_code_work_request_record(
+        self, request_id: str
+    ) -> EveryCodeWorkRequestRecord:
+        payload = self._request("GET", f"/v1/every-code/work-requests/{request_id.strip()}")
+        return EveryCodeWorkRequestRecord.model_validate(payload["request"])
+
+    def list_every_code_work_request_records(
+        self,
+        *,
+        state: str = "",
+        repository: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodeWorkRequestRecord, ...]:
+        query: dict[str, object] = {}
+        if state.strip():
+            query["state"] = state.strip()
+        if repository.strip():
+            query["repository"] = repository.strip()
+        if limit is not None:
+            query["limit"] = limit
+        suffix = f"?{urlencode(query)}" if query else ""
+        payload = self._request("GET", f"/v1/every-code/work-requests{suffix}")
+        requests = payload.get("requests", [])
+        if not isinstance(requests, list):
+            raise EveryCodeWorkerApiError("Launchplane work-request list response is invalid")
+        return tuple(EveryCodeWorkRequestRecord.model_validate(item) for item in requests)
+
+    def claim_every_code_work_request_record(
+        self,
+        *,
+        request_id: str,
+        host: str,
+        claimed_at: str,
+    ) -> EveryCodeWorkRequestRecord | None:
+        del claimed_at
+        try:
+            payload = self._request(
+                "POST",
+                "/v1/every-code/work-requests/claim",
+                body={"request_id": request_id.strip(), "host": host.strip()},
+                idempotency_key=f"every-code-claim-{request_id.strip()}-{host.strip()}",
+            )
+        except EveryCodeWorkerApiError as error:
+            if "HTTP 409" in str(error):
+                return None
+            raise
+        result_payload = payload.get("result")
+        request_payload: object = None
+        if isinstance(result_payload, dict):
+            request_payload = result_payload.get("request")
+        if request_payload is None:
+            request_payload = payload.get("records")
+        if request_payload is None:
+            raise EveryCodeWorkerApiError("Launchplane claim response is invalid")
+        return EveryCodeWorkRequestRecord.model_validate(request_payload)
+
+    def write_every_code_work_request_record(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> object:
+        payload = self._request(
+            "POST",
+            "/v1/every-code/work-requests/status",
+            body={
+                "request_id": record.request_id,
+                "host": record.claimed_by_host,
+                "state": record.state,
+                "result_pr_url": record.result_pr_url,
+                "result_summary": record.result_summary,
+                "error_message": record.error_message,
+                "updated_at": record.updated_at,
+            },
+            idempotency_key=f"every-code-status-{record.request_id}-{record.state}-{record.updated_at}",
+        )
+        return payload
+
+    def _request(
+        self,
+        method: Literal["GET", "POST"],
+        path: str,
+        *,
+        body: dict[str, object] | None = None,
+        idempotency_key: str = "",
+    ) -> dict[str, object]:
+        base_url = self.service_url.strip().rstrip("/")
+        url = f"{base_url}{path}"
+        data = None
+        headers = {
+            "Accept": "application/json",
+            "Authorization": f"Bearer {self.worker_token.strip()}",
+        }
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        request = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(request, timeout=self.timeout_seconds) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")
+            raise EveryCodeWorkerApiError(
+                f"Launchplane API request failed with HTTP {error.code}: {detail}"
+            ) from error
+        except (URLError, TimeoutError, OSError) as error:
+            raise EveryCodeWorkerApiError(f"Launchplane API request failed: {error}") from error
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise EveryCodeWorkerApiError("Launchplane API response was not valid JSON") from error
+        if not isinstance(payload, dict):
+            raise EveryCodeWorkerApiError("Launchplane API response was not a JSON object")
+        return payload
 
 
 @dataclass(frozen=True)
@@ -213,6 +345,8 @@ def build_every_code_session_command(
     state_dir: Path,
     host: str,
     database_url: str = "",
+    service_url: str = "",
+    worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
 ) -> str:
     finish_command = [
         "uv",
@@ -231,6 +365,9 @@ def build_every_code_session_command(
     ]
     if database_url.strip():
         finish_command.extend(("--database-url", database_url.strip()))
+    if service_url.strip():
+        finish_command.extend(("--service-url", service_url.strip()))
+        finish_command.extend(("--worker-token-env", worker_token_env.strip()))
     finish_shell = " ".join(
         "$status" if part == "$status" else shlex.quote(part) for part in finish_command
     )
@@ -264,6 +401,8 @@ def run_every_code_worker_once(
     command_template: str = "",
     state_dir: Path | None = None,
     database_url: str = "",
+    service_url: str = "",
+    worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
     tmux_binary: str = "tmux",
     runner: Runner | None = None,
 ) -> EveryCodeWorkerHandoffResult:
@@ -334,6 +473,8 @@ def run_every_code_worker_once(
                 command=command,
                 state_dir=state_dir,
                 database_url=database_url,
+                service_url=service_url,
+                worker_token_env=worker_token_env,
                 host=normalized_host,
             )
         try:
@@ -399,6 +540,8 @@ def run_every_code_worker_loop(
     command_template: str = "",
     state_dir: Path | None = None,
     database_url: str = "",
+    service_url: str = "",
+    worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
     tmux_binary: str = "tmux",
     interval_seconds: float = 60.0,
     max_iterations: int = 0,
@@ -429,6 +572,8 @@ def run_every_code_worker_loop(
             command_template=command_template,
             state_dir=state_dir,
             database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
             tmux_binary=tmux_binary,
             runner=runner,
         )
@@ -463,6 +608,8 @@ def build_every_code_worker_daemon_spec(
     *,
     state_dir: Path,
     database_url: str = "",
+    service_url: str = "",
+    worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
     host: str = "",
     workspace_root: Path = Path.home() / "Developer",
     checkout_root: Path | None = None,
@@ -490,6 +637,9 @@ def build_every_code_worker_daemon_spec(
     ]
     if database_url.strip():
         command.extend(("--database-url", database_url.strip()))
+    if service_url.strip():
+        command.extend(("--service-url", service_url.strip()))
+        command.extend(("--worker-token-env", worker_token_env.strip()))
     if host.strip():
         command.extend(("--host", host.strip()))
     if checkout_root is not None:
