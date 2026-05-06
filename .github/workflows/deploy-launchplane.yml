@@ -239,8 +239,8 @@ jobs:
                   LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
                   }
                   + (
-                    if (not $omit_every_code_env)
-                      and (($enable_every_code_runtime_secrets | ascii_downcase) == "true") then
+                    if (($omit_every_code_env | not)
+                      and (($enable_every_code_runtime_secrets | ascii_downcase) == "true")) then
                       {
                         LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
                         LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret
