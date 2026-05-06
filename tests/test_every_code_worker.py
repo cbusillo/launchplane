@@ -18,6 +18,7 @@ from control_plane.every_code_worker import (
     build_every_code_worker_daemon_spec,
     build_every_code_session_command,
     default_every_code_command,
+    every_code_claim_comment_body,
     every_code_tmux_session_name,
     every_code_worker_daemon_status,
     finish_every_code_work_request,
@@ -47,11 +48,16 @@ def _queued_record() -> EveryCodeWorkRequestRecord:
 
 
 class _Runner:
-    def __init__(self) -> None:
+    def __init__(self, *, fail_issue_comment: bool = False) -> None:
         self.calls: list[tuple[str, ...]] = []
+        self.fail_issue_comment = fail_issue_comment
 
     def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
+        if args[:3] == ("gh", "issue", "comment"):
+            if self.fail_issue_comment:
+                return subprocess.CompletedProcess(args, 1, "", "rate limited")
+            return subprocess.CompletedProcess(args, 0, "", "")
         if args[1] == "has-session":
             return subprocess.CompletedProcess(args, 1, "", "no session")
         return subprocess.CompletedProcess(args, 0, "", "")
@@ -196,6 +202,19 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("https://github.com/cbusillo/code/issues/123", command)
         self.assertIn("every-code-cbusillo-code-123-test", command)
 
+    def test_claim_comment_body_marks_issue_as_in_progress(self) -> None:
+        body = every_code_claim_comment_body(
+            _queued_record(),
+            host="Chris-Studio",
+            session_name="every-code-test",
+        )
+
+        self.assertIn("<!-- every-code-claim -->", body)
+        self.assertIn("Every Code is working on this issue", body)
+        self.assertIn("`Chris-Studio`", body)
+        self.assertIn("`every-code-test`", body)
+        self.assertIn("`every-code-cbusillo-code-123-test`", body)
+
     def test_session_command_reports_terminal_status(self) -> None:
         command = build_every_code_session_command(
             record=_queued_record(),
@@ -237,6 +256,32 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(runner.calls[0][1], "has-session")
         self.assertEqual(runner.calls[1][1], "new-session")
         self.assertIn("every-code finish", runner.calls[1][-1])
+        self.assertEqual(runner.calls[2][:3], ("gh", "issue", "comment"))
+
+    def test_run_once_still_launches_tmux_when_claim_comment_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = _Runner(fail_issue_comment=True)
+
+            result = run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        self.assertEqual(result.status, "running")
+        self.assertEqual(record.state, "running")
+        self.assertIn("Visible tmux session", record.result_summary)
+        self.assertIn("Could not post GitHub working comment", record.result_summary)
+        self.assertEqual(runner.calls[1][1], "new-session")
+        self.assertEqual(runner.calls[2][:3], ("gh", "issue", "comment"))
 
     def test_finish_marks_running_request_done(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
