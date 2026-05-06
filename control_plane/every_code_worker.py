@@ -24,6 +24,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 EveryCodeWorkerStatus = Literal["empty", "running", "blocked"]
 EveryCodeWorkerFinishStatus = Literal["done", "blocked"]
+TERMINAL_EVERY_CODE_STATES = {"done", "blocked"}
 
 
 class EveryCodeWorkerStore(Protocol):
@@ -200,6 +201,8 @@ class EveryCodeWorkerHandoffResult:
     issue_number: int = 0
     session_name: str = ""
     checkout_root: str = ""
+    worktree_root: str = ""
+    worktree_branch: str = ""
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -210,6 +213,8 @@ class EveryCodeWorkerHandoffResult:
             "issue_number": self.issue_number,
             "session_name": self.session_name,
             "checkout_root": self.checkout_root,
+            "worktree_root": self.worktree_root,
+            "worktree_branch": self.worktree_branch,
         }
 
 
@@ -312,6 +317,64 @@ def every_code_tmux_session_name(request_id: str) -> str:
     return f"every-code-{normalized or 'request'}"[:80]
 
 
+def every_code_session_state_path(*, state_dir: Path, request_id: str) -> Path:
+    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
+    return (
+        state_dir.expanduser().resolve()
+        / "every-code-worker"
+        / "sessions"
+        / f"{normalized or 'request'}.json"
+    )
+
+
+def write_every_code_session_state(
+    *,
+    state_dir: Path,
+    record: EveryCodeWorkRequestRecord,
+    session_name: str,
+    source_checkout_root: Path,
+    launch_root: Path,
+    worktree_branch: str,
+    host: str,
+) -> None:
+    path = every_code_session_state_path(state_dir=state_dir, request_id=record.request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "request_id": record.request_id,
+        "session_name": session_name,
+        "source_checkout_root": str(source_checkout_root),
+        "launch_root": str(launch_root),
+        "worktree_branch": worktree_branch,
+        "host": host.strip(),
+        "created_at": utc_now_timestamp(),
+    }
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_every_code_session_state(path: Path) -> dict[str, str] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    result: dict[str, str] = {}
+    for key in (
+        "request_id",
+        "session_name",
+        "host",
+        "source_checkout_root",
+        "launch_root",
+        "worktree_branch",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str):
+            result[key] = value
+    if not result.get("request_id") or not result.get("session_name"):
+        return None
+    return result
+
+
 def every_code_claim_comment_body(
     record: EveryCodeWorkRequestRecord, *, host: str, session_name: str
 ) -> str:
@@ -364,6 +427,10 @@ def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
     prompt = (
         f"Work on {record.repository} issue #{record.issue_number}: {record.issue_title}. "
         f"Issue URL: {record.issue_url}. Launchplane request: {record.request_id}. "
+        "Before changing files, read the issue body and every issue comment. "
+        "Treat newer comments as potentially more current than the original body. "
+        "Inspect linked references and any available images or attachments before deciding what to change. "
+        "You are already running inside the isolated Every Code worktree and branch for this request. "
         "Open a pull request for the change. If the PR fully resolves the issue, "
         f"include `Closes #{record.issue_number}` or `Fixes #{record.issue_number}` "
         "in the PR body so GitHub closes the issue when the PR merges. Use "
@@ -445,12 +512,82 @@ def resolve_every_code_checkout_root(
     return (workspace_root.expanduser() / repository_name).resolve()
 
 
+@dataclass(frozen=True)
+class EveryCodePreparedCheckout:
+    launch_root: Path
+    source_checkout_root: Path
+    worktree_branch: str = ""
+
+
+def every_code_worktree_root(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    state_dir: Path,
+) -> Path:
+    repository_slug = _safe_path_component(record.repository.strip().replace("/", "-"))
+    request_slug = _safe_path_component(record.request_id)
+    return (
+        state_dir.expanduser().resolve()
+        / "every-code-worker"
+        / "worktrees"
+        / repository_slug
+        / request_slug
+    )
+
+
+def every_code_worktree_branch(record: EveryCodeWorkRequestRecord) -> str:
+    repository_slug = _safe_branch_component(record.repository.strip().replace("/", "-"))
+    request_slug = _safe_branch_component(record.request_id)
+    issue_part = str(record.issue_number) if record.issue_number > 0 else "request"
+    return f"every-code/{repository_slug}-{issue_part}-{request_slug}"[:180].rstrip("/.-")
+
+
+def prepare_every_code_checkout(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    workspace_root: Path,
+    state_dir: Path | None,
+    checkout_root: Path | None = None,
+    runner: Runner | None = None,
+) -> EveryCodePreparedCheckout:
+    resolved_checkout_root = resolve_every_code_checkout_root(
+        record,
+        workspace_root=workspace_root,
+        checkout_root=checkout_root,
+    )
+    if checkout_root is not None or state_dir is None:
+        return EveryCodePreparedCheckout(
+            launch_root=resolved_checkout_root,
+            source_checkout_root=resolved_checkout_root,
+        )
+    if not resolved_checkout_root.is_dir():
+        return EveryCodePreparedCheckout(
+            launch_root=resolved_checkout_root,
+            source_checkout_root=resolved_checkout_root,
+        )
+    run = runner or _run_subprocess
+    worktree_root = every_code_worktree_root(record, state_dir=state_dir)
+    branch = every_code_worktree_branch(record)
+    _ensure_every_code_worktree(
+        source_checkout_root=resolved_checkout_root,
+        worktree_root=worktree_root,
+        branch=branch,
+        runner=run,
+    )
+    return EveryCodePreparedCheckout(
+        launch_root=worktree_root,
+        source_checkout_root=resolved_checkout_root,
+        worktree_branch=branch,
+    )
+
+
 def run_every_code_worker_once(
     *,
     record_store: EveryCodeWorkerStore,
     host: str,
     workspace_root: Path,
     checkout_root: Path | None = None,
+    worktree_state_dir: Path | None = None,
     repository: str = "",
     command_template: str = "",
     state_dir: Path | None = None,
@@ -488,23 +625,51 @@ def run_every_code_worker_once(
             issue_number=queued_record.issue_number,
         )
 
-    resolved_checkout_root = resolve_every_code_checkout_root(
-        claimed_record,
-        workspace_root=workspace_root,
-        checkout_root=checkout_root,
-    )
     session_name = every_code_tmux_session_name(claimed_record.request_id)
+    run = runner or _run_subprocess
+    resolved_worktree_state_dir = worktree_state_dir if worktree_state_dir is not None else state_dir
+    try:
+        prepared_checkout = prepare_every_code_checkout(
+            claimed_record,
+            workspace_root=workspace_root,
+            checkout_root=checkout_root,
+            state_dir=resolved_worktree_state_dir,
+            runner=run,
+        )
+    except RuntimeError as exc:
+        fallback_checkout_root = resolve_every_code_checkout_root(
+            claimed_record,
+            workspace_root=workspace_root,
+            checkout_root=checkout_root,
+        )
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=str(exc),
+            session_name=session_name,
+            checkout_root=fallback_checkout_root,
+        )
+    resolved_checkout_root = prepared_checkout.launch_root
+    if not prepared_checkout.source_checkout_root.is_dir():
+        return _block_every_code_request(
+            record_store=record_store,
+            record=claimed_record,
+            host=normalized_host,
+            detail=f"Checkout root does not exist: {prepared_checkout.source_checkout_root}",
+            session_name=session_name,
+            checkout_root=prepared_checkout.source_checkout_root,
+        )
     if not resolved_checkout_root.is_dir():
         return _block_every_code_request(
             record_store=record_store,
             record=claimed_record,
             host=normalized_host,
-            detail=f"Checkout root does not exist: {resolved_checkout_root}",
+            detail=f"Every Code worktree root does not exist: {resolved_checkout_root}",
             session_name=session_name,
-            checkout_root=resolved_checkout_root,
+            checkout_root=prepared_checkout.source_checkout_root,
         )
 
-    run = runner or _run_subprocess
     existing_session = _tmux_session_exists(
         tmux_binary=tmux_binary,
         session_name=session_name,
@@ -517,7 +682,7 @@ def run_every_code_worker_once(
             host=normalized_host,
             detail=f"Could not inspect tmux session {session_name!r}.",
             session_name=session_name,
-            checkout_root=resolved_checkout_root,
+            checkout_root=prepared_checkout.source_checkout_root,
         )
     if not existing_session:
         command = render_every_code_command(claimed_record, command_template=command_template)
@@ -551,7 +716,7 @@ def run_every_code_worker_once(
                 host=normalized_host,
                 detail=f"Could not launch tmux session: {exc}",
                 session_name=session_name,
-                checkout_root=resolved_checkout_root,
+                checkout_root=prepared_checkout.source_checkout_root,
             )
         if launch_result.returncode != 0:
             return _block_every_code_request(
@@ -560,8 +725,18 @@ def run_every_code_worker_once(
                 host=normalized_host,
                 detail=f"tmux launch failed: {launch_result.stderr.strip()}",
                 session_name=session_name,
-                checkout_root=resolved_checkout_root,
+                checkout_root=prepared_checkout.source_checkout_root,
             )
+    if state_dir is not None:
+        write_every_code_session_state(
+            state_dir=state_dir,
+            record=claimed_record,
+            session_name=session_name,
+            source_checkout_root=prepared_checkout.source_checkout_root,
+            launch_root=resolved_checkout_root,
+            worktree_branch=prepared_checkout.worktree_branch,
+            host=normalized_host,
+        )
 
     claim_comment_warning = _post_every_code_claim_comment(
         record=claimed_record,
@@ -579,6 +754,7 @@ def run_every_code_worker_once(
                 part
                 for part in (
                     f"Visible tmux session: {session_name}",
+                    f"Worktree: {resolved_checkout_root}",
                     claim_comment_warning,
                 )
                 if part
@@ -593,7 +769,9 @@ def run_every_code_worker_once(
         repository=running_record.repository,
         issue_number=running_record.issue_number,
         session_name=session_name,
-        checkout_root=str(resolved_checkout_root),
+        checkout_root=str(prepared_checkout.source_checkout_root),
+        worktree_root=str(resolved_checkout_root),
+        worktree_branch=prepared_checkout.worktree_branch,
     )
 
 
@@ -603,6 +781,7 @@ def run_every_code_worker_loop(
     host: str,
     workspace_root: Path,
     checkout_root: Path | None = None,
+    worktree_state_dir: Path | None = None,
     repository: str = "",
     command_template: str = "",
     state_dir: Path | None = None,
@@ -630,11 +809,19 @@ def run_every_code_worker_loop(
     )
     while max_iterations == 0 or iterations < max_iterations:
         iterations += 1
+        close_terminal_every_code_sessions(
+            record_store=record_store,
+            host=host,
+            state_dir=state_dir,
+            tmux_binary=tmux_binary,
+            runner=runner,
+        )
         last_result = run_every_code_worker_once(
             record_store=record_store,
             host=host,
             workspace_root=workspace_root,
             checkout_root=checkout_root,
+            worktree_state_dir=worktree_state_dir,
             repository=repository,
             command_template=command_template,
             state_dir=state_dir,
@@ -671,6 +858,72 @@ def run_every_code_worker_loop(
     )
 
 
+def close_terminal_every_code_sessions(
+    *,
+    record_store: EveryCodeWorkerStore,
+    host: str,
+    state_dir: Path | None,
+    tmux_binary: str = "tmux",
+    runner: Runner | None = None,
+) -> int:
+    if state_dir is None:
+        return 0
+    normalized_host = host.strip()
+    if not normalized_host:
+        raise ValueError("Every Code worker requires a host name")
+    sessions_dir = state_dir.expanduser().resolve() / "every-code-worker" / "sessions"
+    try:
+        session_state_paths = tuple(sessions_dir.glob("*.json"))
+    except OSError:
+        return 0
+
+    run = runner or _run_subprocess
+    closed = 0
+    for path in session_state_paths:
+        session_state = read_every_code_session_state(path)
+        if session_state is None:
+            continue
+        if session_state.get("host", normalized_host) != normalized_host:
+            continue
+        request_id = session_state["request_id"]
+        try:
+            record = record_store.read_every_code_work_request_record(request_id)
+        except Exception:
+            continue
+        if record.claimed_by_host.strip() != normalized_host:
+            continue
+        if record.state not in TERMINAL_EVERY_CODE_STATES:
+            continue
+
+        session_name = session_state["session_name"]
+        existing_session = _tmux_session_exists(
+            tmux_binary=tmux_binary,
+            session_name=session_name,
+            runner=run,
+        )
+        if existing_session is False:
+            path.unlink(missing_ok=True)
+            continue
+        if existing_session is None:
+            continue
+        pane_pid = _tmux_pane_pid(
+            tmux_binary=tmux_binary,
+            session_name=session_name,
+            runner=run,
+        )
+        if pane_pid is None:
+            continue
+        try:
+            os.killpg(pane_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            path.unlink(missing_ok=True)
+            continue
+        except OSError:
+            continue
+        closed += 1
+    return closed
+
+
 def build_every_code_worker_daemon_spec(
     *,
     state_dir: Path,
@@ -680,6 +933,7 @@ def build_every_code_worker_daemon_spec(
     host: str = "",
     workspace_root: Path = Path.home() / "Developer",
     checkout_root: Path | None = None,
+    worktree_state_dir: Path | None = None,
     repository: str = "",
     command_template: str = "",
     tmux_binary: str = "tmux",
@@ -711,6 +965,10 @@ def build_every_code_worker_daemon_spec(
         command.extend(("--host", host.strip()))
     if checkout_root is not None:
         command.extend(("--checkout-root", str(checkout_root.expanduser().resolve())))
+    if worktree_state_dir is not None:
+        command.extend(
+            ("--worktree-state-dir", str(worktree_state_dir.expanduser().resolve()))
+        )
     if repository.strip():
         command.extend(("--repository", repository.strip()))
     if command_template.strip():
@@ -845,6 +1103,17 @@ def finish_every_code_work_request(
     result_summary: str = "",
 ) -> EveryCodeWorkerFinishResult:
     record = record_store.read_every_code_work_request_record(request_id.strip())
+    if record.state in TERMINAL_EVERY_CODE_STATES:
+        return EveryCodeWorkerFinishResult(
+            status="done" if record.state == "done" else "blocked",
+            detail=record.result_summary
+            or record.error_message
+            or "Every Code request is already terminal.",
+            request_id=record.request_id,
+            repository=record.repository,
+            issue_number=record.issue_number,
+            result_pr_url=record.result_pr_url,
+        )
     succeeded = exit_code == 0
     summary = result_summary.strip() or (
         "Every Code session completed successfully."
@@ -875,6 +1144,141 @@ def finish_every_code_work_request(
 
 def _run_subprocess(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, check=False, text=True)
+
+
+def _ensure_every_code_worktree(
+    *,
+    source_checkout_root: Path,
+    worktree_root: Path,
+    branch: str,
+    runner: Runner,
+) -> None:
+    if not _is_git_checkout(source_checkout_root):
+        raise RuntimeError(f"Checkout root is not a git checkout: {source_checkout_root}")
+    if worktree_root.exists():
+        if not worktree_root.is_dir():
+            raise RuntimeError(f"Every Code worktree path is not a directory: {worktree_root}")
+        if not _is_git_checkout(worktree_root):
+            raise RuntimeError(
+                f"Existing Every Code worktree is not a git checkout: {worktree_root}"
+            )
+        actual_branch = _git_output(
+            ("git", "-C", str(worktree_root), "branch", "--show-current"),
+            runner=runner,
+            detail="inspect Every Code worktree branch",
+        )
+        if actual_branch != branch:
+            raise RuntimeError(
+                "Existing Every Code worktree uses unexpected branch "
+                f"{actual_branch!r}; expected {branch!r}: {worktree_root}"
+            )
+        return
+
+    worktree_root.parent.mkdir(parents=True, exist_ok=True)
+    if _git_branch_exists(source_checkout_root, branch=branch, runner=runner):
+        _git_checked(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "worktree",
+                "add",
+                str(worktree_root),
+                branch,
+            ),
+            runner=runner,
+            detail="create Every Code worktree from existing branch",
+        )
+    else:
+        default_branch = _git_default_branch(source_checkout_root, runner=runner)
+        _git_checked(
+            ("git", "-C", str(source_checkout_root), "fetch", "--quiet", "origin", default_branch),
+            runner=runner,
+            detail="fetch default branch before creating Every Code worktree",
+        )
+        _git_checked(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "worktree",
+                "add",
+                "-b",
+                branch,
+                str(worktree_root),
+                f"origin/{default_branch}",
+            ),
+            runner=runner,
+            detail="create Every Code worktree",
+        )
+
+
+def _git_default_branch(source_checkout_root: Path, *, runner: Runner) -> str:
+    origin_head = _git_output(
+        ("git", "-C", str(source_checkout_root), "symbolic-ref", "--short", "refs/remotes/origin/HEAD"),
+        runner=runner,
+        detail="inspect origin default branch",
+    )
+    if origin_head.startswith("origin/"):
+        return origin_head.removeprefix("origin/")
+    if origin_head:
+        return origin_head
+    raise RuntimeError(f"Could not determine default branch for {source_checkout_root}")
+
+
+def _git_branch_exists(source_checkout_root: Path, *, branch: str, runner: Runner) -> bool:
+    try:
+        result = runner(
+            (
+                "git",
+                "-C",
+                str(source_checkout_root),
+                "show-ref",
+                "--verify",
+                "--quiet",
+                f"refs/heads/{branch}",
+            )
+        )
+    except OSError as exc:
+        raise RuntimeError(f"Could not inspect Every Code worktree branch: {exc}") from exc
+    if result.returncode == 0:
+        return True
+    if result.returncode == 1:
+        return False
+    message = result.stderr.strip() or result.stdout.strip() or "git show-ref failed"
+    raise RuntimeError(f"Could not inspect Every Code worktree branch: {message}")
+
+
+def _git_output(args: Sequence[str], *, runner: Runner, detail: str) -> str:
+    result = _git_checked(args, runner=runner, detail=detail)
+    return result.stdout.strip()
+
+
+def _git_checked(
+    args: Sequence[str], *, runner: Runner, detail: str
+) -> subprocess.CompletedProcess[str]:
+    try:
+        result = runner(args)
+    except OSError as exc:
+        raise RuntimeError(f"Could not {detail}: {exc}") from exc
+    if result.returncode != 0:
+        message = result.stderr.strip() or result.stdout.strip() or f"{args[0]} failed"
+        raise RuntimeError(f"Could not {detail}: {message}")
+    return result
+
+
+def _is_git_checkout(path: Path) -> bool:
+    return (path / ".git").exists()
+
+
+def _safe_path_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-._")
+    return normalized or "request"
+
+
+def _safe_branch_component(value: str) -> str:
+    normalized = re.sub(r"[^A-Za-z0-9_.-]+", "-", value.strip()).strip("-._")
+    return normalized or "request"
 
 
 def _launch_daemon_process(
@@ -988,6 +1392,29 @@ def _tmux_session_exists(*, tmux_binary: str, session_name: str, runner: Runner)
     if result.returncode == 1:
         return False
     return None
+
+
+def _tmux_pane_pid(*, tmux_binary: str, session_name: str, runner: Runner) -> int | None:
+    try:
+        result = runner(
+            (
+                tmux_binary,
+                "display-message",
+                "-p",
+                "-t",
+                session_name,
+                "#{pane_pid}",
+            )
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        pane_pid = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return pane_pid if pane_pid > 0 else None
 
 
 def _block_every_code_request(
