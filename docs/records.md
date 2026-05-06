@@ -552,7 +552,10 @@ state/
   `every-code` label through `POST /v1/every-code/github-webhook`. The route
   uses `X-Hub-Signature-256`, requires `X-GitHub-Delivery`, and dedupes repeated
   deliveries by the deterministic repository/issue/label request id without
-  overwriting a request that is already claimed or finished.
+  overwriting a request that is already claimed or finished. Re-applying the
+  same label to the same issue returns the existing request; a fresh retry model
+  should use a new trigger label or explicit retry record rather than mutating a
+  terminal request in place.
 
 ## Inventory
 

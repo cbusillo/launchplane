@@ -18,6 +18,7 @@ from sqlalchemy import (
 )
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
@@ -1175,6 +1176,30 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def create_every_code_work_request_record_if_absent(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> tuple[EveryCodeWorkRequestRecord, bool]:
+        with self._session_factory() as session:
+            session.add(
+                LaunchplaneEveryCodeWorkRequestRow(
+                    request_id=record.request_id,
+                    source=record.source,
+                    state=record.state,
+                    repository=record.repository,
+                    issue_number=record.issue_number,
+                    trigger_label=record.trigger_label,
+                    updated_at=record.updated_at,
+                    claimed_by_host=record.claimed_by_host,
+                    payload=self._payload_dict(record),
+                )
+            )
+            try:
+                session.commit()
+            except IntegrityError:
+                session.rollback()
+                return self.read_every_code_work_request_record(record.request_id), False
+        return record, True
 
     def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
         return self._read_model(

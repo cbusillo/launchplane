@@ -1764,6 +1764,10 @@ class _EveryCodeWorkRequestStore(Protocol):
         self, record: EveryCodeWorkRequestRecord
     ) -> object: ...
 
+    def create_every_code_work_request_record_if_absent(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> tuple[EveryCodeWorkRequestRecord, bool]: ...
+
     def read_every_code_work_request_record(
         self, request_id: str
     ) -> EveryCodeWorkRequestRecord: ...
@@ -1788,6 +1792,7 @@ class _EveryCodeWorkRequestStore(Protocol):
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
         "write_every_code_work_request_record",
+        "create_every_code_work_request_record_if_absent",
         "read_every_code_work_request_record",
         "list_every_code_work_request_records",
         "claim_every_code_work_request_record",
@@ -1932,13 +1937,10 @@ def _handle_every_code_github_webhook(
     )
     record = _build_every_code_work_request_record(request, queued_at=request.queued_at)
     every_code_store = _every_code_work_request_store(record_store)
-    try:
-        stored_record = every_code_store.read_every_code_work_request_record(record.request_id)
-        deduped = True
-    except FileNotFoundError:
-        every_code_store.write_every_code_work_request_record(record)
-        stored_record = record
-        deduped = False
+    stored_record, created = every_code_store.create_every_code_work_request_record_if_absent(
+        record
+    )
+    deduped = not created
 
     accepted_payload = _accepted_payload(
         trace_id=trace_id,

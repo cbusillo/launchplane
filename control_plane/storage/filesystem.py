@@ -47,6 +47,24 @@ class FilesystemRecordStore:
         )
         return record_path
 
+    def _create_model_if_absent(
+        self, record_type: str, record_id: str, model: BaseModel
+    ) -> bool:
+        record_path = self._record_path(record_type, record_id)
+        record_path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            with record_path.open("x", encoding="utf-8") as record_file:
+                record_file.write(
+                    json.dumps(
+                        model.model_dump(mode="json", exclude_none=True),
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
+        except FileExistsError:
+            return False
+        return True
+
     def _read_model(
         self, model_type: type[BaseModel], record_type: str, record_id: str
     ) -> BaseModel:
@@ -121,6 +139,18 @@ class FilesystemRecordStore:
 
     def write_every_code_work_request_record(self, record: EveryCodeWorkRequestRecord) -> Path:
         return self._write_model("launchplane_every_code_work_requests", record.request_id, record)
+
+    def create_every_code_work_request_record_if_absent(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> tuple[EveryCodeWorkRequestRecord, bool]:
+        created = self._create_model_if_absent(
+            "launchplane_every_code_work_requests",
+            record.request_id,
+            record,
+        )
+        if created:
+            return record, True
+        return self.read_every_code_work_request_record(record.request_id), False
 
     def read_every_code_work_request_record(self, request_id: str) -> EveryCodeWorkRequestRecord:
         return EveryCodeWorkRequestRecord.model_validate(
