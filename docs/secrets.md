@@ -58,6 +58,9 @@ title: Secrets
   when the service API is missing; add the service boundary first so the
   deployed runtime resolves DB-backed target authority and records sanitized
   audit evidence.
+- Live target runtime sync uses `POST /v1/live-target-runtime/apply` or the
+  `live-target-runtime.yml` workflow wrapper. Dry-run and apply both evaluate
+  runtime key-safety policy before returning sanitized key/count evidence.
 - Gates fail closed when a required binding is missing, disabled, ambiguous,
   unclassified, or scoped outside the target context/instance. A target with an
   unknown environment class also fails closed.

@@ -673,6 +673,22 @@ jobs:
             generic_web_prod_promotion.execute \
             deploy:syo-prod-promotion-execute-grant \
             syo-prod-promotion-execute
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            live-target-runtime.yml \
+            sellyouroutboard \
+            sellyouroutboard \
+            live_target_runtime.plan \
+            deploy:syo-live-target-runtime-plan-grant \
+            syo-live-target-runtime-plan
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            live-target-runtime.yml \
+            sellyouroutboard \
+            sellyouroutboard \
+            live_target_runtime.apply \
+            deploy:syo-live-target-runtime-apply-grant \
+            syo-live-target-runtime-apply
           post_syo_preview_grants \
             sellyouroutboard-testing \
             legacy-context

@@ -446,6 +446,12 @@ Current derived-state behavior:
   compatibility/local operator surface only: do not use it for shared or
   production live changes from a local checkout. Use a deployed service API or
   add one before applying live target runtime changes.
+- `POST /v1/live-target-runtime/apply` is the deployed service equivalent for
+  shared and production live changes. Use `mode: "dry-run"` first, confirm the
+  returned `changed_keys` are expected, then use `mode: "apply"` through an
+  authorized workflow or operator API caller. The `live-target-runtime.yml`
+  workflow wraps this route with GitHub OIDC and uploads the sanitized response
+  artifact.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
 - Product repos and GitHub issues must not contain product secret values. Put
