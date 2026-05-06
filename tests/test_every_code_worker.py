@@ -1030,7 +1030,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 "--repo",
                 "cbusillo/sellyouroutboard",
                 "--add-label",
-                "launchplane-preview",
+                "preview",
             ),
             runner.calls,
         )
