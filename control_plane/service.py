@@ -2450,14 +2450,33 @@ def _handle_every_code_pr_feedback_webhook(
         )
 
     every_code_store = _every_code_work_request_store(record_store)
-    matched_record: EveryCodeWorkRequestRecord | None = None
-    for record in every_code_store.list_every_code_work_request_records(
+    matched_record = _find_every_code_work_request_for_pull_request(
+        every_code_store,
         repository=repository,
-        limit=100,
-    ):
-        if record.result_pr_url.strip() == pr_url:
-            matched_record = record
-            break
+        pr_url=pr_url,
+    )
+    if matched_record is None:
+        pull_request_payload = _github_webhook_mapping(payload, "pull_request")
+        linked_issue_numbers = (
+            _github_issue_numbers_referenced_by_pull_request(
+                pull_request_payload,
+                repository=repository,
+            )
+            if pull_request_payload is not None
+            else frozenset()
+        )
+        for record in _iter_every_code_work_request_records(
+            every_code_store,
+            repository=repository,
+        ):
+            if _every_code_issue_url_matches_pull_request(
+                issue_url=record.issue_url,
+                repository=repository,
+                pr_url=pr_url,
+                linked_issue_numbers=linked_issue_numbers,
+            ):
+                matched_record = record
+                break
     if matched_record is None:
         return _json_response(
             start_response=start_response,
