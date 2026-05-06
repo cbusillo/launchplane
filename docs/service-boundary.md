@@ -554,6 +554,14 @@ Browser verification uses the preview URL returned by the driver plus
 allow-listed app maintenance actions keyed by preview slug when it needs remote
 owner-admin setup/cleanup.
 
+VeriReel app maintenance accepts an optional `intent` alongside the allow-listed
+action. Smoke/E2E helpers should set the narrow intent, such as
+`remote-e2e-grant-sponsored`, `remote-e2e-delete-user`,
+`owner-route-promote-owner`, or `owner-route-delete-user`, so Launchplane can
+validate the requested action against the expected stable or preview lane before
+it touches Dokploy schedules. The legacy action-only payload remains accepted
+for compatibility, but new product calls should prefer the intent-based contract.
+
 The first Odoo driver cuts are intentionally narrow as well: Launchplane owns the
 artifact publish handoff, remote post-deploy data-workflow trigger, and prod
 rollback for stable Odoo compose targets. Artifact publish resolves DB-backed
