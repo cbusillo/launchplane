@@ -121,10 +121,14 @@ Plans state.
 graph snapshot for the same authorization boundary. It composes product
 overviews and Every Code work-request records into the typed snapshot contract.
 When a caller-owned planning ingestion provider is configured, the route can
-overlay compact GitHub/Code Plans facts such as Focus, Manager, Finish Line,
-dependency counts, subissue counts, updated time, labels, and check/deploy
-state. The route reports product, work-request, and planning-fact source counts,
-does not fetch or store GitHub issue bodies, and writes no state.
+overlay compact GitHub/Code Plans facts. The first provider is opt-in via
+`LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
+`LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, reads `gh project item-list --format
+json`, and supplies Project Focus, Manager, Finish Line, labels, status, updated
+time, and PR-vs-issue type. The route reports product, work-request, and
+planning-fact source counts, does not fetch or store GitHub issue bodies, and
+writes no state. A configured Project read failure returns an error instead of a
+silently incomplete snapshot.
 
 ## Host Assumption
 

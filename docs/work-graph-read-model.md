@@ -70,10 +70,25 @@ current product overviews with durable Every Code work-request records,
 classifies product repositories as `managed_runtime`, classifies other request
 repositories as `active_awareness`, and returns source counts with the snapshot.
 The route can also apply compact planning facts from a caller-owned ingestion
-provider, such as Focus, Manager, Finish Line, labels, dependency counts,
-subissue counts, updated time, and check/deploy state. Empty planning facts do
-not erase Every Code work-request facts. It does not fetch or store GitHub issue
-bodies and does not write new records.
+provider. The first provider reads GitHub Project item fields through the
+GitHub CLI when `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
+`LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER` are configured. It supplies Focus,
+Manager, Finish Line, labels, item status, updated time, and PR-vs-issue type;
+the broader overlay contract also leaves room for dependency counts, subissue
+counts, and check/deploy state as later GitHub sources are added. Empty planning
+facts do not erase Every Code work-request facts. The snapshot route does not
+fetch or store GitHub issue bodies and does not write new records.
+
+The GitHub Project provider shells out to:
+
+```sh
+gh project item-list <number> --owner <owner> --format json --limit <limit>
+```
+
+The service account running Launchplane must already have GitHub CLI credentials
+with the `project` scope, for example from `gh auth refresh -s project`. A
+configured Project that cannot be read fails the snapshot request instead of
+silently dropping Project fields.
 
 ## Boundary
 
