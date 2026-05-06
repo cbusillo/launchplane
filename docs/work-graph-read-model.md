@@ -74,16 +74,25 @@ provider. The first provider reads GitHub Project item fields through the
 GitHub CLI when `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
 `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER` are configured. It supplies Focus,
 Manager, Finish Line, labels, item status, updated time, and PR-vs-issue type;
-the broader overlay contract also leaves room for dependency counts, subissue
-counts, and check/deploy state as later GitHub sources are added. Empty planning
-facts do not erase Every Code work-request facts. The snapshot route does not
-fetch or store GitHub issue bodies and does not write new records.
+then it uses bounded GitHub issue and pull-request reads to supply blocked-by,
+blocking, subissue, and PR check state. Empty planning facts do not erase Every
+Code work-request facts. The snapshot route does not fetch or store GitHub issue
+bodies and does not write new records.
 
 The GitHub Project provider shells out to:
 
 ```sh
 gh project item-list <number> --owner <owner> --format json --limit <limit>
+gh api repos/<owner>/<repo>/issues/<number>/dependencies/blocked_by
+gh api repos/<owner>/<repo>/issues/<number>/dependencies/blocking
+gh api repos/<owner>/<repo>/issues/<number>/sub_issues
+gh pr checks <number> --repo <owner>/<repo> --json bucket,state,name,workflow,completedAt,startedAt
 ```
+
+`LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT` bounds the per-snapshot dependency,
+subissue, and check fan-out after Project items are loaded. Items beyond that
+limit still receive Project field facts, but their live signal fields remain
+unknown until a later snapshot includes them inside the bound.
 
 The service account running Launchplane must already have GitHub CLI credentials
 with the `project` scope, for example from `gh auth refresh -s project`. A

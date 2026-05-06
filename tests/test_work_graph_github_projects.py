@@ -19,13 +19,31 @@ from control_plane.work_graph_github_projects import (
 def _write_fake_gh(
     directory: Path, *, stdout: object, exit_code: int = 0, stderr: str = ""
 ) -> Path:
+    return _write_fake_gh_sequence(
+        directory, responses=[{"stdout": stdout, "exit_code": exit_code, "stderr": stderr}]
+    )
+
+
+def _write_fake_gh_sequence(directory: Path, *, responses: list[dict[str, object]]) -> Path:
     script = directory / "gh"
+    responses_path = directory / "responses.jsonl"
+    responses_path.write_text("\n".join(json.dumps(response) for response in responses) + "\n")
     script.write_text(
         "#!/bin/sh\n"
-        'printf \'%s\n\' "$@" > "$FAKE_GH_ARGS"\n'
-        f"printf '%s' {json.dumps(json.dumps(stdout))}\n"
-        + (f"printf '%s' {json.dumps(stderr)} >&2\n" if stderr else "")
-        + f"exit {exit_code}\n"
+        'printf \'%s\n\' "$@" >> "$FAKE_GH_ARGS"\n'
+        f"responses_path={json.dumps(str(responses_path))}\n"
+        'if [ -s "$responses_path" ]; then\n'
+        "  response=$(sed -n '1p' \"$responses_path\")\n"
+        '  tail -n +2 "$responses_path" > "$responses_path.tmp"\n'
+        '  mv "$responses_path.tmp" "$responses_path"\n'
+        "else\n"
+        '  response=\'{"stdout":[],"exit_code":0,"stderr":""}\'\n'
+        "fi\n"
+        "printf '%s' \"$response\" | jq -c '.stdout'\n"
+        "stderr=$(printf '%s' \"$response\" | jq -r '.stderr // \"\"')\n"
+        'if [ -n "$stderr" ]; then printf \'%s\' "$stderr" >&2; fi\n'
+        "exit_code=$(printf '%s' \"$response\" | jq -r '.exit_code // 0')\n"
+        'exit "$exit_code"\n'
     )
     script.chmod(script.stat().st_mode | stat.S_IXUSR)
     return script
@@ -110,6 +128,128 @@ class GitHubProjectPlanningFactsTests(unittest.TestCase):
         self.assertEqual(facts[1].state, "closed")
         self.assertEqual(recorded_args, ["project", "item-list", "4", "--owner", "cbusillo"])
 
+    def test_project_facts_include_dependency_subissue_and_pr_check_signals(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            directory = Path(temporary_directory_name)
+            args_file = directory / "args.txt"
+            fake_gh = _write_fake_gh_sequence(
+                directory,
+                responses=[
+                    {
+                        "stdout": {
+                            "items": [
+                                {
+                                    "content": {
+                                        "number": 302,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "Read work graph Project fields",
+                                        "type": "PullRequest",
+                                        "url": "https://github.com/cbusillo/launchplane/pull/302",
+                                    },
+                                    "focus": "Next",
+                                    "status": "Ready",
+                                }
+                            ]
+                        }
+                    },
+                    {"stdout": [{"number": 190}]},
+                    {"stdout": [{"number": 153}, {"number": 164}]},
+                    {"stdout": [{"state": "closed"}, {"state": "open"}]},
+                    {
+                        "stdout": [
+                            {"bucket": "pass", "name": "test"},
+                            {"bucket": "pending", "name": "deploy"},
+                        ]
+                    },
+                ],
+            )
+            previous_args = os.environ.get("FAKE_GH_ARGS")
+            os.environ["FAKE_GH_ARGS"] = str(args_file)
+            try:
+                facts = build_github_project_planning_facts(
+                    GitHubProjectPlanningFactsConfig(
+                        owner="cbusillo",
+                        project_number=4,
+                        signal_limit=5,
+                        gh_binary=str(fake_gh),
+                    )
+                )
+            finally:
+                if previous_args is None:
+                    os.environ.pop("FAKE_GH_ARGS", None)
+                else:
+                    os.environ["FAKE_GH_ARGS"] = previous_args
+            recorded_args = args_file.read_text().splitlines()
+
+        self.assertEqual(len(facts), 1)
+        self.assertEqual(facts[0].blocked_by, 1)
+        self.assertEqual(facts[0].blocking, 2)
+        self.assertEqual(facts[0].subissues_total, 2)
+        self.assertEqual(facts[0].subissues_completed, 1)
+        self.assertEqual(facts[0].check_state, "pending")
+        self.assertIn("repos/cbusillo/launchplane/issues/302/sub_issues", recorded_args)
+        self.assertIn("pr", recorded_args)
+        self.assertIn("checks", recorded_args)
+
+    def test_project_signal_limit_bounds_extra_github_reads(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            directory = Path(temporary_directory_name)
+            args_file = directory / "args.txt"
+            fake_gh = _write_fake_gh_sequence(
+                directory,
+                responses=[
+                    {
+                        "stdout": {
+                            "items": [
+                                {
+                                    "content": {
+                                        "number": 190,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "First",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/190",
+                                    }
+                                },
+                                {
+                                    "content": {
+                                        "number": 191,
+                                        "repository": "cbusillo/launchplane",
+                                        "title": "Second",
+                                        "type": "Issue",
+                                        "url": "https://github.com/cbusillo/launchplane/issues/191",
+                                    }
+                                },
+                            ]
+                        }
+                    },
+                    {"stdout": []},
+                    {"stdout": []},
+                    {"stdout": []},
+                ],
+            )
+            previous_args = os.environ.get("FAKE_GH_ARGS")
+            os.environ["FAKE_GH_ARGS"] = str(args_file)
+            try:
+                facts = build_github_project_planning_facts(
+                    GitHubProjectPlanningFactsConfig(
+                        owner="cbusillo",
+                        project_number=4,
+                        signal_limit=1,
+                        gh_binary=str(fake_gh),
+                    )
+                )
+            finally:
+                if previous_args is None:
+                    os.environ.pop("FAKE_GH_ARGS", None)
+                else:
+                    os.environ["FAKE_GH_ARGS"] = previous_args
+            recorded_args = args_file.read_text().splitlines()
+
+        self.assertEqual(len(facts), 2)
+        self.assertEqual(facts[0].blocked_by, 0)
+        self.assertIsNone(facts[1].blocked_by)
+        self.assertEqual(recorded_args.count("api"), 3)
+
     def test_project_item_repository_can_be_derived_from_project_field_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             directory = Path(temporary_directory_name)
@@ -159,6 +299,19 @@ class GitHubProjectPlanningFactsTests(unittest.TestCase):
             load_github_project_planning_facts_config_from_env(
                 {"LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "cbusillo"}
             )
+
+    def test_env_config_accepts_signal_limit(self) -> None:
+        config = load_github_project_planning_facts_config_from_env(
+            {
+                "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "cbusillo",
+                "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
+                "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "12",
+            }
+        )
+
+        self.assertIsNotNone(config)
+        assert config is not None
+        self.assertEqual(config.signal_limit, 12)
 
     def test_failed_gh_call_is_operator_visible(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
