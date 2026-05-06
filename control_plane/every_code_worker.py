@@ -312,6 +312,54 @@ def every_code_tmux_session_name(request_id: str) -> str:
     return f"every-code-{normalized or 'request'}"[:80]
 
 
+def every_code_claim_comment_body(
+    record: EveryCodeWorkRequestRecord, *, host: str, session_name: str
+) -> str:
+    return (
+        "<!-- every-code-claim -->\n"
+        "Every Code is working on this issue from "
+        f"`{host.strip() or 'this host'}`.\n\n"
+        f"Session: `{session_name}`\n"
+        f"Launchplane request: `{record.request_id}`"
+    )
+
+
+def _post_every_code_claim_comment(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    host: str,
+    session_name: str,
+    runner: Runner,
+) -> str:
+    repository = record.repository.strip()
+    if not repository or record.issue_number <= 0:
+        return ""
+    body = every_code_claim_comment_body(
+        record,
+        host=host,
+        session_name=session_name,
+    )
+    try:
+        result = runner(
+            (
+                "gh",
+                "issue",
+                "comment",
+                str(record.issue_number),
+                "--repo",
+                repository,
+                "--body",
+                body,
+            )
+        )
+    except OSError as exc:
+        return f"Could not post GitHub working comment: {exc}"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh issue comment failed"
+        return f"Could not post GitHub working comment: {detail}"
+    return ""
+
+
 def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
     prompt = (
         f"Work on {record.repository} issue #{record.issue_number}: {record.issue_title}. "
@@ -509,13 +557,26 @@ def run_every_code_worker_once(
                 checkout_root=resolved_checkout_root,
             )
 
+    claim_comment_warning = _post_every_code_claim_comment(
+        record=claimed_record,
+        host=normalized_host,
+        session_name=session_name,
+        runner=run,
+    )
     running_record = apply_every_code_work_request_status(
         record_store.read_every_code_work_request_record(claimed_record.request_id),
         EveryCodeWorkRequestStatusUpdate(
             state="running",
             host=normalized_host,
             updated_at=utc_now_timestamp(),
-            result_summary=f"Visible tmux session: {session_name}",
+            result_summary="; ".join(
+                part
+                for part in (
+                    f"Visible tmux session: {session_name}",
+                    claim_comment_warning,
+                )
+                if part
+            ),
         ),
     )
     record_store.write_every_code_work_request_record(running_record)
