@@ -59,6 +59,8 @@ VeriReel product paths:
   - `POST /v1/every-code/work-requests/create`
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/status`
+- work graph chooser route:
+  - `POST /v1/work-graph/rank`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
@@ -107,6 +109,12 @@ queues work for the `every-code` label. Other signed events, actions, or labels
 return `202` with `skipped: true`. Matching deliveries create or return the
 durable Every Code work request and include `deduped` plus the delivery id in
 the response.
+
+`POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
+returns the queue payload under `result.queue`. The route requires the
+`work_graph.rank` action for product/context `launchplane`, performs no storage
+writes, and does not make Launchplane authoritative for copied GitHub or Code
+Plans state.
 
 ## Host Assumption
 
