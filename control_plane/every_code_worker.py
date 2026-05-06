@@ -363,7 +363,13 @@ def _post_every_code_claim_comment(
 def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
     prompt = (
         f"Work on {record.repository} issue #{record.issue_number}: {record.issue_title}. "
-        f"Issue URL: {record.issue_url}. Launchplane request: {record.request_id}."
+        f"Issue URL: {record.issue_url}. Launchplane request: {record.request_id}. "
+        "Open a pull request for the change. If the PR fully resolves the issue, "
+        f"include `Closes #{record.issue_number}` or `Fixes #{record.issue_number}` "
+        "in the PR body so GitHub closes the issue when the PR merges. Use "
+        "`Refs` only when the PR is partial or still needs reporter validation. "
+        "When the PR is open and your checks are complete, let the session exit "
+        "so Launchplane can mark this request finished."
     )
     return "code " + shlex.quote(prompt)
 

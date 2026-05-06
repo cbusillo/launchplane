@@ -201,6 +201,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertIn("https://github.com/cbusillo/code/issues/123", command)
         self.assertIn("every-code-cbusillo-code-123-test", command)
+        self.assertIn("Closes #123", command)
+        self.assertIn("Use `Refs` only", command)
+        self.assertIn("let the session exit", command)
 
     def test_claim_comment_body_marks_issue_as_in_progress(self) -> None:
         body = every_code_claim_comment_body(
