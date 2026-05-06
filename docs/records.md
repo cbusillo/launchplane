@@ -554,6 +554,13 @@ state/
   `uv run launchplane every-code stop`. The supervisor writes a pid file and log
   under `state/every-code-worker/` by default while the worker-created tmux
   sessions remain visible and independently attachable.
+- For a remote Launchplane database, run the Mac worker through the service API
+  instead of sharing DB credentials with the local host. Configure the service
+  and worker with the same `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`, then start the
+  worker with `uv run launchplane every-code start --service-url https://...`.
+  The foreground `run`, `run-once`, and `finish` commands support the same
+  `--service-url` mode. Direct `--database-url` and file-backed state remain
+  local/dev fallbacks.
 - Missed or manually inspected issue labels can be reconciled without polling by
   running `uv run launchplane every-code reconcile-issue` with the known issue
   repository, number, URL, title, and current labels. Reconciliation creates the

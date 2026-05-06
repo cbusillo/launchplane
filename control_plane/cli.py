@@ -98,6 +98,8 @@ from control_plane.contracts.work_graph_read_model import (
 )
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.every_code_worker import (
+    EveryCodeWorkerApiStore,
+    EveryCodeWorkerStore,
     build_every_code_worker_daemon_spec,
     every_code_worker_daemon_status,
     finish_every_code_work_request,
@@ -188,6 +190,7 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
     "OPENUPGRADE_ADDON_REPOSITORY",
 )
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
+_EVERY_CODE_WORKER_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN"
 _MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_TOML",
@@ -9546,6 +9549,17 @@ def work_graph_rank(snapshot_file: Path, limit: int) -> None:
     help="Optional Postgres connection string for Launchplane work-request records.",
 )
 @click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service base URL for API-backed worker mode.",
+)
+@click.option(
+    "--worker-token-env",
+    default=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the Every Code worker token.",
+)
+@click.option(
     "--state-dir",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
     default=Path("state"),
@@ -9575,6 +9589,8 @@ def work_graph_rank(snapshot_file: Path, limit: int) -> None:
 @click.option("--tmux-binary", default="tmux", show_default=True)
 def every_code_run_once(
     database_url: str,
+    service_url: str,
+    worker_token_env: str,
     state_dir: Path,
     host: str,
     workspace_root: Path,
@@ -9584,7 +9600,12 @@ def every_code_run_once(
     tmux_binary: str,
 ) -> None:
     resolved_host = host.strip() or os.uname().nodename
-    record_store = _store(state_dir=state_dir, database_url=database_url)
+    record_store = _every_code_worker_store(
+        state_dir=state_dir,
+        database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
+    )
     try:
         result = run_every_code_worker_once(
             record_store=record_store,
@@ -9595,13 +9616,40 @@ def every_code_run_once(
             command_template=command_template,
             state_dir=state_dir,
             database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
             tmux_binary=tmux_binary,
         )
     finally:
-        close = getattr(record_store, "close", None)
-        if callable(close):
-            close()
+        _close_store(record_store)
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+def _every_code_worker_store(
+    *,
+    state_dir: Path,
+    database_url: str,
+    service_url: str,
+    worker_token_env: str,
+) -> EveryCodeWorkerStore:
+    if service_url.strip():
+        token_env_key = worker_token_env.strip() or _EVERY_CODE_WORKER_TOKEN_ENV_KEY
+        resolved_token = os.environ.get(token_env_key, "").strip()
+        if not resolved_token:
+            raise click.ClickException(
+                f"{token_env_key} is required when --service-url is set."
+            )
+        return EveryCodeWorkerApiStore(
+            service_url=service_url.strip(),
+            worker_token=resolved_token,
+        )
+    return cast(EveryCodeWorkerStore, _store(state_dir=state_dir, database_url=database_url))
+
+
+def _close_store(record_store: object) -> None:
+    close = getattr(record_store, "close", None)
+    if callable(close):
+        close()
 
 
 @every_code.command("run")
@@ -9611,6 +9659,17 @@ def every_code_run_once(
     default="",
     show_default=False,
     help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service base URL for API-backed worker mode.",
+)
+@click.option(
+    "--worker-token-env",
+    default=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the Every Code worker token.",
 )
 @click.option(
     "--state-dir",
@@ -9656,6 +9715,8 @@ def every_code_run_once(
 )
 def every_code_run(
     database_url: str,
+    service_url: str,
+    worker_token_env: str,
     state_dir: Path,
     host: str,
     workspace_root: Path,
@@ -9667,7 +9728,12 @@ def every_code_run(
     max_iterations: int,
 ) -> None:
     resolved_host = host.strip() or os.uname().nodename
-    record_store = _store(state_dir=state_dir, database_url=database_url)
+    record_store = _every_code_worker_store(
+        state_dir=state_dir,
+        database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
+    )
     try:
         result = run_every_code_worker_loop(
             record_store=record_store,
@@ -9678,6 +9744,8 @@ def every_code_run(
             command_template=command_template,
             state_dir=state_dir,
             database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
             tmux_binary=tmux_binary,
             interval_seconds=interval_seconds,
             max_iterations=max_iterations,
@@ -9685,9 +9753,7 @@ def every_code_run(
     except KeyboardInterrupt:
         raise click.ClickException("Every Code worker stopped by interrupt.") from None
     finally:
-        close = getattr(record_store, "close", None)
-        if callable(close):
-            close()
+        _close_store(record_store)
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
 
 
@@ -9698,6 +9764,17 @@ def every_code_run(
     default="",
     show_default=False,
     help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service base URL for API-backed worker mode.",
+)
+@click.option(
+    "--worker-token-env",
+    default=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the Every Code worker token.",
 )
 @click.option(
     "--state-dir",
@@ -9736,6 +9813,8 @@ def every_code_run(
 )
 def every_code_start(
     database_url: str,
+    service_url: str,
+    worker_token_env: str,
     state_dir: Path,
     host: str,
     workspace_root: Path,
@@ -9745,9 +9824,17 @@ def every_code_start(
     tmux_binary: str,
     interval_seconds: float,
 ) -> None:
+    if service_url.strip():
+        token_env_key = worker_token_env.strip() or _EVERY_CODE_WORKER_TOKEN_ENV_KEY
+        if not os.environ.get(token_env_key, "").strip():
+            raise click.ClickException(
+                f"{token_env_key} is required when --service-url is set."
+            )
     spec = build_every_code_worker_daemon_spec(
         state_dir=state_dir,
         database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
         host=host.strip() or os.uname().nodename,
         workspace_root=workspace_root,
         checkout_root=checkout_root,
@@ -9797,6 +9884,17 @@ def every_code_status(state_dir: Path) -> None:
     help="Optional Postgres connection string for Launchplane work-request records.",
 )
 @click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service base URL for API-backed worker mode.",
+)
+@click.option(
+    "--worker-token-env",
+    default=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the Every Code worker token.",
+)
+@click.option(
     "--state-dir",
     type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
     default=Path("state"),
@@ -9810,6 +9908,8 @@ def every_code_status(state_dir: Path) -> None:
 @click.option("--result-summary", default="", help="Optional terminal result summary.")
 def every_code_finish(
     database_url: str,
+    service_url: str,
+    worker_token_env: str,
     state_dir: Path,
     request_id: str,
     host: str,
@@ -9818,7 +9918,12 @@ def every_code_finish(
     result_summary: str,
 ) -> None:
     resolved_host = host.strip() or os.uname().nodename
-    record_store = _store(state_dir=state_dir, database_url=database_url)
+    record_store = _every_code_worker_store(
+        state_dir=state_dir,
+        database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
+    )
     try:
         result = finish_every_code_work_request(
             record_store=record_store,
@@ -9829,9 +9934,7 @@ def every_code_finish(
             result_summary=result_summary,
         )
     finally:
-        close = getattr(record_store, "close", None)
-        if callable(close):
-            close()
+        _close_store(record_store)
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
 
 

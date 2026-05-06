@@ -1,9 +1,11 @@
 import subprocess
 import unittest
 from collections.abc import Sequence
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
 import signal
+import threading
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
@@ -12,6 +14,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.every_code_worker import (
+    EveryCodeWorkerApiStore,
     build_every_code_worker_daemon_spec,
     build_every_code_session_command,
     default_every_code_command,
@@ -59,7 +62,129 @@ class _Process:
         self.pid = pid
 
 
+class _EveryCodeApiHandler(BaseHTTPRequestHandler):
+    store: FilesystemRecordStore
+    token = "worker-token"
+
+    def log_message(self, format: str, *args: object) -> None:
+        pass
+
+    def do_GET(self) -> None:
+        if self.headers.get("Authorization") != f"Bearer {self.token}":
+            self._write_json(401, {"status": "rejected"})
+            return
+        if self.path.startswith("/v1/every-code/work-requests?"):
+            records = self.store.list_every_code_work_request_records(state="queued", limit=1)
+            self._write_json(
+                200,
+                {"status": "ok", "requests": [record.model_dump(mode="json") for record in records]},
+            )
+            return
+        request_id = self.path.rsplit("/", 1)[-1]
+        record = self.store.read_every_code_work_request_record(request_id)
+        self._write_json(200, {"status": "ok", "request": record.model_dump(mode="json")})
+
+    def do_POST(self) -> None:
+        if self.headers.get("Authorization") != f"Bearer {self.token}":
+            self._write_json(401, {"status": "rejected"})
+            return
+        content_length = int(self.headers.get("Content-Length", "0"))
+        payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        if self.path == "/v1/every-code/work-requests/claim":
+            record = self.store.claim_every_code_work_request_record(
+                request_id=str(payload["request_id"]),
+                host=str(payload["host"]),
+                claimed_at="2026-05-06T00:00:00Z",
+            )
+            if record is None:
+                self._write_json(409, {"status": "rejected"})
+                return
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "records": {"request_id": record.request_id, "state": record.state},
+                    "result": {"request": record.model_dump(mode="json")},
+                },
+            )
+            return
+        record = self.store.read_every_code_work_request_record(str(payload["request_id"]))
+        updated_record = record.model_copy(
+            update={
+                "state": payload["state"],
+                "updated_at": payload["updated_at"],
+                "started_at": payload["updated_at"],
+                "finished_at": payload["updated_at"] if payload["state"] != "running" else "",
+                "result_pr_url": payload.get("result_pr_url", ""),
+                "result_summary": payload.get("result_summary", ""),
+                "error_message": payload.get("error_message", ""),
+            }
+        )
+        self.store.write_every_code_work_request_record(updated_record)
+        self._write_json(
+            202,
+            {
+                "status": "accepted",
+                "records": {
+                    "request_id": updated_record.request_id,
+                    "state": updated_record.state,
+                },
+                "result": {"request": updated_record.model_dump(mode="json")},
+            },
+        )
+
+    def _write_json(self, status_code: int, payload: dict[str, object]) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(status_code)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
 class EveryCodeWorkerTests(unittest.TestCase):
+    def test_api_store_lists_claims_and_updates_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(
+                state_dir=temporary_root / "state"
+            )
+            _EveryCodeApiHandler.store.write_every_code_work_request_record(_queued_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                records = store.list_every_code_work_request_records(state="queued", limit=1)
+                claimed_record = store.claim_every_code_work_request_record(
+                    request_id=records[0].request_id,
+                    host="Chris-Studio",
+                    claimed_at="ignored-by-service",
+                )
+                assert claimed_record is not None
+                running_record = claimed_record.model_copy(
+                    update={
+                        "state": "running",
+                        "started_at": "2026-05-06T00:01:00Z",
+                        "updated_at": "2026-05-06T00:01:00Z",
+                        "result_summary": "Visible tmux session: every-code-test",
+                    }
+                )
+                store.write_every_code_work_request_record(running_record)
+                read_record = store.read_every_code_work_request_record(records[0].request_id)
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertEqual(len(records), 1)
+        self.assertEqual(claimed_record.claimed_by_host, "Chris-Studio")
+        self.assertEqual(read_record.state, "running")
+        self.assertEqual(read_record.result_summary, "Visible tmux session: every-code-test")
+
     def test_session_name_is_stable_and_tmux_safe(self) -> None:
         session_name = every_code_tmux_session_name("every code/cbusillo/code#123 !")
 
@@ -77,10 +202,13 @@ class EveryCodeWorkerTests(unittest.TestCase):
             command="code issue",
             state_dir=Path("state"),
             host="Chris-Studio",
+            service_url="https://launchplane.example",
         )
 
         self.assertIn("code issue", command)
         self.assertIn("every-code finish", command)
+        self.assertIn("--service-url https://launchplane.example", command)
+        self.assertIn("--worker-token-env LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", command)
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
         self.assertIn("--exit-code $status", command)
 
@@ -262,12 +390,38 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(payload["empty"], 1)
         self.assertEqual(payload["stopped_reason"], "max_iterations")
 
+    def test_cli_api_mode_requires_worker_token_env(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            result = CliRunner().invoke(
+                main,
+                [
+                    "every-code",
+                    "run-once",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--worker-token-env",
+                    "MISSING_EVERY_CODE_TOKEN",
+                    "--state-dir",
+                    str(temporary_root / "state"),
+                    "--workspace-root",
+                    str(temporary_root / "Developer"),
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn(
+            "MISSING_EVERY_CODE_TOKEN is required when --service-url is set",
+            result.output,
+        )
+
     def test_daemon_spec_builds_worker_run_command(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             spec = build_every_code_worker_daemon_spec(
                 state_dir=temporary_root / "state",
                 database_url="postgres://example",
+                service_url="https://launchplane.example",
                 host="Chris-Studio",
                 workspace_root=temporary_root / "Developer",
                 repository="cbusillo/code",
@@ -279,6 +433,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("run", spec.command)
         self.assertIn("--database-url", spec.command)
         self.assertIn("postgres://example", spec.command)
+        self.assertIn("--service-url", spec.command)
+        self.assertIn("https://launchplane.example", spec.command)
         self.assertIn("cbusillo/code", spec.command)
 
     def test_start_daemon_writes_pid_file_and_log_path(self) -> None:

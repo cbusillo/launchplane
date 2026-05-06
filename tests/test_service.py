@@ -1269,6 +1269,117 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "https://github.com/cbusillo/code/pull/26",
         )
 
+    def test_every_code_worker_token_can_read_claim_and_update_requests(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.write"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/code",
+                    "issue_number": 123,
+                    "issue_url": "https://github.com/cbusillo/code/issues/123",
+                    "issue_title": "Wire local automation",
+                    "trigger_label": "every-code",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-05T22:00:00Z",
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            list_status, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests",
+                query_string="state=queued",
+                authorization="Bearer worker-token",
+            )
+            claim_status, claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+            status_status, status_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "updated_at": "2026-05-05T22:05:00Z",
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(list_status, 200)
+        self.assertEqual(list_payload["requests"][0]["request_id"], request_id)
+        self.assertEqual(claim_status, 202)
+        self.assertEqual(claim_payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
+        self.assertEqual(status_status, 202)
+        self.assertEqual(status_payload["result"]["request"]["state"], "done")
+
+    def test_every_code_worker_token_is_required_for_unauthenticated_request(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests",
+                authorization="",
+            )
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
     def test_every_code_work_request_create_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
