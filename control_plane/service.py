@@ -8,6 +8,7 @@ import json
 import logging
 import mimetypes
 import os
+import re
 import secrets
 from socketserver import ThreadingMixIn
 import uuid
@@ -244,6 +245,14 @@ from control_plane.workflows.verireel_preview_driver import (
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
+_GITHUB_CLOSING_REFERENCE_PATTERN = re.compile(
+    r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+([^\n\r]+)", re.IGNORECASE
+)
+_GITHUB_ISSUE_REFERENCE_PATTERN = re.compile(
+    r"https://github\.com/(?P<url_repository>[^/\s]+/[^/\s]+)/issues/(?P<url_number>\d+)"
+    r"|(?:(?P<repository>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)#|#)(?P<number>\d+)",
+    re.IGNORECASE,
+)
 _EVERY_CODE_TRIGGER_LABEL = "every-code"
 _WorkGraphPlanningFactsProvider = Callable[[], tuple[WorkGraphPlanningIssueFacts, ...]]
 
@@ -2157,8 +2166,14 @@ def _handle_every_code_pull_request_webhook(
     pull_request_payload = _github_webhook_mapping(payload, "pull_request")
     repository = _github_webhook_string(repository_payload, "full_name")
     pr_url = _github_webhook_string(pull_request_payload, "html_url")
-    pr_number_value = pull_request_payload.get("number") if pull_request_payload else None
-    pr_number = pr_number_value if isinstance(pr_number_value, int) else None
+    linked_issue_numbers = (
+        _github_issue_numbers_referenced_by_pull_request(
+            pull_request_payload,
+            repository=repository,
+        )
+        if pull_request_payload is not None
+        else frozenset()
+    )
     merged = bool(pull_request_payload.get("merged")) if pull_request_payload else False
     closed_at = _github_webhook_string(pull_request_payload, "closed_at") or _utc_now_timestamp()
     every_code_store = _every_code_work_request_store(record_store)
@@ -2208,7 +2223,7 @@ def _handle_every_code_pull_request_webhook(
                 issue_url=record.issue_url,
                 repository=repository,
                 pr_url=pr_url,
-                pr_number=pr_number,
+                linked_issue_numbers=linked_issue_numbers,
             ):
                 continue
             matched_record = record
@@ -2267,20 +2282,52 @@ def _every_code_issue_url_matches_pull_request(
     issue_url: str,
     repository: str,
     pr_url: str,
-    pr_number: int | None,
+    linked_issue_numbers: frozenset[int],
 ) -> bool:
-    normalized_issue_url = issue_url.strip().rstrip("/")
-    normalized_pr_url = pr_url.strip().rstrip("/")
+    normalized_issue_url = issue_url.strip().rstrip("/").lower()
+    normalized_pr_url = pr_url.strip().rstrip("/").lower()
     if not normalized_issue_url or not normalized_pr_url:
         return False
     if normalized_issue_url == normalized_pr_url:
         return True
-    if pr_number is None:
-        return False
-    normalized_repository = repository.strip().strip("/")
+    normalized_repository = repository.strip().strip("/").lower()
     if not normalized_repository:
         return False
-    return normalized_issue_url == f"https://github.com/{normalized_repository}/issues/{pr_number}"
+    return any(
+        normalized_issue_url == f"https://github.com/{normalized_repository}/issues/{issue_number}"
+        for issue_number in linked_issue_numbers
+    )
+
+
+def _github_issue_numbers_referenced_by_pull_request(
+    pull_request_payload: dict[str, object],
+    *,
+    repository: str,
+) -> frozenset[int]:
+    normalized_repository = repository.strip().strip("/").lower()
+    if not normalized_repository:
+        return frozenset()
+
+    issue_numbers: set[int] = set()
+    for field in ("title", "body"):
+        value = _github_webhook_string(pull_request_payload, field)
+        if not value:
+            continue
+        for closing_reference_match in _GITHUB_CLOSING_REFERENCE_PATTERN.finditer(value):
+            references = closing_reference_match.group(1)
+            for issue_reference_match in _GITHUB_ISSUE_REFERENCE_PATTERN.finditer(references):
+                reference_repository = (
+                    issue_reference_match.group("url_repository")
+                    or issue_reference_match.group("repository")
+                    or normalized_repository
+                ).lower()
+                if reference_repository != normalized_repository:
+                    continue
+                issue_number = issue_reference_match.group(
+                    "url_number"
+                ) or issue_reference_match.group("number")
+                issue_numbers.add(int(issue_number))
+    return frozenset(issue_numbers)
 
 
 def _find_every_code_work_request_for_pull_request(
