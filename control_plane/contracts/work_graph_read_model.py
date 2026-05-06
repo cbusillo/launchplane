@@ -4,6 +4,9 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.product_environment_read_model import ProductSiteOverview
+
 
 RepoClassification = Literal[
     "managed_runtime",
@@ -137,6 +140,42 @@ class WorkGraphQueue(BaseModel):
     hidden_count: int = Field(default=0, ge=0)
 
 
+def build_work_graph_snapshot_from_records(
+    *,
+    generated_at: str,
+    product_overviews: tuple[ProductSiteOverview, ...],
+    work_requests: tuple[EveryCodeWorkRequestRecord, ...],
+) -> WorkGraphSnapshot:
+    repo_snapshots: dict[str, WorkGraphRepoSnapshot] = {}
+    for product in product_overviews:
+        repository = product.repository.strip()
+        if not repository or "/" not in repository:
+            continue
+        repo_snapshots[repository.lower()] = WorkGraphRepoSnapshot(
+            repository=repository,
+            classification="managed_runtime",
+            product=product.product,
+            display_name=product.display_name or product.product,
+        )
+    for request in work_requests:
+        repository = request.repository.strip()
+        if not repository or "/" not in repository:
+            continue
+        repo_snapshots.setdefault(
+            repository.lower(),
+            WorkGraphRepoSnapshot(
+                repository=repository,
+                classification="active_awareness",
+                display_name=repository.rsplit("/", maxsplit=1)[-1],
+            ),
+        )
+    return WorkGraphSnapshot(
+        generated_at=generated_at,
+        repos=tuple(repo_snapshots.values()),
+        issues=tuple(_work_request_issue_snapshot(request) for request in work_requests),
+    )
+
+
 def build_work_graph_queue(snapshot: WorkGraphSnapshot, *, limit: int = 25) -> WorkGraphQueue:
     if limit < 1:
         raise ValueError("work graph queue limit must be positive")
@@ -156,6 +195,33 @@ def build_work_graph_queue(snapshot: WorkGraphSnapshot, *, limit: int = 25) -> W
         items=tuple(ranked_items[:limit]),
         hidden_count=hidden_count + max(0, len(ranked_items) - limit),
     )
+
+
+def _work_request_issue_snapshot(request: EveryCodeWorkRequestRecord) -> WorkGraphIssueSnapshot:
+    return WorkGraphIssueSnapshot(
+        repository=request.repository,
+        number=request.issue_number,
+        title=request.issue_title or f"Issue #{request.issue_number}",
+        url=request.issue_url,
+        state="closed" if request.state == "done" else "open",
+        focus=_work_request_focus(request),
+        manager=request.claimed_by_host or request.trigger_actor or "Code",
+        finish_line=request.result_summary,
+        labels=tuple(label for label in (request.trigger_label,) if label),
+        blocked_by=1 if request.state == "blocked" else 0,
+        updated_at=request.updated_at or request.queued_at,
+        check_state="failure" if request.state == "blocked" else "unknown",
+    )
+
+
+def _work_request_focus(request: EveryCodeWorkRequestRecord) -> WorkItemFocus:
+    if request.state == "blocked":
+        return "Waiting"
+    if request.state == "done":
+        return "Done"
+    if request.state in {"claimed", "running"}:
+        return "Now"
+    return "Next"
 
 
 def _build_queue_item(

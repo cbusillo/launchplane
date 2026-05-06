@@ -60,6 +60,7 @@ VeriReel product paths:
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/status`
 - work graph chooser route:
+  - `GET /v1/work-graph/snapshot`
   - `POST /v1/work-graph/rank`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
@@ -115,6 +116,12 @@ returns the queue payload under `result.queue`. The route requires the
 `work_graph.rank` action for product/context `launchplane`, performs no storage
 writes, and does not make Launchplane authoritative for copied GitHub or Code
 Plans state.
+
+`GET /v1/work-graph/snapshot` returns the current Launchplane-assembled work
+graph snapshot for the same authorization boundary. It composes product
+overviews and Every Code work-request records into the typed snapshot contract
+without fetching live GitHub issue bodies, copying Code Plans project fields, or
+writing new state.
 
 ## Host Assumption
 

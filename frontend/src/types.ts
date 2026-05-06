@@ -553,6 +553,16 @@ export interface WorkGraphSnapshot {
   issues: WorkGraphIssueSnapshot[];
 }
 
+export interface WorkGraphSnapshotPayload {
+  status: "ok";
+  trace_id: string;
+  snapshot: WorkGraphSnapshot;
+  source: {
+    product_count: number;
+    work_request_count: number;
+  };
+}
+
 export interface WorkGraphQueueItem {
   repository: string;
   repo_classification: WorkGraphRepoClassification;

@@ -9,9 +9,10 @@ Code Plans facts. It is a chooser surface, not a second planning database:
 GitHub issues, PRs, Projects, checks, and deployments remain the source of
 truth.
 
-The first slice accepts a typed snapshot and returns a ranked queue with compact
-recommendation reasons. Later service/UI slices can add live GitHub ingestion or
-cached snapshots behind the same queue contract.
+The first slices accept typed snapshots, assemble Launchplane-owned snapshots
+from existing product and Every Code records, and return ranked queues with
+compact recommendation reasons. Later service/UI slices can add live GitHub or
+Code Plans ingestion behind the same snapshot and queue contracts.
 
 ## Snapshot Contract
 
@@ -57,6 +58,19 @@ POST /v1/work-graph/rank
 The request body contains `snapshot` and optional `limit`. Launchplane returns
 the queue at `result.queue`, requires `work_graph.rank` authorization for
 product/context `launchplane`, and does not persist the supplied snapshot.
+
+Authenticated callers can also read the current Launchplane-assembled snapshot:
+
+```sh
+GET /v1/work-graph/snapshot
+```
+
+The snapshot route uses the same `work_graph.rank` authorization. It composes
+current product overviews with durable Every Code work-request records,
+classifies product repositories as `managed_runtime`, classifies other request
+repositories as `active_awareness`, and returns source counts with the snapshot.
+It does not fetch live GitHub issue bodies or Project fields and does not write
+new records.
 
 ## Boundary
 

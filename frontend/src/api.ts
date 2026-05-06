@@ -15,6 +15,7 @@ import type {
   ProductProfileListPayload,
   WorkGraphRankPayload,
   WorkGraphSnapshot,
+  WorkGraphSnapshotPayload,
 } from "./types";
 
 export class LaunchplaneApiError extends Error {
@@ -103,6 +104,10 @@ export function listEveryCodeWorkRequests(
   return requestJson<EveryCodeWorkRequestListPayload>(
     `/v1/every-code/work-requests?limit=${encodeURIComponent(String(limit))}`,
   );
+}
+
+export function readWorkGraphSnapshot(): Promise<WorkGraphSnapshotPayload> {
+  return requestJson<WorkGraphSnapshotPayload>("/v1/work-graph/snapshot");
 }
 
 export function rankWorkGraphSnapshot(

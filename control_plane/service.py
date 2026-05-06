@@ -80,6 +80,7 @@ from control_plane.contracts.promotion_record import (
 from control_plane.contracts.work_graph_read_model import (
     WorkGraphSnapshot,
     build_work_graph_queue,
+    build_work_graph_snapshot_from_records,
 )
 from control_plane.drivers.registry import (
     build_driver_context_view,
@@ -1681,6 +1682,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "operations.read", {"context": segments[2]}
     if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
         return "launchplane_service.read", {}
+    if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
+        return "work_graph.rank", {}
     if len(segments) == 2 and segments == ["v1", "product-profiles"]:
         return "product_profile.read", {}
     if (
@@ -3904,6 +3907,61 @@ def create_launchplane_service_app(
                             "state": state_filter,
                             "repository": repository_filter,
                             "requests": [record.model_dump(mode="json") for record in records],
+                        },
+                    )
+                if action == "work_graph.rank":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read the Launchplane work graph snapshot.",
+                                },
+                            },
+                        )
+
+                    def work_graph_product_action_allowed(
+                        requested_action: str, requested_product: str, requested_context: str
+                    ) -> bool:
+                        return authz_policy.allows(
+                            identity=identity,
+                            action=requested_action,
+                            product=requested_product,
+                            context=requested_context,
+                        )
+
+                    work_requests = _every_code_work_request_store(
+                        record_store
+                    ).list_every_code_work_request_records(limit=100)
+                    product_overviews = build_product_site_overviews(
+                        record_store=record_store,
+                        action_allowed=work_graph_product_action_allowed,
+                    )
+                    snapshot = build_work_graph_snapshot_from_records(
+                        generated_at=_utc_now_timestamp(),
+                        product_overviews=product_overviews,
+                        work_requests=work_requests,
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "snapshot": snapshot.model_dump(mode="json"),
+                            "source": {
+                                "product_count": len(product_overviews),
+                                "work_request_count": len(work_requests),
+                            },
                         },
                     )
                 if action == "product_profile.read":

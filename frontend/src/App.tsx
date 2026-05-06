@@ -39,6 +39,7 @@ import {
   logout,
   readAuthSession,
   readDriverView,
+  readWorkGraphSnapshot,
   rankWorkGraphSnapshot,
 } from "./api";
 import type {
@@ -67,7 +68,6 @@ import type {
   FreshnessStatus,
   WorkGraphQueueItem,
   WorkGraphRecommendation,
-  WorkGraphSnapshot,
   WorkGraphState,
 } from "./types";
 
@@ -498,10 +498,11 @@ export function App() {
           setPreviewView(previewPayload?.view ?? null);
           setProductOverviews(productsPayload.products);
           setWorkRequests(workRequestsPayload.requests);
-          const workGraphSnapshot = buildWorkGraphSnapshot(
-            productsPayload.products,
-            workRequestsPayload.requests,
-          );
+          const workGraphSnapshotPayload = await readWorkGraphSnapshot();
+          if (controller.signal.aborted) {
+            return;
+          }
+          const workGraphSnapshot = workGraphSnapshotPayload.snapshot;
           if (!workGraphSnapshot.issues.length) {
             setWorkGraphItems([]);
             setWorkGraphHiddenCount(0);
@@ -4386,73 +4387,6 @@ function workGraphStateStatus(state: WorkGraphState): Status | string {
 
 function recommendationLabel(recommendation: WorkGraphRecommendation): string {
   return recommendation.replaceAll("_", " ");
-}
-
-function focusForWorkRequest(
-  request: EveryCodeWorkRequestRecord,
-): WorkGraphSnapshot["issues"][number]["focus"] {
-  if (request.state === "blocked") {
-    return "Waiting";
-  }
-  if (request.state === "done") {
-    return "Done";
-  }
-  if (request.state === "running" || request.state === "claimed") {
-    return "Now";
-  }
-  return "Next";
-}
-
-function buildWorkGraphSnapshot(
-  products: ProductSiteOverview[],
-  workRequests: EveryCodeWorkRequestRecord[],
-): WorkGraphSnapshot {
-  const repoSnapshots = new Map<string, WorkGraphSnapshot["repos"][number]>();
-  for (const product of products) {
-    const repository = product.repository.trim();
-    if (!repository || !repository.includes("/")) {
-      continue;
-    }
-    repoSnapshots.set(repository.toLowerCase(), {
-      repository,
-      classification: "managed_runtime",
-      product: product.product,
-      display_name: product.display_name || product.product,
-    });
-  }
-  for (const request of workRequests) {
-    const repository = request.repository.trim();
-    if (!repository || !repository.includes("/")) {
-      continue;
-    }
-    if (!repoSnapshots.has(repository.toLowerCase())) {
-      repoSnapshots.set(repository.toLowerCase(), {
-        repository,
-        classification: "active_awareness",
-        display_name: repository.split("/").at(-1) ?? repository,
-      });
-    }
-  }
-  return {
-    schema_version: 1,
-    generated_at: new Date().toISOString(),
-    repos: Array.from(repoSnapshots.values()),
-    issues: workRequests.map((request) => ({
-      repository: request.repository,
-      number: request.issue_number,
-      title: request.issue_title || `Issue #${request.issue_number}`,
-      url: request.issue_url,
-      state: request.state === "done" ? "closed" : "open",
-      focus: focusForWorkRequest(request),
-      manager: request.claimed_by_host || request.trigger_actor || "Code",
-      finish_line: request.result_summary,
-      labels: [request.trigger_label].filter(Boolean),
-      blocked_by: request.state === "blocked" ? 1 : 0,
-      updated_at: request.updated_at || request.queued_at,
-      check_state: request.state === "blocked" ? "failure" : "unknown",
-      deploy_state: "unknown",
-    })),
-  };
 }
 
 function safetyLabel(safety: Safety): string {

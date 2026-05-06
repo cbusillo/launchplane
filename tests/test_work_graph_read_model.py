@@ -4,11 +4,14 @@ import unittest
 
 from pydantic import ValidationError
 
+from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.product_environment_read_model import ProductSiteOverview
 from control_plane.contracts.work_graph_read_model import (
     WorkGraphIssueSnapshot,
     WorkGraphRepoSnapshot,
     WorkGraphSnapshot,
     build_work_graph_queue,
+    build_work_graph_snapshot_from_records,
 )
 
 
@@ -40,6 +43,39 @@ def _issue(**overrides: object) -> WorkGraphIssueSnapshot:
     }
     payload.update(overrides)
     return WorkGraphIssueSnapshot.model_validate(payload)
+
+
+def _product_overview(**overrides: object) -> ProductSiteOverview:
+    payload: dict[str, object] = {
+        "product": "launchplane",
+        "display_name": "Launchplane",
+        "repository": "cbusillo/launchplane",
+        "driver_id": "launchplane-service",
+        "preview": {"enabled": False},
+        "trust_state": "recorded",
+        "provenance": {"source_kind": "record", "freshness_status": "recorded"},
+    }
+    payload.update(overrides)
+    return ProductSiteOverview.model_validate(payload)
+
+
+def _work_request(**overrides: object) -> EveryCodeWorkRequestRecord:
+    payload: dict[str, object] = {
+        "request_id": "every-code-cbusillo-launchplane-190",
+        "source": "github_issue_label",
+        "state": "queued",
+        "repository": "cbusillo/launchplane",
+        "issue_number": 190,
+        "issue_url": "https://github.com/cbusillo/launchplane/issues/190",
+        "issue_title": "Build What To Work On Next cockpit",
+        "trigger_label": "every-code",
+        "trigger_actor": "cbusillo",
+        "github_delivery_id": "delivery-190",
+        "queued_at": "2026-05-06T02:00:00Z",
+        "updated_at": "2026-05-06T02:00:00Z",
+    }
+    payload.update(overrides)
+    return EveryCodeWorkRequestRecord.model_validate(payload)
 
 
 class WorkGraphReadModelTests(unittest.TestCase):
@@ -159,6 +195,40 @@ class WorkGraphReadModelTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "limit must be positive"):
             build_work_graph_queue(snapshot, limit=0)
+
+    def test_build_snapshot_from_launchplane_records_classifies_product_and_awareness_repos(
+        self,
+    ) -> None:
+        snapshot = build_work_graph_snapshot_from_records(
+            generated_at="2026-05-06T03:05:00Z",
+            product_overviews=(_product_overview(),),
+            work_requests=(
+                _work_request(),
+                _work_request(
+                    request_id="every-code-cbusillo-code-12",
+                    repository="cbusillo/code",
+                    issue_number=12,
+                    issue_url="https://github.com/cbusillo/code/issues/12",
+                    issue_title="Improve local worker",
+                    state="blocked",
+                    claimed_at="2026-05-06T02:05:00Z",
+                    claimed_by_host="mac-mini",
+                    started_at="2026-05-06T02:06:00Z",
+                    finished_at="2026-05-06T02:07:00Z",
+                    updated_at="2026-05-06T02:07:00Z",
+                    error_message="Checkout is missing.",
+                ),
+            ),
+        )
+
+        repos = {repo.repository: repo for repo in snapshot.repos}
+        self.assertEqual(repos["cbusillo/launchplane"].classification, "managed_runtime")
+        self.assertEqual(repos["cbusillo/launchplane"].product, "launchplane")
+        self.assertEqual(repos["cbusillo/code"].classification, "active_awareness")
+        issues = {issue.repository: issue for issue in snapshot.issues}
+        self.assertEqual(issues["cbusillo/launchplane"].focus, "Next")
+        self.assertEqual(issues["cbusillo/code"].focus, "Waiting")
+        self.assertEqual(issues["cbusillo/code"].blocked_by, 1)
 
 
 if __name__ == "__main__":

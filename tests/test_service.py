@@ -1423,6 +1423,93 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["queue"]["items"][0]["number"], 190)
 
+    def test_work_graph_snapshot_returns_launchplane_assembled_snapshot(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane", "example-site"],
+                        "contexts": ["launchplane", "example-site"],
+                        "actions": [
+                            "work_graph.rank",
+                            "product_environment.read",
+                            "every_code_work_request.write",
+                        ],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            status_code, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "every/example-site",
+                    "issue_number": 190,
+                    "issue_url": "https://github.com/every/example-site/issues/190",
+                    "issue_title": "Build operator chooser",
+                    "trigger_label": "every-code",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-06T02:00:00Z",
+                },
+                headers={"Idempotency-Key": "every-code-create-example-site-190"},
+            )
+            self.assertEqual(status_code, 202)
+            self.assertEqual(create_payload["result"]["request"]["state"], "queued")
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/snapshot",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["source"]["product_count"], 1)
+        self.assertEqual(payload["source"]["work_request_count"], 1)
+        snapshot = payload["snapshot"]
+        self.assertEqual(snapshot["schema_version"], 1)
+        self.assertEqual(snapshot["repos"][0]["classification"], "managed_runtime")
+        self.assertEqual(snapshot["repos"][0]["product"], "example-site")
+        self.assertEqual(snapshot["issues"][0]["repository"], "every/example-site")
+        self.assertEqual(snapshot["issues"][0]["focus"], "Next")
+
+    def test_work_graph_snapshot_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/snapshot",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_health_endpoint_reports_storage_backend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(
