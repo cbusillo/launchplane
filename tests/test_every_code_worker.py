@@ -745,6 +745,65 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "done")
         self.assertEqual(result.detail, "Linked pull request merged.")
 
+    def test_finish_retries_preview_label_for_terminal_done_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "sellyouroutboard"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "repository": "cbusillo/sellyouroutboard",
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/71",
+                    "result_summary": "Every Code opened PR #71.",
+                    "error_message": "",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            runner = _Runner()
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-cbusillo-code-123-test",
+                host="Chris-Studio",
+                exit_code=0,
+                runner=runner,
+            )
+
+        self.assertEqual(result.status, "done")
+        self.assertEqual(
+            result.result_pr_url,
+            "https://github.com/cbusillo/sellyouroutboard/pull/71",
+        )
+        self.assertIn("Requested Launchplane preview", result.detail)
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "edit",
+                "71",
+                "--repo",
+                "cbusillo/sellyouroutboard",
+                "--add-label",
+                "launchplane-preview",
+            ),
+            runner.calls,
+        )
+
     def test_run_once_marks_missing_checkout_blocked(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
