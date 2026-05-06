@@ -77,6 +77,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
+from control_plane.contracts.work_graph_read_model import (
+    WorkGraphSnapshot,
+    build_work_graph_queue,
+)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
@@ -1233,6 +1237,14 @@ class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     updated_at: str = ""
 
 
+class WorkGraphRankEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    snapshot: WorkGraphSnapshot
+    limit: int = Field(default=25, ge=1, le=100)
+
+
 class AuthzPolicyGitHubActionsGrant(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1733,6 +1745,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/status",
+        "/v1/work-graph/rank",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
         "/v1/evidence/previews/generations",
@@ -4369,6 +4382,32 @@ def create_launchplane_service_app(
                 every_code_store.write_every_code_work_request_record(updated_record)
                 result = {"request_id": updated_record.request_id, "state": updated_record.state}
                 driver_result = {"request": updated_record.model_dump(mode="json")}
+            elif path == "/v1/work-graph/rank":
+                rank_request = WorkGraphRankEnvelope.model_validate(payload)
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="work_graph.rank",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot rank Launchplane work graph snapshots.",
+                            },
+                        },
+                    )
+                queue = build_work_graph_queue(
+                    rank_request.snapshot,
+                    limit=rank_request.limit,
+                )
+                result = {"item_count": len(queue.items), "hidden_count": queue.hidden_count}
+                driver_result = {"queue": queue.model_dump(mode="json")}
             elif path == "/v1/evidence/deployments":
                 deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

@@ -46,6 +46,18 @@ The command prints a `WorkGraphQueue` JSON payload with:
 - score and explanation reasons
 - hidden count for closed, done, or overflow items
 
+## Service Route
+
+Authenticated callers can request the same stateless ranking over HTTP:
+
+```sh
+POST /v1/work-graph/rank
+```
+
+The request body contains `snapshot` and optional `limit`. Launchplane returns
+the queue at `result.queue`, requires `work_graph.rank` authorization for
+product/context `launchplane`, and does not persist the supplied snapshot.
+
 ## Boundary
 
 Do not store copied issue bodies or Project fields as Launchplane authority.

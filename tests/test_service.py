@@ -418,6 +418,45 @@ def _every_code_github_issue_labeled_payload(
     }
 
 
+def _work_graph_snapshot_payload() -> dict[str, object]:
+    return {
+        "generated_at": "2026-05-06T01:45:00Z",
+        "repos": [
+            {
+                "repository": "cbusillo/launchplane",
+                "classification": "managed_runtime",
+                "product": "launchplane",
+                "display_name": "Launchplane",
+            }
+        ],
+        "issues": [
+            {
+                "repository": "cbusillo/launchplane",
+                "number": 190,
+                "title": "Build operator work graph",
+                "url": "https://github.com/cbusillo/launchplane/issues/190",
+                "focus": "Now",
+                "manager": "Code",
+                "finish_line": "Ranked work queue is available to the operator UI.",
+                "labels": ["plan", "plan:active"],
+                "blocking": 2,
+                "subissues_total": 2,
+                "subissues_completed": 1,
+                "check_state": "success",
+                "deploy_state": "success",
+            },
+            {
+                "repository": "cbusillo/launchplane",
+                "number": 164,
+                "title": "Absorb product orchestration",
+                "url": "https://github.com/cbusillo/launchplane/issues/164",
+                "state": "closed",
+                "focus": "Done",
+            },
+        ],
+    }
+
+
 def _invoke_app(
     app: WsgiApp,
     *,
@@ -1250,6 +1289,102 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_work_graph_rank_returns_ranked_queue(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.rank"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/rank",
+                payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        queue = payload["result"]["queue"]
+        self.assertEqual(len(queue["items"]), 1)
+        self.assertEqual(queue["hidden_count"], 1)
+        self.assertEqual(queue["items"][0]["number"], 190)
+        self.assertEqual(queue["items"][0]["recommendation"], "deep_work")
+
+    def test_work_graph_rank_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/rank",
+                payload={"snapshot": _work_graph_snapshot_payload()},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_work_graph_rank_rejects_unclassified_issue(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.rank"],
+                    }
+                ]
+            }
+        )
+        snapshot = _work_graph_snapshot_payload()
+        snapshot["repos"] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/rank",
+                payload={"snapshot": snapshot},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_health_endpoint_reports_storage_backend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
