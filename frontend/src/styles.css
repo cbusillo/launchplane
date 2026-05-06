@@ -286,6 +286,121 @@ p {
   padding: 18px;
 }
 
+.operator-cockpit {
+  display: grid;
+  grid-template-columns: minmax(230px, 0.62fr) minmax(0, 1.35fr) minmax(
+      280px,
+      0.82fr
+    );
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--hair);
+  background: var(--hair);
+}
+
+.cockpit-summary,
+.product-inventory-table,
+.every-code-queue {
+  min-width: 0;
+  background: var(--bg-1);
+}
+
+.cockpit-summary {
+  display: grid;
+  align-content: start;
+}
+
+.cockpit-metrics {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+  padding: 0 14px 14px;
+}
+
+.product-inventory-table,
+.every-code-queue {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+  padding: 12px;
+}
+
+.product-inventory-row,
+.queue-row {
+  display: grid;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg);
+  text-align: left;
+}
+
+.product-inventory-row {
+  grid-template-columns: minmax(170px, 0.9fr) minmax(170px, 1.25fr) auto;
+  min-height: 54px;
+  padding: 8px 10px;
+}
+
+.product-inventory-row[data-selected="true"] {
+  border-color: color-mix(in oklab, var(--lane-preview) 58%, var(--hair));
+  background: color-mix(in oklab, var(--lane-preview) 8%, var(--bg-2));
+}
+
+.product-inventory-name,
+.queue-row span {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.product-inventory-name strong,
+.queue-row strong {
+  overflow: hidden;
+  color: var(--fg-strong);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-inventory-name code,
+.queue-row code {
+  overflow: hidden;
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.product-inventory-lanes {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.queue-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  min-height: 28px;
+  color: var(--fg-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.queue-head strong {
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.queue-row {
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 50px;
+  padding: 8px 10px;
+}
+
 .lane-grid {
   display: grid;
   grid-template-columns: minmax(0, 1fr) minmax(280px, 0.72fr) minmax(0, 1fr);
@@ -1460,6 +1575,7 @@ p {
 }
 
 @media (max-width: 1120px) {
+  .operator-cockpit,
   .lane-grid,
   .product-overview-grid,
   .work-grid,
@@ -1470,6 +1586,10 @@ p {
 
   .product-environment-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .product-inventory-row {
+    grid-template-columns: minmax(180px, 0.9fr) minmax(0, 1fr) auto;
   }
 
   .config-target-grid {
@@ -1519,6 +1639,13 @@ p {
 
   .product-environment-strip {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .cockpit-metrics,
+  .product-inventory-row,
+  .queue-row {
+    grid-template-columns: minmax(0, 1fr);
+    align-items: start;
   }
 
   .kv-row,
