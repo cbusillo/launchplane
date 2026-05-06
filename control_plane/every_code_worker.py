@@ -19,6 +19,11 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
 )
+from control_plane.workflows.launchplane import (
+    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+    github_pull_request_reference,
+    launchplane_anchor_repo_eligible,
+)
 from control_plane.workflows.ship import utc_now_timestamp
 
 
@@ -1101,6 +1106,7 @@ def finish_every_code_work_request(
     exit_code: int,
     result_pr_url: str = "",
     result_summary: str = "",
+    runner: Runner | None = None,
 ) -> EveryCodeWorkerFinishResult:
     record = record_store.read_every_code_work_request_record(request_id.strip())
     if record.state in TERMINAL_EVERY_CODE_STATES:
@@ -1115,7 +1121,14 @@ def finish_every_code_work_request(
             result_pr_url=record.result_pr_url,
         )
     succeeded = exit_code == 0
-    summary = result_summary.strip() or (
+    preview_label_summary = ""
+    if succeeded and result_pr_url.strip():
+        preview_label_summary = request_every_code_pr_preview_label(
+            result_pr_url=result_pr_url,
+            runner=runner,
+        )
+    summary_parts = [part for part in (result_summary.strip(), preview_label_summary) if part]
+    summary = "; ".join(summary_parts) or (
         "Every Code session completed successfully."
         if succeeded
         else f"Every Code session exited with status {exit_code}."
@@ -1140,6 +1153,39 @@ def finish_every_code_work_request(
         issue_number=updated_record.issue_number,
         result_pr_url=updated_record.result_pr_url,
     )
+
+
+def request_every_code_pr_preview_label(
+    *,
+    result_pr_url: str,
+    runner: Runner | None = None,
+) -> str:
+    reference = github_pull_request_reference(pr_url=result_pr_url.strip())
+    if reference is None:
+        return ""
+    if not launchplane_anchor_repo_eligible(repo=reference["repo"]):
+        return ""
+    run = runner or _run_subprocess
+    repo = f"{reference['owner']}/{reference['repo']}"
+    try:
+        result = run(
+            (
+                "gh",
+                "pr",
+                "edit",
+                str(reference["pr_number"]),
+                "--repo",
+                repo,
+                "--add-label",
+                LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+            )
+        )
+    except OSError as exc:
+        return f"Could not request Launchplane preview: {exc}"
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip() or "gh pr edit failed"
+        return f"Could not request Launchplane preview: {detail}"
+    return f"Requested Launchplane preview with `{LAUNCHPLANE_PREVIEW_ENABLE_LABEL}`."
 
 
 def _run_subprocess(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
