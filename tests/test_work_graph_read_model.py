@@ -1,0 +1,165 @@
+from __future__ import annotations
+
+import unittest
+
+from pydantic import ValidationError
+
+from control_plane.contracts.work_graph_read_model import (
+    WorkGraphIssueSnapshot,
+    WorkGraphRepoSnapshot,
+    WorkGraphSnapshot,
+    build_work_graph_queue,
+)
+
+
+def _repo(
+    repository: str = "cbusillo/launchplane",
+    classification: str = "managed_runtime",
+) -> WorkGraphRepoSnapshot:
+    return WorkGraphRepoSnapshot.model_validate(
+        {
+            "repository": repository,
+            "classification": classification,
+            "product": "launchplane" if classification == "managed_runtime" else "",
+            "display_name": "Launchplane",
+        }
+    )
+
+
+def _issue(**overrides: object) -> WorkGraphIssueSnapshot:
+    payload: dict[str, object] = {
+        "repository": "cbusillo/launchplane",
+        "number": 190,
+        "title": "Build What To Work On Next cockpit",
+        "url": "https://github.com/cbusillo/launchplane/issues/190",
+        "focus": "Next",
+        "manager": "Chris",
+        "finish_line": "Ranked Launchplane work queue from Code Plans with links.",
+        "labels": ("plan", "plan:active"),
+        "updated_at": "2026-05-06T01:39:23Z",
+    }
+    payload.update(overrides)
+    return WorkGraphIssueSnapshot.model_validate(payload)
+
+
+class WorkGraphReadModelTests(unittest.TestCase):
+    def test_build_queue_ranks_ready_plan_items_with_reasons(self) -> None:
+        snapshot = WorkGraphSnapshot.model_validate(
+            {
+                "generated_at": "2026-05-06T01:45:00Z",
+                "repos": (_repo().model_dump(mode="json"),),
+                "issues": (
+                    _issue(number=190, focus="Next", blocking=2).model_dump(mode="json"),
+                    _issue(
+                        number=260,
+                        title="Blocked tenant work",
+                        url="https://github.com/cbusillo/launchplane/issues/260",
+                        focus="Waiting",
+                        labels=("plan", "plan:blocked"),
+                        blocked_by=1,
+                    ).model_dump(mode="json"),
+                ),
+            }
+        )
+
+        queue = build_work_graph_queue(snapshot)
+
+        self.assertEqual(queue.generated_at, "2026-05-06T01:45:00Z")
+        self.assertEqual([item.number for item in queue.items], [190, 260])
+        first = queue.items[0]
+        self.assertEqual(first.state, "ready")
+        self.assertEqual(first.recommendation, "quick_win")
+        self.assertEqual(first.repo_classification, "managed_runtime")
+        self.assertEqual(first.product, "launchplane")
+        self.assertGreater(first.score, queue.items[1].score)
+        self.assertIn("repo_classification", {reason.code for reason in first.reasons})
+        self.assertIn("finish_line", {reason.code for reason in first.reasons})
+
+    def test_failed_signal_becomes_attention_needed(self) -> None:
+        snapshot = WorkGraphSnapshot.model_validate(
+            {
+                "generated_at": "2026-05-06T01:45:00Z",
+                "repos": (_repo().model_dump(mode="json"),),
+                "issues": (
+                    _issue(number=153, focus="Later", check_state="failure").model_dump(
+                        mode="json"
+                    ),
+                    _issue(number=190, focus="Next").model_dump(mode="json"),
+                ),
+            }
+        )
+
+        queue = build_work_graph_queue(snapshot)
+
+        self.assertEqual(queue.items[0].number, 153)
+        self.assertEqual(queue.items[0].state, "ready")
+        self.assertEqual(queue.items[0].recommendation, "attention_needed")
+        self.assertIn("failed_signal", {reason.code for reason in queue.items[0].reasons})
+
+    def test_closed_and_done_items_are_hidden(self) -> None:
+        snapshot = WorkGraphSnapshot.model_validate(
+            {
+                "generated_at": "2026-05-06T01:45:00Z",
+                "repos": (_repo().model_dump(mode="json"),),
+                "issues": (
+                    _issue(number=153, state="closed", focus="Done").model_dump(mode="json"),
+                    _issue(number=190, focus="Next").model_dump(mode="json"),
+                ),
+            }
+        )
+
+        queue = build_work_graph_queue(snapshot)
+
+        self.assertEqual([item.number for item in queue.items], [190])
+        self.assertEqual(queue.hidden_count, 1)
+
+    def test_limit_counts_hidden_overflow(self) -> None:
+        snapshot = WorkGraphSnapshot.model_validate(
+            {
+                "generated_at": "2026-05-06T01:45:00Z",
+                "repos": (_repo().model_dump(mode="json"),),
+                "issues": (
+                    _issue(number=190).model_dump(mode="json"),
+                    _issue(
+                        number=191, title="Next item", url="https://github.com/x/y/1"
+                    ).model_dump(mode="json"),
+                ),
+            }
+        )
+
+        queue = build_work_graph_queue(snapshot, limit=1)
+
+        self.assertEqual(len(queue.items), 1)
+        self.assertEqual(queue.hidden_count, 1)
+
+    def test_snapshot_requires_repo_classification_for_each_issue(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "missing repo classifications"):
+            WorkGraphSnapshot.model_validate(
+                {
+                    "generated_at": "2026-05-06T01:45:00Z",
+                    "repos": (),
+                    "issues": (_issue().model_dump(mode="json"),),
+                }
+            )
+
+    def test_managed_runtime_repo_requires_product(self) -> None:
+        with self.assertRaisesRegex(ValidationError, "requires product"):
+            WorkGraphRepoSnapshot.model_validate(
+                {"repository": "cbusillo/launchplane", "classification": "managed_runtime"}
+            )
+
+    def test_rejects_invalid_limit(self) -> None:
+        snapshot = WorkGraphSnapshot.model_validate(
+            {
+                "generated_at": "2026-05-06T01:45:00Z",
+                "repos": (_repo().model_dump(mode="json"),),
+                "issues": (_issue().model_dump(mode="json"),),
+            }
+        )
+
+        with self.assertRaisesRegex(ValueError, "limit must be positive"):
+            build_work_graph_queue(snapshot, limit=0)
+
+
+if __name__ == "__main__":
+    unittest.main()
