@@ -120,7 +120,9 @@ class GenericWebDeployTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
-            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy") as deploy,
+            patch(
+                "control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy"
+            ) as deploy,
         ):
             result = execute_generic_web_deploy(
                 control_plane_root=Path("."),
@@ -161,7 +163,9 @@ class GenericWebDeployTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
                 return_value=("https://dokploy.example", "token"),
             ),
-            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy") as deploy,
+            patch(
+                "control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy"
+            ) as deploy,
         ):
             execute_generic_web_deploy(
                 control_plane_root=Path("."),

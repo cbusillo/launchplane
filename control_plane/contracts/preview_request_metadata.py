@@ -63,16 +63,24 @@ class LaunchplanePreviewRequestParseResult(BaseModel):
             if self.metadata is None:
                 raise ValueError("valid Launchplane preview request parse result requires metadata")
             if self.error.strip():
-                raise ValueError("valid Launchplane preview request parse result cannot include error")
+                raise ValueError(
+                    "valid Launchplane preview request parse result cannot include error"
+                )
             return self
         if self.status == "missing":
             if self.metadata is not None:
-                raise ValueError("missing Launchplane preview request parse result cannot include metadata")
+                raise ValueError(
+                    "missing Launchplane preview request parse result cannot include metadata"
+                )
             if self.error.strip():
-                raise ValueError("missing Launchplane preview request parse result cannot include error")
+                raise ValueError(
+                    "missing Launchplane preview request parse result cannot include error"
+                )
             return self
         if self.metadata is not None:
-            raise ValueError("invalid Launchplane preview request parse result cannot include metadata")
+            raise ValueError(
+                "invalid Launchplane preview request parse result cannot include metadata"
+            )
         if not self.error.strip():
             raise ValueError("invalid Launchplane preview request parse result requires error")
         return self

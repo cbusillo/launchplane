@@ -90,7 +90,9 @@ class OdooOverrideApplyResult(BaseModel):
         if not self.attempted and self.status != "skipped":
             raise ValueError("non-attempted Odoo override apply result must use skipped status")
         if self.attempted and self.status not in {"pending", "pass", "fail"}:
-            raise ValueError("attempted Odoo override apply result must use pending/pass/fail status")
+            raise ValueError(
+                "attempted Odoo override apply result must use pending/pass/fail status"
+            )
         if self.status in {"pass", "fail"} and not self.applied_at:
             raise ValueError("completed Odoo override apply result requires applied_at")
         return self

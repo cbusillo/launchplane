@@ -24,7 +24,9 @@ class _WebhookRunner:
                 "",
             )
         if command[:3] == ("gh", "api", "repos/cbusillo/code/hooks"):
-            return subprocess.CompletedProcess(command, 0, json.dumps(self.hooks["cbusillo/code"]), "")
+            return subprocess.CompletedProcess(
+                command, 0, json.dumps(self.hooks["cbusillo/code"]), ""
+            )
         if command[:3] == ("gh", "api", "repos/cbusillo/launchplane/hooks"):
             return subprocess.CompletedProcess(
                 command, 0, json.dumps(self.hooks["cbusillo/launchplane"]), ""

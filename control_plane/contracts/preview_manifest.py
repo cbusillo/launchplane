@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from control_plane.contracts.preview_generation_record import PreviewPullRequestSummary, PreviewSourceRecord
+from control_plane.contracts.preview_generation_record import (
+    PreviewPullRequestSummary,
+    PreviewSourceRecord,
+)
 
 
 class LaunchplaneResolvedPreviewManifest(BaseModel):
@@ -23,9 +26,13 @@ class LaunchplaneResolvedPreviewManifest(BaseModel):
         if not self.baseline_channel.strip():
             raise ValueError("resolved Launchplane preview manifest requires baseline_channel")
         if not self.baseline_release_tuple_id.strip():
-            raise ValueError("resolved Launchplane preview manifest requires baseline_release_tuple_id")
+            raise ValueError(
+                "resolved Launchplane preview manifest requires baseline_release_tuple_id"
+            )
         if not self.resolved_manifest_fingerprint.strip():
-            raise ValueError("resolved Launchplane preview manifest requires resolved_manifest_fingerprint")
+            raise ValueError(
+                "resolved Launchplane preview manifest requires resolved_manifest_fingerprint"
+            )
         if not self.source_map:
             raise ValueError("resolved Launchplane preview manifest requires source_map")
         return self

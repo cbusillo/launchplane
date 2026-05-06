@@ -17,4 +17,3 @@ class DokployTargetIdRecord(BaseModel):
         if not value.strip():
             raise ValueError("Dokploy target-id record requires non-empty string fields")
         return value.strip()
-

@@ -42,5 +42,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_index("launchplane_product_profiles_driver_idx", table_name="launchplane_product_profiles")
+    op.drop_index(
+        "launchplane_product_profiles_driver_idx", table_name="launchplane_product_profiles"
+    )
     op.drop_table("launchplane_product_profiles")

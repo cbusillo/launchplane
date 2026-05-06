@@ -169,9 +169,13 @@ class LaunchplanePullRequestMutationIntent(BaseModel):
     def _validate_intent(self) -> "LaunchplanePullRequestMutationIntent":
         if self.command == "request-generation":
             if self.preview_request is None:
-                raise ValueError("request-generation Launchplane mutation intent requires preview_request")
+                raise ValueError(
+                    "request-generation Launchplane mutation intent requires preview_request"
+                )
             if self.destroy_request is not None:
-                raise ValueError("request-generation Launchplane mutation intent cannot include destroy_request")
+                raise ValueError(
+                    "request-generation Launchplane mutation intent cannot include destroy_request"
+                )
             if self.generation_request is None and self.generation_request_seed is None:
                 raise ValueError(
                     "request-generation Launchplane mutation intent requires generation_request or generation_request_seed"
@@ -187,11 +191,17 @@ class LaunchplanePullRequestMutationIntent(BaseModel):
             return self
 
         if self.preview_request is not None:
-            raise ValueError("destroy-preview Launchplane mutation intent cannot include preview_request")
+            raise ValueError(
+                "destroy-preview Launchplane mutation intent cannot include preview_request"
+            )
         if self.generation_request is not None or self.generation_request_seed is not None:
-            raise ValueError("destroy-preview Launchplane mutation intent cannot include generation payload")
+            raise ValueError(
+                "destroy-preview Launchplane mutation intent cannot include generation payload"
+            )
         if self.destroy_request is None:
             raise ValueError("destroy-preview Launchplane mutation intent requires destroy_request")
         if self.manifest_resolution_required:
-            raise ValueError("destroy-preview Launchplane mutation intent cannot require manifest resolution")
+            raise ValueError(
+                "destroy-preview Launchplane mutation intent cannot require manifest resolution"
+            )
         return self

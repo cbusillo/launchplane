@@ -17,7 +17,11 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
-from control_plane.workflows.ship import build_deployment_record, generate_deployment_record_id, utc_now_timestamp
+from control_plane.workflows.ship import (
+    build_deployment_record,
+    generate_deployment_record_id,
+    utc_now_timestamp,
+)
 
 
 class GenericWebDeployStore(Protocol):
@@ -88,7 +92,9 @@ def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: DokployTarge
     return f"dokploy-{configured_ship_mode}-api"
 
 
-def _fallback_target_name(*, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile) -> str:
+def _fallback_target_name(
+    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+) -> str:
     return f"{profile.product}-{lane.instance}"
 
 
@@ -99,9 +105,9 @@ def normalize_generic_web_artifact_id(
     image_repository = profile.image.repository.strip().rstrip("/")
     if not normalized_artifact_id:
         raise click.ClickException("Generic web deploy requires artifact_id.")
-    if normalized_artifact_id.startswith(f"{image_repository}@") or normalized_artifact_id.startswith(
-        f"{image_repository}:"
-    ):
+    if normalized_artifact_id.startswith(
+        f"{image_repository}@"
+    ) or normalized_artifact_id.startswith(f"{image_repository}:"):
         return normalized_artifact_id
     if normalized_artifact_id.startswith("sha256:"):
         return f"{image_repository}@{normalized_artifact_id}"
@@ -114,7 +120,10 @@ def normalize_generic_web_artifact_id(
 
 
 def _fallback_ship_request(
-    *, request: GenericWebDeployRequest, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
+    *,
+    request: GenericWebDeployRequest,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
 ) -> ShipRequest:
     return ShipRequest(
         artifact_id=normalize_generic_web_artifact_id(
@@ -258,7 +267,9 @@ def execute_generic_web_deploy(
         )
 
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+        host, token = control_plane_dokploy.read_dokploy_config(
+            control_plane_root=control_plane_root
+        )
         execute_dokploy_artifact_deploy(
             host=host,
             token=token,
