@@ -76,3 +76,15 @@ def build_every_code_pr_feedback_id(
     if not identity_slug:
         raise ValueError("Every Code PR feedback id requires a slug-safe feedback id")
     return f"every-code-pr-feedback-{normalized_repository.replace('/', '-')}-{pr_number}-{identity_slug}"
+
+
+def apply_every_code_pr_feedback_status(
+    record: EveryCodePrFeedbackRecord,
+    *,
+    status: EveryCodePrFeedbackStatus,
+) -> EveryCodePrFeedbackRecord | None:
+    if record.status != "pending":
+        return None
+    if status == "pending":
+        return record
+    return record.model_copy(update={"status": status})

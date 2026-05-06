@@ -8,13 +8,16 @@ import signal
 import threading
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
+from urllib.parse import parse_qs, urlparse
 
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.every_code_worker import (
     EveryCodeWorkerApiStore,
+    apply_every_code_pr_feedback_for_host,
     build_every_code_worker_daemon_spec,
     build_every_code_session_command,
     close_terminal_every_code_sessions,
@@ -60,6 +63,24 @@ def _queued_preview_record() -> EveryCodeWorkRequestRecord:
             "repository": "every/tenant-opw",
             "issue_url": "https://github.com/every/tenant-opw/issues/123",
         }
+    )
+
+
+def _feedback_record(*, status: str = "pending") -> EveryCodePrFeedbackRecord:
+    return EveryCodePrFeedbackRecord(
+        feedback_id="every-code-pr-feedback-cbusillo-code-26-ic-1001",
+        request_id="every-code-cbusillo-code-123-test",
+        repository="cbusillo/code",
+        pr_number=26,
+        pr_url="https://github.com/cbusillo/code/pull/26",
+        feedback_kind="issue_comment",
+        github_delivery_id="delivery-comment",
+        github_node_id="IC_kwDO_test_1001",
+        actor="cbusillo",
+        body="Please tighten the README wording before merge.",
+        html_url="https://github.com/cbusillo/code/pull/26#issuecomment-1001",
+        received_at="2026-05-06T19:00:00Z",
+        status=status,  # type: ignore[arg-type]
     )
 
 
@@ -116,6 +137,16 @@ class _ExistingSessionRunner(_Runner):
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
+class _GoneSessionRunner(_Runner):
+    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(args))
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 1, "", "no session")
+        if args[0] == "tmux" and args[1] == "new-session":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        return super().__call__(args)
+
+
 class _Process:
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -132,13 +163,33 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {self.token}":
             self._write_json(401, {"status": "rejected"})
             return
-        if self.path.startswith("/v1/every-code/work-requests?"):
-            records = self.store.list_every_code_work_request_records(state="queued", limit=1)
+        if self.path.startswith("/v1/every-code/pr-feedback"):
+            query = parse_qs(urlparse(self.path).query)
+            feedback_records = self.store.list_every_code_pr_feedback_records(
+                status=str((query.get("status") or [""])[0]),
+                limit=10,
+            )
             self._write_json(
                 200,
                 {
                     "status": "ok",
-                    "requests": [record.model_dump(mode="json") for record in records],
+                    "feedback": [
+                        record.model_dump(mode="json") for record in feedback_records
+                    ],
+                },
+            )
+            return
+        if self.path.startswith("/v1/every-code/work-requests?"):
+            work_request_records = self.store.list_every_code_work_request_records(
+                state="queued", limit=1
+            )
+            self._write_json(
+                200,
+                {
+                    "status": "ok",
+                    "requests": [
+                        record.model_dump(mode="json") for record in work_request_records
+                    ],
                 },
             )
             return
@@ -152,26 +203,56 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
             return
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        if self.path == "/v1/every-code/pr-feedback/status":
+            feedback_records = self.store.list_every_code_pr_feedback_records(
+                request_id=str(payload["request_id"]),
+                limit=10,
+            )
+            feedback_record = next(
+                record
+                for record in feedback_records
+                if record.feedback_id == payload["feedback_id"]
+            )
+            updated_feedback_record = feedback_record.model_copy(update={"status": payload["status"]})
+            self.store.write_every_code_pr_feedback_record(updated_feedback_record)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "records": {
+                        "request_id": updated_feedback_record.request_id,
+                        "feedback_id": updated_feedback_record.feedback_id,
+                        "status": updated_feedback_record.status,
+                    },
+                    "result": {"feedback": updated_feedback_record.model_dump(mode="json")},
+                },
+            )
+            return
         if self.path == "/v1/every-code/work-requests/claim":
-            record = self.store.claim_every_code_work_request_record(
+            claimed_record = self.store.claim_every_code_work_request_record(
                 request_id=str(payload["request_id"]),
                 host=str(payload["host"]),
                 claimed_at="2026-05-06T00:00:00Z",
             )
-            if record is None:
+            if claimed_record is None:
                 self._write_json(409, {"status": "rejected"})
                 return
             self._write_json(
                 202,
                 {
                     "status": "accepted",
-                    "records": {"request_id": record.request_id, "state": record.state},
-                    "result": {"request": record.model_dump(mode="json")},
+                    "records": {
+                        "request_id": claimed_record.request_id,
+                        "state": claimed_record.state,
+                    },
+                    "result": {"request": claimed_record.model_dump(mode="json")},
                 },
             )
             return
-        record = self.store.read_every_code_work_request_record(str(payload["request_id"]))
-        updated_record = record.model_copy(
+        work_request_record = self.store.read_every_code_work_request_record(
+            str(payload["request_id"])
+        )
+        updated_work_request_record = work_request_record.model_copy(
             update={
                 "state": payload["state"],
                 "updated_at": payload["updated_at"],
@@ -182,16 +263,16 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 "error_message": payload.get("error_message", ""),
             }
         )
-        self.store.write_every_code_work_request_record(updated_record)
+        self.store.write_every_code_work_request_record(updated_work_request_record)
         self._write_json(
             202,
             {
                 "status": "accepted",
                 "records": {
-                    "request_id": updated_record.request_id,
-                    "state": updated_record.state,
+                    "request_id": updated_work_request_record.request_id,
+                    "state": updated_work_request_record.state,
                 },
-                "result": {"request": updated_record.model_dump(mode="json")},
+                "result": {"request": updated_work_request_record.model_dump(mode="json")},
             },
         )
 
@@ -244,6 +325,35 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(claimed_record.claimed_by_host, "Chris-Studio")
         self.assertEqual(read_record.state, "running")
         self.assertEqual(read_record.result_summary, "Visible tmux session: every-code-test")
+
+    def test_api_store_lists_and_updates_pr_feedback_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(
+                state_dir=temporary_root / "state"
+            )
+            _EveryCodeApiHandler.store.write_every_code_pr_feedback_record(_feedback_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                feedback_records = store.list_every_code_pr_feedback_records(status="pending")
+                applied_record = feedback_records[0].model_copy(update={"status": "applied"})
+                store.write_every_code_pr_feedback_record(applied_record)
+                listed_after_update = store.list_every_code_pr_feedback_records(status="applied")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(len(feedback_records), 1)
+        self.assertEqual(feedback_records[0].feedback_id, _feedback_record().feedback_id)
+        self.assertEqual(listed_after_update[0].status, "applied")
 
     def test_session_name_is_stable_and_tmux_safe(self) -> None:
         session_name = every_code_tmux_session_name("every code/cbusillo/code#123 !")
@@ -509,6 +619,131 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
         self.assertIn("every-code finish", launch_call[-1])
         self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
+
+    def test_apply_feedback_sends_prompt_to_active_session(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            store.write_every_code_pr_feedback_record(_feedback_record())
+            runner = _ExistingSessionRunner()
+
+            result = apply_every_code_pr_feedback_for_host(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+            feedback = store.list_every_code_pr_feedback_records(limit=1)[0]
+
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(feedback.status, "applied")
+        send_call = next(call for call in runner.calls if call[1] == "send-keys")
+        self.assertIn("Please tighten the README wording", send_call[4])
+
+    def test_apply_feedback_relaunches_terminal_session_in_saved_worktree(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            finished_record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T19:05:00Z",
+                    "updated_at": "2026-05-06T19:05:00Z",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Opened PR.",
+                }
+            )
+            store.write_every_code_work_request_record(finished_record)
+            store.write_every_code_pr_feedback_record(_feedback_record())
+            runner = _GoneSessionRunner()
+
+            result = apply_every_code_pr_feedback_for_host(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+            feedback = store.list_every_code_pr_feedback_records(limit=1)[0]
+            resumed_record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            )
+
+        self.assertEqual(result.status, "applied")
+        self.assertEqual(feedback.status, "applied")
+        self.assertEqual(resumed_record.state, "running")
+        self.assertEqual(resumed_record.finished_at, "")
+        launch_call = next(call for call in runner.calls if call[1] == "new-session")
+        self.assertEqual(
+            launch_call[6],
+            str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
+        )
+        self.assertIn("Every Code received new PR feedback", launch_call[-1])
+
+    def test_apply_feedback_ignores_request_closed_by_linked_pr(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            closed_record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T19:05:00Z",
+                    "updated_at": "2026-05-06T19:05:00Z",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Linked pull request merged: https://github.com/cbusillo/code/pull/26",
+                }
+            )
+            store.write_every_code_work_request_record(closed_record)
+            store.write_every_code_pr_feedback_record(_feedback_record())
+            runner = _GoneSessionRunner()
+
+            result = apply_every_code_pr_feedback_for_host(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+            feedback = store.list_every_code_pr_feedback_records(limit=1)[0]
+
+        self.assertEqual(result.status, "ignored")
+        self.assertEqual(feedback.status, "ignored")
+        self.assertFalse(any(call[1] == "new-session" for call in runner.calls))
 
     def test_terminal_host_request_sends_sigterm_to_session_process_group(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
