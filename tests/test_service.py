@@ -460,6 +460,32 @@ def _every_code_github_pull_request_closed_payload(
     }
 
 
+def _every_code_github_pr_comment_payload(
+    *,
+    repository: str = "cbusillo/code",
+    pr_number: int = 26,
+    body: str = "Please tighten this wording before merge.",
+    comment_id: int = 1001,
+) -> dict[str, object]:
+    return {
+        "action": "created",
+        "repository": {"full_name": repository},
+        "issue": {
+            "number": pr_number,
+            "html_url": f"https://github.com/{repository}/pull/{pr_number}",
+            "pull_request": {"url": f"https://api.github.com/repos/{repository}/pulls/{pr_number}"},
+        },
+        "comment": {
+            "id": comment_id,
+            "node_id": f"IC_kwDO_test_{comment_id}",
+            "html_url": f"https://github.com/{repository}/pull/{pr_number}#issuecomment-{comment_id}",
+            "body": body,
+            "author_association": "OWNER",
+        },
+        "sender": {"login": "cbusillo"},
+    }
+
+
 def _work_graph_snapshot_payload() -> dict[str, object]:
     return {
         "generated_at": "2026-05-06T01:45:00Z",
@@ -879,7 +905,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
             ),
         ):
             app = create_launchplane_service_app(
@@ -952,7 +981,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
             ),
         ):
             app = create_launchplane_service_app(
@@ -1040,7 +1072,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
             ),
         ):
             app = create_launchplane_service_app(
@@ -1138,7 +1173,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
                 os.environ,
-                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
             ),
         ):
             app = create_launchplane_service_app(
@@ -1333,6 +1371,172 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertTrue(payload["skipped"])
         self.assertEqual(payload["reason"], "linked_every_code_request_not_found")
+
+    def test_every_code_pr_comment_webhook_records_feedback(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            claim_status, claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            status_status, _status_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Opened PR.",
+                    "updated_at": "2026-05-06T16:00:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(claim_status, 202)
+        self.assertEqual(status_status, 202)
+        self.assertEqual(claim_payload["result"]["request"]["state"], "claimed")
+        self.assertEqual(feedback_status, 202)
+        self.assertEqual(feedback_response["records"]["request_id"], request_id)
+        feedback = feedback_response["result"]["feedback"]
+        self.assertEqual(feedback["request_id"], request_id)
+        self.assertEqual(feedback["feedback_kind"], "issue_comment")
+        self.assertEqual(feedback["body"], "Please tighten this wording before merge.")
+
+    def test_every_code_pr_comment_webhook_dedupes_feedback(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        comment_payload = _every_code_github_pr_comment_payload(comment_id=2002)
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Opened PR.",
+                    "updated_at": "2026-05-06T16:00:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            first_status, first_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            second_status, second_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(first_status, 202)
+        self.assertEqual(second_status, 202)
+        self.assertEqual(
+            first_response["result"]["feedback"]["feedback_id"],
+            second_response["result"]["feedback_id"],
+        )
+        self.assertTrue(second_response["deduped"])
 
     def test_every_code_github_webhook_rejects_invalid_signature(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

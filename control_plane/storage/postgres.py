@@ -32,6 +32,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
 )
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -458,6 +459,39 @@ class LaunchplaneEveryCodeWorkRequestRow(Base):
     trigger_label: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     claimed_by_host: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodePrFeedbackRow(Base):
+    __tablename__ = "launchplane_every_code_pr_feedback"
+    __table_args__ = (
+        Index(
+            "launchplane_every_code_pr_feedback_request_idx",
+            "request_id",
+            desc("received_at"),
+        ),
+        Index(
+            "launchplane_every_code_pr_feedback_pr_idx",
+            "repository",
+            "pr_number",
+            desc("received_at"),
+        ),
+        Index(
+            "launchplane_every_code_pr_feedback_status_idx",
+            "status",
+            desc("received_at"),
+        ),
+    )
+
+    feedback_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    feedback_kind: Mapped[str] = mapped_column(String, nullable=False)
+    github_delivery_id: Mapped[str] = mapped_column(String, nullable=False)
+    actor: Mapped[str] = mapped_column(String, nullable=False)
+    received_at: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1263,6 +1297,51 @@ class PostgresRecordStore(HumanSessionStore):
             row.payload = self._payload_dict(claimed_record)
             session.commit()
             return claimed_record
+
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> None:
+        self._write_row(
+            LaunchplaneEveryCodePrFeedbackRow(
+                feedback_id=record.feedback_id,
+                request_id=record.request_id,
+                repository=record.repository,
+                pr_number=record.pr_number,
+                feedback_kind=record.feedback_kind,
+                github_delivery_id=record.github_delivery_id,
+                actor=record.actor,
+                received_at=record.received_at,
+                status=record.status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]:
+        filters: list[object] = []
+        if request_id:
+            filters.append(LaunchplaneEveryCodePrFeedbackRow.request_id == request_id)
+        if repository:
+            filters.append(LaunchplaneEveryCodePrFeedbackRow.repository == repository)
+        if pr_number is not None:
+            filters.append(LaunchplaneEveryCodePrFeedbackRow.pr_number == pr_number)
+        if status:
+            filters.append(LaunchplaneEveryCodePrFeedbackRow.status == status)
+        return self._list_models(
+            model_type=EveryCodePrFeedbackRecord,
+            orm_model=LaunchplaneEveryCodePrFeedbackRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodePrFeedbackRow.received_at.desc(),
+                LaunchplaneEveryCodePrFeedbackRow.feedback_id.desc(),
+            ),
+            limit=limit,
+        )
 
     def write_preview_lifecycle_plan_record(self, record: PreviewLifecyclePlanRecord) -> None:
         self._write_row(
