@@ -68,8 +68,15 @@ class EveryCodeWebhookSyncTests(unittest.TestCase):
         }
         patch_payload = payloads["PATCH"]
         post_payload = payloads["POST"]
-        self.assertEqual(patch_payload["events"], ["issues", "pull_request"])
-        self.assertEqual(post_payload["events"], ["issues", "pull_request"])
+        expected_events = [
+            "issues",
+            "pull_request",
+            "issue_comment",
+            "pull_request_review",
+            "pull_request_review_comment",
+        ]
+        self.assertEqual(patch_payload["events"], expected_events)
+        self.assertEqual(post_payload["events"], expected_events)
         self.assertEqual(patch_payload["config"]["secret"], "secret")
 
 
