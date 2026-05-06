@@ -264,6 +264,50 @@ class WorkGraphReadModelTests(unittest.TestCase):
         self.assertEqual(issue.updated_at, "2026-05-06T03:54:00Z")
         self.assertEqual(issue.check_state, "success")
 
+    def test_build_snapshot_includes_project_only_planning_facts_for_known_repos(
+        self,
+    ) -> None:
+        snapshot = build_work_graph_snapshot_from_records(
+            generated_at="2026-05-06T14:20:00Z",
+            product_overviews=(_product_overview(),),
+            work_requests=(),
+            planning_issue_facts=(
+                WorkGraphPlanningIssueFacts.model_validate(
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "number": 307,
+                        "title": "Refactor large work graph and operator UI source files",
+                        "url": "https://github.com/cbusillo/launchplane/issues/307",
+                        "focus": "Next",
+                        "manager": "@cellmechanic",
+                        "finish_line": "Work graph changes land in focused modules.",
+                        "labels": ("plan", "plan:active"),
+                        "blocking": 1,
+                        "updated_at": "2026-05-06T13:28:25Z",
+                    }
+                ),
+                WorkGraphPlanningIssueFacts.model_validate(
+                    {
+                        "repository": "cbusillo/unmanaged",
+                        "number": 12,
+                        "title": "Unmanaged project issue",
+                        "url": "https://github.com/cbusillo/unmanaged/issues/12",
+                    }
+                ),
+            ),
+        )
+
+        self.assertEqual(len(snapshot.issues), 1)
+        issue = snapshot.issues[0]
+        self.assertEqual(issue.repository, "cbusillo/launchplane")
+        self.assertEqual(issue.number, 307)
+        self.assertEqual(issue.focus, "Next")
+        self.assertEqual(issue.manager, "@cellmechanic")
+        self.assertEqual(issue.finish_line, "Work graph changes land in focused modules.")
+        self.assertEqual(issue.labels, ("plan", "plan:active"))
+        self.assertEqual(issue.blocking, 1)
+        self.assertEqual(issue.updated_at, "2026-05-06T13:28:25Z")
+
     def test_empty_planning_facts_do_not_erase_every_code_facts(self) -> None:
         snapshot = build_work_graph_snapshot_from_records(
             generated_at="2026-05-06T03:55:00Z",

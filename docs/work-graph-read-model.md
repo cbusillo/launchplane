@@ -73,11 +73,14 @@ The route can also apply compact planning facts from a caller-owned ingestion
 provider. The first provider reads GitHub Project item fields through the
 GitHub CLI when `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
 `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER` are configured. It supplies Focus,
-Manager, Finish Line, labels, item status, updated time, and PR-vs-issue type;
-then it uses bounded GitHub issue and pull-request reads to supply blocked-by,
-blocking, subissue, and PR check state. Empty planning facts do not erase Every
-Code work-request facts. The snapshot route does not fetch or store GitHub issue
-bodies and does not write new records.
+Manager, Finish Line, labels, item status, title, URL, updated time, and
+PR-vs-issue type; then it uses bounded GitHub issue and pull-request reads to
+supply blocked-by, blocking, subissue, and PR check state. Planning facts can
+stand alone for known Launchplane-managed repos when no Every Code work request
+record exists yet; Project items for unclassified repos stay out of the snapshot
+until Launchplane has an explicit repo classification. Empty planning facts do
+not erase Every Code work-request facts. The snapshot route does not fetch or
+store GitHub issue bodies and does not write new records.
 
 The GitHub Project provider shells out to:
 

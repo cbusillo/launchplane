@@ -117,6 +117,8 @@ class GitHubProjectPlanningFactsTests(unittest.TestCase):
         self.assertEqual(len(facts), 2)
         self.assertEqual(facts[0].repository, "cbusillo/launchplane")
         self.assertEqual(facts[0].number, 190)
+        self.assertEqual(facts[0].title, "Build What To Work On Next cockpit")
+        self.assertEqual(facts[0].url, "https://github.com/cbusillo/launchplane/issues/190")
         self.assertEqual(facts[0].focus, "Now")
         self.assertEqual(facts[0].manager, "@cellmechanic")
         self.assertEqual(facts[0].finish_line, "Ranked queue includes Project fields.")

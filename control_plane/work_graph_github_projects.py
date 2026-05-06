@@ -304,6 +304,8 @@ def _project_item_to_planning_facts(item: dict[str, Any]) -> WorkGraphPlanningIs
         {
             "repository": repository,
             "number": number,
+            "title": _string(content.get("title") or item.get("title")),
+            "url": _string(content.get("url")),
             "state": state,
             "focus": focus,
             "manager": _string(item.get("manager")),
