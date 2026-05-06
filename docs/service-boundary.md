@@ -131,6 +131,10 @@ dependency, subissue, and check reads after Project items are loaded. The route
 reports product, work-request, and planning-fact source counts, does not fetch or
 store GitHub issue bodies, and writes no state. A configured Project or signal
 read failure returns an error instead of a silently incomplete snapshot.
+The production image includes `gh` for this provider, and deploy automation maps
+the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` repository secret into service `GH_TOKEN`
+when present. That token is not a Launchplane record and must remain outside the
+repo.
 
 ## Host Assumption
 
