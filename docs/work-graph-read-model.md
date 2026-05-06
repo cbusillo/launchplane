@@ -94,10 +94,12 @@ subissue, and check fan-out after Project items are loaded. Items beyond that
 limit still receive Project field facts, but their live signal fields remain
 unknown until a later snapshot includes them inside the bound.
 
-The service account running Launchplane must already have GitHub CLI credentials
-with the `project` scope, for example from `gh auth refresh -s project`. A
-configured Project that cannot be read fails the snapshot request instead of
-silently dropping Project fields.
+The Launchplane image includes the GitHub CLI and disables interactive prompts
+for service use. The deployed service should receive `GH_TOKEN` from the
+`LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deploy secret; the token must have enough
+access for the configured Project plus issue dependency, subissue, and PR check
+reads. A configured Project or signal source that cannot be read fails the
+snapshot request instead of silently dropping Project fields.
 
 ## Boundary
 
