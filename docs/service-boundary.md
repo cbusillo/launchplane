@@ -119,9 +119,12 @@ Plans state.
 
 `GET /v1/work-graph/snapshot` returns the current Launchplane-assembled work
 graph snapshot for the same authorization boundary. It composes product
-overviews and Every Code work-request records into the typed snapshot contract
-without fetching live GitHub issue bodies, copying Code Plans project fields, or
-writing new state.
+overviews and Every Code work-request records into the typed snapshot contract.
+When a caller-owned planning ingestion provider is configured, the route can
+overlay compact GitHub/Code Plans facts such as Focus, Manager, Finish Line,
+dependency counts, subissue counts, updated time, labels, and check/deploy
+state. The route reports product, work-request, and planning-fact source counts,
+does not fetch or store GitHub issue bodies, and writes no state.
 
 ## Host Assumption
 

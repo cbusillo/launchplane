@@ -560,6 +560,7 @@ export interface WorkGraphSnapshotPayload {
   source: {
     product_count: number;
     work_request_count: number;
+    planning_fact_count?: number;
   };
 }
 

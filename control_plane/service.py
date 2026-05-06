@@ -78,6 +78,7 @@ from control_plane.contracts.promotion_record import (
     ReleaseStatus,
 )
 from control_plane.contracts.work_graph_read_model import (
+    WorkGraphPlanningIssueFacts,
     WorkGraphSnapshot,
     build_work_graph_queue,
     build_work_graph_snapshot_from_records,
@@ -226,6 +227,7 @@ _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
 _EVERY_CODE_TRIGGER_LABEL = "every-code"
+_WorkGraphPlanningFactsProvider = Callable[[], tuple[WorkGraphPlanningIssueFacts, ...]]
 
 
 @dataclass(frozen=True)
@@ -3185,6 +3187,7 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
+    work_graph_planning_facts_provider: _WorkGraphPlanningFactsProvider | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -3946,10 +3949,16 @@ def create_launchplane_service_app(
                         record_store=record_store,
                         action_allowed=work_graph_product_action_allowed,
                     )
+                    planning_issue_facts = (
+                        work_graph_planning_facts_provider()
+                        if work_graph_planning_facts_provider is not None
+                        else ()
+                    )
                     snapshot = build_work_graph_snapshot_from_records(
                         generated_at=_utc_now_timestamp(),
                         product_overviews=product_overviews,
                         work_requests=work_requests,
+                        planning_issue_facts=planning_issue_facts,
                     )
                     return _json_response(
                         start_response=start_response,
@@ -3961,6 +3970,7 @@ def create_launchplane_service_app(
                             "source": {
                                 "product_count": len(product_overviews),
                                 "work_request_count": len(work_requests),
+                                "planning_fact_count": len(planning_issue_facts),
                             },
                         },
                     )

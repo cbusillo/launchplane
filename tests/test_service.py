@@ -49,6 +49,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -1492,6 +1493,88 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(snapshot["repos"][0]["product"], "example-site")
         self.assertEqual(snapshot["issues"][0]["repository"], "every/example-site")
         self.assertEqual(snapshot["issues"][0]["focus"], "Next")
+        self.assertEqual(payload["source"]["planning_fact_count"], 0)
+
+    def test_work_graph_snapshot_uses_compact_planning_facts_when_available(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane", "example-site"],
+                        "contexts": ["launchplane", "example-site"],
+                        "actions": [
+                            "work_graph.rank",
+                            "product_environment.read",
+                            "every_code_work_request.write",
+                        ],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                work_graph_planning_facts_provider=lambda: (
+                    WorkGraphPlanningIssueFacts.model_validate(
+                        {
+                            "repository": "every/example-site",
+                            "number": 190,
+                            "focus": "Now",
+                            "manager": "Chris",
+                            "finish_line": "Project fields are visible in the cockpit.",
+                            "labels": ("plan", "plan:active"),
+                            "blocking": 1,
+                            "updated_at": "2026-05-06T03:54:00Z",
+                        }
+                    ),
+                ),
+            )
+            create_status, _ = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "every/example-site",
+                    "issue_number": 190,
+                    "issue_url": "https://github.com/every/example-site/issues/190",
+                    "issue_title": "Build operator chooser",
+                    "trigger_label": "every-code",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-06T02:00:00Z",
+                },
+                headers={"Idempotency-Key": "every-code-create-example-site-190"},
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/snapshot",
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["source"]["planning_fact_count"], 1)
+        issue = payload["snapshot"]["issues"][0]
+        self.assertEqual(issue["focus"], "Now")
+        self.assertEqual(issue["manager"], "Chris")
+        self.assertEqual(issue["finish_line"], "Project fields are visible in the cockpit.")
+        self.assertEqual(issue["labels"], ["every-code", "plan", "plan:active"])
+        self.assertEqual(issue["blocking"], 1)
+        self.assertEqual(issue["updated_at"], "2026-05-06T03:54:00Z")
 
     def test_work_graph_snapshot_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

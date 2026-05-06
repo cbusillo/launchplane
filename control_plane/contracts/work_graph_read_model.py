@@ -77,6 +77,38 @@ class WorkGraphIssueSnapshot(BaseModel):
         return self
 
 
+class WorkGraphPlanningIssueFacts(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    number: int = Field(ge=1)
+    state: Literal["open", "closed"] | None = None
+    focus: WorkItemFocus | None = None
+    manager: str = ""
+    finish_line: str = ""
+    labels: tuple[str, ...] = ()
+    blocked_by: int | None = Field(default=None, ge=0)
+    blocking: int | None = Field(default=None, ge=0)
+    subissues_total: int | None = Field(default=None, ge=0)
+    subissues_completed: int | None = Field(default=None, ge=0)
+    updated_at: str = ""
+    is_pull_request: bool | None = None
+    check_state: Literal["success", "pending", "failure", "unknown"] | None = None
+    deploy_state: Literal["success", "pending", "failure", "unknown"] | None = None
+
+    @model_validator(mode="after")
+    def _validate_planning_facts(self) -> "WorkGraphPlanningIssueFacts":
+        if not self.repository.strip() or "/" not in self.repository.strip():
+            raise ValueError("work graph planning facts require owner/repo repository")
+        if (
+            self.subissues_total is not None
+            and self.subissues_completed is not None
+            and self.subissues_completed > self.subissues_total
+        ):
+            raise ValueError("completed subissue count cannot exceed total subissue count")
+        return self
+
+
 class WorkGraphSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -145,6 +177,7 @@ def build_work_graph_snapshot_from_records(
     generated_at: str,
     product_overviews: tuple[ProductSiteOverview, ...],
     work_requests: tuple[EveryCodeWorkRequestRecord, ...],
+    planning_issue_facts: tuple[WorkGraphPlanningIssueFacts, ...] = (),
 ) -> WorkGraphSnapshot:
     repo_snapshots: dict[str, WorkGraphRepoSnapshot] = {}
     for product in product_overviews:
@@ -169,10 +202,20 @@ def build_work_graph_snapshot_from_records(
                 display_name=repository.rsplit("/", maxsplit=1)[-1],
             ),
         )
+    planning_facts_by_issue = {
+        (facts.repository.strip().lower(), facts.number): facts for facts in planning_issue_facts
+    }
+    issues = tuple(
+        _apply_planning_issue_facts(
+            _work_request_issue_snapshot(request),
+            planning_facts_by_issue.get((request.repository.strip().lower(), request.issue_number)),
+        )
+        for request in work_requests
+    )
     return WorkGraphSnapshot(
         generated_at=generated_at,
         repos=tuple(repo_snapshots.values()),
-        issues=tuple(_work_request_issue_snapshot(request) for request in work_requests),
+        issues=issues,
     )
 
 
@@ -212,6 +255,61 @@ def _work_request_issue_snapshot(request: EveryCodeWorkRequestRecord) -> WorkGra
         updated_at=request.updated_at or request.queued_at,
         check_state="failure" if request.state == "blocked" else "unknown",
     )
+
+
+def _apply_planning_issue_facts(
+    issue: WorkGraphIssueSnapshot, facts: WorkGraphPlanningIssueFacts | None
+) -> WorkGraphIssueSnapshot:
+    if facts is None:
+        return issue
+    updates: dict[str, object] = {}
+    if facts.state is not None:
+        updates["state"] = facts.state
+    if facts.focus is not None:
+        updates["focus"] = facts.focus
+    if facts.manager.strip():
+        updates["manager"] = facts.manager
+    if facts.finish_line.strip():
+        updates["finish_line"] = facts.finish_line
+    if facts.labels:
+        updates["labels"] = _merge_labels(issue.labels, facts.labels)
+    for field_name in (
+        "blocked_by",
+        "blocking",
+        "subissues_total",
+        "is_pull_request",
+        "check_state",
+        "deploy_state",
+    ):
+        value = getattr(facts, field_name)
+        if value is not None:
+            updates[field_name] = value
+    if facts.subissues_completed is not None:
+        next_total = (
+            facts.subissues_total if facts.subissues_total is not None else issue.subissues_total
+        )
+        if next_total:
+            updates["subissues_completed"] = facts.subissues_completed
+    if facts.updated_at.strip():
+        updates["updated_at"] = facts.updated_at
+    if not updates:
+        return issue
+    return WorkGraphIssueSnapshot.model_validate(issue.model_dump(mode="python") | updates)
+
+
+def _merge_labels(
+    existing_labels: tuple[str, ...], incoming_labels: tuple[str, ...]
+) -> tuple[str, ...]:
+    labels: list[str] = []
+    seen: set[str] = set()
+    for label in (*existing_labels, *incoming_labels):
+        normalized = label.strip()
+        key = normalized.lower()
+        if not normalized or key in seen:
+            continue
+        labels.append(normalized)
+        seen.add(key)
+    return tuple(labels)
 
 
 def _work_request_focus(request: EveryCodeWorkRequestRecord) -> WorkItemFocus:
