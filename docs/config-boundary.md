@@ -59,6 +59,7 @@ Launchplane records/secrets instead of repo files or operator-local env.
 | Dokploy credentials | Launchplane managed secrets (`DOKPLOY_HOST`, `DOKPLOY_TOKEN`) | Launchplane managed secrets | Fail closed when the shared store does not have both bindings. |
 | Runtime environment values | Runtime-environment records | Launchplane runtime-environment records | Includes shared, context, and instance-scoped values. |
 | Secret-shaped runtime keys | Managed runtime secrets overlay | Launchplane managed secrets | Includes `*_PASSWORD`, `*_TOKEN`, `*_SECRET`, `*_KEY`. |
+| Runtime key-safety policy | `launchplane_runtime_key_safety_policies`, deploy-time reconciliation endpoint | Launchplane runtime key-safety policy records | Classifies managed secret binding keys by runtime class and scope. Deploy reconciliation carries metadata only and cannot replace secret values. |
 | Ship mode overrides | `DOKPLOY_SHIP_MODE`, `DOKPLOY_SHIP_MODE_<CTX>_<INSTANCE>` | Launchplane runtime-environment records | Mutable operator behavior, not bootstrap. |
 | Preview routing/config | `LAUNCHPLANE_PREVIEW_BASE_URL` | Launchplane runtime-environment records | Shared control-plane-owned runtime value. |
 | GitHub workflow runtime integration values | `GITHUB_TOKEN`, `GITHUB_WEBHOOK_SECRET` | Launchplane runtime-environment records and managed secrets | Current docs already classify these as DB-backed target state. |

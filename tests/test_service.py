@@ -6421,6 +6421,173 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_runtime_key_safety_policy_endpoint_reconciles_rules(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["runtime_key_safety.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            _write_runtime_key_safety_policy(database_url=database_url)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/runtime-key-safety/policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "source_label": "test:runtime-key-safety-policy",
+                    "rules": [
+                        {
+                            "binding_key": "SMTP_PASSWORD",
+                            "secret_class": "prod_only",
+                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_instances": ["prod"],
+                        },
+                        {
+                            "binding_key": "RESEND_API_KEY",
+                            "secret_class": "prod_only",
+                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_instances": ["prod"],
+                        },
+                    ],
+                },
+                headers={"Idempotency-Key": "runtime-key-safety-policy:test"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_runtime_key_safety_policy_records(
+                    status="active", limit=1
+                )[0]
+            finally:
+                store.close()
+            repeat_status_code, repeat_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/runtime-key-safety/policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "source_label": "test:runtime-key-safety-policy",
+                    "rules": [
+                        {
+                            "binding_key": "SMTP_PASSWORD",
+                            "secret_class": "prod_only",
+                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_instances": ["prod"],
+                        },
+                        {
+                            "binding_key": "RESEND_API_KEY",
+                            "secret_class": "prod_only",
+                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_instances": ["prod"],
+                        },
+                    ],
+                },
+                headers={"Idempotency-Key": "runtime-key-safety-policy:test-repeat"},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(
+            payload["records"]["runtime_key_safety_policy_record_id"], active_policy.record_id
+        )
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(
+            payload["result"]["runtime_key_safety_policy"]["binding_keys"],
+            ["RESEND_API_KEY", "SMTP_PASSWORD"],
+        )
+        self.assertEqual(
+            [rule.binding_key for rule in active_policy.rules],
+            ["RESEND_API_KEY", "SMTP_PASSWORD"],
+        )
+        self.assertEqual(repeat_status_code, 202)
+        self.assertEqual(
+            repeat_payload["records"]["runtime_key_safety_policy_record_id"],
+            active_policy.record_id,
+        )
+        self.assertEqual(repeat_payload["result"]["changed"], False)
+
+    def test_runtime_key_safety_policy_endpoint_rejects_without_permission(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "actions": ["product_profile.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/runtime-key-safety/policies/apply",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "rules": [
+                        {
+                            "binding_key": "RESEND_API_KEY",
+                            "secret_class": "prod_only",
+                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_instances": ["prod"],
+                        }
+                    ],
+                },
+                headers={"Idempotency-Key": "runtime-key-safety-policy:unauthorized"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_preview_generation_endpoint_writes_records_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
