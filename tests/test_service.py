@@ -472,7 +472,7 @@ def _every_code_github_pr_comment_payload(
     pr_number: int = 26,
     body: str = "Please tighten this wording before merge.",
     comment_id: int = 1001,
-    pull_request_body: str = "",
+    issue_body: str = "",
 ) -> dict[str, object]:
     return {
         "action": "created",
@@ -480,6 +480,7 @@ def _every_code_github_pr_comment_payload(
         "issue": {
             "number": pr_number,
             "html_url": f"https://github.com/{repository}/pull/{pr_number}",
+            "body": issue_body,
             "pull_request": {"url": f"https://api.github.com/repos/{repository}/pulls/{pr_number}"},
         },
         "comment": {
@@ -488,11 +489,6 @@ def _every_code_github_pr_comment_payload(
             "html_url": f"https://github.com/{repository}/pull/{pr_number}#issuecomment-{comment_id}",
             "body": body,
             "author_association": "OWNER",
-        },
-        "pull_request": {
-            "number": pr_number,
-            "html_url": f"https://github.com/{repository}/pull/{pr_number}",
-            "body": pull_request_body,
         },
         "sender": {"login": "cbusillo"},
     }
@@ -1751,7 +1747,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         issue_payload = _every_code_github_issue_labeled_payload(issue_number=67)
         comment_payload = _every_code_github_pr_comment_payload(
             pr_number=75,
-            pull_request_body="Closes #67",
+            issue_body="Closes #67",
         )
         with (
             TemporaryDirectory() as temporary_directory_name,
@@ -1818,7 +1814,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(issue_status, 202)
         self.assertEqual(claim_status, 202)
         self.assertEqual(running_status, 202)
-        self.assertEqual(feedback_status, 202)
+        self.assertIn("records", feedback_response)
+        self.assertEqual(feedback_status, 202, feedback_response)
         self.assertEqual(feedback_response["records"]["request_id"], request_id)
         feedback = feedback_response["result"]["feedback"]
         self.assertEqual(feedback["request_id"], request_id)
