@@ -29,6 +29,9 @@ Treat this file as the launch checklist for every Codex session in
 - Never commit secrets or operator-local overrides.
 - Prefer Launchplane-owned runtime-environment records and managed secret
   records over ad hoc service-host env for product/runtime configuration.
+- Use the deployed Launchplane service API or the operator UI for shared and
+  production live mutations. Do not use local CLI live-target commands from an
+  arbitrary checkout as a fallback; add or use a service endpoint first.
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower temporary compatibility fallback.
 - Update docs in the same change when behavior or ownership changes.
