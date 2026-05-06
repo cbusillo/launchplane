@@ -14,10 +14,15 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from control_plane.contracts.every_code_pr_feedback_record import (
+    EveryCodePrFeedbackRecord,
+    EveryCodePrFeedbackStatus,
+)
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
+    resume_every_code_work_request,
 )
 from control_plane.workflows.launchplane import (
     LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
@@ -55,6 +60,20 @@ class EveryCodeWorkerStore(Protocol):
 
     def write_every_code_work_request_record(
         self, record: EveryCodeWorkRequestRecord
+    ) -> object: ...
+
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
+
+    def write_every_code_pr_feedback_record(
+        self, record: EveryCodePrFeedbackRecord
     ) -> object: ...
 
 
@@ -156,6 +175,46 @@ class EveryCodeWorkerApiStore:
                 "updated_at": record.updated_at,
             },
             idempotency_key=f"every-code-status-{record.request_id}-{record.state}-{record.updated_at}",
+        )
+        return payload
+
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]:
+        query: dict[str, object] = {}
+        if request_id.strip():
+            query["request_id"] = request_id.strip()
+        if repository.strip():
+            query["repository"] = repository.strip()
+        if pr_number is not None:
+            query["pr_number"] = pr_number
+        if status.strip():
+            query["status"] = status.strip()
+        if limit is not None:
+            query["limit"] = limit
+        suffix = f"?{urlencode(query)}" if query else ""
+        payload = self._request("GET", f"/v1/every-code/pr-feedback{suffix}")
+        feedback = payload.get("feedback", [])
+        if not isinstance(feedback, list):
+            raise EveryCodeWorkerApiError("Launchplane PR feedback list response is invalid")
+        return tuple(EveryCodePrFeedbackRecord.model_validate(item) for item in feedback)
+
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object:
+        payload = self._request(
+            "POST",
+            "/v1/every-code/pr-feedback/status",
+            body={
+                "feedback_id": record.feedback_id,
+                "request_id": record.request_id,
+                "status": record.status,
+            },
+            idempotency_key=f"every-code-pr-feedback-{record.feedback_id}-{record.status}",
         )
         return payload
 
@@ -317,6 +376,24 @@ class EveryCodeWorkerFinishResult:
         }
 
 
+@dataclass(frozen=True)
+class EveryCodePrFeedbackApplyResult:
+    status: Literal["empty", "applied", "ignored", "blocked"]
+    detail: str
+    feedback_id: str = ""
+    request_id: str = ""
+    session_name: str = ""
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "detail": self.detail,
+            "feedback_id": self.feedback_id,
+            "request_id": self.request_id,
+            "session_name": self.session_name,
+        }
+
+
 def every_code_tmux_session_name(request_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
     return f"every-code-{normalized or 'request'}"[:80]
@@ -446,6 +523,32 @@ def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
     return "code " + shlex.quote(prompt)
 
 
+def every_code_pr_feedback_prompt(feedback: EveryCodePrFeedbackRecord) -> str:
+    source = feedback.html_url.strip() or feedback.pr_url.strip()
+    submitted = feedback.submitted_at.strip() or feedback.received_at.strip()
+    lines = [
+        "Every Code received new PR feedback for this request.",
+        f"Feedback kind: {feedback.feedback_kind}",
+        f"Actor: {feedback.actor}",
+    ]
+    if submitted:
+        lines.append(f"Submitted at: {submitted}")
+    if source:
+        lines.append(f"Source: {source}")
+    lines.extend(
+        (
+            "",
+            "Feedback:",
+            feedback.body.strip(),
+            "",
+            "Read the PR context and existing discussion before changing files. "
+            "Apply the requested correction on the same branch/worktree, update the PR, "
+            "and then let the session exit when checks are complete.",
+        )
+    )
+    return "\n".join(lines)
+
+
 def render_every_code_command(
     record: EveryCodeWorkRequestRecord,
     *,
@@ -502,6 +605,40 @@ def build_every_code_session_command(
         "status=$?\n"
         f"{finish_shell}\n"
         "exit $status"
+    )
+
+
+def build_every_code_feedback_session_command(
+    *,
+    feedback: EveryCodePrFeedbackRecord,
+    state_dir: Path,
+    host: str,
+    database_url: str = "",
+    service_url: str = "",
+    worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
+) -> str:
+    command = "code " + shlex.quote(every_code_pr_feedback_prompt(feedback))
+    return build_every_code_session_command(
+        record=EveryCodeWorkRequestRecord(
+            request_id=feedback.request_id,
+            source="manual",
+            state="running",
+            repository=feedback.repository,
+            issue_number=1,
+            issue_url=feedback.pr_url,
+            trigger_label="every-code",
+            queued_at=feedback.received_at,
+            updated_at=feedback.received_at,
+            claimed_at=feedback.received_at,
+            claimed_by_host=host.strip() or "Every Code worker",
+            started_at=feedback.received_at,
+        ),
+        command=command,
+        state_dir=state_dir,
+        host=host,
+        database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
     )
 
 
@@ -780,6 +917,54 @@ def run_every_code_worker_once(
     )
 
 
+def apply_every_code_pr_feedback_for_host(
+    *,
+    record_store: EveryCodeWorkerStore,
+    host: str,
+    state_dir: Path | None,
+    database_url: str = "",
+    service_url: str = "",
+    worker_token_env: str = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
+    tmux_binary: str = "tmux",
+    runner: Runner | None = None,
+) -> EveryCodePrFeedbackApplyResult:
+    if state_dir is None:
+        return EveryCodePrFeedbackApplyResult(
+            status="empty",
+            detail="Every Code PR feedback requires a worker state directory.",
+        )
+    normalized_host = host.strip()
+    if not normalized_host:
+        raise ValueError("Every Code worker requires a host name")
+    feedback_records = record_store.list_every_code_pr_feedback_records(
+        status="pending",
+        limit=25,
+    )
+    if not feedback_records:
+        return EveryCodePrFeedbackApplyResult(
+            status="empty", detail="No pending Every Code PR feedback."
+        )
+    run = runner or _run_subprocess
+    for feedback in feedback_records:
+        result = _apply_every_code_pr_feedback_record(
+            record_store=record_store,
+            feedback=feedback,
+            host=normalized_host,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+            tmux_binary=tmux_binary,
+            runner=run,
+        )
+        if result.status != "empty":
+            return result
+    return EveryCodePrFeedbackApplyResult(
+        status="empty",
+        detail="No pending Every Code PR feedback belongs to this host.",
+    )
+
+
 def run_every_code_worker_loop(
     *,
     record_store: EveryCodeWorkerStore,
@@ -818,6 +1003,16 @@ def run_every_code_worker_loop(
             record_store=record_store,
             host=host,
             state_dir=state_dir,
+            tmux_binary=tmux_binary,
+            runner=runner,
+        )
+        apply_every_code_pr_feedback_for_host(
+            record_store=record_store,
+            host=host,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
             tmux_binary=tmux_binary,
             runner=runner,
         )
@@ -927,6 +1122,163 @@ def close_terminal_every_code_sessions(
             continue
         closed += 1
     return closed
+
+
+def _apply_every_code_pr_feedback_record(
+    *,
+    record_store: EveryCodeWorkerStore,
+    feedback: EveryCodePrFeedbackRecord,
+    host: str,
+    state_dir: Path,
+    database_url: str,
+    service_url: str,
+    worker_token_env: str,
+    tmux_binary: str,
+    runner: Runner,
+) -> EveryCodePrFeedbackApplyResult:
+    try:
+        record = record_store.read_every_code_work_request_record(feedback.request_id)
+    except Exception:
+        _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        return EveryCodePrFeedbackApplyResult(
+            status="ignored",
+            detail="Every Code work request for PR feedback was not found.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+        )
+    if record.claimed_by_host.strip() != host:
+        return EveryCodePrFeedbackApplyResult(
+            status="empty",
+            detail="Every Code PR feedback belongs to another host.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+        )
+    if _terminal_every_code_request_closed_by_linked_pr(record):
+        _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        return EveryCodePrFeedbackApplyResult(
+            status="ignored",
+            detail="Every Code PR feedback belongs to a closed linked pull request.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+        )
+    state_path = every_code_session_state_path(state_dir=state_dir, request_id=record.request_id)
+    session_state = read_every_code_session_state(state_path)
+    if session_state is None:
+        _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        return EveryCodePrFeedbackApplyResult(
+            status="ignored",
+            detail="Every Code PR feedback has no local session state on this host.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+        )
+    if session_state.get("host", host) != host:
+        return EveryCodePrFeedbackApplyResult(
+            status="empty",
+            detail="Every Code PR feedback session state belongs to another host.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+        )
+    session_name = session_state["session_name"]
+    existing_session = _tmux_session_exists(
+        tmux_binary=tmux_binary,
+        session_name=session_name,
+        runner=runner,
+    )
+    if existing_session is None:
+        return EveryCodePrFeedbackApplyResult(
+            status="blocked",
+            detail=f"Could not inspect tmux session {session_name!r}.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+            session_name=session_name,
+        )
+    if existing_session:
+        if not _send_every_code_pr_feedback_to_session(
+            feedback=feedback,
+            session_name=session_name,
+            tmux_binary=tmux_binary,
+            runner=runner,
+        ):
+            return EveryCodePrFeedbackApplyResult(
+                status="blocked",
+                detail=f"Could not send PR feedback to tmux session {session_name!r}.",
+                feedback_id=feedback.feedback_id,
+                request_id=feedback.request_id,
+                session_name=session_name,
+            )
+        _mark_every_code_pr_feedback(record_store, feedback=feedback, status="applied")
+        return EveryCodePrFeedbackApplyResult(
+            status="applied",
+            detail="Every Code PR feedback was sent to the running session.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+            session_name=session_name,
+        )
+
+    launch_root = Path(session_state.get("launch_root", "")).expanduser()
+    if not launch_root.is_dir():
+        _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        state_path.unlink(missing_ok=True)
+        return EveryCodePrFeedbackApplyResult(
+            status="ignored",
+            detail="Every Code PR feedback worktree is no longer available on this host.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+            session_name=session_name,
+        )
+    if record.state in TERMINAL_EVERY_CODE_STATES:
+        resumed = resume_every_code_work_request(
+            record,
+            host=host,
+            resumed_at=utc_now_timestamp(),
+            result_summary=f"Resumed for PR feedback: {feedback.html_url or feedback.pr_url}",
+        )
+        record_store.write_every_code_work_request_record(resumed)
+    command = build_every_code_feedback_session_command(
+        feedback=feedback,
+        state_dir=state_dir,
+        host=host,
+        database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
+    )
+    try:
+        launch_result = runner(
+            (
+                tmux_binary,
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                "-c",
+                str(launch_root),
+                command,
+            )
+        )
+    except OSError:
+        return EveryCodePrFeedbackApplyResult(
+            status="blocked",
+            detail=f"Could not relaunch tmux session {session_name!r} for PR feedback.",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+            session_name=session_name,
+        )
+    if launch_result.returncode != 0:
+        return EveryCodePrFeedbackApplyResult(
+            status="blocked",
+            detail=f"tmux relaunch failed: {launch_result.stderr.strip()}",
+            feedback_id=feedback.feedback_id,
+            request_id=feedback.request_id,
+            session_name=session_name,
+        )
+    _mark_every_code_pr_feedback(record_store, feedback=feedback, status="applied")
+    return EveryCodePrFeedbackApplyResult(
+        status="applied",
+        detail="Every Code PR feedback resumed the local session.",
+        feedback_id=feedback.feedback_id,
+        request_id=feedback.request_id,
+        session_name=session_name,
+    )
 
 
 def build_every_code_worker_daemon_spec(
@@ -1186,6 +1538,43 @@ def request_every_code_pr_preview_label(
         detail = result.stderr.strip() or result.stdout.strip() or "gh pr edit failed"
         return f"Could not request Launchplane preview: {detail}"
     return f"Requested Launchplane preview with `{LAUNCHPLANE_PREVIEW_ENABLE_LABEL}`."
+
+
+def _mark_every_code_pr_feedback(
+    record_store: EveryCodeWorkerStore,
+    *,
+    feedback: EveryCodePrFeedbackRecord,
+    status: EveryCodePrFeedbackStatus,
+) -> EveryCodePrFeedbackRecord | None:
+    if feedback.status != "pending":
+        return None
+    updated_feedback = feedback.model_copy(update={"status": status})
+    record_store.write_every_code_pr_feedback_record(updated_feedback)
+    return updated_feedback
+
+
+def _terminal_every_code_request_closed_by_linked_pr(record: EveryCodeWorkRequestRecord) -> bool:
+    if record.state not in TERMINAL_EVERY_CODE_STATES:
+        return False
+    summary = record.result_summary.strip()
+    return summary.startswith("Linked pull request merged:") or summary.startswith(
+        "Linked pull request closed without merge:"
+    )
+
+
+def _send_every_code_pr_feedback_to_session(
+    *,
+    feedback: EveryCodePrFeedbackRecord,
+    session_name: str,
+    tmux_binary: str,
+    runner: Runner,
+) -> bool:
+    prompt = every_code_pr_feedback_prompt(feedback)
+    try:
+        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt, "Enter"))
+    except OSError:
+        return False
+    return result.returncode == 0
 
 
 def _run_subprocess(args: Sequence[str]) -> subprocess.CompletedProcess[str]:

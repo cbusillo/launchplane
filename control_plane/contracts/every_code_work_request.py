@@ -146,6 +146,33 @@ def apply_every_code_work_request_status(
     return record.model_copy(update=updates)
 
 
+def resume_every_code_work_request(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    host: str,
+    resumed_at: str,
+    result_summary: str,
+) -> EveryCodeWorkRequestRecord:
+    normalized_host = host.strip()
+    if not normalized_host:
+        raise ValueError("Every Code resume requires host")
+    if not resumed_at.strip():
+        raise ValueError("Every Code resume requires resumed_at")
+    if record.claimed_by_host.strip() != normalized_host:
+        raise ValueError("Every Code resume host does not match claim host")
+    if record.state not in {"done", "blocked"}:
+        raise ValueError("Every Code resume requires a terminal work request")
+    return record.model_copy(
+        update={
+            "state": "running",
+            "updated_at": resumed_at,
+            "finished_at": "",
+            "result_summary": result_summary.strip(),
+            "error_message": "",
+        }
+    )
+
+
 def close_every_code_work_request_for_pull_request(
     record: EveryCodeWorkRequestRecord,
     *,

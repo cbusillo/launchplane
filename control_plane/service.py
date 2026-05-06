@@ -44,6 +44,8 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackKind,
     EveryCodePrFeedbackRecord,
+    EveryCodePrFeedbackStatus,
+    apply_every_code_pr_feedback_status,
     build_every_code_pr_feedback_id,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -1264,6 +1266,22 @@ class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     updated_at: str = ""
 
 
+class EveryCodePrFeedbackStatusEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    feedback_id: str
+    request_id: str
+    status: EveryCodePrFeedbackStatus
+
+    @model_validator(mode="after")
+    def _validate_status(self) -> "EveryCodePrFeedbackStatusEnvelope":
+        if not self.feedback_id.strip():
+            raise ValueError("Every Code PR feedback status requires feedback_id")
+        if not self.request_id.strip():
+            raise ValueError("Every Code PR feedback status requires request_id")
+        return self
+
+
 class WorkGraphRankEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1717,6 +1735,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
     if len(segments) == 3 and segments == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {}
+    if len(segments) == 3 and segments == ["v1", "every-code", "pr-feedback"]:
+        return "every_code_pr_feedback.read", {}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {"request_id": segments[3]}
     if len(segments) == 2 and segments == ["v1", "drivers"]:
@@ -1835,6 +1855,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/status",
+        "/v1/every-code/pr-feedback/status",
         "/v1/work-graph/rank",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
@@ -2676,11 +2697,14 @@ def _every_code_worker_token_from_env() -> str:
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
     if method == "GET" and path == "/v1/every-code/work-requests":
         return True
+    if method == "GET" and path == "/v1/every-code/pr-feedback":
+        return True
     if method == "GET" and path.startswith("/v1/every-code/work-requests/"):
         return True
     return method == "POST" and path in {
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/status",
+        "/v1/every-code/pr-feedback/status",
     }
 
 
@@ -2707,13 +2731,33 @@ def _every_code_read_payload(
 ) -> dict[str, object]:
     every_code_store = _every_code_work_request_store(record_store)
     segments = [segment for segment in path.split("/") if segment]
+    if path == "/v1/every-code/pr-feedback":
+        request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
+        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
+        status_filter = str((query.get("status") or [""])[0] or "").strip()
+        pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
+        pr_number_filter = int(pr_number_value) if pr_number_value else None
+        limit = int(str((query.get("limit") or ["50"])[0] or "50"))
+        feedback_records = every_code_store.list_every_code_pr_feedback_records(
+            request_id=request_id_filter,
+            repository=repository_filter,
+            pr_number=pr_number_filter,
+            status=status_filter,
+            limit=limit,
+        )
+        return {
+            "request_id": request_id_filter,
+            "repository": repository_filter,
+            "status_filter": status_filter,
+            "feedback": [record.model_dump(mode="json") for record in feedback_records],
+        }
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         record = every_code_store.read_every_code_work_request_record(segments[3])
         return {"request": record.model_dump(mode="json")}
     state_filter = str((query.get("state") or [""])[0] or "").strip()
     repository_filter = str((query.get("repository") or [""])[0] or "").strip()
     limit = int(str((query.get("limit") or ["50"])[0] or "50"))
-    records = every_code_store.list_every_code_work_request_records(
+    work_request_records = every_code_store.list_every_code_work_request_records(
         state=state_filter,
         repository=repository_filter,
         limit=limit,
@@ -2721,7 +2765,7 @@ def _every_code_read_payload(
     return {
         "state": state_filter,
         "repository": repository_filter,
-        "requests": [record.model_dump(mode="json") for record in records],
+        "requests": [record.model_dump(mode="json") for record in work_request_records],
     }
 
 
@@ -2753,6 +2797,64 @@ def _handle_every_code_worker_write(
     payload: dict[str, object],
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
+    if path == "/v1/every-code/pr-feedback/status":
+        feedback_status_request = EveryCodePrFeedbackStatusEnvelope.model_validate(payload)
+        feedback_matches = every_code_store.list_every_code_pr_feedback_records(
+            request_id=feedback_status_request.request_id.strip(),
+            limit=100,
+        )
+        existing_feedback_record = next(
+            (
+                record
+                for record in feedback_matches
+                if record.feedback_id == feedback_status_request.feedback_id.strip()
+            ),
+            None,
+        )
+        if existing_feedback_record is None:
+            return _json_response(
+                start_response=start_response,
+                status_code=404,
+                payload={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "not_found",
+                        "message": "Every Code PR feedback record was not found.",
+                    },
+                },
+            )
+        updated_feedback_record = apply_every_code_pr_feedback_status(
+            existing_feedback_record,
+            status=feedback_status_request.status,
+        )
+        if updated_feedback_record is None:
+            return _json_response(
+                start_response=start_response,
+                status_code=409,
+                payload={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "feedback_already_final",
+                        "message": "Every Code PR feedback is already applied or ignored.",
+                    },
+                },
+            )
+        every_code_store.write_every_code_pr_feedback_record(updated_feedback_record)
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload=_accepted_payload(
+                trace_id=trace_id,
+                result={
+                    "request_id": updated_feedback_record.request_id,
+                    "feedback_id": updated_feedback_record.feedback_id,
+                    "status": updated_feedback_record.status,
+                },
+                driver_result={"feedback": updated_feedback_record.model_dump(mode="json")},
+            ),
+        )
     if path == "/v1/every-code/work-requests/claim":
         claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
         claimed_record = every_code_store.claim_every_code_work_request_record(
@@ -2782,29 +2884,32 @@ def _handle_every_code_worker_write(
                 driver_result={"request": claimed_record.model_dump(mode="json")},
             ),
         )
-    status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
-    existing_record = every_code_store.read_every_code_work_request_record(
-        status_request.request_id.strip()
+    work_request_status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
+    existing_work_request_record = every_code_store.read_every_code_work_request_record(
+        work_request_status_request.request_id.strip()
     )
-    updated_record = apply_every_code_work_request_status(
-        existing_record,
+    updated_work_request_record = apply_every_code_work_request_status(
+        existing_work_request_record,
         EveryCodeWorkRequestStatusUpdate(
-            state=status_request.state,
-            host=status_request.host,
-            updated_at=status_request.updated_at.strip() or _utc_now_timestamp(),
-            result_pr_url=status_request.result_pr_url,
-            result_summary=status_request.result_summary,
-            error_message=status_request.error_message,
+            state=work_request_status_request.state,
+            host=work_request_status_request.host,
+            updated_at=work_request_status_request.updated_at.strip() or _utc_now_timestamp(),
+            result_pr_url=work_request_status_request.result_pr_url,
+            result_summary=work_request_status_request.result_summary,
+            error_message=work_request_status_request.error_message,
         ),
     )
-    every_code_store.write_every_code_work_request_record(updated_record)
+    every_code_store.write_every_code_work_request_record(updated_work_request_record)
     return _json_response(
         start_response=start_response,
         status_code=202,
         payload=_accepted_payload(
             trace_id=trace_id,
-            result={"request_id": updated_record.request_id, "state": updated_record.state},
-            driver_result={"request": updated_record.model_dump(mode="json")},
+            result={
+                "request_id": updated_work_request_record.request_id,
+                "state": updated_work_request_record.state,
+            },
+            driver_result={"request": updated_work_request_record.model_dump(mode="json")},
         ),
     )
 
