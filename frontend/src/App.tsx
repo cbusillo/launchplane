@@ -1108,6 +1108,7 @@ function WorkGraphQueue({
             { value: "all", label: "Any" },
             { value: "quick_win", label: "Quick" },
             { value: "deep_work", label: "Deep" },
+            { value: "switch_projects", label: "Switch" },
             { value: "attention_needed", label: "Needs" },
           ]}
           onChange={onModeChange}
@@ -3239,6 +3240,23 @@ function StateFixtureGallery({
       score: 42,
       updated_at: "2026-05-05T23:00:00Z",
       reasons: [{ code: "blocked", detail: "Waiting on downstream validation" }],
+    },
+    {
+      repository: "cbusillo/odoo-tenant-opw",
+      repo_classification: "active_awareness",
+      product: "",
+      product_display_name: "",
+      number: 302,
+      title: "Revisit tenant thinning follow-up",
+      url: "https://github.com/cbusillo/odoo-tenant-opw/issues/302",
+      focus: "Later",
+      manager: "Unassigned",
+      finish_line: "Choose whether this belongs in Launchplane or stays tenant-owned.",
+      state: "ready",
+      recommendation: "switch_projects",
+      score: 58,
+      updated_at: "2026-05-05T21:30:00Z",
+      reasons: [{ code: "repo_classification", detail: "Awareness-only repo." }],
     },
   ];
 
