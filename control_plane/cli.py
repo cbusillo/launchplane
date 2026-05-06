@@ -101,6 +101,7 @@ from control_plane.contracts.work_graph_read_model import (
 )
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.every_code_worker import (
+    EveryCodeWorkerApiError,
     EveryCodeWorkerApiStore,
     EveryCodeWorkerStore,
     build_every_code_worker_daemon_spec,
@@ -9781,6 +9782,8 @@ def every_code_rerun_issue(
                 "detail": "Requeued terminal Every Code work request for this issue.",
                 "request": request.model_dump(mode="json"),
             }
+        except EveryCodeWorkerApiError as error:
+            raise click.ClickException(str(error)) from error
         finally:
             _close_store(record_store)
         click.echo(json.dumps(payload, indent=2, sort_keys=True))

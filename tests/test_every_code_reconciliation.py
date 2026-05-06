@@ -1,7 +1,9 @@
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -240,6 +242,30 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
             self.assertEqual(rerun_payload["request"]["state"], "queued")
             self.assertEqual(rerun_payload["request"]["trigger_actor"], "ops")
             self.assertEqual(rerun_payload["request"]["result_pr_url"], "")
+
+    def test_cli_rerun_issue_reports_service_failure_without_traceback(self) -> None:
+        runner = CliRunner()
+
+        with patch.dict(os.environ, {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-token"}):
+            result = runner.invoke(
+                main,
+                [
+                    "every-code",
+                    "rerun-issue",
+                    "--service-url",
+                    "http://127.0.0.1:1",
+                    "--repository",
+                    "cbusillo/launchplane",
+                    "--issue-number",
+                    "278",
+                    "--actor",
+                    "ops",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Error: Launchplane API request failed", result.output)
+        self.assertNotIn("Traceback", result.output)
 
 
 if __name__ == "__main__":
