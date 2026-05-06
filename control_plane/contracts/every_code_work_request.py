@@ -144,3 +144,40 @@ def apply_every_code_work_request_status(
         if not record.started_at.strip():
             updates["started_at"] = update.updated_at
     return record.model_copy(update=updates)
+
+
+def close_every_code_work_request_for_pull_request(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    pr_url: str,
+    merged: bool,
+    closed_at: str,
+) -> EveryCodeWorkRequestRecord | None:
+    normalized_pr_url = pr_url.strip()
+    if not normalized_pr_url:
+        raise ValueError("Every Code PR close update requires pr_url")
+    if not closed_at.strip():
+        raise ValueError("Every Code PR close update requires closed_at")
+    if record.result_pr_url.strip() != normalized_pr_url:
+        return None
+    if record.state in {"queued", "done", "blocked"}:
+        return None
+
+    state: EveryCodeWorkRequestState = "done" if merged else "blocked"
+    summary = (
+        f"Linked pull request merged: {normalized_pr_url}"
+        if merged
+        else f"Linked pull request closed without merge: {normalized_pr_url}"
+    )
+    error_message = "" if merged else summary
+    updates: dict[str, object] = {
+        "state": state,
+        "updated_at": closed_at,
+        "finished_at": closed_at,
+        "result_pr_url": normalized_pr_url,
+        "result_summary": summary,
+        "error_message": error_message,
+    }
+    if not record.started_at.strip():
+        updates["started_at"] = closed_at
+    return record.model_copy(update=updates)
