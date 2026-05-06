@@ -29,6 +29,7 @@ class EveryCodeRerunStore(Protocol):
         self, record: EveryCodeWorkRequestRecord
     ) -> object: ...
 
+
 @dataclass(frozen=True)
 class EveryCodeIssueReconciliationResult:
     status: EveryCodeReconciliationStatus
