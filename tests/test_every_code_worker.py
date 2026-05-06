@@ -214,13 +214,14 @@ class EveryCodeWorkerTests(unittest.TestCase):
             temporary_root = Path(temporary_directory_name)
             spec = build_every_code_worker_daemon_spec(state_dir=temporary_root / "state")
 
+            def launcher(args: Sequence[str], log_file: Path, cwd: Path) -> _Process:
+                launched.append((tuple(args), log_file, cwd))
+                return _Process(4242)
+
             result = start_every_code_worker_daemon(
                 spec=spec,
                 cwd=temporary_root,
-                launcher=lambda args, log_file, cwd: launched.append(
-                    (tuple(args), log_file, cwd)
-                )
-                or _Process(4242),
+                launcher=launcher,
             )
             payload = json.loads(spec.pid_file.read_text(encoding="utf-8"))
 
@@ -287,11 +288,16 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "control_plane.every_code_worker._process_matches_expected_command",
                     return_value=False,
                 ):
+                    def launcher(
+                        _args: Sequence[str], _log_file: Path, _cwd: Path
+                    ) -> _Process:
+                        launched.append(1)
+                        return _Process(5252)
+
                     result = start_every_code_worker_daemon(
                         spec=spec,
                         cwd=temporary_root,
-                        launcher=lambda _args, _log_file, _cwd: launched.append(1)
-                        or _Process(5252),
+                        launcher=launcher,
                     )
 
         self.assertEqual(result.status, "started")

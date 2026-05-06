@@ -49,9 +49,12 @@ class EveryCodeWorkerStore(Protocol):
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
-ProcessLauncher = Callable[
-    [Sequence[str], Path, Path], subprocess.Popen[str]
-]
+
+class DaemonProcess(Protocol):
+    pid: int
+
+
+ProcessLauncher = Callable[[Sequence[str], Path, Path], DaemonProcess]
 
 
 @dataclass(frozen=True)
