@@ -4,7 +4,7 @@ from pathlib import Path
 import re
 import shlex
 import time
-from typing import Literal
+from typing import Literal, cast
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -21,6 +21,27 @@ VeriReelAppMaintenanceAction = Literal[
     "delete-user",
     "reset-testing",
 ]
+VeriReelAppMaintenanceIntent = Literal[
+    "",
+    "stable-testing-migration",
+    "stable-testing-reset",
+    "remote-e2e-grant-sponsored",
+    "remote-e2e-delete-user",
+    "owner-route-promote-owner",
+    "owner-route-delete-user",
+]
+
+APP_MAINTENANCE_INTENT_REQUIREMENTS: dict[
+    str,
+    tuple[VeriReelAppMaintenanceAction, str],
+] = {
+    "stable-testing-migration": ("migrate", "verireel"),
+    "stable-testing-reset": ("reset-testing", "verireel"),
+    "remote-e2e-grant-sponsored": ("grant-sponsored", "verireel-testing"),
+    "remote-e2e-delete-user": ("delete-user", "verireel-testing"),
+    "owner-route-promote-owner": ("promote-owner", "verireel"),
+    "owner-route-delete-user": ("delete-user", "verireel"),
+}
 
 DEFAULT_TIMEOUT_SECONDS = 300
 DEFAULT_ATTEMPTS = 4
@@ -36,6 +57,7 @@ class VeriReelAppMaintenanceRequest(BaseModel):
     context: Literal["verireel", "verireel-testing"] = "verireel"
     instance: Literal["testing", "preview"] = "testing"
     action: VeriReelAppMaintenanceAction
+    intent: VeriReelAppMaintenanceIntent = ""
     email: str = ""
     application_name: str = ""
     preview_slug: str = ""
@@ -44,6 +66,7 @@ class VeriReelAppMaintenanceRequest(BaseModel):
     @model_validator(mode="after")
     def _validate_request(self) -> "VeriReelAppMaintenanceRequest":
         self.email = self.email.strip()
+        self.intent = cast(VeriReelAppMaintenanceIntent, self.intent.strip())
         self.application_name = self.application_name.strip()
         self.preview_slug = self.preview_slug.strip()
 
@@ -63,11 +86,15 @@ class VeriReelAppMaintenanceRequest(BaseModel):
                     "VeriReel preview app maintenance requires a ver-preview-pr-*-app application_name."
                 )
             if self.preview_slug and not PREVIEW_SLUG_PATTERN.fullmatch(self.preview_slug):
-                raise ValueError("VeriReel preview app maintenance requires a pr-*-shaped preview_slug.")
+                raise ValueError(
+                    "VeriReel preview app maintenance requires a pr-*-shaped preview_slug."
+                )
             if not self.application_name and not self.preview_slug:
                 raise ValueError("VeriReel preview app maintenance requires preview_slug.")
         if self.context == "verireel" and self.application_name:
-            raise ValueError("VeriReel stable app maintenance resolves application_name from Launchplane records.")
+            raise ValueError(
+                "VeriReel stable app maintenance resolves application_name from Launchplane records."
+            )
         if self.context == "verireel" and self.preview_slug:
             raise ValueError("VeriReel stable app maintenance does not accept preview_slug.")
         if self.action in {"migrate", "reset-testing"} and self.context != "verireel":
@@ -75,9 +102,19 @@ class VeriReelAppMaintenanceRequest(BaseModel):
                 f"VeriReel app maintenance action '{self.action}' is only supported for the stable testing instance."
             )
         if self.action in {"migrate", "reset-testing"} and self.email:
-            raise ValueError(f"VeriReel app maintenance action '{self.action}' does not accept email.")
+            raise ValueError(
+                f"VeriReel app maintenance action '{self.action}' does not accept email."
+            )
         if self.action not in {"migrate", "reset-testing"} and not self.email:
             raise ValueError(f"VeriReel app maintenance action '{self.action}' requires email.")
+        if self.intent:
+            required_action, required_context = APP_MAINTENANCE_INTENT_REQUIREMENTS[self.intent]
+            if self.action != required_action or self.context != required_context:
+                raise ValueError(
+                    "VeriReel app maintenance intent "
+                    f"'{self.intent}' requires action '{required_action}' "
+                    f"in context '{required_context}'."
+                )
         return self
 
 
@@ -86,6 +123,7 @@ class VeriReelAppMaintenanceResult(BaseModel):
 
     maintenance_status: Literal["pass", "fail"]
     action: VeriReelAppMaintenanceAction
+    intent: str = ""
     context: str
     instance: str
     application_name: str
@@ -125,7 +163,9 @@ def _command_for_request(request: VeriReelAppMaintenanceRequest) -> tuple[str, s
         )
     if request.action == "delete-user":
         schedule_name = (
-            "ver-owner-route-delete-user" if request.context == "verireel" else "ver-remote-e2e-delete-user"
+            "ver-owner-route-delete-user"
+            if request.context == "verireel"
+            else "ver-remote-e2e-delete-user"
         )
         return schedule_name, _remote_owner_admin_command(
             action=request.action,
@@ -149,7 +189,9 @@ def _resolve_stable_testing_application(
     if target_definition is None:
         raise click.ClickException("No Dokploy target definition found for verireel/testing.")
     if target_definition.target_type != "application" or not target_definition.target_id.strip():
-        raise click.ClickException("VeriReel app maintenance requires verireel/testing to resolve to an application target.")
+        raise click.ClickException(
+            "VeriReel app maintenance requires verireel/testing to resolve to an application target."
+        )
     target_name = target_definition.target_name.strip() or "ver-testing-app"
     return target_name, target_definition.target_id.strip()
 
@@ -185,17 +227,23 @@ def _find_application_by_name(*, host: str, token: str, application_name: str) -
     return None
 
 
-def _resolve_preview_application(*, host: str, token: str, application_name: str) -> tuple[str, str]:
+def _resolve_preview_application(
+    *, host: str, token: str, application_name: str
+) -> tuple[str, str]:
     application = _find_application_by_name(
         host=host,
         token=token,
         application_name=application_name,
     )
     if application is None:
-        raise click.ClickException(f"No Dokploy application found for preview app {application_name!r}.")
+        raise click.ClickException(
+            f"No Dokploy application found for preview app {application_name!r}."
+        )
     application_id = str(application.get("applicationId") or application.get("id") or "").strip()
     if not application_id:
-        raise click.ClickException(f"Preview app {application_name!r} did not expose an application id.")
+        raise click.ClickException(
+            f"Preview app {application_name!r} did not expose an application id."
+        )
     return application_name, application_id
 
 
@@ -203,7 +251,9 @@ def _preview_application_name(preview_slug: str) -> str:
     return f"ver-preview-{preview_slug}-app"
 
 
-def _find_application_schedule(*, host: str, token: str, application_id: str, schedule_name: str) -> JsonObject | None:
+def _find_application_schedule(
+    *, host: str, token: str, application_id: str, schedule_name: str
+) -> JsonObject | None:
     for schedule in control_plane_dokploy.list_dokploy_schedules(
         host=host,
         token=token,
@@ -342,7 +392,9 @@ def execute_verireel_app_maintenance(
     application_id = ""
     schedule_name = ""
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+        host, token = control_plane_dokploy.read_dokploy_config(
+            control_plane_root=control_plane_root
+        )
         if request.context == "verireel":
             application_name, application_id = _resolve_stable_testing_application(
                 control_plane_root=control_plane_root,
@@ -351,7 +403,8 @@ def execute_verireel_app_maintenance(
             application_name, application_id = _resolve_preview_application(
                 host=host,
                 token=token,
-                application_name=request.application_name or _preview_application_name(request.preview_slug),
+                application_name=request.application_name
+                or _preview_application_name(request.preview_slug),
             )
         schedule_name, command = _command_for_request(request)
         _run_application_command_with_retries(
@@ -371,6 +424,7 @@ def execute_verireel_app_maintenance(
         return VeriReelAppMaintenanceResult(
             maintenance_status="pass",
             action=request.action,
+            intent=request.intent,
             context=request.context,
             instance=request.instance,
             application_name=application_name,
@@ -383,6 +437,7 @@ def execute_verireel_app_maintenance(
         return VeriReelAppMaintenanceResult(
             maintenance_status="fail",
             action=request.action,
+            intent=request.intent,
             context=request.context,
             instance=request.instance,
             application_name=application_name,
