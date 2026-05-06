@@ -2284,6 +2284,146 @@ def _bearer_token(environ: dict[str, object]) -> str:
     return token.strip()
 
 
+def _every_code_worker_token_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", "").strip()
+
+
+def _is_every_code_worker_route(*, method: str, path: str) -> bool:
+    if method == "GET" and path == "/v1/every-code/work-requests":
+        return True
+    if method == "GET" and path.startswith("/v1/every-code/work-requests/"):
+        return True
+    return method == "POST" and path in {
+        "/v1/every-code/work-requests/claim",
+        "/v1/every-code/work-requests/status",
+    }
+
+
+def _every_code_worker_token_authorized(
+    *, environ: dict[str, object], method: str, path: str
+) -> bool:
+    if not _is_every_code_worker_route(method=method, path=path):
+        return False
+    expected_token = _every_code_worker_token_from_env()
+    if not expected_token:
+        return False
+    try:
+        provided_token = _bearer_token(environ)
+    except PermissionError:
+        return False
+    return secrets.compare_digest(provided_token, expected_token)
+
+
+def _every_code_read_payload(
+    *,
+    record_store: object,
+    path: str,
+    query: dict[str, list[str]],
+) -> dict[str, object]:
+    every_code_store = _every_code_work_request_store(record_store)
+    segments = [segment for segment in path.split("/") if segment]
+    if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
+        record = every_code_store.read_every_code_work_request_record(segments[3])
+        return {"request": record.model_dump(mode="json")}
+    state_filter = str((query.get("state") or [""])[0] or "").strip()
+    repository_filter = str((query.get("repository") or [""])[0] or "").strip()
+    limit = int(str((query.get("limit") or ["50"])[0] or "50"))
+    records = every_code_store.list_every_code_work_request_records(
+        state=state_filter,
+        repository=repository_filter,
+        limit=limit,
+    )
+    return {
+        "state": state_filter,
+        "repository": repository_filter,
+        "requests": [record.model_dump(mode="json") for record in records],
+    }
+
+
+def _handle_every_code_work_request_read(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    record_store: object,
+    path: str,
+    query: dict[str, list[str]],
+) -> list[bytes]:
+    return _json_response(
+        start_response=start_response,
+        status_code=200,
+        payload={
+            "status": "ok",
+            "trace_id": trace_id,
+            **_every_code_read_payload(record_store=record_store, path=path, query=query),
+        },
+    )
+
+
+def _handle_every_code_worker_write(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    record_store: object,
+    path: str,
+    payload: dict[str, object],
+) -> list[bytes]:
+    every_code_store = _every_code_work_request_store(record_store)
+    if path == "/v1/every-code/work-requests/claim":
+        claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
+        claimed_record = every_code_store.claim_every_code_work_request_record(
+            request_id=claim_request.request_id.strip(),
+            host=claim_request.host.strip(),
+            claimed_at=_utc_now_timestamp(),
+        )
+        if claimed_record is None:
+            return _json_response(
+                start_response=start_response,
+                status_code=409,
+                payload={
+                    "status": "rejected",
+                    "trace_id": trace_id,
+                    "error": {
+                        "code": "work_request_already_claimed",
+                        "message": "Every Code work request is not queued for claim.",
+                    },
+                },
+            )
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload=_accepted_payload(
+                trace_id=trace_id,
+                result={"request_id": claimed_record.request_id, "state": claimed_record.state},
+                driver_result={"request": claimed_record.model_dump(mode="json")},
+            ),
+        )
+    status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
+    existing_record = every_code_store.read_every_code_work_request_record(
+        status_request.request_id.strip()
+    )
+    updated_record = apply_every_code_work_request_status(
+        existing_record,
+        EveryCodeWorkRequestStatusUpdate(
+            state=status_request.state,
+            host=status_request.host,
+            updated_at=status_request.updated_at.strip() or _utc_now_timestamp(),
+            result_pr_url=status_request.result_pr_url,
+            result_summary=status_request.result_summary,
+            error_message=status_request.error_message,
+        ),
+    )
+    every_code_store.write_every_code_work_request_record(updated_record)
+    return _json_response(
+        start_response=start_response,
+        status_code=202,
+        payload=_accepted_payload(
+            trace_id=trace_id,
+            result={"request_id": updated_record.request_id, "state": updated_record.state},
+            driver_result={"request": updated_record.model_dump(mode="json")},
+        ),
+    )
+
+
 def _session_identity(
     *, environ: dict[str, object], session_manager: HumanSessionManager | None
 ) -> GitHubHumanIdentity | None:
@@ -3462,6 +3602,23 @@ def create_launchplane_service_app(
                         },
                     },
                 )
+        if _every_code_worker_token_authorized(environ=environ, method=method, path=path):
+            if method == "GET":
+                return _handle_every_code_work_request_read(
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                    path=path,
+                    query=query,
+                )
+            payload = _read_json_request(environ)
+            return _handle_every_code_worker_write(
+                start_response=start_response,
+                trace_id=request_trace_id,
+                record_store=record_store,
+                path=path,
+                payload=payload,
+            )
         try:
             if method == "GET":
                 identity = _read_identity(
@@ -3889,38 +4046,12 @@ def create_launchplane_service_app(
                                 },
                             },
                         )
-                    every_code_store = _every_code_work_request_store(record_store)
-                    if "request_id" in params:
-                        record = every_code_store.read_every_code_work_request_record(
-                            params["request_id"]
-                        )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "request": record.model_dump(mode="json"),
-                            },
-                        )
-                    state_filter = str((query.get("state") or [""])[0] or "").strip()
-                    repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-                    limit = int(str((query.get("limit") or ["50"])[0] or "50"))
-                    records = every_code_store.list_every_code_work_request_records(
-                        state=state_filter,
-                        repository=repository_filter,
-                        limit=limit,
-                    )
-                    return _json_response(
+                    return _handle_every_code_work_request_read(
                         start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            "state": state_filter,
-                            "repository": repository_filter,
-                            "requests": [record.model_dump(mode="json") for record in records],
-                        },
+                        trace_id=request_trace_id,
+                        record_store=record_store,
+                        path=path,
+                        query=query,
                     )
                 if action == "work_graph.rank":
                     if not authz_policy.allows(
@@ -4364,7 +4495,6 @@ def create_launchplane_service_app(
                 result = {"request_id": record.request_id, "state": record.state}
                 driver_result = {"request": record.model_dump(mode="json")}
             elif path == "/v1/every-code/work-requests/claim":
-                claim_request = EveryCodeWorkRequestClaimEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="every_code_work_request.claim",
@@ -4394,29 +4524,14 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                every_code_store = _every_code_work_request_store(record_store)
-                claimed_record = every_code_store.claim_every_code_work_request_record(
-                    request_id=claim_request.request_id.strip(),
-                    host=claim_request.host.strip(),
-                    claimed_at=_utc_now_timestamp(),
+                return _handle_every_code_worker_write(
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                    path=path,
+                    payload=payload,
                 )
-                if claimed_record is None:
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=409,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "work_request_already_claimed",
-                                "message": "Every Code work request is not queued for claim.",
-                            },
-                        },
-                    )
-                result = {"request_id": claimed_record.request_id, "state": claimed_record.state}
-                driver_result = {"request": claimed_record.model_dump(mode="json")}
             elif path == "/v1/every-code/work-requests/status":
-                status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
                 if not authz_policy.allows(
                     identity=identity,
                     action="every_code_work_request.update",
@@ -4446,24 +4561,13 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                every_code_store = _every_code_work_request_store(record_store)
-                existing_record = every_code_store.read_every_code_work_request_record(
-                    status_request.request_id.strip()
+                return _handle_every_code_worker_write(
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                    path=path,
+                    payload=payload,
                 )
-                updated_record = apply_every_code_work_request_status(
-                    existing_record,
-                    EveryCodeWorkRequestStatusUpdate(
-                        state=status_request.state,
-                        host=status_request.host,
-                        updated_at=status_request.updated_at.strip() or _utc_now_timestamp(),
-                        result_pr_url=status_request.result_pr_url,
-                        result_summary=status_request.result_summary,
-                        error_message=status_request.error_message,
-                    ),
-                )
-                every_code_store.write_every_code_work_request_record(updated_record)
-                result = {"request_id": updated_record.request_id, "state": updated_record.state}
-                driver_result = {"request": updated_record.model_dump(mode="json")}
             elif path == "/v1/work-graph/rank":
                 rank_request = WorkGraphRankEnvelope.model_validate(payload)
                 if not authz_policy.allows(
