@@ -51,6 +51,76 @@ Keep a compatibility surface only when it is one of these:
   tracked as capability expansion in the active Launchplane GUI/driver plan or
   in focused PRs/issues, not by reopening the old migration checklist.
 
+## File-Backed State Inventory
+
+`state/`, `FilesystemRecordStore`, `--state-dir`, and `LAUNCHPLANE_STATE_DIR`
+remain compatibility surfaces. They are allowed only for local development,
+tests, import/backfill, and emergency inspection. Shared and production live
+mutations must use the deployed Launchplane service API or DB-backed operator
+records.
+
+### Keep
+
+- `control_plane.storage.filesystem.FilesystemRecordStore` stays as the local
+  JSON implementation used by tests, local rehearsals, and temporary import
+  sources.
+- Unit and integration tests may keep temporary `state_dir` fixtures. These
+  validate record contract parity and service behavior without requiring a live
+  Postgres database.
+- `launchplane service serve --state-dir ...` may stay as a local-only fallback
+  for development when `--database-url` is omitted. Hosted/shared service runs
+  should use `LAUNCHPLANE_DATABASE_URL`.
+- Every Code local worker commands may keep `--state-dir` for daemon pid/log
+  files and local worktree/session state. Work-request authority should use
+  `--service-url` mode for the deployed Launchplane service.
+- `storage import-core-records --state-dir ... --database-url ...` stays as the
+  explicit backfill bridge from local JSON records into Postgres-backed records.
+
+### Migrate Or Demote
+
+- Generic record CLI groups such as `artifacts`, `backup-gates`, `deployments`,
+  `promotions`, `inventory`, `release-tuples`, and `launchplane-previews`
+  should be treated as local inspection/backfill tools unless they are run with
+  `--database-url`. Do not document them as live shared-service mutation paths.
+- Legacy workflow helpers that still type their store as `FilesystemRecordStore`
+  should be migrated to store protocols or DB-backed/service-backed entrypoints
+  before they are used for shared environments. Current examples include
+  `control_plane.workflows.launchplane`, `odoo_prod_promotion`,
+  `verireel_stable_deploy`, `verireel_prod_backup_gate`,
+  `verireel_prod_promotion`, and `verireel_prod_rollback`.
+- Service routes and product driver workflows should keep accepting a generic
+  record-store protocol where possible. New product workflow docs should point
+  to the service route, not to a local checkout plus `--state-dir` command.
+- Any public doc that shows a product/tenant operator mutating live state through
+  local JSON files should be rewritten to use service ingress, DB-backed
+  operator commands, or a clearly labeled local-only rehearsal.
+
+### Delete Later
+
+- Delete file-backed write commands once an equivalent service route exists,
+  product workflows use that route, and import/backfill no longer needs the
+  command.
+- Delete product-specific file-backed workflow modules after the matching
+  Launchplane driver route and DB-backed tests cover the same behavior.
+- Delete stale examples or seed files that imply repo-tracked operational state.
+  Durable runtime records belong in Postgres-backed Launchplane storage, not in
+  git history.
+
+### Retirement Checklist
+
+Before removing a file-backed command or workflow path, verify all of the
+following:
+
+- a typed service route or DB-backed operator command exists for the same record
+  family or mutation
+- the shared/product workflow calls the service route with GitHub OIDC or uses a
+  Launchplane-owned DB-backed operator path
+- tests cover both the replacement route and the retired compatibility behavior
+- local/dev users still have a documented rehearsal path, or the old local path
+  is explicitly obsolete
+- live evidence shows the replacement route has succeeded for at least one real
+  product/context lane
+
 ## Review Cadence
 
 Review this page after adding any new product driver route or tenant workflow.
