@@ -368,6 +368,10 @@ def default_every_code_command(record: EveryCodeWorkRequestRecord) -> str:
     prompt = (
         f"Work on {record.repository} issue #{record.issue_number}: {record.issue_title}. "
         f"Issue URL: {record.issue_url}. Launchplane request: {record.request_id}. "
+        "Before changing files, read the issue body and every issue comment. "
+        "Treat newer comments as potentially more current than the original body. "
+        "Inspect linked references and any available images or attachments before deciding what to change. "
+        "You are already running inside the isolated Every Code worktree and branch for this request. "
         "Open a pull request for the change. If the PR fully resolves the issue, "
         f"include `Closes #{record.issue_number}` or `Fixes #{record.issue_number}` "
         "in the PR body so GitHub closes the issue when the PR merges. Use "
