@@ -16,6 +16,11 @@ on:
         description: Exact image reference to deploy instead of building a new one.
         required: false
         type: string
+      omit_every_code_env:
+        description: Temporarily omit Every Code env for one compatibility deploy.
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   actions: read
@@ -223,6 +228,7 @@ jobs:
                 --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
                 --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
                 --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
+                --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
                 '(
                   {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -233,7 +239,8 @@ jobs:
                   LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
                   }
                   + (
-                    if ($enable_every_code_runtime_secrets | ascii_downcase) == "true" then
+                    if (not $omit_every_code_env)
+                      and (($enable_every_code_runtime_secrets | ascii_downcase) == "true") then
                       {
                         LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
                         LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret

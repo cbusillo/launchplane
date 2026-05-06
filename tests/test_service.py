@@ -6160,13 +6160,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_GITHUB_CLIENT_ID": "client-id",
                                 "LAUNCHPLANE_PUBLIC_URL": "https://launchplane.example",
                                 "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": ("info@shinycomputers.com"),
+                                "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ("webhook-secret"),
+                                "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "cbusillo",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT": "50",
                                 "LAUNCHPLANE_WORK_GRAPH_GH_BINARY": "gh",
-                                "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token",
-                                "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "webhook-secret",
                                 "GH_TOKEN": "github-token",
                             },
                         },
@@ -6194,16 +6194,16 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS=info@shinycomputers.com",
             updated_env_text,
         )
+        self.assertIn(
+            "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET=webhook-secret",
+            updated_env_text,
+        )
+        self.assertIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=worker-token", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER=cbusillo", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER=4", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT=200", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT=50", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_GH_BINARY=gh", updated_env_text)
-        self.assertIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=worker-token", updated_env_text)
-        self.assertIn(
-            "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET=webhook-secret",
-            updated_env_text,
-        )
         self.assertIn("GH_TOKEN=github-token", updated_env_text)
         self.assertNotIn("LAUNCHPLANE_POLICY_TOML=", updated_env_text)
         self.assertNotIn("LAUNCHPLANE_POLICY_FILE=", updated_env_text)
