@@ -133,8 +133,10 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.target_id, "target-123")
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "pass")
+        artifact_identity = store.deployments[0].artifact_identity
+        assert artifact_identity is not None
         self.assertEqual(
-            store.deployments[0].artifact_identity.artifact_id,
+            artifact_identity.artifact_id,
             "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
         )
         self.assertIsNotNone(store.deployments[0].resolved_target)
@@ -177,7 +179,9 @@ class GenericWebDeployTests(unittest.TestCase):
             "ghcr.io/cbusillo/sellyouroutboard:sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c"
         )
         self.assertEqual(deploy_request.artifact_id, expected_artifact_id)
-        self.assertEqual(store.deployments[0].artifact_identity.artifact_id, expected_artifact_id)
+        artifact_identity = store.deployments[0].artifact_identity
+        assert artifact_identity is not None
+        self.assertEqual(artifact_identity.artifact_id, expected_artifact_id)
 
     def test_execute_generic_web_deploy_records_failure_when_provider_fails(self) -> None:
         store = _GenericWebDeployStore(_profile())

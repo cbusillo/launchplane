@@ -6,7 +6,13 @@ import subprocess
 from typing import Callable, Sequence
 
 
-EVERY_CODE_WEBHOOK_EVENTS = ("issues", "pull_request")
+EVERY_CODE_WEBHOOK_EVENTS = (
+    "issues",
+    "pull_request",
+    "issue_comment",
+    "pull_request_review",
+    "pull_request_review_comment",
+)
 EVERY_CODE_WEBHOOK_URL = "https://launchplane.shinycomputers.com/v1/every-code/github-webhook"
 
 Runner = Callable[[Sequence[str], str | None], subprocess.CompletedProcess[str]]

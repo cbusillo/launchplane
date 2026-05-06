@@ -1,7 +1,7 @@
 import unittest
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import Literal, cast
 from unittest.mock import patch
 
 import click
@@ -203,7 +203,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         seen_artifact_ids: list[str] = []
 
         def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
-            deploy_request = kwargs["request"]
+            deploy_request = cast(GenericWebDeployRequest, kwargs["request"])
             self.assertIsInstance(deploy_request, GenericWebDeployRequest)
             seen_artifact_ids.append(deploy_request.artifact_id)
             store.write_deployment_record(
