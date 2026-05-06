@@ -125,10 +125,12 @@ overlay compact GitHub/Code Plans facts. The first provider is opt-in via
 `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER` and
 `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, reads `gh project item-list --format
 json`, and supplies Project Focus, Manager, Finish Line, labels, status, updated
-time, and PR-vs-issue type. The route reports product, work-request, and
-planning-fact source counts, does not fetch or store GitHub issue bodies, and
-writes no state. A configured Project read failure returns an error instead of a
-silently incomplete snapshot.
+time, PR-vs-issue type, dependency counts, subissue counts, and PR check state.
+`LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT` bounds the per-snapshot fan-out for
+dependency, subissue, and check reads after Project items are loaded. The route
+reports product, work-request, and planning-fact source counts, does not fetch or
+store GitHub issue bodies, and writes no state. A configured Project or signal
+read failure returns an error instead of a silently incomplete snapshot.
 
 ## Host Assumption
 

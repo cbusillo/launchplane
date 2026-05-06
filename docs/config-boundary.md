@@ -39,7 +39,7 @@ it can reach, trust, or decrypt DB-backed state.
 | Launchplane self image ref | `DOCKER_IMAGE_REFERENCE` | Service target env | Needed for Launchplane self-deploy and rollback posture. |
 | Process wiring | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT` | Service target env | Runtime/process wiring, not product config. |
 | Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config. |
-| Work graph GitHub Project read source | `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER`, `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_GH_BINARY` | Service target env | Opt-in read source for compact Project fields. Requires a `gh` credential with the GitHub CLI `project` scope. Does not store copied issue bodies. |
+| Work graph GitHub Project read source | `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER`, `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_GH_BINARY` | Service target env | Opt-in read source for compact Project fields plus bounded dependency, subissue, and PR check signals. Requires a `gh` credential with the GitHub CLI `project` scope. Does not store copied issue bodies. |
 
 ### DB Authoritative
 

@@ -4,7 +4,7 @@ import json
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import urlparse
 
 import click
@@ -15,11 +15,16 @@ from control_plane.contracts.work_graph_read_model import (
 )
 
 
+_API_VERSION_ARGS = ("-H", "X-GitHub-Api-Version: 2022-11-28")
+GitHubCheckState = Literal["success", "pending", "failure", "unknown"]
+
+
 @dataclass(frozen=True)
 class GitHubProjectPlanningFactsConfig:
     owner: str
     project_number: int
     limit: int = 200
+    signal_limit: int = 50
     gh_binary: str = "gh"
 
     def __post_init__(self) -> None:
@@ -29,6 +34,8 @@ class GitHubProjectPlanningFactsConfig:
             raise ValueError("GitHub Project planning facts require a positive project number")
         if self.limit < 1:
             raise ValueError("GitHub Project planning facts require a positive limit")
+        if self.signal_limit < 1:
+            raise ValueError("GitHub Project planning facts require a positive signal limit")
         if not self.gh_binary.strip():
             raise ValueError("GitHub Project planning facts require a gh binary")
 
@@ -61,7 +68,7 @@ def build_github_project_planning_facts(
         fact = _project_item_to_planning_facts(item)
         if fact is not None:
             facts.append(fact)
-    return tuple(facts)
+    return _enrich_planning_facts_with_github_signals(config=config, facts=tuple(facts))
 
 
 def load_github_project_planning_facts_config_from_env(
@@ -89,10 +96,18 @@ def load_github_project_planning_facts_config_from_env(
         raise click.ClickException(
             "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT must be a positive integer."
         ) from error
+    signal_limit_value = environ.get("LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT", "").strip()
+    try:
+        signal_limit = int(signal_limit_value) if signal_limit_value else 50
+    except ValueError as error:
+        raise click.ClickException(
+            "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT must be a positive integer."
+        ) from error
     return GitHubProjectPlanningFactsConfig(
         owner=owner,
         project_number=project_number,
         limit=limit,
+        signal_limit=signal_limit,
         gh_binary=environ.get("LAUNCHPLANE_WORK_GRAPH_GH_BINARY", "gh").strip() or "gh",
     )
 
@@ -122,6 +137,153 @@ def _run_gh_json(command: Sequence[str]) -> dict[str, Any]:
     if data is None:
         raise click.ClickException("GitHub Project item-list returned invalid JSON.")
     return data
+
+
+def _enrich_planning_facts_with_github_signals(
+    *, config: GitHubProjectPlanningFactsConfig, facts: tuple[WorkGraphPlanningIssueFacts, ...]
+) -> tuple[WorkGraphPlanningIssueFacts, ...]:
+    enriched: list[WorkGraphPlanningIssueFacts] = []
+    for index, fact in enumerate(facts):
+        if index >= config.signal_limit:
+            enriched.append(fact)
+            continue
+        updates: dict[str, object] = {}
+        blocked_by = _github_issue_relation_count(config=config, fact=fact, endpoint="blocked_by")
+        blocking = _github_issue_relation_count(config=config, fact=fact, endpoint="blocking")
+        subissues = _github_subissue_counts(config=config, fact=fact)
+        if blocked_by is not None:
+            updates["blocked_by"] = blocked_by
+        if blocking is not None:
+            updates["blocking"] = blocking
+        if subissues is not None:
+            updates["subissues_total"] = subissues[0]
+            updates["subissues_completed"] = subissues[1]
+        if fact.is_pull_request:
+            check_state = _github_pr_check_state(config=config, fact=fact)
+            if check_state is not None:
+                updates["check_state"] = check_state
+        enriched.append(
+            fact
+            if not updates
+            else WorkGraphPlanningIssueFacts.model_validate(
+                fact.model_dump(mode="python") | updates
+            )
+        )
+    return tuple(enriched)
+
+
+def _github_issue_relation_count(
+    *, config: GitHubProjectPlanningFactsConfig, fact: WorkGraphPlanningIssueFacts, endpoint: str
+) -> int | None:
+    payload = _run_optional_gh_json(
+        (
+            config.gh_binary,
+            "api",
+            *_API_VERSION_ARGS,
+            f"repos/{fact.repository}/issues/{fact.number}/dependencies/{endpoint}",
+        )
+    )
+    if payload is None:
+        return None
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            f"GitHub issue {endpoint} endpoint did not return an array for "
+            f"{fact.repository}#{fact.number}."
+        )
+    return len(payload)
+
+
+def _github_subissue_counts(
+    *, config: GitHubProjectPlanningFactsConfig, fact: WorkGraphPlanningIssueFacts
+) -> tuple[int, int] | None:
+    payload = _run_optional_gh_json(
+        (
+            config.gh_binary,
+            "api",
+            *_API_VERSION_ARGS,
+            f"repos/{fact.repository}/issues/{fact.number}/sub_issues",
+        )
+    )
+    if payload is None:
+        return None
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            "GitHub sub_issues endpoint did not return an array for "
+            f"{fact.repository}#{fact.number}."
+        )
+    completed = 0
+    for raw_subissue in payload:
+        subissue = _as_object(raw_subissue)
+        if subissue is not None and _string(subissue.get("state")).lower() == "closed":
+            completed += 1
+    return len(payload), completed
+
+
+def _github_pr_check_state(
+    *, config: GitHubProjectPlanningFactsConfig, fact: WorkGraphPlanningIssueFacts
+) -> GitHubCheckState | None:
+    payload = _run_optional_gh_json(
+        (
+            config.gh_binary,
+            "pr",
+            "checks",
+            str(fact.number),
+            "--repo",
+            fact.repository,
+            "--json",
+            "bucket,state,name,workflow,completedAt,startedAt",
+        )
+    )
+    if payload is None:
+        return None
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            f"GitHub PR checks did not return an array for {fact.repository}#{fact.number}."
+        )
+    buckets = {
+        _string(check.get("bucket")).lower()
+        for check in (_as_object(raw_check) for raw_check in payload)
+        if check is not None
+    }
+    if not buckets:
+        return "unknown"
+    if buckets & {"fail", "cancel"}:
+        return "failure"
+    if buckets & {"pending"}:
+        return "pending"
+    if buckets <= {"pass", "skipping"}:
+        return "success"
+    return "unknown"
+
+
+def _run_optional_gh_json(command: Sequence[str]) -> object | None:
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            "GitHub CLI is required for work graph Project facts."
+        ) from error
+    except subprocess.CalledProcessError as error:
+        if error.returncode == 8 and tuple(command[1:3]) == ("pr", "checks"):
+            return [{"bucket": "pending"}]
+        detail = (error.stderr or error.stdout or str(error)).strip()
+        if "not found" in detail.lower() or "does not exist" in detail.lower():
+            return None
+        raise click.ClickException(
+            f"GitHub Project planning signals could not be loaded: {detail}"
+        ) from error
+    try:
+        payload: object = json.loads(result.stdout)
+        return payload
+    except json.JSONDecodeError as error:
+        raise click.ClickException(
+            "GitHub Project planning signals returned invalid JSON."
+        ) from error
 
 
 def _project_item_to_planning_facts(item: dict[str, Any]) -> WorkGraphPlanningIssueFacts | None:
