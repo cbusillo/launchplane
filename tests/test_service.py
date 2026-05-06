@@ -1840,6 +1840,118 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(second_status, 409)
         self.assertEqual(second_response["error"]["code"], "feedback_already_final")
 
+    def test_every_code_worker_token_reruns_terminal_request(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "blocked",
+                    "error_message": "Needs another pass.",
+                    "updated_at": "2026-05-06T16:00:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+
+            rerun_status, rerun_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={"request_id": request_id, "trigger_actor": "ops"},
+                authorization="Bearer dev-worker-token",
+            )
+
+        self.assertEqual(rerun_status, 202)
+        request = rerun_response["result"]["request"]
+        self.assertEqual(request["state"], "queued")
+        self.assertEqual(request["trigger_actor"], "ops")
+        self.assertEqual(request["claimed_by_host"], "")
+        self.assertEqual(request["error_message"], "")
+
+    def test_every_code_worker_token_cannot_rerun_active_request(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+
+            rerun_status, rerun_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={"request_id": request_id, "trigger_actor": "ops"},
+                authorization="Bearer dev-worker-token",
+            )
+
+        self.assertEqual(rerun_status, 400)
+        self.assertEqual(rerun_response["error"]["code"], "invalid_payload")
+
     def test_every_code_github_webhook_rejects_invalid_signature(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         webhook_payload = _every_code_github_issue_labeled_payload()
@@ -2131,6 +2243,95 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(claim_payload["result"]["request"]["claimed_by_host"], "Chris-Studio")
         self.assertEqual(status_status, 202)
         self.assertEqual(status_payload["result"]["request"]["state"], "done")
+
+    def test_every_code_worker_token_can_rerun_terminal_request(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.write"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/code",
+                    "issue_number": 123,
+                    "issue_url": "https://github.com/cbusillo/code/issues/123",
+                    "issue_title": "Wire local automation",
+                    "trigger_label": "every-code",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-05T22:00:00Z",
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "blocked",
+                    "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                    "result_summary": "Detached session went stale.",
+                    "error_message": "Detached session went stale.",
+                    "updated_at": "2026-05-05T22:05:00Z",
+                },
+                authorization="Bearer worker-token",
+            )
+            rerun_status, rerun_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={"request_id": request_id, "trigger_actor": "cbusillo"},
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(rerun_status, 202)
+        self.assertEqual(rerun_payload["records"]["state"], "queued")
+        self.assertEqual(rerun_payload["result"]["request"]["trigger_actor"], "cbusillo")
+        self.assertEqual(rerun_payload["result"]["request"]["claimed_by_host"], "")
+        self.assertEqual(rerun_payload["result"]["request"]["result_pr_url"], "")
+        self.assertEqual(rerun_payload["result"]["request"]["error_message"], "")
 
     def test_every_code_worker_token_is_required_for_unauthenticated_request(self) -> None:
         with (

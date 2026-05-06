@@ -6,6 +6,7 @@ from typing import Literal, Protocol, Sequence
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     build_every_code_work_request_id,
+    requeue_every_code_work_request,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -19,6 +20,15 @@ class EveryCodeReconciliationStore(Protocol):
     ) -> tuple[EveryCodeWorkRequestRecord, bool]: ...
 
 
+class EveryCodeRerunStore(Protocol):
+    def read_every_code_work_request_record(
+        self, request_id: str
+    ) -> EveryCodeWorkRequestRecord: ...
+
+    def write_every_code_work_request_record(
+        self, record: EveryCodeWorkRequestRecord
+    ) -> object: ...
+
 @dataclass(frozen=True)
 class EveryCodeIssueReconciliationResult:
     status: EveryCodeReconciliationStatus
@@ -27,6 +37,22 @@ class EveryCodeIssueReconciliationResult:
 
     def as_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {"status": self.status, "detail": self.detail}
+        if self.request is not None:
+            payload["request"] = self.request.model_dump(mode="json")
+        return payload
+
+
+@dataclass(frozen=True)
+class EveryCodeIssueRerunResult:
+    status: str
+    detail: str
+    request: EveryCodeWorkRequestRecord | None = None
+
+    def as_payload(self) -> dict[str, object]:
+        payload: dict[str, object] = {
+            "status": self.status,
+            "detail": self.detail,
+        }
         if self.request is not None:
             payload["request"] = self.request.model_dump(mode="json")
         return payload
@@ -92,4 +118,32 @@ def reconcile_every_code_issue(
         status="deduped",
         detail="Every Code work request already exists for this issue and label.",
         request=stored_record,
+    )
+
+
+def rerun_every_code_issue(
+    *,
+    record_store: EveryCodeRerunStore,
+    repository: str,
+    issue_number: int,
+    trigger_label: str = "every-code",
+    actor: str = "requeue",
+) -> EveryCodeIssueRerunResult:
+    request_id = build_every_code_work_request_id(
+        repository=repository,
+        issue_number=issue_number,
+        trigger_label=trigger_label,
+    )
+    record = record_store.read_every_code_work_request_record(request_id)
+    now = utc_now_timestamp()
+    requeued_record = requeue_every_code_work_request(
+        record,
+        queued_at=now,
+        trigger_actor=actor,
+    )
+    record_store.write_every_code_work_request_record(requeued_record)
+    return EveryCodeIssueRerunResult(
+        status="queued",
+        detail="Requeued terminal Every Code work request for this issue.",
+        request=requeued_record,
     )

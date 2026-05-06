@@ -175,6 +175,34 @@ def resume_every_code_work_request(
     )
 
 
+def requeue_every_code_work_request(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    queued_at: str,
+    trigger_actor: str = "",
+) -> EveryCodeWorkRequestRecord:
+    if not queued_at.strip():
+        raise ValueError("Every Code requeue requires queued_at")
+    if record.state not in {"done", "blocked"}:
+        raise ValueError("Every Code requeue requires a terminal work request")
+
+    return record.model_copy(
+        update={
+            "state": "queued",
+            "trigger_actor": trigger_actor.strip() or record.trigger_actor,
+            "queued_at": queued_at,
+            "updated_at": queued_at,
+            "claimed_at": "",
+            "claimed_by_host": "",
+            "started_at": "",
+            "finished_at": "",
+            "result_pr_url": "",
+            "result_summary": "",
+            "error_message": "",
+        }
+    )
+
+
 def close_every_code_work_request_for_pull_request(
     record: EveryCodeWorkRequestRecord,
     *,

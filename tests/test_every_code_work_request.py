@@ -7,6 +7,7 @@ from control_plane.contracts.every_code_work_request import (
     build_every_code_work_request_id,
     claim_every_code_work_request,
     close_every_code_work_request_for_pull_request,
+    requeue_every_code_work_request,
 )
 
 
@@ -208,6 +209,50 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
                 claimed_at="2026-05-05T22:01:00Z",
                 claimed_by_host="Chris-Studio",
                 finished_at="2026-05-05T22:03:00Z",
+            )
+
+    def test_requeue_terminal_request_clears_worker_state(self) -> None:
+        claimed_record = claim_every_code_work_request(
+            _queued_record(),
+            host="Chris-Studio",
+            claimed_at="2026-05-05T22:01:00Z",
+        )
+        assert claimed_record is not None
+        blocked_record = apply_every_code_work_request_status(
+            claimed_record,
+            EveryCodeWorkRequestStatusUpdate(
+                state="blocked",
+                host="Chris-Studio",
+                updated_at="2026-05-05T22:03:00Z",
+                result_pr_url="https://github.com/cbusillo/code/pull/99",
+                result_summary="Old session went stale.",
+                error_message="Old session went stale.",
+            ),
+        )
+
+        requeued_record = requeue_every_code_work_request(
+            blocked_record,
+            queued_at="2026-05-05T22:07:00Z",
+            trigger_actor="cbusillo",
+        )
+
+        self.assertEqual(requeued_record.state, "queued")
+        self.assertEqual(requeued_record.trigger_actor, "cbusillo")
+        self.assertEqual(requeued_record.queued_at, "2026-05-05T22:07:00Z")
+        self.assertEqual(requeued_record.updated_at, "2026-05-05T22:07:00Z")
+        self.assertEqual(requeued_record.claimed_at, "")
+        self.assertEqual(requeued_record.claimed_by_host, "")
+        self.assertEqual(requeued_record.started_at, "")
+        self.assertEqual(requeued_record.finished_at, "")
+        self.assertEqual(requeued_record.result_pr_url, "")
+        self.assertEqual(requeued_record.result_summary, "")
+        self.assertEqual(requeued_record.error_message, "")
+
+    def test_requeue_requires_terminal_request(self) -> None:
+        with self.assertRaises(ValueError):
+            requeue_every_code_work_request(
+                _queued_record(),
+                queued_at="2026-05-05T22:07:00Z",
             )
 
 
