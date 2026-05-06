@@ -52,6 +52,12 @@ title: Secrets
 - Runtime key-safety gates classify managed secret bindings by binding key and
   Launchplane metadata, not by plaintext value. The initial classification
   contract is `prod_only`, `testing`, `preview`, `non_prod`, and `shared_safe`.
+- Shared and production runtime mutations must execute through the deployed
+  Launchplane service API or an operator UI path backed by that API. Do not use
+  local CLI live-target mutation commands from arbitrary checkouts as a fallback
+  when the service API is missing; add the service boundary first so the
+  deployed runtime resolves DB-backed target authority and records sanitized
+  audit evidence.
 - Gates fail closed when a required binding is missing, disabled, ambiguous,
   unclassified, or scoped outside the target context/instance. A target with an
   unknown environment class also fails closed.
