@@ -24,6 +24,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 EveryCodeWorkerStatus = Literal["empty", "running", "blocked"]
 EveryCodeWorkerFinishStatus = Literal["done", "blocked"]
+TERMINAL_EVERY_CODE_STATES = {"done", "blocked"}
 
 
 class EveryCodeWorkerStore(Protocol):
@@ -314,6 +315,64 @@ class EveryCodeWorkerFinishResult:
 def every_code_tmux_session_name(request_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
     return f"every-code-{normalized or 'request'}"[:80]
+
+
+def every_code_session_state_path(*, state_dir: Path, request_id: str) -> Path:
+    normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
+    return (
+        state_dir.expanduser().resolve()
+        / "every-code-worker"
+        / "sessions"
+        / f"{normalized or 'request'}.json"
+    )
+
+
+def write_every_code_session_state(
+    *,
+    state_dir: Path,
+    record: EveryCodeWorkRequestRecord,
+    session_name: str,
+    source_checkout_root: Path,
+    launch_root: Path,
+    worktree_branch: str,
+    host: str,
+) -> None:
+    path = every_code_session_state_path(state_dir=state_dir, request_id=record.request_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "request_id": record.request_id,
+        "session_name": session_name,
+        "source_checkout_root": str(source_checkout_root),
+        "launch_root": str(launch_root),
+        "worktree_branch": worktree_branch,
+        "host": host.strip(),
+        "created_at": utc_now_timestamp(),
+    }
+    path.write_text(json.dumps(payload, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def read_every_code_session_state(path: Path) -> dict[str, str] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    result: dict[str, str] = {}
+    for key in (
+        "request_id",
+        "session_name",
+        "host",
+        "source_checkout_root",
+        "launch_root",
+        "worktree_branch",
+    ):
+        value = payload.get(key)
+        if isinstance(value, str):
+            result[key] = value
+    if not result.get("request_id") or not result.get("session_name"):
+        return None
+    return result
 
 
 def every_code_claim_comment_body(
@@ -664,6 +723,16 @@ def run_every_code_worker_once(
                 session_name=session_name,
                 checkout_root=prepared_checkout.source_checkout_root,
             )
+    if state_dir is not None:
+        write_every_code_session_state(
+            state_dir=state_dir,
+            record=claimed_record,
+            session_name=session_name,
+            source_checkout_root=prepared_checkout.source_checkout_root,
+            launch_root=resolved_checkout_root,
+            worktree_branch=prepared_checkout.worktree_branch,
+            host=normalized_host,
+        )
 
     claim_comment_warning = _post_every_code_claim_comment(
         record=claimed_record,
@@ -736,6 +805,13 @@ def run_every_code_worker_loop(
     )
     while max_iterations == 0 or iterations < max_iterations:
         iterations += 1
+        close_terminal_every_code_sessions(
+            record_store=record_store,
+            host=host,
+            state_dir=state_dir,
+            tmux_binary=tmux_binary,
+            runner=runner,
+        )
         last_result = run_every_code_worker_once(
             record_store=record_store,
             host=host,
@@ -776,6 +852,72 @@ def run_every_code_worker_loop(
         stopped_reason="stopped",
         last_result=last_result,
     )
+
+
+def close_terminal_every_code_sessions(
+    *,
+    record_store: EveryCodeWorkerStore,
+    host: str,
+    state_dir: Path | None,
+    tmux_binary: str = "tmux",
+    runner: Runner | None = None,
+) -> int:
+    if state_dir is None:
+        return 0
+    normalized_host = host.strip()
+    if not normalized_host:
+        raise ValueError("Every Code worker requires a host name")
+    sessions_dir = state_dir.expanduser().resolve() / "every-code-worker" / "sessions"
+    try:
+        session_state_paths = tuple(sessions_dir.glob("*.json"))
+    except OSError:
+        return 0
+
+    run = runner or _run_subprocess
+    closed = 0
+    for path in session_state_paths:
+        session_state = read_every_code_session_state(path)
+        if session_state is None:
+            continue
+        if session_state.get("host", normalized_host) != normalized_host:
+            continue
+        request_id = session_state["request_id"]
+        try:
+            record = record_store.read_every_code_work_request_record(request_id)
+        except Exception:
+            continue
+        if record.claimed_by_host.strip() != normalized_host:
+            continue
+        if record.state not in TERMINAL_EVERY_CODE_STATES:
+            continue
+
+        session_name = session_state["session_name"]
+        existing_session = _tmux_session_exists(
+            tmux_binary=tmux_binary,
+            session_name=session_name,
+            runner=run,
+        )
+        if existing_session is False:
+            path.unlink(missing_ok=True)
+            continue
+        if existing_session is None:
+            continue
+        pane_pid = _tmux_pane_pid(
+            tmux_binary=tmux_binary,
+            session_name=session_name,
+            runner=run,
+        )
+        if pane_pid is None:
+            continue
+        try:
+            os.killpg(pane_pid, signal.SIGTERM)
+        except ProcessLookupError:
+            path.unlink(missing_ok=True)
+            continue
+        except OSError:
+            continue
+        closed += 1
+    return closed
 
 
 def build_every_code_worker_daemon_spec(
@@ -957,6 +1099,17 @@ def finish_every_code_work_request(
     result_summary: str = "",
 ) -> EveryCodeWorkerFinishResult:
     record = record_store.read_every_code_work_request_record(request_id.strip())
+    if record.state in TERMINAL_EVERY_CODE_STATES:
+        return EveryCodeWorkerFinishResult(
+            status="done" if record.state == "done" else "blocked",
+            detail=record.result_summary
+            or record.error_message
+            or "Every Code request is already terminal.",
+            request_id=record.request_id,
+            repository=record.repository,
+            issue_number=record.issue_number,
+            result_pr_url=record.result_pr_url,
+        )
     succeeded = exit_code == 0
     summary = result_summary.strip() or (
         "Every Code session completed successfully."
@@ -1235,6 +1388,29 @@ def _tmux_session_exists(*, tmux_binary: str, session_name: str, runner: Runner)
     if result.returncode == 1:
         return False
     return None
+
+
+def _tmux_pane_pid(*, tmux_binary: str, session_name: str, runner: Runner) -> int | None:
+    try:
+        result = runner(
+            (
+                tmux_binary,
+                "display-message",
+                "-p",
+                "-t",
+                session_name,
+                "#{pane_pid}",
+            )
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        pane_pid = int(result.stdout.strip())
+    except ValueError:
+        return None
+    return pane_pid if pane_pid > 0 else None
 
 
 def _block_every_code_request(
