@@ -6719,13 +6719,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "binding_key": "SMTP_PASSWORD",
                             "secret_class": "prod_only",
-                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_contexts": ["sellyouroutboard"],
                             "allowed_instances": ["prod"],
                         },
                         {
                             "binding_key": "RESEND_API_KEY",
                             "secret_class": "prod_only",
-                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_contexts": ["sellyouroutboard"],
                             "allowed_instances": ["prod"],
                         },
                     ],
@@ -6751,13 +6751,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         {
                             "binding_key": "SMTP_PASSWORD",
                             "secret_class": "prod_only",
-                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_contexts": ["sellyouroutboard"],
                             "allowed_instances": ["prod"],
                         },
                         {
                             "binding_key": "RESEND_API_KEY",
                             "secret_class": "prod_only",
-                            "allowed_contexts": ["sellyouroutboard-prod"],
+                            "allowed_contexts": ["sellyouroutboard"],
                             "allowed_instances": ["prod"],
                         },
                     ],
