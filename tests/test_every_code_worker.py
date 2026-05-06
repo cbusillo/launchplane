@@ -1,13 +1,18 @@
 import subprocess
 import unittest
 from collections.abc import Sequence
+import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from click.testing import CliRunner
+
+from control_plane.cli import main
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.every_code_worker import (
     default_every_code_command,
     every_code_tmux_session_name,
+    run_every_code_worker_loop,
     run_every_code_worker_once,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -107,6 +112,71 @@ class EveryCodeWorkerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "empty")
+
+    def test_run_loop_processes_until_max_iterations(self) -> None:
+        sleeps: list[float] = []
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            runner = _Runner()
+
+            result = run_every_code_worker_loop(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                interval_seconds=2.5,
+                max_iterations=2,
+                runner=runner,
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual(result.iterations, 2)
+        self.assertEqual(result.handed_off, 1)
+        self.assertEqual(result.empty, 1)
+        self.assertEqual(result.blocked, 0)
+        self.assertEqual(result.stopped_reason, "max_iterations")
+        self.assertEqual(sleeps, [2.5])
+
+    def test_run_loop_rejects_negative_interval(self) -> None:
+        with self.assertRaises(ValueError):
+            run_every_code_worker_loop(
+                record_store=FilesystemRecordStore(state_dir=Path("state")),
+                host="Chris-Studio",
+                workspace_root=Path("."),
+                interval_seconds=-1,
+                max_iterations=1,
+                sleeper=lambda _seconds: None,
+            )
+
+    def test_cli_run_reports_loop_summary(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            result = CliRunner().invoke(
+                main,
+                [
+                    "every-code",
+                    "run",
+                    "--state-dir",
+                    str(temporary_root / "state"),
+                    "--workspace-root",
+                    str(temporary_root / "Developer"),
+                    "--host",
+                    "Chris-Studio",
+                    "--interval-seconds",
+                    "0",
+                    "--max-iterations",
+                    "1",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["iterations"], 1)
+        self.assertEqual(payload["empty"], 1)
+        self.assertEqual(payload["stopped_reason"], "max_iterations")
 
 
 if __name__ == "__main__":

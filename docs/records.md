@@ -542,9 +542,10 @@ state/
 - State is `queued`, `claimed`, `running`, `done`, or `blocked`. Workers claim a
   queued request before reporting progress. Terminal states are immutable through
   the service status route.
-- The first local worker handoff is `uv run launchplane every-code run-once`.
-  It claims one queued request, opens or reuses a deterministic visible tmux
-  session for the local checkout, and records `running` or `blocked` status.
+- The local worker handoff is `uv run launchplane every-code run` for polling or
+  `uv run launchplane every-code run-once` for a single scan. It claims queued
+  requests, opens or reuses deterministic visible tmux sessions for local
+  checkouts, and records `running` or `blocked` status.
 - Launchplane owns this coordination record so GitHub webhooks, reconciliation,
   local Mac workers, and the future operator UI share one inspectable source of
   truth instead of relying on GitHub API polling or local shell lock files.

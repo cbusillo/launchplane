@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import shlex
 import subprocess
+import time
 from typing import Callable, Literal, Protocol, Sequence
 
 from control_plane.contracts.every_code_work_request import (
@@ -66,6 +67,26 @@ class EveryCodeWorkerHandoffResult:
             "issue_number": self.issue_number,
             "session_name": self.session_name,
             "checkout_root": self.checkout_root,
+        }
+
+
+@dataclass(frozen=True)
+class EveryCodeWorkerLoopResult:
+    iterations: int
+    handed_off: int
+    blocked: int
+    empty: int
+    stopped_reason: str
+    last_result: EveryCodeWorkerHandoffResult
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "iterations": self.iterations,
+            "handed_off": self.handed_off,
+            "blocked": self.blocked,
+            "empty": self.empty,
+            "stopped_reason": self.stopped_reason,
+            "last_result": self.last_result.as_payload(),
         }
 
 
@@ -234,6 +255,72 @@ def run_every_code_worker_once(
         issue_number=running_record.issue_number,
         session_name=session_name,
         checkout_root=str(resolved_checkout_root),
+    )
+
+
+def run_every_code_worker_loop(
+    *,
+    record_store: EveryCodeWorkerStore,
+    host: str,
+    workspace_root: Path,
+    checkout_root: Path | None = None,
+    repository: str = "",
+    command_template: str = "",
+    tmux_binary: str = "tmux",
+    interval_seconds: float = 60.0,
+    max_iterations: int = 0,
+    runner: Runner | None = None,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> EveryCodeWorkerLoopResult:
+    if interval_seconds < 0:
+        raise ValueError("Every Code worker interval must be non-negative")
+    if max_iterations < 0:
+        raise ValueError("Every Code worker max_iterations must be non-negative")
+
+    iterations = 0
+    handed_off = 0
+    blocked = 0
+    empty = 0
+    last_result = EveryCodeWorkerHandoffResult(
+        status="empty",
+        detail="Every Code worker loop has not run yet.",
+    )
+    while max_iterations == 0 or iterations < max_iterations:
+        iterations += 1
+        last_result = run_every_code_worker_once(
+            record_store=record_store,
+            host=host,
+            workspace_root=workspace_root,
+            checkout_root=checkout_root,
+            repository=repository,
+            command_template=command_template,
+            tmux_binary=tmux_binary,
+            runner=runner,
+        )
+        if last_result.status == "running":
+            handed_off += 1
+        elif last_result.status == "blocked":
+            blocked += 1
+        else:
+            empty += 1
+        if max_iterations != 0 and iterations >= max_iterations:
+            return EveryCodeWorkerLoopResult(
+                iterations=iterations,
+                handed_off=handed_off,
+                blocked=blocked,
+                empty=empty,
+                stopped_reason="max_iterations",
+                last_result=last_result,
+            )
+        sleeper(interval_seconds)
+
+    return EveryCodeWorkerLoopResult(
+        iterations=iterations,
+        handed_off=handed_off,
+        blocked=blocked,
+        empty=empty,
+        stopped_reason="stopped",
+        last_result=last_result,
     )
 
 
