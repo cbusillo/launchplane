@@ -1,0 +1,99 @@
+---
+name: Work Graph Snapshot Validate
+
+"on":
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: launchplane-work-graph-snapshot-validate
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+    steps:
+      - name: Request work graph snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+
+          service_origin="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
+          print(f"{parsed.scheme}://{parsed.netloc}")
+          PY
+          })"
+          service_audience="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+          })"
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
+            | jq -r '.value'
+          })"
+          response_file="launchplane-work-graph-snapshot.json"
+          status_code="$(curl -sS \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            -H "Authorization: Bearer ${oidc_token}" \
+            "${service_origin}/v1/work-graph/snapshot")"
+          if [ "$status_code" != "200" ]; then
+            cat "$response_file" >&2
+            echo "Launchplane work graph snapshot failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+          jq . "$response_file"
+
+      - name: Upload snapshot artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: launchplane-work-graph-snapshot
+          path: launchplane-work-graph-snapshot.json
+          if-no-files-found: error
+
+      - name: Summarize snapshot
+        shell: bash
+        run: |
+          set -euo pipefail
+          result_file="launchplane-work-graph-snapshot.json"
+          {
+            echo '## Launchplane work graph snapshot'
+            echo
+            echo "- Products: $(jq -r '.source.product_count' "$result_file")"
+            echo "- Work requests: $(jq -r '.source.work_request_count' "$result_file")"
+            echo "- Planning facts: $(jq -r '.source.planning_fact_count' "$result_file")"
+            echo "- Repositories: $(jq -r '.snapshot.repos | length' "$result_file")"
+            echo "- Issues: $(jq -r '.snapshot.issues | length' "$result_file")"
+            echo
+            echo '### Top issues'
+            jq -r '
+              .snapshot.issues[:10][]
+              | "- \(.repository)#\(.number): \(.title) [focus=\(.focus), manager=\(.manager), state=\(.state)]"
+            ' "$result_file"
+          } >> "$GITHUB_STEP_SUMMARY"
