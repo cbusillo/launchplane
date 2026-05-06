@@ -27,6 +27,7 @@ from control_plane.every_code_worker import (
     every_code_worker_daemon_status,
     finish_every_code_work_request,
     prepare_every_code_checkout,
+    request_every_code_pr_preview_label,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -49,6 +50,16 @@ def _queued_record() -> EveryCodeWorkRequestRecord:
         github_delivery_id="delivery-1",
         queued_at="2026-05-05T22:00:00Z",
         updated_at="2026-05-05T22:00:00Z",
+    )
+
+
+def _queued_preview_record() -> EveryCodeWorkRequestRecord:
+    return _queued_record().model_copy(
+        update={
+            "request_id": "every-code-every-tenant-opw-123-test",
+            "repository": "every/tenant-opw",
+            "issue_url": "https://github.com/every/tenant-opw/issues/123",
+        }
     )
 
 
@@ -292,6 +303,40 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("--worker-token-env LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", command)
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
         self.assertIn("--exit-code $status", command)
+
+    def test_preview_label_request_labels_eligible_pull_request(self) -> None:
+        runner = _Runner()
+
+        summary = request_every_code_pr_preview_label(
+            result_pr_url="https://github.com/every/tenant-opw/pull/123",
+            runner=runner,
+        )
+
+        self.assertIn("Requested Launchplane preview", summary)
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "edit",
+                "123",
+                "--repo",
+                "every/tenant-opw",
+                "--add-label",
+                "launchplane-preview",
+            ),
+            runner.calls,
+        )
+
+    def test_preview_label_request_skips_ineligible_pull_request(self) -> None:
+        runner = _Runner()
+
+        summary = request_every_code_pr_preview_label(
+            result_pr_url="https://github.com/cbusillo/code/pull/123",
+            runner=runner,
+        )
+
+        self.assertEqual(summary, "")
+        self.assertEqual(runner.calls, [])
 
     def test_prepare_checkout_creates_worker_owned_worktree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -567,6 +612,37 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(record.state, "done")
         self.assertEqual(record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
         self.assertEqual(record.error_message, "")
+
+    def test_finish_requests_preview_label_for_eligible_pr(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "tenant-opw"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_preview_record())
+            runner = _Runner()
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-every-tenant-opw-123-test",
+                host="Chris-Studio",
+                exit_code=0,
+                result_pr_url="https://github.com/every/tenant-opw/pull/99",
+                runner=runner,
+            )
+            record = store.read_every_code_work_request_record("every-code-every-tenant-opw-123-test")
+
+        self.assertEqual(result.status, "done")
+        self.assertIn("Requested Launchplane preview", record.result_summary)
+        self.assertTrue(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
 
     def test_finish_marks_failed_session_blocked(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
