@@ -38,6 +38,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     build_every_code_work_request_id,
+    close_every_code_work_request_for_pull_request,
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
@@ -1911,6 +1912,14 @@ def _handle_every_code_github_webhook(
 
     payload = _decode_json_request_body(body_bytes)
     event_name = _github_webhook_header(environ, "X-GitHub-Event")
+    if event_name == "pull_request":
+        return _handle_every_code_pull_request_webhook(
+            start_response=start_response,
+            trace_id=trace_id,
+            delivery_id=delivery_id,
+            payload=payload,
+            record_store=record_store,
+        )
     if event_name != "issues":
         return _json_response(
             start_response=start_response,
@@ -1979,6 +1988,92 @@ def _handle_every_code_github_webhook(
         driver_result={"request": stored_record.model_dump(mode="json")},
     )
     accepted_payload["deduped"] = deduped
+    accepted_payload["github_delivery_id"] = delivery_id
+    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+
+
+def _handle_every_code_pull_request_webhook(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    delivery_id: str,
+    payload: dict[str, object],
+    record_store: object,
+) -> list[bytes]:
+    if payload.get("action") != "closed":
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "unsupported_action",
+            },
+        )
+
+    repository_payload = _github_webhook_mapping(payload, "repository")
+    pull_request_payload = _github_webhook_mapping(payload, "pull_request")
+    repository = _github_webhook_string(repository_payload, "full_name")
+    pr_url = _github_webhook_string(pull_request_payload, "html_url")
+    merged = bool(pull_request_payload.get("merged")) if pull_request_payload else False
+    closed_at = _github_webhook_string(pull_request_payload, "closed_at") or _utc_now_timestamp()
+    every_code_store = _every_code_work_request_store(record_store)
+    matched_record: EveryCodeWorkRequestRecord | None = None
+    updated_record: EveryCodeWorkRequestRecord | None = None
+    for record in every_code_store.list_every_code_work_request_records(
+        repository=repository,
+        limit=100,
+    ):
+        if record.result_pr_url.strip() != pr_url:
+            continue
+        matched_record = record
+        closed_record = close_every_code_work_request_for_pull_request(
+            record,
+            pr_url=pr_url,
+            merged=merged,
+            closed_at=closed_at,
+        )
+        if closed_record is None:
+            break
+        every_code_store.write_every_code_work_request_record(closed_record)
+        updated_record = closed_record
+        break
+
+    if matched_record is None:
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "linked_every_code_request_not_found",
+                "github_delivery_id": delivery_id,
+            },
+        )
+    if updated_record is None:
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "linked_every_code_request_already_terminal",
+                "result": {
+                    "request_id": matched_record.request_id,
+                    "state": matched_record.state,
+                },
+                "github_delivery_id": delivery_id,
+            },
+        )
+
+    accepted_payload = _accepted_payload(
+        trace_id=trace_id,
+        result={"request_id": updated_record.request_id, "state": updated_record.state},
+        driver_result={"request": updated_record.model_dump(mode="json")},
+    )
     accepted_payload["github_delivery_id"] = delivery_id
     return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
 
