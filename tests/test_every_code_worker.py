@@ -77,6 +77,7 @@ def _feedback_record(*, status: str = "pending") -> EveryCodePrFeedbackRecord:
         feedback_kind="issue_comment",
         github_delivery_id="delivery-comment",
         github_node_id="IC_kwDO_test_1001",
+        github_id="1001",
         actor="cbusillo",
         body="Please tighten the README wording before merge.",
         html_url="https://github.com/cbusillo/code/pull/26#issuecomment-1001",
@@ -135,6 +136,18 @@ class _ExistingSessionRunner(_Runner):
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[1] == "display-message":
             return subprocess.CompletedProcess(args, 0, "4242\n", "")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class _FailingFeedbackSendRunner(_ExistingSessionRunner):
+    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(args))
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "display-message":
+            return subprocess.CompletedProcess(args, 0, "4242\n", "")
+        if args[1] == "send-keys":
+            return subprocess.CompletedProcess(args, 1, "", "send failed")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
@@ -741,6 +754,53 @@ class EveryCodeWorkerTests(unittest.TestCase):
         send_call = next(call for call in runner.calls if call[1] == "send-keys")
         self.assertIn("Please tighten the README wording", send_call[4])
         self.assertEqual(send_call[-1], "C-m")
+        reaction_calls = [
+            call
+            for call in runner.calls
+            if call[:4] == ("gh", "api", "--method", "POST")
+        ]
+        self.assertEqual(
+            [call[-1] for call in reaction_calls],
+            ["content=eyes", "content=rocket"],
+        )
+
+    def test_apply_feedback_reacts_when_active_session_send_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            store.write_every_code_pr_feedback_record(_feedback_record())
+            runner = _FailingFeedbackSendRunner()
+
+            result = apply_every_code_pr_feedback_for_host(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+            feedback = store.list_every_code_pr_feedback_records(limit=1)[0]
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(feedback.status, "pending")
+        reaction_calls = [
+            call
+            for call in runner.calls
+            if call[:4] == ("gh", "api", "--method", "POST")
+        ]
+        self.assertEqual(
+            [call[-1] for call in reaction_calls],
+            ["content=eyes", "content=confused"],
+        )
 
     def test_apply_feedback_relaunches_terminal_session_in_saved_worktree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
