@@ -44,4 +44,3 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("launchplane_authz_policies_updated_idx", table_name="launchplane_authz_policies")
     op.drop_table("launchplane_authz_policies")
-

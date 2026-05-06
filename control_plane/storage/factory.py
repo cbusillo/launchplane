@@ -19,7 +19,9 @@ def resolve_database_url(database_url: str | None = None) -> str | None:
     return None
 
 
-def build_record_store(*, state_dir: Path, database_url: str | None = None) -> FilesystemRecordStore | PostgresRecordStore:
+def build_record_store(
+    *, state_dir: Path, database_url: str | None = None
+) -> FilesystemRecordStore | PostgresRecordStore:
     resolved_database_url = resolve_database_url(database_url)
     if resolved_database_url is None:
         return FilesystemRecordStore(state_dir=state_dir)

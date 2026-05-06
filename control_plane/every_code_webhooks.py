@@ -76,7 +76,7 @@ def sync_every_code_webhooks(
 
 def _topic_repositories(*, owner: str, topic: str, runner: Runner) -> tuple[str, ...]:
     query = (
-        f'.[] | select(.isArchived == false) | '
+        f".[] | select(.isArchived == false) | "
         f'select([(.repositoryTopics // [])[].name] | index("{topic}")) | .nameWithOwner'
     )
     result = runner(
@@ -126,9 +126,14 @@ def _sync_repo_webhook(
     if existing_hook is not None:
         hook_id_value = existing_hook.get("id")
         hook_id = int(hook_id_value) if isinstance(hook_id_value, int | str) else 0
-        runner(("gh", "api", "-X", "PATCH", f"repos/{repo}/hooks/{hook_id}", "--input", "-"), hook_payload)
+        runner(
+            ("gh", "api", "-X", "PATCH", f"repos/{repo}/hooks/{hook_id}", "--input", "-"),
+            hook_payload,
+        )
         return EveryCodeWebhookSyncResult(repo=repo, status="updated", hook_id=hook_id)
-    result = runner(("gh", "api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-"), hook_payload)
+    result = runner(
+        ("gh", "api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-"), hook_payload
+    )
     created_hook = json.loads(result.stdout)
     hook_id = int(created_hook.get("id", 0)) if isinstance(created_hook, dict) else 0
     return EveryCodeWebhookSyncResult(repo=repo, status="created", hook_id=hook_id)

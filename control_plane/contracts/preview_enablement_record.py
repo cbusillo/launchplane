@@ -46,18 +46,22 @@ class PreviewEnablementRecord(BaseModel):
         if not self.updated_at.strip():
             raise ValueError("preview enablement record requires updated_at")
         if self.request_metadata_status == "invalid" and not self.request_metadata_error.strip():
-            raise ValueError(
-                "invalid preview enablement record requires request_metadata_error"
-            )
+            raise ValueError("invalid preview enablement record requires request_metadata_error")
         if self.request_metadata_status != "invalid" and self.request_metadata_error.strip():
             raise ValueError(
                 "preview enablement record can only include request_metadata_error when status is invalid"
             )
-        if self.request_metadata_status == "valid" and not self.request_metadata_baseline_channel.strip():
+        if (
+            self.request_metadata_status == "valid"
+            and not self.request_metadata_baseline_channel.strip()
+        ):
             raise ValueError(
                 "valid preview enablement record requires request_metadata_baseline_channel"
             )
-        if self.request_metadata_status != "valid" and self.request_metadata_baseline_channel.strip():
+        if (
+            self.request_metadata_status != "valid"
+            and self.request_metadata_baseline_channel.strip()
+        ):
             raise ValueError(
                 "preview enablement record can only include request_metadata_baseline_channel when status is valid"
             )

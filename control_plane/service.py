@@ -2465,8 +2465,11 @@ def _handle_every_code_pr_feedback_webhook(
         if event_name == "issue_comment":
             issue_payload = _github_webhook_mapping(payload, "issue")
             if issue_payload is not None:
-                linked_issue_numbers = linked_issue_numbers | _github_issue_numbers_referenced_by_pull_request(
-                    issue_payload, repository=repository
+                linked_issue_numbers = (
+                    linked_issue_numbers
+                    | _github_issue_numbers_referenced_by_pull_request(
+                        issue_payload, repository=repository
+                    )
                 )
         for record in _iter_every_code_work_request_records(
             every_code_store,

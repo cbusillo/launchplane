@@ -47,4 +47,3 @@ class LaunchplaneAuthzPolicyRecord(BaseModel):
         if self.policy_sha256 != computed_sha256:
             raise ValueError("authz policy record policy_sha256 does not match policy payload")
         return self
-

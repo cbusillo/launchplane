@@ -74,36 +74,40 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 }
             )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
-                return_value=VeriReelStableDeployResult(
-                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
-                    deploy_status="pass",
-                    deploy_started_at="2026-04-21T18:20:00Z",
-                    deploy_finished_at="2026-04-21T18:21:15Z",
-                    target_name="ver-prod-app",
-                    target_type="application",
-                    target_id="prod-app-123",
-                    rollout_status="pass",
-                    rollout_base_url="https://ver-prod.shinycomputers.com",
-                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    rollout_started_at="2026-04-21T18:21:16Z",
-                    rollout_finished_at="2026-04-21T18:21:45Z",
-                ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
-                return_value=None,
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._verify_rollout",
-                side_effect=[
-                    VeriReelRolloutVerificationResult(
-                        status="pass",
-                        base_url="https://ver-prod.shinycomputers.com",
-                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                        started_at="2026-04-21T18:21:46Z",
-                        finished_at="2026-04-21T18:22:15Z",
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                    return_value=VeriReelStableDeployResult(
+                        deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                        deploy_status="pass",
+                        deploy_started_at="2026-04-21T18:20:00Z",
+                        deploy_finished_at="2026-04-21T18:21:15Z",
+                        target_name="ver-prod-app",
+                        target_type="application",
+                        target_id="prod-app-123",
+                        rollout_status="pass",
+                        rollout_base_url="https://ver-prod.shinycomputers.com",
+                        rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        rollout_started_at="2026-04-21T18:21:16Z",
+                        rollout_finished_at="2026-04-21T18:21:45Z",
                     ),
-                ],
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._verify_rollout",
+                    side_effect=[
+                        VeriReelRolloutVerificationResult(
+                            status="pass",
+                            base_url="https://ver-prod.shinycomputers.com",
+                            health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                            started_at="2026-04-21T18:21:46Z",
+                            finished_at="2026-04-21T18:22:15Z",
+                        ),
+                    ],
+                ),
             ):
                 result = execute_verireel_prod_promotion(
                     control_plane_root=root,
@@ -126,7 +130,9 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
             promotion = store.read_promotion_record(
                 "promotion-verireel-testing-to-prod-run-12345-attempt-1"
             )
-            self.assertEqual(promotion.backup_record_id, "backup-gate-verireel-prod-run-12345-attempt-1")
+            self.assertEqual(
+                promotion.backup_record_id, "backup-gate-verireel-prod-run-12345-attempt-1"
+            )
             self.assertEqual(promotion.source_health.status, "pass")
             self.assertEqual(promotion.deploy.status, "pass")
             self.assertEqual(promotion.deploy.deployment_id, "prod-app-123")
@@ -164,34 +170,40 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 expected_build_tag="sha-abcdef1234567890",
             )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
-                return_value=VeriReelStableDeployResult(
-                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
-                    deploy_status="pass",
-                    deploy_started_at="2026-04-21T18:20:00Z",
-                    deploy_finished_at="2026-04-21T18:21:15Z",
-                    target_name="ver-prod-app",
-                    target_type="application",
-                    target_id="prod-app-123",
-                    rollout_status="pass",
-                    rollout_base_url="https://ver-prod.shinycomputers.com",
-                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    rollout_started_at="2026-04-21T18:21:16Z",
-                    rollout_finished_at="2026-04-21T18:21:45Z",
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                    return_value=VeriReelStableDeployResult(
+                        deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                        deploy_status="pass",
+                        deploy_started_at="2026-04-21T18:20:00Z",
+                        deploy_finished_at="2026-04-21T18:21:15Z",
+                        target_name="ver-prod-app",
+                        target_type="application",
+                        target_id="prod-app-123",
+                        rollout_status="pass",
+                        rollout_base_url="https://ver-prod.shinycomputers.com",
+                        rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        rollout_started_at="2026-04-21T18:21:16Z",
+                        rollout_finished_at="2026-04-21T18:21:45Z",
+                    ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._verify_rollout",
-                return_value=VeriReelRolloutVerificationResult(
-                    status="pass",
-                    base_url="https://ver-prod.shinycomputers.com",
-                    health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    started_at="2026-04-21T18:21:16Z",
-                    finished_at="2026-04-21T18:21:45Z",
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._verify_rollout",
+                    return_value=VeriReelRolloutVerificationResult(
+                        status="pass",
+                        base_url="https://ver-prod.shinycomputers.com",
+                        health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        started_at="2026-04-21T18:21:16Z",
+                        finished_at="2026-04-21T18:21:45Z",
+                    ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
-                side_effect=click.ClickException("Dokploy schedule deployment failed during Prisma migration."),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                    side_effect=click.ClickException(
+                        "Dokploy schedule deployment failed during Prisma migration."
+                    ),
+                ),
             ):
                 result = execute_verireel_prod_promotion(
                     control_plane_root=root,
@@ -237,33 +249,40 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 expected_build_tag="sha-abcdef1234567890",
             )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
-                return_value=VeriReelStableDeployResult(
-                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
-                    deploy_status="pass",
-                    deploy_started_at="2026-04-21T18:20:00Z",
-                    deploy_finished_at="2026-04-21T18:21:15Z",
-                    target_name="ver-prod-app",
-                    target_type="application",
-                    target_id="prod-app-123",
-                    rollout_status="pass",
-                    rollout_base_url="https://ver-prod.shinycomputers.com",
-                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    rollout_started_at="2026-04-21T18:21:16Z",
-                    rollout_finished_at="2026-04-21T18:21:45Z",
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                    return_value=VeriReelStableDeployResult(
+                        deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                        deploy_status="pass",
+                        deploy_started_at="2026-04-21T18:20:00Z",
+                        deploy_finished_at="2026-04-21T18:21:15Z",
+                        target_name="ver-prod-app",
+                        target_type="application",
+                        target_id="prod-app-123",
+                        rollout_status="pass",
+                        rollout_base_url="https://ver-prod.shinycomputers.com",
+                        rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        rollout_started_at="2026-04-21T18:21:16Z",
+                        rollout_finished_at="2026-04-21T18:21:45Z",
+                    ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
-                return_value=None,
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._verify_rollout",
-                side_effect=[
-                    click.ClickException("VeriReel prod rollout verification timed out: health payload mismatch."),
-                ],
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._resolve_rollout_base_urls",
-                return_value=("https://ver-prod.shinycomputers.com",),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._run_prisma_migrations",
+                    return_value=None,
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._verify_rollout",
+                    side_effect=[
+                        click.ClickException(
+                            "VeriReel prod rollout verification timed out: health payload mismatch."
+                        ),
+                    ],
+                ),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._resolve_rollout_base_urls",
+                    return_value=("https://ver-prod.shinycomputers.com",),
+                ),
             ):
                 result = execute_verireel_prod_promotion(
                     control_plane_root=root,
@@ -306,27 +325,30 @@ class VeriReelProdPromotionWorkflowTests(unittest.TestCase):
                 expected_build_tag="sha-abcdef1234567890",
             )
 
-            with patch(
-                "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
-                return_value=VeriReelStableDeployResult(
-                    deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
-                    deploy_status="pass",
-                    deploy_started_at="2026-04-21T18:20:00Z",
-                    deploy_finished_at="2026-04-21T18:21:15Z",
-                    target_name="ver-prod-app",
-                    target_type="application",
-                    target_id="prod-app-123",
-                    rollout_status="fail",
-                    rollout_base_url="https://ver-prod.shinycomputers.com",
-                    rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
-                    error_message=(
-                        "VeriReel prod rollout page verification expected "
-                        "https://ver-prod.shinycomputers.com/ to include \"VeriReel\"."
+            with (
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion.execute_verireel_stable_deploy",
+                    return_value=VeriReelStableDeployResult(
+                        deployment_record_id="deployment-verireel-prod-run-12345-attempt-1",
+                        deploy_status="pass",
+                        deploy_started_at="2026-04-21T18:20:00Z",
+                        deploy_finished_at="2026-04-21T18:21:15Z",
+                        target_name="ver-prod-app",
+                        target_type="application",
+                        target_id="prod-app-123",
+                        rollout_status="fail",
+                        rollout_base_url="https://ver-prod.shinycomputers.com",
+                        rollout_health_urls=("https://ver-prod.shinycomputers.com/api/health",),
+                        error_message=(
+                            "VeriReel prod rollout page verification expected "
+                            'https://ver-prod.shinycomputers.com/ to include "VeriReel".'
+                        ),
                     ),
                 ),
-            ), patch(
-                "control_plane.workflows.verireel_prod_promotion._resolve_rollout_base_urls",
-                return_value=("https://ver-prod.shinycomputers.com",),
+                patch(
+                    "control_plane.workflows.verireel_prod_promotion._resolve_rollout_base_urls",
+                    return_value=("https://ver-prod.shinycomputers.com",),
+                ),
             ):
                 result = execute_verireel_prod_promotion(
                     control_plane_root=root,

@@ -87,17 +87,29 @@ class GitHubWebhookReplayEnvelope(BaseModel):
             raise ValueError("GitHub webhook replay envelope delivery_source must not be blank")
         if self.capture is not None:
             capture_event_name = self._capture_header_value("X-GitHub-Event")
-            if self.event_name.strip() and capture_event_name and self.event_name.strip() != capture_event_name:
+            if (
+                self.event_name.strip()
+                and capture_event_name
+                and self.event_name.strip() != capture_event_name
+            ):
                 raise ValueError(
                     "GitHub webhook replay envelope event_name conflicts with capture header X-GitHub-Event"
                 )
             capture_signature = self._capture_header_value("X-Hub-Signature-256")
-            if self.signature_256.strip() and capture_signature and self.signature_256.strip() != capture_signature:
+            if (
+                self.signature_256.strip()
+                and capture_signature
+                and self.signature_256.strip() != capture_signature
+            ):
                 raise ValueError(
                     "GitHub webhook replay envelope signature_256 conflicts with capture header X-Hub-Signature-256"
                 )
             capture_delivery_id = self._capture_header_value("X-GitHub-Delivery")
-            if self.delivery_id.strip() and capture_delivery_id and self.delivery_id.strip() != capture_delivery_id:
+            if (
+                self.delivery_id.strip()
+                and capture_delivery_id
+                and self.delivery_id.strip() != capture_delivery_id
+            ):
                 raise ValueError(
                     "GitHub webhook replay envelope delivery_id conflicts with capture header X-GitHub-Delivery"
                 )

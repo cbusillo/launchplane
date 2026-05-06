@@ -173,7 +173,9 @@ def _write_runtime_environments_file(repo_root: Path, payload: str) -> Path:
     store = PostgresRecordStore(database_url=_runtime_environments_database_url(repo_root))
     store.ensure_schema()
     try:
-        for record in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
+        for (
+            record
+        ) in control_plane_runtime_environments.build_runtime_environment_records_from_definition(
             definition,
             updated_at="2026-04-22T00:00:00Z",
             source_label="test",
@@ -213,7 +215,9 @@ def _write_runtime_secret_and_safety_policy(
                 scope="instance",
                 context=context,
                 instance=instance,
-                env={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons,/opt/project/addons/shared"},
+                env={
+                    "ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons,/opt/project/addons/shared"
+                },
                 updated_at="2026-05-05T21:00:00Z",
                 source_label="test",
             )
@@ -316,10 +320,16 @@ def _post_deploy_update_evidence(
 
 class PromoteWorkflowTests(unittest.TestCase):
     def test_build_promotion_record_returns_pending_record(self) -> None:
-        record = build_promotion_record(record_id="promotion-20260410-182231-opw-testing-prod",
-                                        artifact_id="artifact-20260410-f45db648", context_name="opw",
-                                        from_instance_name="testing", to_instance_name="prod", target_name="opw-prod",
-                                        target_type="compose", deploy_mode="dokploy-compose-api")
+        record = build_promotion_record(
+            record_id="promotion-20260410-182231-opw-testing-prod",
+            artifact_id="artifact-20260410-f45db648",
+            context_name="opw",
+            from_instance_name="testing",
+            to_instance_name="prod",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+        )
 
         self.assertEqual(record.artifact_identity.artifact_id, "artifact-20260410-f45db648")
         self.assertEqual(record.deploy.status, "pending")
@@ -327,18 +337,25 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.from_instance, "testing")
 
     def test_build_executed_promotion_record_marks_success_after_waited_ship(self) -> None:
-        request = PromotionRequest(artifact_id="artifact-sha256-image456",
-                                   backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
-                                   context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
-                                   target_type="compose", deploy_mode="dokploy-compose-api",
-                                   destination_health=_healthcheck_evidence(),
-                                   source_health=_healthcheck_evidence(
-                                       verified=True,
-                                       urls=("https://testing.example.com/web/health",),
-                                       timeout_seconds=30,
-                                       status="pass",
-                                   ),
-                                   backup_gate=_backup_gate_evidence())
+        request = PromotionRequest(
+            artifact_id="artifact-sha256-image456",
+            backup_record_id="backup-opw-prod-20260410T182231Z",
+            source_git_ref="abc123",
+            context="opw",
+            from_instance="testing",
+            to_instance="prod",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            destination_health=_healthcheck_evidence(),
+            source_health=_healthcheck_evidence(
+                verified=True,
+                urls=("https://testing.example.com/web/health",),
+                timeout_seconds=30,
+                status="pass",
+            ),
+            backup_gate=_backup_gate_evidence(),
+        )
 
         record = build_executed_promotion_record(
             request=request,
@@ -373,10 +390,17 @@ class PromoteWorkflowTests(unittest.TestCase):
             )
 
     def test_build_deployment_record_marks_pending_health_for_async_ship(self) -> None:
-        request = ShipRequest(context="opw", instance="prod", source_git_ref="abc123", target_name="opw-prod",
-                              target_type="compose", deploy_mode="dokploy-compose-api",
-                              artifact_id="artifact-sha256-image456", wait=False,
-                              destination_health=_healthcheck_evidence())
+        request = ShipRequest(
+            context="opw",
+            instance="prod",
+            source_git_ref="abc123",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            artifact_id="artifact-sha256-image456",
+            wait=False,
+            destination_health=_healthcheck_evidence(),
+        )
 
         record = build_deployment_record(
             request=request,
@@ -396,10 +420,19 @@ class PromoteWorkflowTests(unittest.TestCase):
         self.assertEqual(record.destination_health.status, "pending")
         self.assertFalse(record.destination_health.verified)
 
-    def test_build_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(self) -> None:
-        request = ShipRequest(context="opw", instance="prod", source_git_ref="abc123",
-                              artifact_id="artifact-sha256-image456", target_name="opw-prod", target_type="compose",
-                              deploy_mode="dokploy-compose-api", destination_health=_healthcheck_evidence())
+    def test_build_deployment_record_marks_post_deploy_update_success_for_waited_compose_ship(
+        self,
+    ) -> None:
+        request = ShipRequest(
+            context="opw",
+            instance="prod",
+            source_git_ref="abc123",
+            artifact_id="artifact-sha256-image456",
+            target_name="opw-prod",
+            target_type="compose",
+            deploy_mode="dokploy-compose-api",
+            destination_health=_healthcheck_evidence(),
+        )
 
         record = build_deployment_record(
             request=request,
@@ -412,12 +445,16 @@ class PromoteWorkflowTests(unittest.TestCase):
 
         self.assertTrue(record.post_deploy_update.attempted)
         self.assertEqual(record.post_deploy_update.status, "pass")
-        self.assertIn("native control-plane Dokploy schedule workflow", record.post_deploy_update.detail)
+        self.assertIn(
+            "native control-plane Dokploy schedule workflow", record.post_deploy_update.detail
+        )
 
 
 class ArtifactImageOverrideTests(unittest.TestCase):
     def test_sync_artifact_image_reference_sets_exact_image_reference(self) -> None:
-        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod")
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose", target_id="compose-123", target_name="opw-prod"
+        )
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
@@ -432,31 +469,37 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         )
         captured_update: dict[str, object] = {}
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.runtime_environments.resolve_runtime_environment_values",
-            return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            side_effect=[
-                {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
-                {
-                    "env": (
-                        "DOCKER_IMAGE=odoo-runtime\n"
-                        "DOCKER_IMAGE_TAG=latest\n"
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
-                        "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons/shared"
-                    )
-                },
-            ],
-        ), patch(
-            "control_plane.dokploy.sync_dokploy_compose_raw_source",
-            return_value={"source_type": "raw", "compose_sha256": "abc123"},
-        ) as raw_compose_sync, patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-            side_effect=lambda **kwargs: captured_update.update(kwargs),
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_ADDONS_PATH": "/odoo/addons,/opt/project/addons/shared"},
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                side_effect=[
+                    {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+                    {
+                        "env": (
+                            "DOCKER_IMAGE=odoo-runtime\n"
+                            "DOCKER_IMAGE_TAG=latest\n"
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
+                            "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons/shared"
+                        )
+                    },
+                ],
+            ),
+            patch(
+                "control_plane.dokploy.sync_dokploy_compose_raw_source",
+                return_value={"source_type": "raw", "compose_sha256": "abc123"},
+            ) as raw_compose_sync,
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: captured_update.update(kwargs),
+            ),
         ):
             _sync_artifact_image_reference_for_target(
                 context_name="opw",
@@ -478,7 +521,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         )
 
     def test_sync_artifact_image_reference_updates_stale_env_even_when_image_matches(self) -> None:
-        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="cm-testing")
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose", target_id="compose-123", target_name="cm-testing"
+        )
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
@@ -505,34 +550,40 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 context="cm",
                 instance="testing",
             )
-            with patch(
-                "control_plane.dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ), patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
-                side_effect=[
-                    {"env": stale_env},
+            with (
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    side_effect=[
+                        {"env": stale_env},
+                        {
+                            "env": (
+                                "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
+                                "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared\n"
+                                "SMTP_PASSWORD=managed-secret-value"
+                            )
+                        },
+                    ],
+                ),
+                patch(
+                    "control_plane.dokploy.sync_dokploy_compose_raw_source",
+                    return_value={"source_type": "raw", "compose_sha256": "abc123"},
+                ),
+                patch(
+                    "control_plane.dokploy.update_dokploy_target_env",
+                    side_effect=lambda **kwargs: captured_update.update(kwargs),
+                ),
+                patch.dict(
+                    os.environ,
                     {
-                        "env": (
-                            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:image456\n"
-                            "ODOO_ADDONS_PATH=/odoo/addons,/opt/project/addons,/opt/project/addons/shared\n"
-                            "SMTP_PASSWORD=managed-secret-value"
-                        )
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key",
                     },
-                ],
-            ), patch(
-                "control_plane.dokploy.sync_dokploy_compose_raw_source",
-                return_value={"source_type": "raw", "compose_sha256": "abc123"},
-            ), patch(
-                "control_plane.dokploy.update_dokploy_target_env",
-                side_effect=lambda **kwargs: captured_update.update(kwargs),
-            ), patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_DATABASE_URL": database_url,
-                    "LAUNCHPLANE_MASTER_ENCRYPTION_KEY": "test-master-key",
-                },
-                clear=True,
+                    clear=True,
+                ),
             ):
                 runtime_source = _sync_artifact_image_reference_for_target(
                     context_name="cm",
@@ -553,7 +604,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         self.assertEqual(runtime_source["runtime_env_verified"], "true")
 
     def test_sync_artifact_image_reference_blocks_unsafe_runtime_secret_binding(self) -> None:
-        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="cm-prod")
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose", target_id="compose-123", target_name="cm-prod"
+        )
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
@@ -575,19 +628,23 @@ class ArtifactImageOverrideTests(unittest.TestCase):
                 instance="prod",
                 secret_class="testing",
             )
-            with patch(
-                "control_plane.dokploy.read_dokploy_config",
-                return_value=("https://dokploy.example.com", "token-123"),
-            ), patch(
-                "control_plane.runtime_environments.resolve_runtime_environment_values",
-                return_value={"SMTP_PASSWORD": "managed-secret-value"},
-            ), patch(
-                "control_plane.dokploy.fetch_dokploy_target_payload",
-                return_value={"env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:old"},
-            ), patch(
-                "control_plane.dokploy.update_dokploy_target_env"
-            ) as update_target_env, patch.dict(
-                os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True
+            with (
+                patch(
+                    "control_plane.dokploy.read_dokploy_config",
+                    return_value=("https://dokploy.example.com", "token-123"),
+                ),
+                patch(
+                    "control_plane.runtime_environments.resolve_runtime_environment_values",
+                    return_value={"SMTP_PASSWORD": "managed-secret-value"},
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "env": "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:old"
+                    },
+                ),
+                patch("control_plane.dokploy.update_dokploy_target_env") as update_target_env,
+                patch.dict(os.environ, {"LAUNCHPLANE_DATABASE_URL": database_url}, clear=True),
             ):
                 with self.assertRaises(click.ClickException) as error_context:
                     _sync_artifact_image_reference_for_target(
@@ -602,7 +659,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         update_target_env.assert_not_called()
 
     def test_sync_artifact_image_reference_rejects_legacy_monorepo_target_source(self) -> None:
-        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-testing")
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose", target_id="compose-123", target_name="opw-testing"
+        )
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
@@ -616,20 +675,24 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             }
         )
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.runtime_environments.resolve_runtime_environment_values",
-            return_value={},
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={
-                "sourceType": "git",
-                "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
-                "customGitBranch": "opw-testing",
-                "env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest",
-            },
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "sourceType": "git",
+                    "customGitUrl": "git@github.com:cbusillo/odoo-ai.git",
+                    "customGitBranch": "opw-testing",
+                    "env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest",
+                },
+            ),
         ):
             with self.assertRaises(click.ClickException) as error_context:
                 _sync_artifact_image_reference_for_target(
@@ -643,7 +706,9 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         self.assertIn("odoo-ai", str(error_context.exception))
 
     def test_sync_artifact_image_reference_rejects_mutable_addon_refs(self) -> None:
-        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-testing")
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose", target_id="compose-123", target_name="opw-testing"
+        )
         artifact_manifest = ArtifactIdentityManifest.model_validate(
             {
                 "artifact_id": "artifact-sha256-image456",
@@ -657,21 +722,25 @@ class ArtifactImageOverrideTests(unittest.TestCase):
             }
         )
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.runtime_environments.resolve_runtime_environment_values",
-            return_value={},
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            return_value={
-                "env": (
-                    "DOCKER_IMAGE=odoo-runtime\n"
-                    "DOCKER_IMAGE_TAG=latest\n"
-                    "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
-                )
-            },
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": (
+                        "DOCKER_IMAGE=odoo-runtime\n"
+                        "DOCKER_IMAGE_TAG=latest\n"
+                        "ODOO_ADDON_REPOSITORIES=cbusillo/disable_odoo_online@main,OCA/OpenUpgrade@89e649728027a8ab656b3aa4be18f4bd364db417"
+                    )
+                },
+            ),
         ):
             with self.assertRaises(click.ClickException) as error_context:
                 _sync_artifact_image_reference_for_target(
@@ -685,30 +754,37 @@ class ArtifactImageOverrideTests(unittest.TestCase):
         self.assertIn("disable_odoo_online@main", str(error_context.exception))
 
     def test_sync_artifact_image_reference_clears_stale_override_without_manifest(self) -> None:
-        resolved_target = ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod")
+        resolved_target = ResolvedTargetEvidence(
+            target_type="compose", target_id="compose-123", target_name="opw-prod"
+        )
         captured_update: dict[str, object] = {}
 
-        with patch(
-            "control_plane.dokploy.read_dokploy_config",
-            return_value=("https://dokploy.example.com", "token-123"),
-        ), patch(
-            "control_plane.runtime_environments.resolve_runtime_environment_values",
-            return_value={},
-        ), patch(
-            "control_plane.dokploy.fetch_dokploy_target_payload",
-            side_effect=[
-                {
-                    "env": (
-                        "DOCKER_IMAGE=odoo-runtime\n"
-                        "DOCKER_IMAGE_TAG=latest\n"
-                        "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:stale"
-                    )
-                },
-                {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
-            ],
-        ), patch(
-            "control_plane.dokploy.update_dokploy_target_env",
-            side_effect=lambda **kwargs: captured_update.update(kwargs),
+        with (
+            patch(
+                "control_plane.dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                side_effect=[
+                    {
+                        "env": (
+                            "DOCKER_IMAGE=odoo-runtime\n"
+                            "DOCKER_IMAGE_TAG=latest\n"
+                            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-private@sha256:stale"
+                        )
+                    },
+                    {"env": "DOCKER_IMAGE=odoo-runtime\nDOCKER_IMAGE_TAG=latest"},
+                ],
+            ),
+            patch(
+                "control_plane.dokploy.update_dokploy_target_env",
+                side_effect=lambda **kwargs: captured_update.update(kwargs),
+            ),
         ):
             _sync_artifact_image_reference_for_target(
                 context_name="opw",
@@ -759,27 +835,39 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", verify_health=False).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    verify_health=False,
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             post_deploy_updates: list[dict[str, object]] = []
 
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                },
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    },
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
+                ),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -813,37 +901,58 @@ class PromoteCliTests(unittest.TestCase):
             _write_release_tuple_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(artifact_id="artifact-sha256-image456",
-                                 backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
-                                 context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
-                                 target_type="compose", deploy_mode="dokploy-compose-api", health_timeout_seconds=45,
-                                 source_health=_healthcheck_evidence(
-                                     verified=True,
-                                     urls=("https://testing.example.com/web/health",),
-                                     timeout_seconds=30,
-                                     status="pass",
-                                 ),
-                                 backup_gate=_backup_gate_evidence(),
-                                 destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
+                    backup_record_id="backup-opw-prod-20260410T182231Z",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    health_timeout_seconds=45,
+                    source_health=_healthcheck_evidence(
+                        verified=True,
+                        urls=("https://testing.example.com/web/health",),
+                        timeout_seconds=30,
+                        status="pass",
+                    ),
+                    backup_gate=_backup_gate_evidence(),
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
-            with patch(
-                "control_plane.cli._resolve_ship_request_for_promotion",
-                return_value=ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                                         source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                                         deploy_mode="dokploy-compose-api",
-                                         destination_health=_healthcheck_evidence()),
-            ), patch(
-                "control_plane.cli._execute_ship",
-                return_value=(
-                    state_dir / "deployments" / "deployment-1.json",
-                    DeploymentRecord(record_id="deployment-1",
-                                     artifact_identity=_artifact_identity_reference(), context="opw",
-                                     instance="prod", source_git_ref="abc123",
-                                     deploy=_deploy_evidence(
-                                         started_at="2026-04-10T18:22:31Z",
-                                         finished_at="2026-04-10T18:24:00Z",
-                                     )),
+            with (
+                patch(
+                    "control_plane.cli._resolve_ship_request_for_promotion",
+                    return_value=ShipRequest(
+                        artifact_id="artifact-sha256-image456",
+                        context="opw",
+                        instance="prod",
+                        source_git_ref="abc123",
+                        target_name="opw-prod",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        destination_health=_healthcheck_evidence(),
+                    ),
+                ),
+                patch(
+                    "control_plane.cli._execute_ship",
+                    return_value=(
+                        state_dir / "deployments" / "deployment-1.json",
+                        DeploymentRecord(
+                            record_id="deployment-1",
+                            artifact_identity=_artifact_identity_reference(),
+                            context="opw",
+                            instance="prod",
+                            source_git_ref="abc123",
+                            deploy=_deploy_evidence(
+                                started_at="2026-04-10T18:22:31Z",
+                                finished_at="2026-04-10T18:24:00Z",
+                            ),
+                        ),
+                    ),
                 ),
             ):
                 result = runner.invoke(
@@ -864,7 +973,9 @@ class PromoteCliTests(unittest.TestCase):
             persisted_payload = promotion_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
-            self.assertIn('"backup_record_id": "backup-opw-prod-20260410T182231Z"', persisted_payload)
+            self.assertIn(
+                '"backup_record_id": "backup-opw-prod-20260410T182231Z"', persisted_payload
+            )
             self.assertIn('"deployment_id": "control-plane-dokploy"', persisted_payload)
             self.assertIn('"snapshot": "opw-predeploy-20260410-182231"', persisted_payload)
 
@@ -881,7 +992,10 @@ class PromoteCliTests(unittest.TestCase):
                         "schema_version": 1,
                         "context": "opw",
                         "instance": "prod",
-                        "artifact_identity": {"artifact_id": "artifact-sha256-image456", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-sha256-image456",
+                            "manifest_version": 1,
+                        },
                         "source_git_ref": "abc123",
                         "deploy": {
                             "target_name": "opw-prod",
@@ -946,7 +1060,10 @@ class PromoteCliTests(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "record_id": "promotion-1",
-                        "artifact_identity": {"artifact_id": "artifact-sha256-image456", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-sha256-image456",
+                            "manifest_version": 1,
+                        },
                         "backup_record_id": "backup-opw-prod-20260410T182231Z",
                         "context": "opw",
                         "from_instance": "testing",
@@ -976,7 +1093,10 @@ class PromoteCliTests(unittest.TestCase):
                         "schema_version": 1,
                         "context": "opw",
                         "instance": "prod",
-                        "artifact_identity": {"artifact_id": "artifact-sha256-image456", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-sha256-image456",
+                            "manifest_version": 1,
+                        },
                         "source_git_ref": "abc123",
                         "deploy": {
                             "target_name": "opw-prod",
@@ -1014,7 +1134,10 @@ class PromoteCliTests(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "record_id": "deployment-1",
-                        "artifact_identity": {"artifact_id": "artifact-sha256-image456", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-sha256-image456",
+                            "manifest_version": 1,
+                        },
                         "context": "opw",
                         "instance": "prod",
                         "source_git_ref": "abc123",
@@ -1072,7 +1195,10 @@ class PromoteCliTests(unittest.TestCase):
                         "schema_version": 1,
                         "context": "zeta",
                         "instance": "testing",
-                        "artifact_identity": {"artifact_id": "artifact-zeta", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-zeta",
+                            "manifest_version": 1,
+                        },
                         "source_git_ref": "zeta-ref",
                         "deploy": {
                             "target_name": "zeta-testing",
@@ -1107,7 +1233,10 @@ class PromoteCliTests(unittest.TestCase):
                         "schema_version": 1,
                         "context": "acme",
                         "instance": "prod",
-                        "artifact_identity": {"artifact_id": "artifact-acme", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-acme",
+                            "manifest_version": 1,
+                        },
                         "source_git_ref": "acme-ref",
                         "deploy": {
                             "target_name": "acme-prod",
@@ -1141,7 +1270,10 @@ class PromoteCliTests(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "record_id": "deployment-zeta",
-                        "artifact_identity": {"artifact_id": "artifact-zeta", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-zeta",
+                            "manifest_version": 1,
+                        },
                         "context": "zeta",
                         "instance": "testing",
                         "source_git_ref": "zeta-ref",
@@ -1167,7 +1299,10 @@ class PromoteCliTests(unittest.TestCase):
                     {
                         "schema_version": 1,
                         "record_id": "deployment-acme",
-                        "artifact_identity": {"artifact_id": "artifact-acme", "manifest_version": 1},
+                        "artifact_identity": {
+                            "artifact_id": "artifact-acme",
+                            "manifest_version": 1,
+                        },
                         "context": "acme",
                         "instance": "prod",
                         "source_git_ref": "acme-ref",
@@ -1201,7 +1336,10 @@ class PromoteCliTests(unittest.TestCase):
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
             payload = json.loads(result.output)
-            self.assertEqual([(entry["context"], entry["instance"]) for entry in payload], [("acme", "prod"), ("zeta", "testing")])
+            self.assertEqual(
+                [(entry["context"], entry["instance"]) for entry in payload],
+                [("acme", "prod"), ("zeta", "testing")],
+            )
             self.assertEqual(payload[0]["live"]["artifact_id"], "artifact-acme")
             self.assertEqual(payload[1]["latest_deployment"]["record_id"], "deployment-zeta")
 
@@ -1366,10 +1504,12 @@ DOKPLOY_SHIP_MODE = "auto"
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ,
-                            {
-                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -1420,8 +1560,12 @@ DOKPLOY_SHIP_MODE = "auto"
             )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            persisted_payload = (state_dir / "promotions" / "promotion-1.json").read_text(encoding="utf-8")
-            self.assertIn('"backup_record_id": "backup-opw-prod-20260410T182231Z"', persisted_payload)
+            persisted_payload = (state_dir / "promotions" / "promotion-1.json").read_text(
+                encoding="utf-8"
+            )
+            self.assertIn(
+                '"backup_record_id": "backup-opw-prod-20260410T182231Z"', persisted_payload
+            )
 
     def test_backup_gates_list_returns_latest_first(self) -> None:
         runner = CliRunner()
@@ -1477,7 +1621,10 @@ DOKPLOY_SHIP_MODE = "auto"
                         {
                             "schema_version": 1,
                             "record_id": record_id,
-                            "artifact_identity": {"artifact_id": artifact_id, "manifest_version": 1},
+                            "artifact_identity": {
+                                "artifact_id": artifact_id,
+                                "manifest_version": 1,
+                            },
                             "backup_record_id": backup_record_id,
                             "context": "opw",
                             "from_instance": "testing",
@@ -1547,7 +1694,10 @@ DOKPLOY_SHIP_MODE = "auto"
                         {
                             "schema_version": 1,
                             "record_id": record_id,
-                            "artifact_identity": {"artifact_id": artifact_id, "manifest_version": 1},
+                            "artifact_identity": {
+                                "artifact_id": artifact_id,
+                                "manifest_version": 1,
+                            },
                             "context": "opw",
                             "instance": "prod",
                             "source_git_ref": source_git_ref,
@@ -1636,7 +1786,9 @@ DOKPLOY_SHIP_MODE = "auto"
             written_path = state_dir / "deployments" / "deployment-20260411T182231Z-opw-prod.json"
             self.assertEqual(Path(result.output.strip()), written_path)
             self.assertEqual(
-                DeploymentRecord.model_validate(json.loads(written_path.read_text(encoding="utf-8"))),
+                DeploymentRecord.model_validate(
+                    json.loads(written_path.read_text(encoding="utf-8"))
+                ),
                 record,
             )
 
@@ -1673,10 +1825,14 @@ DOKPLOY_SHIP_MODE = "auto"
             )
 
             self.assertEqual(result.exit_code, 0, msg=result.output)
-            written_path = state_dir / "promotions" / "promotion-20260411T182231Z-opw-testing-to-prod.json"
+            written_path = (
+                state_dir / "promotions" / "promotion-20260411T182231Z-opw-testing-to-prod.json"
+            )
             self.assertEqual(Path(result.output.strip()), written_path)
             self.assertEqual(
-                PromotionRecord.model_validate(json.loads(written_path.read_text(encoding="utf-8"))),
+                PromotionRecord.model_validate(
+                    json.loads(written_path.read_text(encoding="utf-8"))
+                ),
                 record,
             )
 
@@ -2120,31 +2276,45 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api",
-                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._wait_for_ship_healthcheck",
-                side_effect=lambda **_kwargs: None,
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._wait_for_ship_healthcheck",
+                    side_effect=lambda **_kwargs: None,
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2164,7 +2334,7 @@ DOKPLOY_SHIP_MODE = "auto"
             persisted_payload = inventory_file.read_text(encoding="utf-8")
             self.assertIn('"artifact_id": "artifact-sha256-image456"', persisted_payload)
             self.assertIn('"deployment_record_id": "deployment-', persisted_payload)
-            self.assertIn('native control-plane Dokploy schedule workflow', persisted_payload)
+            self.assertIn("native control-plane Dokploy schedule workflow", persisted_payload)
             tuple_file = state_dir / "release_tuples" / "opw-prod.json"
             self.assertTrue(tuple_file.exists())
             tuple_payload = tuple_file.read_text(encoding="utf-8")
@@ -2181,40 +2351,61 @@ DOKPLOY_SHIP_MODE = "auto"
             _write_release_tuple_record(state_dir)
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(artifact_id="artifact-sha256-image456",
-                                 backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
-                                 context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
-                                 target_type="compose", deploy_mode="dokploy-compose-api", health_timeout_seconds=45,
-                                 source_health=_healthcheck_evidence(
-                                     verified=True,
-                                     urls=("https://testing.example.com/web/health",),
-                                     timeout_seconds=30,
-                                     status="pass",
-                                 ),
-                                 backup_gate=_backup_gate_evidence(),
-                                 destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
+                    backup_record_id="backup-opw-prod-20260410T182231Z",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    health_timeout_seconds=45,
+                    source_health=_healthcheck_evidence(
+                        verified=True,
+                        urls=("https://testing.example.com/web/health",),
+                        timeout_seconds=30,
+                        status="pass",
+                    ),
+                    backup_gate=_backup_gate_evidence(),
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_ship_request_for_promotion",
-                return_value=ShipRequest(context="opw", instance="prod", source_git_ref="abc123",
-                                         target_name="opw-prod", target_type="compose",
-                                         deploy_mode="dokploy-compose-api", artifact_id="artifact-sha256-image456",
-                                         destination_health=_healthcheck_evidence()),
-            ), patch(
-                "control_plane.cli._execute_ship",
-                return_value=(
-                    state_dir / "deployments" / "deployment-1.json",
-                    DeploymentRecord(record_id="deployment-1",
-                                     artifact_identity=_artifact_identity_reference(), context="opw",
-                                     instance="prod", source_git_ref="abc123",
-                                     deploy=_deploy_evidence(
-                                         started_at="2026-04-10T18:22:31Z",
-                                         finished_at="2026-04-10T18:24:00Z",
-                                     ),
-                                     post_deploy_update=_post_deploy_update_evidence(),
-                                     destination_health=_healthcheck_evidence(verified=True, status="pass")),
+            with (
+                patch(
+                    "control_plane.cli._resolve_ship_request_for_promotion",
+                    return_value=ShipRequest(
+                        context="opw",
+                        instance="prod",
+                        source_git_ref="abc123",
+                        target_name="opw-prod",
+                        target_type="compose",
+                        deploy_mode="dokploy-compose-api",
+                        artifact_id="artifact-sha256-image456",
+                        destination_health=_healthcheck_evidence(),
+                    ),
+                ),
+                patch(
+                    "control_plane.cli._execute_ship",
+                    return_value=(
+                        state_dir / "deployments" / "deployment-1.json",
+                        DeploymentRecord(
+                            record_id="deployment-1",
+                            artifact_identity=_artifact_identity_reference(),
+                            context="opw",
+                            instance="prod",
+                            source_git_ref="abc123",
+                            deploy=_deploy_evidence(
+                                started_at="2026-04-10T18:22:31Z",
+                                finished_at="2026-04-10T18:24:00Z",
+                            ),
+                            post_deploy_update=_post_deploy_update_evidence(),
+                            destination_health=_healthcheck_evidence(verified=True, status="pass"),
+                        ),
+                    ),
                 ),
             ):
                 result = runner.invoke(
@@ -2349,27 +2540,39 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", verify_health=False).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    verify_health=False,
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             post_deploy_updates: list[dict[str, object]] = []
 
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                },
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    },
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
+                ),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2433,28 +2636,40 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", verify_health=False).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    verify_health=False,
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
             captured_sync_calls: list[dict[str, object]] = []
 
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                },
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **kwargs: captured_sync_calls.append(kwargs),
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **_kwargs: None,
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    },
+                ),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **kwargs: captured_sync_calls.append(kwargs),
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **_kwargs: None,
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2503,32 +2718,44 @@ target_id = "compose-123"
             )
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api",
-                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
             post_deploy_updates: list[dict[str, object]] = []
             captured_health_urls: list[str] = []
 
-            with patch.dict(
-                os.environ,
-                {
-                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                },
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._wait_for_ship_healthcheck",
-                side_effect=lambda url, timeout_seconds: captured_health_urls.append(url),
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                    },
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
+                ),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._wait_for_ship_healthcheck",
+                    side_effect=lambda url, timeout_seconds: captured_health_urls.append(url),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2554,31 +2781,45 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api",
-                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._wait_for_ship_healthcheck",
-                side_effect=click.ClickException("Healthcheck failed"),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._wait_for_ship_healthcheck",
+                    side_effect=click.ClickException("Healthcheck failed"),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2600,7 +2841,9 @@ target_id = "compose-123"
             self.assertIn('"post_deploy_update": {', persisted_payload)
             self.assertIn('"attempted": true', persisted_payload)
 
-    def test_ship_execute_accepts_first_passing_health_url_when_multiple_are_available(self) -> None:
+    def test_ship_execute_accepts_first_passing_health_url_when_multiple_are_available(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -2632,26 +2875,36 @@ target_id = "compose-123"
                 self.assertEqual(timeout_seconds, 45)
                 captured_health_urls.append(url)
                 if url == "https://prod-alt.example.com/web/health":
-                    raise click.ClickException("Healthcheck failed for https://prod-alt.example.com/web/health: http 401")
+                    raise click.ClickException(
+                        "Healthcheck failed for https://prod-alt.example.com/web/health: http 401"
+                    )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._wait_for_ship_healthcheck",
-                side_effect=_health_side_effect,
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._wait_for_ship_healthcheck",
+                    side_effect=_health_side_effect,
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2704,24 +2957,32 @@ target_id = "compose-123"
                 self.assertEqual(timeout_seconds, 45)
                 raise click.ClickException(f"Healthcheck failed for {url}: http 401")
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._wait_for_ship_healthcheck",
-                side_effect=_health_side_effect,
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._wait_for_ship_healthcheck",
+                    side_effect=_health_side_effect,
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2743,7 +3004,7 @@ target_id = "compose-123"
             self.assertEqual(len(deployment_files), 1)
             persisted_payload = deployment_files[0].read_text(encoding="utf-8")
             self.assertIn('"status": "fail"', persisted_payload)
-            self.assertIn('native control-plane Dokploy schedule workflow', persisted_payload)
+            self.assertIn("native control-plane Dokploy schedule workflow", persisted_payload)
 
     def test_ship_execute_marks_post_deploy_update_failed_when_native_update_fails(self) -> None:
         runner = CliRunner()
@@ -2753,28 +3014,41 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api",
-                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=click.ClickException("Native post-deploy update failed"),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=click.ClickException("Native post-deploy update failed"),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2796,7 +3070,7 @@ target_id = "compose-123"
             self.assertIn('"status": "pass"', persisted_payload)
             self.assertIn('"post_deploy_update": {', persisted_payload)
             self.assertIn('"attempted": true', persisted_payload)
-            self.assertIn('native control-plane Dokploy schedule workflow', persisted_payload)
+            self.assertIn("native control-plane Dokploy schedule workflow", persisted_payload)
             self.assertIn('"destination_health": {', persisted_payload)
             self.assertIn('"verified": false', persisted_payload)
 
@@ -2808,25 +3082,37 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api",
-                            destination_health=_healthcheck_evidence()).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    destination_health=_healthcheck_evidence(),
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=subprocess.CalledProcessError(1, ["uv", "run"]),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=subprocess.CalledProcessError(1, ["uv", "run"]),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2890,29 +3176,43 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="compose",
-                            deploy_mode="dokploy-compose-api", verify_health=False).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                    verify_health=False,
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
             post_deploy_updates: list[dict[str, object]] = []
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=lambda **kwargs: post_deploy_updates.append(kwargs),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -2940,27 +3240,45 @@ target_id = "compose-123"
             _write_artifact_manifest(state_dir)
             input_file = repo_root / "ship-request.json"
             input_file.write_text(
-                ShipRequest(artifact_id="artifact-sha256-image456", context="opw", instance="prod",
-                            source_git_ref="abc123", target_name="opw-prod", target_type="application",
-                            deploy_mode="dokploy-application-api", verify_health=False).model_dump_json(indent=2),
+                ShipRequest(
+                    artifact_id="artifact-sha256-image456",
+                    context="opw",
+                    instance="prod",
+                    source_git_ref="abc123",
+                    target_name="opw-prod",
+                    target_type="application",
+                    deploy_mode="dokploy-application-api",
+                    verify_health=False,
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="application", target_id="application-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="application",
+                            target_id="application-123",
+                            target_name="opw-prod",
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=AssertionError("application deploys must not run compose post-deploy update"),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=AssertionError(
+                        "application deploys must not run compose post-deploy update"
+                    ),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -3004,21 +3322,30 @@ target_id = "compose-123"
                 encoding="utf-8",
             )
 
-            with patch(
-                "control_plane.cli._resolve_dokploy_target",
-                return_value=(
-                    ResolvedTargetEvidence(target_type="compose", target_id="compose-123", target_name="opw-prod"),
-                    600,
+            with (
+                patch(
+                    "control_plane.cli._resolve_dokploy_target",
+                    return_value=(
+                        ResolvedTargetEvidence(
+                            target_type="compose", target_id="compose-123", target_name="opw-prod"
+                        ),
+                        600,
+                    ),
                 ),
-            ), patch(
-                "control_plane.cli._sync_artifact_image_reference_for_target",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._execute_dokploy_deploy",
-                side_effect=lambda **_kwargs: None,
-            ), patch(
-                "control_plane.cli._run_compose_post_deploy_update",
-                side_effect=AssertionError("async compose deploys must not run compose post-deploy update"),
+                patch(
+                    "control_plane.cli._sync_artifact_image_reference_for_target",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._execute_dokploy_deploy",
+                    side_effect=lambda **_kwargs: None,
+                ),
+                patch(
+                    "control_plane.cli._run_compose_post_deploy_update",
+                    side_effect=AssertionError(
+                        "async compose deploys must not run compose post-deploy update"
+                    ),
+                ),
             ):
                 result = runner.invoke(
                     main,
@@ -3124,7 +3451,9 @@ target_id = "compose-123"
         self.assertEqual(resolved_target.target_name, "opw-prod")
         self.assertEqual(deploy_timeout_seconds, 7200)
 
-    def test_resolve_native_ship_request_reads_source_of_truth_and_target_domain_healthcheck(self) -> None:
+    def test_resolve_native_ship_request_reads_source_of_truth_and_target_domain_healthcheck(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
             _write_control_plane_dokploy_source_of_truth(
@@ -3149,12 +3478,15 @@ schema_version = 1
 
 [contexts.opw.instances.prod.env]
 DOKPLOY_SHIP_MODE = "auto"
-""".strip()
+""".strip(),
             )
 
-            with patch.dict(os.environ, {
-                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 ship_request = _resolve_native_ship_request(
                     context_name="opw",
                     instance_name="prod",
@@ -3173,7 +3505,9 @@ DOKPLOY_SHIP_MODE = "auto"
         self.assertEqual(ship_request.target_type, "compose")
         self.assertEqual(ship_request.deploy_mode, "dokploy-compose-api")
         self.assertEqual(ship_request.source_git_ref, "origin/main")
-        self.assertEqual(ship_request.destination_health.urls, ("https://prod.example.com/web/health",))
+        self.assertEqual(
+            ship_request.destination_health.urls, ("https://prod.example.com/web/health",)
+        )
         self.assertEqual(ship_request.destination_health.timeout_seconds, 55)
         self.assertEqual(ship_request.destination_health.status, "pending")
 
@@ -3205,10 +3539,12 @@ DOKPLOY_SHIP_MODE = "auto"
 """,
             )
 
-            with patch.dict(os.environ,
-                            {
-                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -3267,10 +3603,12 @@ DOKPLOY_SHIP_MODE = "auto"
 """,
             )
 
-            with patch.dict(os.environ,
-                            {
-                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 promotion_request = _resolve_native_promotion_request(
                     context_name="opw",
                     from_instance_name="testing",
@@ -3291,10 +3629,14 @@ DOKPLOY_SHIP_MODE = "auto"
         self.assertEqual(promotion_request.target_name, "opw-prod")
         self.assertEqual(promotion_request.target_type, "compose")
         self.assertEqual(promotion_request.deploy_mode, "dokploy-compose-api")
-        self.assertEqual(promotion_request.source_health.urls, ("https://testing.example.com/web/health",))
+        self.assertEqual(
+            promotion_request.source_health.urls, ("https://testing.example.com/web/health",)
+        )
         self.assertEqual(promotion_request.source_health.timeout_seconds, 25)
         self.assertEqual(promotion_request.source_health.status, "pending")
-        self.assertEqual(promotion_request.destination_health.urls, ("https://prod.example.com/web/health",))
+        self.assertEqual(
+            promotion_request.destination_health.urls, ("https://prod.example.com/web/health",)
+        )
         self.assertEqual(promotion_request.destination_health.timeout_seconds, 55)
         self.assertEqual(promotion_request.destination_health.status, "pending")
         self.assertEqual(promotion_request.backup_record_id, "backup-opw-prod-20260410T182231Z")
@@ -3336,10 +3678,12 @@ DOKPLOY_SHIP_MODE = "auto"
 """,
             )
 
-            with patch.dict(os.environ,
-                            {
-                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -3398,17 +3742,26 @@ DOKPLOY_SHIP_MODE = "auto"
             )
             input_file = repo_root / "promotion-request.json"
             input_file.write_text(
-                PromotionRequest(artifact_id="artifact-sha256-image456",
-                                 backup_record_id="backup-opw-prod-20260410T182231Z", source_git_ref="abc123",
-                                 context="opw", from_instance="testing", to_instance="prod", target_name="opw-prod",
-                                 target_type="compose", deploy_mode="dokploy-compose-api").model_dump_json(indent=2),
+                PromotionRequest(
+                    artifact_id="artifact-sha256-image456",
+                    backup_record_id="backup-opw-prod-20260410T182231Z",
+                    source_git_ref="abc123",
+                    context="opw",
+                    from_instance="testing",
+                    to_instance="prod",
+                    target_name="opw-prod",
+                    target_type="compose",
+                    deploy_mode="dokploy-compose-api",
+                ).model_dump_json(indent=2),
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ,
-                            {
-                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -3422,9 +3775,13 @@ DOKPLOY_SHIP_MODE = "auto"
                 )
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("target_type does not match control-plane Dokploy source-of-truth", result.output)
+            self.assertIn(
+                "target_type does not match control-plane Dokploy source-of-truth", result.output
+            )
 
-    def test_promote_execute_dry_run_rejects_target_metadata_drift_against_source_of_truth(self) -> None:
+    def test_promote_execute_dry_run_rejects_target_metadata_drift_against_source_of_truth(
+        self,
+    ) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             repo_root = Path(temporary_directory_name)
@@ -3472,10 +3829,12 @@ DOKPLOY_SHIP_MODE = "auto"
                 encoding="utf-8",
             )
 
-            with patch.dict(os.environ,
-                            {
-                                "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
-                            }):
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_DATABASE_URL": _runtime_environments_database_url(repo_root),
+                },
+            ):
                 result = runner.invoke(
                     main,
                     [
@@ -3489,7 +3848,9 @@ DOKPLOY_SHIP_MODE = "auto"
                 )
 
             self.assertNotEqual(result.exit_code, 0)
-            self.assertIn("target_type does not match control-plane Dokploy source-of-truth", result.output)
+            self.assertIn(
+                "target_type does not match control-plane Dokploy source-of-truth", result.output
+            )
 
 
 if __name__ == "__main__":

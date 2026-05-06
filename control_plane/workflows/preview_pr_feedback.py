@@ -215,7 +215,9 @@ def build_preview_pr_feedback_record(
             if existing_comment is not None:
                 existing_comment_id = existing_comment.get("id")
                 if not isinstance(existing_comment_id, int):
-                    raise click.ClickException("Existing preview feedback comment is missing a numeric id.")
+                    raise click.ClickException(
+                        "Existing preview feedback comment is missing a numeric id."
+                    )
                 if status == "cleared":
                     delete_github_issue_comment(
                         owner=github_reference["owner"],

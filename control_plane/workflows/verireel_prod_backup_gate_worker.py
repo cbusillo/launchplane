@@ -73,9 +73,7 @@ def _parse_non_negative_int(name: str, default: int) -> int:
 
 def _normalize_backup_modes(raw_value: str) -> tuple[str, ...]:
     tokens = {
-        token.strip().lower()
-        for token in raw_value.replace(":", ",").split(",")
-        if token.strip()
+        token.strip().lower() for token in raw_value.replace(":", ",").split(",") if token.strip()
     }
     if "none" in tokens:
         return ()
@@ -248,7 +246,9 @@ def _fetch_health_summary(base_url: str) -> dict[str, str]:
     return summary
 
 
-def _prune_snapshots(*, ctid: str, prefix: str, keep: int, timeout_seconds: int, preserve_name: str) -> None:
+def _prune_snapshots(
+    *, ctid: str, prefix: str, keep: int, timeout_seconds: int, preserve_name: str
+) -> None:
     if keep < 0:
         return
     output = _run_proxmox_command(
@@ -272,9 +272,13 @@ def _prune_snapshots(*, ctid: str, prefix: str, keep: int, timeout_seconds: int,
         )
 
 
-def execute_worker(request: VeriReelProdBackupGateWorkerRequest) -> VeriReelProdBackupGateWorkerResult:
+def execute_worker(
+    request: VeriReelProdBackupGateWorkerRequest,
+) -> VeriReelProdBackupGateWorkerResult:
     ctid = _required_env("VERIREEL_PROD_CT_ID")
-    backup_mode = _normalize_backup_modes(_optional_env("VERIREEL_PROD_BACKUP_MODE", DEFAULT_BACKUP_MODE))
+    backup_mode = _normalize_backup_modes(
+        _optional_env("VERIREEL_PROD_BACKUP_MODE", DEFAULT_BACKUP_MODE)
+    )
     storage = _optional_env("VERIREEL_PROD_BACKUP_STORAGE")
     if "vzdump" in backup_mode and not storage:
         raise click.ClickException(
@@ -282,8 +286,12 @@ def execute_worker(request: VeriReelProdBackupGateWorkerRequest) -> VeriReelProd
         )
     snapshot_prefix = _optional_env("VERIREEL_PROD_SNAPSHOT_PREFIX", DEFAULT_SNAPSHOT_PREFIX)
     snapshot_keep = _parse_non_negative_int("VERIREEL_PROD_SNAPSHOT_KEEP", 5)
-    testing_base_url = _optional_env("VERIREEL_TESTING_BASE_URL", "https://ver-testing.shinycomputers.com")
-    prod_base_url = _optional_env("VERIREEL_PROD_OPERATOR_BASE_URL", "https://ver-prod.shinycomputers.com")
+    testing_base_url = _optional_env(
+        "VERIREEL_TESTING_BASE_URL", "https://ver-testing.shinycomputers.com"
+    )
+    prod_base_url = _optional_env(
+        "VERIREEL_PROD_OPERATOR_BASE_URL", "https://ver-prod.shinycomputers.com"
+    )
 
     started_at = utc_now_timestamp()
     snapshot_name = _format_snapshot_name(snapshot_prefix) if "snapshot" in backup_mode else ""

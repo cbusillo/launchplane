@@ -51,7 +51,9 @@ def build_promotion_record(
     )
 
 
-def generate_promotion_record_id(*, context_name: str, from_instance_name: str, to_instance_name: str) -> str:
+def generate_promotion_record_id(
+    *, context_name: str, from_instance_name: str, to_instance_name: str
+) -> str:
     timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
     return f"promotion-{timestamp}-{context_name}-{from_instance_name}-to-{to_instance_name}"
 
@@ -88,8 +90,11 @@ def _resolve_destination_health(
     if destination_health.status == "skipped":
         return destination_health
     if not wait:
-        return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
-                                   status="pending")
+        return HealthcheckEvidence(
+            urls=destination_health.urls,
+            timeout_seconds=destination_health.timeout_seconds,
+            status="pending",
+        )
     if deployment_status == "pass":
         return HealthcheckEvidence(
             verified=True,
@@ -97,8 +102,11 @@ def _resolve_destination_health(
             timeout_seconds=destination_health.timeout_seconds,
             status="pass",
         )
-    return HealthcheckEvidence(urls=destination_health.urls, timeout_seconds=destination_health.timeout_seconds,
-                               status="fail")
+    return HealthcheckEvidence(
+        urls=destination_health.urls,
+        timeout_seconds=destination_health.timeout_seconds,
+        status="fail",
+    )
 
 
 def build_executed_promotion_record(

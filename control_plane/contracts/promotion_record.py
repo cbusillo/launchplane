@@ -111,7 +111,11 @@ class PromotionRecord(BaseModel):
     def _validate_promotion_path(self) -> "PromotionRecord":
         if self.from_instance == self.to_instance:
             raise ValueError("promotion source and destination instances must differ")
-        if self.backup_gate.required and self.backup_gate.status == "pass" and not self.backup_record_id.strip():
+        if (
+            self.backup_gate.required
+            and self.backup_gate.status == "pass"
+            and not self.backup_record_id.strip()
+        ):
             raise ValueError("promotion record with passing backup gate requires backup_record_id")
         return self
 
