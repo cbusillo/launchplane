@@ -217,7 +217,7 @@ def close_every_code_work_request_for_pull_request(
         raise ValueError("Every Code PR close update requires closed_at")
     if record.result_pr_url.strip() and record.result_pr_url.strip() != normalized_pr_url:
         return None
-    if record.state in {"queued", "done", "blocked"}:
+    if record.state in {"done", "blocked"}:
         return None
 
     state: EveryCodeWorkRequestState = "done" if merged else "blocked"
