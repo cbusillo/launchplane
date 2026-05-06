@@ -217,20 +217,30 @@ jobs:
                 --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
                 --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
-                '{
+                '(
+                  {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
                   LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
                   LAUNCHPLANE_PUBLIC_URL: $public_url,
                   LAUNCHPLANE_SESSION_SECRET: $session_secret,
                   LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
-                  LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER: $work_graph_project_owner,
-                  LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: $work_graph_project_number,
-                  LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: $work_graph_project_limit,
-                  LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: $work_graph_project_signal_limit,
-                  LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary,
-                  GH_TOKEN: $work_graph_gh_token
-                } | with_entries(select(.value != ""))'
+                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                  }
+                  + (
+                    if $work_graph_gh_token != "" then
+                      {
+                        LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER: $work_graph_project_owner,
+                        LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: $work_graph_project_number,
+                        LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: $work_graph_project_limit,
+                        LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: $work_graph_project_signal_limit,
+                        LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary,
+                        GH_TOKEN: $work_graph_gh_token
+                      }
+                    else
+                      {}
+                    end
+                  )
+                ) | with_entries(select(.value != ""))'
             })"
             request_payload="$({
               jq -n \
