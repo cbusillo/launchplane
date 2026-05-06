@@ -17,8 +17,10 @@ from control_plane.every_code_worker import (
     EveryCodeWorkerApiStore,
     build_every_code_worker_daemon_spec,
     build_every_code_session_command,
+    close_terminal_every_code_sessions,
     default_every_code_command,
     every_code_claim_comment_body,
+    every_code_session_state_path,
     every_code_tmux_session_name,
     every_code_worktree_branch,
     every_code_worktree_root,
@@ -80,8 +82,20 @@ class _Runner:
             if self.fail_issue_comment:
                 return subprocess.CompletedProcess(args, 1, "", "rate limited")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "display-message":
+            return subprocess.CompletedProcess(args, 0, "4242\n", "")
         if args[1] == "has-session":
             return subprocess.CompletedProcess(args, 1, "", "no session")
+        return subprocess.CompletedProcess(args, 0, "", "")
+
+
+class _ExistingSessionRunner(_Runner):
+    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(args))
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[1] == "display-message":
+            return subprocess.CompletedProcess(args, 0, "4242\n", "")
         return subprocess.CompletedProcess(args, 0, "", "")
 
 
@@ -385,7 +399,21 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 runner=runner,
             )
             record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+            state_path = every_code_session_state_path(
+                state_dir=temporary_root / "state",
+                request_id="every-code-cbusillo-code-123-test",
+            )
+            self.assertTrue(state_path.exists())
+            session_payload = json.loads(state_path.read_text(encoding="utf-8"))
 
+        self.assertEqual(session_payload["request_id"], "every-code-cbusillo-code-123-test")
+        self.assertEqual(session_payload["host"], "Chris-Studio")
+        self.assertEqual(session_payload["source_checkout_root"], str(checkout_root.resolve()))
+        self.assertEqual(
+            session_payload["launch_root"],
+            str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
+        )
+        self.assertEqual(session_payload["worktree_branch"], every_code_worktree_branch(_queued_record()))
         self.assertEqual(result.status, "running")
         self.assertEqual(record.state, "running")
         self.assertEqual(record.claimed_by_host, "Chris-Studio")
@@ -402,6 +430,87 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
         self.assertIn("every-code finish", launch_call[-1])
         self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
+
+    def test_terminal_host_request_sends_sigterm_to_session_process_group(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            runner = _ExistingSessionRunner()
+
+            with patch("control_plane.every_code_worker.os.killpg") as killpg:
+                closed = close_terminal_every_code_sessions(
+                    record_store=store,
+                    host="Chris-Studio",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+        self.assertEqual(closed, 1)
+        killpg.assert_called_once_with(4242, signal.SIGTERM)
+        self.assertEqual(runner.calls[0][1], "has-session")
+        self.assertEqual(runner.calls[1][1], "display-message")
+
+    def test_terminal_request_claimed_by_other_host_is_ignored(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "claimed_by_host": "Other-Mac",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            runner = _ExistingSessionRunner()
+
+            with patch("control_plane.every_code_worker.os.killpg") as killpg:
+                closed = close_terminal_every_code_sessions(
+                    record_store=store,
+                    host="Chris-Studio",
+                    state_dir=temporary_root / "state",
+                    runner=runner,
+                )
+
+        self.assertEqual(closed, 0)
+        killpg.assert_not_called()
 
     def test_run_once_still_launches_tmux_when_claim_comment_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -486,6 +595,43 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "blocked")
         self.assertEqual(record.state, "blocked")
         self.assertIn("exited with status 7", record.error_message)
+
+    def test_finish_is_idempotent_when_request_already_terminal(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-cbusillo-code-123-test",
+                host="Chris-Studio",
+                exit_code=0,
+            )
+
+        self.assertEqual(result.status, "done")
+        self.assertEqual(result.detail, "Linked pull request merged.")
 
     def test_run_once_marks_missing_checkout_blocked(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
