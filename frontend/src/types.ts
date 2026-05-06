@@ -460,6 +460,44 @@ export interface ProductListPayload {
   products: ProductSiteOverview[];
 }
 
+export type EveryCodeWorkRequestState =
+  | "queued"
+  | "claimed"
+  | "running"
+  | "done"
+  | "blocked";
+
+export interface EveryCodeWorkRequestRecord {
+  schema_version: number;
+  request_id: string;
+  source: "github_issue_label" | "manual" | "reconciliation" | string;
+  state: EveryCodeWorkRequestState;
+  repository: string;
+  issue_number: number;
+  issue_url: string;
+  issue_title: string;
+  trigger_label: string;
+  trigger_actor: string;
+  github_delivery_id: string;
+  queued_at: string;
+  updated_at: string;
+  claimed_at: string;
+  claimed_by_host: string;
+  started_at: string;
+  finished_at: string;
+  result_pr_url: string;
+  result_summary: string;
+  error_message: string;
+}
+
+export interface EveryCodeWorkRequestListPayload {
+  status: "ok";
+  trace_id: string;
+  state: string;
+  repository: string;
+  requests: EveryCodeWorkRequestRecord[];
+}
+
 export interface GenericWebProdPromotionRequest {
   schema_version: 1;
   product: string;

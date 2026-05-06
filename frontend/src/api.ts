@@ -3,6 +3,7 @@ import type {
   AuthSessionPayload,
   DriverListPayload,
   DriverViewPayload,
+  EveryCodeWorkRequestListPayload,
   GenericWebProdPromotionPayload,
   GenericWebProdPromotionRequest,
   GenericWebPromotionWorkflowPayload,
@@ -92,6 +93,14 @@ export function listProductProfiles(
 
 export function listProducts(): Promise<ProductListPayload> {
   return requestJson<ProductListPayload>("/v1/products");
+}
+
+export function listEveryCodeWorkRequests(
+  limit = 8,
+): Promise<EveryCodeWorkRequestListPayload> {
+  return requestJson<EveryCodeWorkRequestListPayload>(
+    `/v1/every-code/work-requests?limit=${encodeURIComponent(String(limit))}`,
+  );
 }
 
 export function applyProductConfig(

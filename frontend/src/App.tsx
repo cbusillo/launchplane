@@ -12,6 +12,7 @@ import {
   LogOut,
   Loader2,
   Moon,
+  PanelsTopLeft,
   Play,
   Plus,
   RefreshCw,
@@ -30,6 +31,7 @@ import {
   applyProductConfig,
   dispatchGenericWebPromotionWorkflow,
   dryRunGenericWebProdPromotion,
+  listEveryCodeWorkRequests,
   listDrivers,
   listProducts,
   listProductProfiles,
@@ -44,6 +46,7 @@ import type {
   DriverContextView,
   DriverDescriptor,
   DriverView,
+  EveryCodeWorkRequestRecord,
   GenericWebProdPromotionPayload,
   GenericWebProdPromotionRequest,
   GenericWebPromotionWorkflowPayload,
@@ -360,6 +363,9 @@ export function App() {
   const [productOverviews, setProductOverviews] = useState<
     ProductSiteOverview[]
   >([]);
+  const [workRequests, setWorkRequests] = useState<
+    EveryCodeWorkRequestRecord[]
+  >([]);
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
   const [testingView, setTestingView] = useState<DriverContextView | null>(
@@ -418,6 +424,7 @@ export function App() {
       setDrivers([]);
       setProductProfiles([]);
       setProductOverviews([]);
+      setWorkRequests([]);
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -441,6 +448,13 @@ export function App() {
         trace_id: "",
         products: [],
       })),
+      listEveryCodeWorkRequests(8).catch(() => ({
+        status: "ok" as const,
+        trace_id: "",
+        state: "",
+        repository: "",
+        requests: [],
+      })),
       listProductProfiles("generic-web").catch(() => ({
         status: "ok" as const,
         trace_id: "",
@@ -455,6 +469,7 @@ export function App() {
           testingPayload,
           previewPayload,
           productsPayload,
+          workRequestsPayload,
           profilePayload,
         ]) => {
           if (controller.signal.aborted) {
@@ -466,6 +481,7 @@ export function App() {
           setTestingView(testingPayload.view);
           setPreviewView(previewPayload?.view ?? null);
           setProductOverviews(productsPayload.products);
+          setWorkRequests(workRequestsPayload.requests);
         },
       )
       .catch((apiError: unknown) => {
@@ -596,6 +612,7 @@ export function App() {
       setDrivers([]);
       setProductProfiles([]);
       setProductOverviews([]);
+      setWorkRequests([]);
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -631,6 +648,15 @@ export function App() {
                 onClearToken={signOut}
               />
             ) : null}
+            <ProductInventoryCockpit
+              products={productOverviews}
+              selectedProduct={selectedProductOverview}
+              workRequests={workRequests}
+              loading={loading}
+              onSelectProduct={(product) =>
+                setSelected(choiceFromProductOverview(product))
+              }
+            />
             <ProductOverviewShell
               product={selectedProductOverview}
               selected={selected}
@@ -827,6 +853,156 @@ function Header({
         </button>
       </div>
     </header>
+  );
+}
+
+function ProductInventoryCockpit({
+  products,
+  selectedProduct,
+  workRequests,
+  loading,
+  onSelectProduct,
+}: {
+  products: ProductSiteOverview[];
+  selectedProduct: ProductSiteOverview | null;
+  workRequests: EveryCodeWorkRequestRecord[];
+  loading: boolean;
+  onSelectProduct: (product: ProductSiteOverview) => void;
+}) {
+  const activeWork = workRequests.filter((request) =>
+    ["queued", "claimed", "running", "blocked"].includes(request.state),
+  );
+  const runningCount = workRequests.filter(
+    (request) => request.state === "claimed" || request.state === "running",
+  ).length;
+  const blockedCount = workRequests.filter(
+    (request) => request.state === "blocked",
+  ).length;
+  const queueStatus = blockedCount
+    ? "blocked"
+    : runningCount
+      ? "pending"
+      : activeWork.length
+        ? "pending"
+        : "pass";
+
+  return (
+    <section className="operator-cockpit" aria-busy={loading}>
+      <div className="cockpit-summary">
+        <PanelHead
+          eyebrow="product inventory"
+          title="Environment workbench"
+          right={<StatusPill status={queueStatus} />}
+        />
+        <div className="cockpit-metrics">
+          <MetricTile
+            label="Products"
+            value={String(products.length)}
+            status={products.length ? "pass" : "unknown"}
+          />
+          <MetricTile
+            label="Stable lanes"
+            value={String(
+              products.reduce(
+                (total, product) => total + product.environments.length,
+                0,
+              ),
+            )}
+            status={products.some((product) => product.environments.length) ? "pass" : "unknown"}
+          />
+          <MetricTile
+            label="Open work"
+            value={String(activeWork.length)}
+            status={queueStatus}
+          />
+        </div>
+      </div>
+      <div className="product-inventory-table" role="list">
+        {loading && !products.length ? <SkeletonRows /> : null}
+        {!loading && !products.length ? (
+          <StateBlock
+            icon={<PanelsTopLeft size={18} />}
+            title="No product environment inventory"
+          />
+        ) : null}
+        {products.map((product) => (
+          <button
+            className="product-inventory-row"
+            type="button"
+            key={product.product}
+            data-selected={selectedProduct?.product === product.product}
+            onClick={() => onSelectProduct(product)}
+          >
+            <span className="product-inventory-name">
+              <strong>{product.display_name || product.product}</strong>
+              <code>{product.repository || product.product}</code>
+            </span>
+            <span className="product-inventory-lanes">
+              {product.environments.map((environment) => (
+                <span
+                  className={`lane-chip lane-chip-${environment.environment}`}
+                  key={`${product.product}:${environment.environment}`}
+                  title={environment.context}
+                >
+                  {environment.environment}
+                </span>
+              ))}
+              {product.preview.enabled ? (
+                <span className="lane-chip lane-chip-preview">
+                  {product.preview.active_count} previews
+                </span>
+              ) : null}
+            </span>
+            <TrustBadge provenance={product.provenance} compact />
+          </button>
+        ))}
+      </div>
+      <EveryCodeQueue requests={activeWork} loading={loading} />
+    </section>
+  );
+}
+
+function EveryCodeQueue({
+  requests,
+  loading,
+}: {
+  requests: EveryCodeWorkRequestRecord[];
+  loading: boolean;
+}) {
+  return (
+    <div className="every-code-queue">
+      <div className="queue-head">
+        <span>Every Code</span>
+        <strong>{requests.length ? `${requests.length} active` : "clear"}</strong>
+      </div>
+      {loading && !requests.length ? <SkeletonRows /> : null}
+      {!loading && !requests.length ? (
+        <StateBlock icon={<TerminalSquare size={18} />} title="No queued local work" />
+      ) : null}
+      {requests.slice(0, 4).map((request) => (
+        <a
+          className="queue-row"
+          href={request.issue_url}
+          key={request.request_id}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span>
+            <strong>{request.issue_title || `Issue #${request.issue_number}`}</strong>
+            <code>
+              {request.repository}#{request.issue_number}
+            </code>
+          </span>
+          <span
+            className="status-pill"
+            data-status={workRequestStatus(request.state)}
+          >
+            <StatusIcon status={workRequestStatus(request.state)} />
+            {request.state}
+          </span>
+        </a>
+      ))}
+    </div>
   );
 }
 
@@ -2695,6 +2871,80 @@ function StateFixtureGallery({
       available_actions: [],
     },
   ];
+  const fixtureProducts: ProductSiteOverview[] = [
+    {
+      schema_version: 1,
+      product: "sellyouroutboard",
+      display_name: "SellYourOutboard",
+      repository: "cbusillo/sellyouroutboard",
+      driver_id: "generic-web",
+      base_driver_id: "generic-web",
+      environments: configEnvironments,
+      preview: {
+        enabled: true,
+        context: "sellyouroutboard-preview",
+        slug_template: "pr-{number}",
+        active_count: 3,
+        latest_preview_id: "preview-pr-190",
+        trust_state: "recorded",
+        provenance: readyTesting.provenance,
+      },
+      warnings: [],
+      trust_state: "verified",
+      provenance: readyProd.provenance,
+      available_actions: [],
+    },
+    {
+      schema_version: 1,
+      product: "verireel",
+      display_name: "VeriReel",
+      repository: "cbusillo/verireel",
+      driver_id: "verireel",
+      base_driver_id: "generic-web",
+      environments: configEnvironments.map((environment) => ({
+        ...environment,
+        context: environment.environment === "prod" ? "verireel" : "verireel-testing",
+        trust_state: environment.environment === "prod" ? "recorded" : "verified",
+      })),
+      preview: {
+        enabled: true,
+        context: "verireel-testing",
+        slug_template: "pr-{number}",
+        active_count: 1,
+        latest_preview_id: "preview-verireel-168",
+        trust_state: "recorded",
+        provenance: readyTesting.provenance,
+      },
+      warnings: ["Runtime owner route evidence is recorded, not provider verified."],
+      trust_state: "recorded",
+      provenance: readyTesting.provenance,
+      available_actions: [],
+    },
+  ];
+  const fixtureRequests: EveryCodeWorkRequestRecord[] = [
+    {
+      schema_version: 1,
+      request_id: "every-code-cbusillo-launchplane-153-fixture",
+      source: "github_issue_label",
+      state: "running",
+      repository: "cbusillo/launchplane",
+      issue_number: 153,
+      issue_url: "https://github.com/cbusillo/launchplane/issues/153",
+      issue_title: "Rebuild operator UI around product environments",
+      trigger_label: "every-code",
+      trigger_actor: "code",
+      github_delivery_id: "fixture-delivery",
+      queued_at: "2026-05-06T00:00:00Z",
+      updated_at: "2026-05-06T00:12:00Z",
+      claimed_at: "2026-05-06T00:01:00Z",
+      claimed_by_host: "local-mac",
+      started_at: "2026-05-06T00:02:00Z",
+      finished_at: "",
+      result_pr_url: "",
+      result_summary: "",
+      error_message: "",
+    },
+  ];
 
   return (
     <section className="fixture-gallery">
@@ -2702,6 +2952,15 @@ function StateFixtureGallery({
         eyebrow="development fixtures"
         title="Operator state coverage"
       />
+      <div className="fixture-wide">
+        <ProductInventoryCockpit
+          products={fixtureProducts}
+          selectedProduct={fixtureProducts[0]}
+          workRequests={fixtureRequests}
+          loading={false}
+          onSelectProduct={() => undefined}
+        />
+      </div>
       <div className="fixture-grid">
         <div className="fixture-card">
           <PromotionBridge
@@ -3813,6 +4072,19 @@ function worstStatus(statuses: Array<Status | string>): Status | string {
 
 function labelForStatus(status: Status | string): string {
   return status.replace("_", " ") || "unknown";
+}
+
+function workRequestStatus(state: EveryCodeWorkRequestRecord["state"]): Status | string {
+  if (state === "done") {
+    return "pass";
+  }
+  if (state === "blocked") {
+    return "blocked";
+  }
+  if (state === "queued" || state === "claimed" || state === "running") {
+    return "pending";
+  }
+  return "unknown";
 }
 
 function safetyLabel(safety: Safety): string {
