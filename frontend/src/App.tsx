@@ -1132,19 +1132,37 @@ function WorkGraphQueue({
           rel="noreferrer"
         >
           <span className="work-graph-score">{item.score}</span>
-          <span className="work-graph-title">
-            <strong>{item.title}</strong>
-            <code>
-              {item.repository}#{item.number}
-            </code>
-          </span>
-          <span className="work-graph-tags">
-            <span className="status-pill" data-status={workGraphStateStatus(item.state)}>
-              <StatusIcon status={workGraphStateStatus(item.state)} />
-              {item.state}
+          <span className="work-graph-content">
+            <span className="work-graph-title">
+              <strong>{item.title}</strong>
+              <code>
+                {item.repository}#{item.number}
+              </code>
             </span>
-            <span className="recommendation-chip">
-              {recommendationLabel(item.recommendation)}
+            <span className="work-graph-meta">
+              <span>{item.focus}</span>
+              <span>{item.manager || "Unassigned"}</span>
+              <span>{formatTime(item.updated_at)}</span>
+              <span>
+                {item.product_display_name || item.product || item.repo_classification}
+              </span>
+            </span>
+            {item.finish_line ? (
+              <span className="work-graph-finish">{item.finish_line}</span>
+            ) : null}
+            <span className="work-graph-tags">
+              <span className="status-pill" data-status={workGraphStateStatus(item.state)}>
+                <StatusIcon status={workGraphStateStatus(item.state)} />
+                {item.state}
+              </span>
+              <span className="recommendation-chip">
+                {recommendationLabel(item.recommendation)}
+              </span>
+              {item.reasons.slice(0, 2).map((reason) => (
+                <span className="reason-chip" key={`${item.repository}:${item.number}:${reason.code}`}>
+                  {reasonLabel(reason.code)}
+                </span>
+              ))}
             </span>
           </span>
         </a>
@@ -4387,6 +4405,10 @@ function workGraphStateStatus(state: WorkGraphState): Status | string {
 
 function recommendationLabel(recommendation: WorkGraphRecommendation): string {
   return recommendation.replaceAll("_", " ");
+}
+
+function reasonLabel(code: string): string {
+  return code.replaceAll("_", " ");
 }
 
 function safetyLabel(safety: Safety): string {
