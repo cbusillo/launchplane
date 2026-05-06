@@ -424,6 +424,14 @@ requires DB-backed storage, returns only sanitized summaries, and exists so the
 Launchplane deploy workflow can seed product records without product repos
 storing live lifecycle truth.
 
+Live target runtime applies are service-boundary work. Operators and agents must
+not run local CLI live-target mutation commands from arbitrary checkouts to make
+shared or production changes, because the local process may lack DB-backed
+tracked target authority or use stale bootstrap context. Add or use a deployed
+service API endpoint for live target runtime apply/redeploy flows so Launchplane
+can authorize with OIDC/session identity, resolve current DB-backed target
+records in the deployed runtime, and audit sanitized key/count evidence.
+
 Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;
 Launchplane resolves the context from the DB-backed product profile lane and the

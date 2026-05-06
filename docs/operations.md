@@ -10,7 +10,11 @@ top-level groups are:
 Today this CLI is the local Launchplane operator surface around the service API.
 It owns stable-lane deploy and promotion records for `testing` and `prod`, plus
 Launchplane preview records and read models for PR review flows. It should not
-be treated as the final cross-product ingress boundary for Launchplane.
+be treated as the final cross-product ingress boundary for Launchplane. Shared
+or production mutations must prefer the deployed service API with GitHub OIDC or
+the operator UI that calls it. If a live mutation still exists only as a local
+CLI command, stop and add or use a service API path instead of running the local
+command from an arbitrary checkout.
 
 - `artifacts`: write, ingest, and inspect artifact manifests.
 - `backup-gates`: write and inspect backup-gate records.
@@ -438,7 +442,10 @@ Current derived-state behavior:
   without requiring an artifact manifest. It preserves unrelated live env keys,
   verifies persistence by key/count metadata only, and never prints plaintext
   env or secret values. Add `--deploy` with `--apply` when the app should be
-  explicitly redeployed/reloaded after the config update.
+  explicitly redeployed/reloaded after the config update. This command is a
+  compatibility/local operator surface only: do not use it for shared or
+  production live changes from a local checkout. Use a deployed service API or
+  add one before applying live target runtime changes.
 - TOML/env files are not runtime import surfaces; use DB-native
   runtime-environment records and managed secrets instead.
 - Product repos and GitHub issues must not contain product secret values. Put
