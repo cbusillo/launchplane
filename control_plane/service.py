@@ -117,6 +117,10 @@ from control_plane.storage.factory import build_record_store, storage_backend_na
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
 from control_plane.tracked_target_logs import build_tracked_target_logs_payload
+from control_plane.work_graph_github_projects import (
+    build_github_project_planning_facts,
+    load_github_project_planning_facts_config_from_env,
+)
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
     apply_promotion_evidence,
@@ -6593,11 +6597,18 @@ def serve_launchplane_service(
 
     authz_policy = load_authz_policy(policy_file)
     verifier = GitHubOidcVerifier(audience=audience)
+    work_graph_project_config = load_github_project_planning_facts_config_from_env(dict(os.environ))
+    work_graph_planning_facts_provider = (
+        (lambda: build_github_project_planning_facts(work_graph_project_config))
+        if work_graph_project_config is not None
+        else None
+    )
     application = create_launchplane_service_app(
         state_dir=state_dir,
         verifier=verifier,
         authz_policy=authz_policy,
         database_url=database_url,
+        work_graph_planning_facts_provider=work_graph_planning_facts_provider,
     )
     with make_server(
         host,
