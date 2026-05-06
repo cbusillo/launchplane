@@ -49,6 +49,11 @@ jobs:
       LAUNCHPLANE_PUBLIC_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       LAUNCHPLANE_COOKIE_SECURE: ${{ vars.LAUNCHPLANE_COOKIE_SECURE }}
       LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: ${{ vars.LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS }}
+      LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER }}
+      LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER }}
+      LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT }}
+      LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT }}
+      LAUNCHPLANE_WORK_GRAPH_GH_BINARY: ${{ vars.LAUNCHPLANE_WORK_GRAPH_GH_BINARY }}
       DISCORD_BLUE_DOKPLOY_TARGET_ID: ${{ vars.DISCORD_BLUE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
       LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
@@ -187,7 +192,7 @@ jobs:
             local response_file="$1"
             local request_payload=""
             local idempotency_key=""
-            local oauth_env_json=""
+            local service_env_json=""
             local oidc_token=""
 
             oidc_token="$({
@@ -197,7 +202,7 @@ jobs:
               | jq -r '.value'
             })"
 
-            oauth_env_json="$({
+            service_env_json="$({
               jq -n \
                 --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
                 --arg github_client_secret "${LAUNCHPLANE_GITHUB_CLIENT_SECRET:-}" \
@@ -205,13 +210,23 @@ jobs:
                 --arg session_secret "${LAUNCHPLANE_SESSION_SECRET:-}" \
                 --arg cookie_secure "${LAUNCHPLANE_COOKIE_SECURE:-}" \
                 --arg bootstrap_admin_emails "${LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS:-}" \
+                --arg work_graph_project_owner "${LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER:-}" \
+                --arg work_graph_project_number "${LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER:-}" \
+                --arg work_graph_project_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT:-}" \
+                --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
+                --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 '{
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
                   LAUNCHPLANE_GITHUB_CLIENT_SECRET: $github_client_secret,
                   LAUNCHPLANE_PUBLIC_URL: $public_url,
                   LAUNCHPLANE_SESSION_SECRET: $session_secret,
                   LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
+                  LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER: $work_graph_project_owner,
+                  LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER: $work_graph_project_number,
+                  LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: $work_graph_project_limit,
+                  LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: $work_graph_project_signal_limit,
+                  LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary
                 } | with_entries(select(.value != ""))'
             })"
             request_payload="$({
@@ -219,8 +234,8 @@ jobs:
                 --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
                 --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
                 --arg image_reference "${{ steps.image.outputs.image_reference }}" \
-                --argjson oauth_env "$oauth_env_json" \
-                '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($oauth_env | length) > 0 then {oauth_env: $oauth_env} else {} end))}'
+                --argjson service_env "$service_env_json" \
+                '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end))}'
             })"
             idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:db-authz"
 
