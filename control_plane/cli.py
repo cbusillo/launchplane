@@ -18,6 +18,7 @@ from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import every_code_reconciliation as control_plane_every_code_reconciliation
+from control_plane import every_code_webhooks as control_plane_every_code_webhooks
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_context_audit as control_plane_product_context_audit
@@ -9995,6 +9996,75 @@ def every_code_reconcile_issue(
         if callable(close):
             close()
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("sync-webhooks")
+@click.option("--owner", default="", help="GitHub owner to scan; defaults to gh api user.")
+@click.option("--topic", default="every-code", show_default=True)
+@click.option(
+    "--webhook-url",
+    default=control_plane_every_code_webhooks.EVERY_CODE_WEBHOOK_URL,
+    show_default=True,
+)
+@click.option(
+    "--webhook-secret-env",
+    default="LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET",
+    show_default=True,
+)
+def every_code_sync_webhooks(
+    owner: str,
+    topic: str,
+    webhook_url: str,
+    webhook_secret_env: str,
+) -> None:
+    resolved_owner = owner.strip() or _gh_current_user_login()
+    secret_env_key = webhook_secret_env.strip()
+    webhook_secret = os.environ.get(secret_env_key, "").strip()
+    if not webhook_secret:
+        raise click.ClickException(f"{secret_env_key} is required.")
+    try:
+        results = control_plane_every_code_webhooks.sync_every_code_webhooks(
+            owner=resolved_owner,
+            webhook_secret=webhook_secret,
+            webhook_url=webhook_url,
+            topic=topic,
+        )
+    except (ValueError, subprocess.CalledProcessError) as error:
+        raise click.ClickException(str(error)) from error
+    failed = [result for result in results if result.status == "error"]
+    click.echo(
+        json.dumps(
+            {
+                "status": "error" if failed else "ok",
+                "owner": resolved_owner,
+                "topic": topic,
+                "webhook_url": webhook_url,
+                "events": list(control_plane_every_code_webhooks.EVERY_CODE_WEBHOOK_EVENTS),
+                "repositories": [result.as_payload() for result in results],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    if failed:
+        raise click.ClickException(f"Failed to sync {len(failed)} Every Code webhook(s).")
+
+
+def _gh_current_user_login() -> str:
+    try:
+        result = subprocess.run(
+            ("gh", "api", "user", "--jq", ".login"),
+            text=True,
+            capture_output=True,
+            check=True,
+        )
+    except subprocess.CalledProcessError as error:
+        detail = (error.stderr or error.stdout or str(error)).strip()
+        raise click.ClickException(detail) from error
+    login = result.stdout.strip()
+    if not login:
+        raise click.ClickException("Could not determine GitHub user login from gh.")
+    return login
 
 
 @main.group()
