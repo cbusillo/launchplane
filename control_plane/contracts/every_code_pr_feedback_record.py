@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import hashlib
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -72,9 +70,9 @@ def build_every_code_pr_feedback_id(
         raise ValueError(
             "Every Code PR feedback id requires repository, pr_number, delivery id, and feedback id"
         )
-    digest = hashlib.sha256(
-        f"{normalized_repository}#{pr_number}:{github_delivery_id.strip()}:{identity}".encode(
-            "utf-8"
-        )
-    ).hexdigest()[:16]
-    return f"every-code-pr-feedback-{normalized_repository.replace('/', '-')}-{pr_number}-{digest}"
+    identity_slug = "".join(
+        character.lower() if character.isalnum() else "-" for character in identity
+    ).strip("-")
+    if not identity_slug:
+        raise ValueError("Every Code PR feedback id requires a slug-safe feedback id")
+    return f"every-code-pr-feedback-{normalized_repository.replace('/', '-')}-{pr_number}-{identity_slug}"
