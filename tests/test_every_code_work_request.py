@@ -139,6 +139,60 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
             )
         )
 
+    def test_pr_close_marks_running_request_done_without_stored_pr_url(self) -> None:
+        claimed_record = claim_every_code_work_request(
+            _queued_record(),
+            host="Chris-Studio",
+            claimed_at="2026-05-05T22:01:00Z",
+        )
+        assert claimed_record is not None
+        running_record = apply_every_code_work_request_status(
+            claimed_record,
+            EveryCodeWorkRequestStatusUpdate(
+                state="running",
+                host="Chris-Studio",
+                updated_at="2026-05-05T22:03:00Z",
+            ),
+        )
+
+        done_record = close_every_code_work_request_for_pull_request(
+            running_record,
+            pr_url="https://github.com/cbusillo/code/pull/99",
+            merged=True,
+            closed_at="2026-05-05T22:05:00Z",
+        )
+
+        self.assertIsNotNone(done_record)
+        assert done_record is not None
+        self.assertEqual(done_record.state, "done")
+        self.assertEqual(done_record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
+
+    def test_pr_close_does_not_match_different_stored_pr_url(self) -> None:
+        claimed_record = claim_every_code_work_request(
+            _queued_record(),
+            host="Chris-Studio",
+            claimed_at="2026-05-05T22:01:00Z",
+        )
+        assert claimed_record is not None
+        running_record = apply_every_code_work_request_status(
+            claimed_record,
+            EveryCodeWorkRequestStatusUpdate(
+                state="running",
+                host="Chris-Studio",
+                updated_at="2026-05-05T22:03:00Z",
+                result_pr_url="https://github.com/cbusillo/code/pull/88",
+            ),
+        )
+
+        self.assertIsNone(
+            close_every_code_work_request_for_pull_request(
+                running_record,
+                pr_url="https://github.com/cbusillo/code/pull/99",
+                merged=True,
+                closed_at="2026-05-05T22:05:00Z",
+            )
+        )
+
     def test_blocked_requires_error_message(self) -> None:
         with self.assertRaises(ValueError):
             EveryCodeWorkRequestRecord(

@@ -93,7 +93,9 @@ def build_every_code_work_request_id(
     normalized_repository = repository.strip().lower()
     normalized_label = trigger_label.strip().lower()
     if not normalized_repository or issue_number < 1 or not normalized_label:
-        raise ValueError("Every Code work request id requires repository, issue_number, and trigger_label")
+        raise ValueError(
+            "Every Code work request id requires repository, issue_number, and trigger_label"
+        )
     digest = hashlib.sha256(
         f"{normalized_repository}#{issue_number}:{normalized_label}".encode("utf-8")
     ).hexdigest()[:16]
@@ -185,7 +187,7 @@ def close_every_code_work_request_for_pull_request(
         raise ValueError("Every Code PR close update requires pr_url")
     if not closed_at.strip():
         raise ValueError("Every Code PR close update requires closed_at")
-    if record.result_pr_url.strip() != normalized_pr_url:
+    if record.result_pr_url.strip() and record.result_pr_url.strip() != normalized_pr_url:
         return None
     if record.state in {"queued", "done", "blocked"}:
         return None
