@@ -67,9 +67,21 @@ jobs:
             fi
           fi
 
+          service_audience="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["SERVICE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("SERVICE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+          })"
+
           token_json="$(curl -fsSL \
             -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=launchplane")"
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}")"
           oidc_token="$(jq -r '.value' <<<"$token_json")"
           if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
             echo "GitHub OIDC token response did not include a token." >&2
