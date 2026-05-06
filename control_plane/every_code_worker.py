@@ -1151,10 +1151,14 @@ def _apply_every_code_pr_feedback_record(
     tmux_binary: str,
     runner: Runner,
 ) -> EveryCodePrFeedbackApplyResult:
+    _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="eyes", runner=runner)
     try:
         record = record_store.read_every_code_work_request_record(feedback.request_id)
     except Exception:
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        _acknowledge_every_code_pr_feedback(
+            feedback=feedback, reaction="confused", runner=runner
+        )
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
             detail="Every Code work request for PR feedback was not found.",
@@ -1170,6 +1174,9 @@ def _apply_every_code_pr_feedback_record(
         )
     if _terminal_every_code_request_closed_by_linked_pr(record):
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        _acknowledge_every_code_pr_feedback(
+            feedback=feedback, reaction="confused", runner=runner
+        )
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
             detail="Every Code PR feedback belongs to a closed linked pull request.",
@@ -1180,6 +1187,9 @@ def _apply_every_code_pr_feedback_record(
     session_state = read_every_code_session_state(state_path)
     if session_state is None:
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        _acknowledge_every_code_pr_feedback(
+            feedback=feedback, reaction="confused", runner=runner
+        )
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
             detail="Every Code PR feedback has no local session state on this host.",
@@ -1214,6 +1224,9 @@ def _apply_every_code_pr_feedback_record(
             tmux_binary=tmux_binary,
             runner=runner,
         ):
+            _acknowledge_every_code_pr_feedback(
+                feedback=feedback, reaction="confused", runner=runner
+            )
             return EveryCodePrFeedbackApplyResult(
                 status="blocked",
                 detail=f"Could not send PR feedback to tmux session {session_name!r}.",
@@ -1222,6 +1235,7 @@ def _apply_every_code_pr_feedback_record(
                 session_name=session_name,
             )
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="applied")
+        _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="rocket", runner=runner)
         return EveryCodePrFeedbackApplyResult(
             status="applied",
             detail="Every Code PR feedback was sent to the running session.",
@@ -1233,6 +1247,9 @@ def _apply_every_code_pr_feedback_record(
     launch_root = Path(session_state.get("launch_root", "")).expanduser()
     if not launch_root.is_dir():
         _mark_every_code_pr_feedback(record_store, feedback=feedback, status="ignored")
+        _acknowledge_every_code_pr_feedback(
+            feedback=feedback, reaction="confused", runner=runner
+        )
         state_path.unlink(missing_ok=True)
         return EveryCodePrFeedbackApplyResult(
             status="ignored",
@@ -1271,6 +1288,9 @@ def _apply_every_code_pr_feedback_record(
             )
         )
     except OSError:
+        _acknowledge_every_code_pr_feedback(
+            feedback=feedback, reaction="confused", runner=runner
+        )
         return EveryCodePrFeedbackApplyResult(
             status="blocked",
             detail=f"Could not relaunch tmux session {session_name!r} for PR feedback.",
@@ -1279,6 +1299,9 @@ def _apply_every_code_pr_feedback_record(
             session_name=session_name,
         )
     if launch_result.returncode != 0:
+        _acknowledge_every_code_pr_feedback(
+            feedback=feedback, reaction="confused", runner=runner
+        )
         return EveryCodePrFeedbackApplyResult(
             status="blocked",
             detail=f"tmux relaunch failed: {launch_result.stderr.strip()}",
@@ -1287,6 +1310,7 @@ def _apply_every_code_pr_feedback_record(
             session_name=session_name,
         )
     _mark_every_code_pr_feedback(record_store, feedback=feedback, status="applied")
+    _acknowledge_every_code_pr_feedback(feedback=feedback, reaction="rocket", runner=runner)
     return EveryCodePrFeedbackApplyResult(
         status="applied",
         detail="Every Code PR feedback resumed the local session.",
@@ -1294,6 +1318,37 @@ def _apply_every_code_pr_feedback_record(
         request_id=feedback.request_id,
         session_name=session_name,
     )
+
+
+def _acknowledge_every_code_pr_feedback(
+    *,
+    feedback: EveryCodePrFeedbackRecord,
+    reaction: str,
+    runner: Runner,
+) -> None:
+    if feedback.feedback_kind != "issue_comment":
+        return
+    if not feedback.github_id.strip():
+        return
+    reference = github_pull_request_reference(pr_url=feedback.pr_url)
+    if reference is None:
+        return
+    try:
+        runner(
+            (
+                "gh",
+                "api",
+                "--method",
+                "POST",
+                f"repos/{reference['owner']}/{reference['repo']}/issues/comments/{feedback.github_id.strip()}/reactions",
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-f",
+                f"content={reaction}",
+            )
+        )
+    except OSError:
+        return
 
 
 def build_every_code_worker_daemon_spec(
