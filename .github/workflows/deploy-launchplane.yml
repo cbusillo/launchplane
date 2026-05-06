@@ -570,6 +570,14 @@ jobs:
             product_profile.write \
             deploy:product-legacy-context-cleanup-grant \
             product-legacy-context-cleanup
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            work-graph-snapshot-validate.yml \
+            launchplane \
+            launchplane \
+            work_graph.rank \
+            deploy:work-graph-snapshot-validate-grant \
+            work-graph-snapshot-validate
           post_syo_grant \
             promote-prod.yml \
             launchplane \
