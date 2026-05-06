@@ -546,6 +546,12 @@ state/
   `uv run launchplane every-code run-once` for a single scan. It claims queued
   requests, opens or reuses deterministic visible tmux sessions for local
   checkouts, and records `running` or `blocked` status.
+- A Mac host can leave the poller running with
+  `uv run launchplane every-code start`, inspect it with
+  `uv run launchplane every-code status`, and stop it with
+  `uv run launchplane every-code stop`. The supervisor writes a pid file and log
+  under `state/every-code-worker/` by default while the worker-created tmux
+  sessions remain visible and independently attachable.
 - Missed or manually inspected issue labels can be reconciled without polling by
   running `uv run launchplane every-code reconcile-issue` with the known issue
   repository, number, URL, title, and current labels. Reconciliation creates the

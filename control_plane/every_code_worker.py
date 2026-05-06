@@ -1,9 +1,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import os
 from pathlib import Path
 import re
 import shlex
+import signal
 import subprocess
 import time
 from typing import Callable, Literal, Protocol, Sequence
@@ -47,6 +50,12 @@ class EveryCodeWorkerStore(Protocol):
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
 
+class DaemonProcess(Protocol):
+    pid: int
+
+
+ProcessLauncher = Callable[[Sequence[str], Path, Path], DaemonProcess]
+
 
 @dataclass(frozen=True)
 class EveryCodeWorkerHandoffResult:
@@ -88,6 +97,60 @@ class EveryCodeWorkerLoopResult:
             "stopped_reason": self.stopped_reason,
             "last_result": self.last_result.as_payload(),
         }
+
+
+@dataclass(frozen=True)
+class EveryCodeWorkerDaemonSpec:
+    pid_file: Path
+    log_file: Path
+    command: tuple[str, ...]
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "pid_file": str(self.pid_file),
+            "log_file": str(self.log_file),
+            "command": list(self.command),
+        }
+
+
+@dataclass(frozen=True)
+class EveryCodeWorkerDaemonStatus:
+    running: bool
+    pid: int | None
+    pid_file: Path
+    log_file: Path
+    detail: str
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "running": self.running,
+            "pid": self.pid,
+            "pid_file": str(self.pid_file),
+            "log_file": str(self.log_file),
+            "detail": self.detail,
+        }
+
+
+@dataclass(frozen=True)
+class EveryCodeWorkerStartResult:
+    status: Literal["started", "already_running"]
+    pid: int
+    spec: EveryCodeWorkerDaemonSpec
+
+    def as_payload(self) -> dict[str, object]:
+        payload = self.spec.as_payload()
+        payload.update({"status": self.status, "pid": self.pid})
+        return payload
+
+
+@dataclass(frozen=True)
+class EveryCodeWorkerStopResult:
+    status: Literal["stopped", "not_running"]
+    pid: int | None
+    detail: str
+
+    def as_payload(self) -> dict[str, object]:
+        return {"status": self.status, "pid": self.pid, "detail": self.detail}
 
 
 def every_code_tmux_session_name(request_id: str) -> str:
@@ -324,8 +387,268 @@ def run_every_code_worker_loop(
     )
 
 
+def build_every_code_worker_daemon_spec(
+    *,
+    state_dir: Path,
+    database_url: str = "",
+    host: str = "",
+    workspace_root: Path = Path.home() / "Developer",
+    checkout_root: Path | None = None,
+    repository: str = "",
+    command_template: str = "",
+    tmux_binary: str = "tmux",
+    interval_seconds: float = 60.0,
+) -> EveryCodeWorkerDaemonSpec:
+    resolved_state_dir = state_dir.expanduser().resolve()
+    worker_dir = resolved_state_dir / "every-code-worker"
+    command: list[str] = [
+        "uv",
+        "run",
+        "launchplane",
+        "every-code",
+        "run",
+        "--state-dir",
+        str(resolved_state_dir),
+        "--workspace-root",
+        str(workspace_root.expanduser().resolve()),
+        "--tmux-binary",
+        tmux_binary,
+        "--interval-seconds",
+        str(interval_seconds),
+    ]
+    if database_url.strip():
+        command.extend(("--database-url", database_url.strip()))
+    if host.strip():
+        command.extend(("--host", host.strip()))
+    if checkout_root is not None:
+        command.extend(("--checkout-root", str(checkout_root.expanduser().resolve())))
+    if repository.strip():
+        command.extend(("--repository", repository.strip()))
+    if command_template.strip():
+        command.extend(("--command-template", command_template))
+    return EveryCodeWorkerDaemonSpec(
+        pid_file=worker_dir / "worker.pid",
+        log_file=worker_dir / "worker.log",
+        command=tuple(command),
+    )
+
+
+def every_code_worker_daemon_status(
+    *, spec: EveryCodeWorkerDaemonSpec
+) -> EveryCodeWorkerDaemonStatus:
+    pid_payload = _read_pid_file(spec.pid_file)
+    if pid_payload is None:
+        return EveryCodeWorkerDaemonStatus(
+            running=False,
+            pid=None,
+            pid_file=spec.pid_file,
+            log_file=spec.log_file,
+            detail="Every Code worker is not running.",
+        )
+    pid, expected_command = pid_payload
+    if _process_is_running(pid):
+        command = expected_command or spec.command
+        if not _process_matches_expected_command(pid, command):
+            return EveryCodeWorkerDaemonStatus(
+                running=False,
+                pid=pid,
+                pid_file=spec.pid_file,
+                log_file=spec.log_file,
+                detail="Every Code worker pid file belongs to a different process.",
+            )
+        return EveryCodeWorkerDaemonStatus(
+            running=True,
+            pid=pid,
+            pid_file=spec.pid_file,
+            log_file=spec.log_file,
+            detail="Every Code worker is running.",
+        )
+    return EveryCodeWorkerDaemonStatus(
+        running=False,
+        pid=pid,
+        pid_file=spec.pid_file,
+        log_file=spec.log_file,
+        detail="Every Code worker pid file is stale.",
+    )
+
+
+def start_every_code_worker_daemon(
+    *,
+    spec: EveryCodeWorkerDaemonSpec,
+    cwd: Path,
+    launcher: ProcessLauncher | None = None,
+) -> EveryCodeWorkerStartResult:
+    status = every_code_worker_daemon_status(spec=spec)
+    if status.running and status.pid is not None:
+        return EveryCodeWorkerStartResult(
+            status="already_running", pid=status.pid, spec=spec
+        )
+    spec.pid_file.parent.mkdir(parents=True, exist_ok=True)
+    spec.log_file.parent.mkdir(parents=True, exist_ok=True)
+    lock_file = spec.pid_file.with_suffix(".lock")
+    lock_fd = _acquire_start_lock(lock_file)
+    if lock_fd is None:
+        racing_status = every_code_worker_daemon_status(spec=spec)
+        if racing_status.running and racing_status.pid is not None:
+            return EveryCodeWorkerStartResult(
+                status="already_running", pid=racing_status.pid, spec=spec
+            )
+        raise RuntimeError("Every Code worker start is already in progress.")
+    try:
+        locked_status = every_code_worker_daemon_status(spec=spec)
+        if locked_status.running and locked_status.pid is not None:
+            return EveryCodeWorkerStartResult(
+                status="already_running", pid=locked_status.pid, spec=spec
+            )
+        launch = launcher or _launch_daemon_process
+        process = launch(spec.command, spec.log_file, cwd.expanduser().resolve())
+        _write_pid_file(spec.pid_file, process.pid, spec.command)
+        return EveryCodeWorkerStartResult(status="started", pid=process.pid, spec=spec)
+    finally:
+        os.close(lock_fd)
+        lock_file.unlink(missing_ok=True)
+
+
+def stop_every_code_worker_daemon(
+    *,
+    spec: EveryCodeWorkerDaemonSpec,
+    timeout_seconds: float = 5.0,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> EveryCodeWorkerStopResult:
+    status = every_code_worker_daemon_status(spec=spec)
+    if not status.running or status.pid is None:
+        if spec.pid_file.exists():
+            spec.pid_file.unlink()
+        return EveryCodeWorkerStopResult(
+            status="not_running", pid=status.pid, detail=status.detail
+        )
+    os.kill(status.pid, signal.SIGTERM)
+    deadline = time.monotonic() + max(timeout_seconds, 0)
+    while time.monotonic() < deadline:
+        if not _process_is_running(status.pid):
+            spec.pid_file.unlink(missing_ok=True)
+            return EveryCodeWorkerStopResult(
+                status="stopped",
+                pid=status.pid,
+                detail="Every Code worker stopped.",
+            )
+        sleeper(0.1)
+    if _process_is_running(status.pid):
+        pid_payload = _read_pid_file(spec.pid_file)
+        expected_command = pid_payload[1] if pid_payload is not None else spec.command
+        if _process_matches_expected_command(status.pid, expected_command):
+            os.kill(status.pid, signal.SIGKILL)
+    spec.pid_file.unlink(missing_ok=True)
+    return EveryCodeWorkerStopResult(
+        status="stopped",
+        pid=status.pid,
+        detail="Every Code worker stop signal sent.",
+    )
+
+
 def _run_subprocess(args: Sequence[str]) -> subprocess.CompletedProcess[str]:
     return subprocess.run(args, capture_output=True, check=False, text=True)
+
+
+def _launch_daemon_process(
+    args: Sequence[str], log_file: Path, cwd: Path
+) -> subprocess.Popen[str]:
+    log_handle = log_file.open("a", encoding="utf-8")
+    try:
+        return subprocess.Popen(
+            args,
+            cwd=cwd,
+            stdout=log_handle,
+            stderr=subprocess.STDOUT,
+            text=True,
+            start_new_session=True,
+        )
+    finally:
+        log_handle.close()
+
+
+def _write_pid_file(pid_file: Path, pid: int, command: Sequence[str]) -> None:
+    temporary_file = pid_file.with_suffix(".tmp")
+    temporary_file.write_text(
+        json.dumps({"pid": pid, "command": list(command)}, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    temporary_file.replace(pid_file)
+
+
+def _acquire_start_lock(lock_file: Path) -> int | None:
+    stale_lock_pid = _read_lock_pid(lock_file)
+    if stale_lock_pid is not None and not _process_is_running(stale_lock_pid):
+        lock_file.unlink(missing_ok=True)
+    try:
+        lock_fd = os.open(str(lock_file), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    except FileExistsError:
+        return None
+    os.write(lock_fd, str(os.getpid()).encode("utf-8"))
+    return lock_fd
+
+
+def _read_lock_pid(lock_file: Path) -> int | None:
+    try:
+        lock_text = lock_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    try:
+        pid = int(lock_text)
+    except ValueError:
+        return None
+    if pid > 0:
+        return pid
+    return None
+
+
+def _read_pid_file(pid_file: Path) -> tuple[int, tuple[str, ...]] | None:
+    try:
+        payload = json.loads(pid_file.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    pid = payload.get("pid") if isinstance(payload, dict) else None
+    if isinstance(pid, int) and pid > 0:
+        command = payload.get("command")
+        if isinstance(command, list) and all(
+            isinstance(part, str) for part in command
+        ):
+            return pid, tuple(command)
+        return pid, ()
+    return None
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _process_matches_expected_command(pid: int, expected_command: Sequence[str]) -> bool:
+    if not expected_command:
+        return True
+    try:
+        result = subprocess.run(
+            ("ps", "-ww", "-p", str(pid), "-o", "command="),
+            capture_output=True,
+            check=False,
+            text=True,
+        )
+    except OSError:
+        return False
+    if result.returncode != 0:
+        return False
+    command_text = result.stdout.strip()
+    if not command_text:
+        return False
+    expected_tail = " ".join(expected_command[1:])
+    if expected_tail:
+        return expected_tail in command_text
+    return expected_command[0] in command_text
 
 
 def _tmux_session_exists(*, tmux_binary: str, session_name: str, runner: Runner) -> bool | None:
