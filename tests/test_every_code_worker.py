@@ -13,9 +13,11 @@ from control_plane.cli import main
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.every_code_worker import (
     build_every_code_worker_daemon_spec,
+    build_every_code_session_command,
     default_every_code_command,
     every_code_tmux_session_name,
     every_code_worker_daemon_status,
+    finish_every_code_work_request,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -69,6 +71,19 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("https://github.com/cbusillo/code/issues/123", command)
         self.assertIn("every-code-cbusillo-code-123-test", command)
 
+    def test_session_command_reports_terminal_status(self) -> None:
+        command = build_every_code_session_command(
+            record=_queued_record(),
+            command="code issue",
+            state_dir=Path("state"),
+            host="Chris-Studio",
+        )
+
+        self.assertIn("code issue", command)
+        self.assertIn("every-code finish", command)
+        self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
+        self.assertIn("--exit-code $status", command)
+
     def test_run_once_claims_request_and_launches_tmux_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -82,6 +97,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 host="Chris-Studio",
                 workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
                 runner=runner,
             )
             record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
@@ -92,6 +108,63 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.checkout_root, str(checkout_root.resolve()))
         self.assertEqual(runner.calls[0][1], "has-session")
         self.assertEqual(runner.calls[1][1], "new-session")
+        self.assertIn("every-code finish", runner.calls[1][-1])
+
+    def test_finish_marks_running_request_done(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-cbusillo-code-123-test",
+                host="Chris-Studio",
+                exit_code=0,
+                result_pr_url="https://github.com/cbusillo/code/pull/99",
+            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        self.assertEqual(result.status, "done")
+        self.assertEqual(record.state, "done")
+        self.assertEqual(record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
+        self.assertEqual(record.error_message, "")
+
+    def test_finish_marks_failed_session_blocked(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-cbusillo-code-123-test",
+                host="Chris-Studio",
+                exit_code=7,
+            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(record.state, "blocked")
+        self.assertIn("exited with status 7", record.error_message)
 
     def test_run_once_marks_missing_checkout_blocked(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -399,6 +472,41 @@ class EveryCodeWorkerTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertFalse(payload["running"])
         self.assertIsNone(payload["pid"])
+
+    def test_cli_finish_reports_done(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "every-code",
+                    "finish",
+                    "--state-dir",
+                    str(temporary_root / "state"),
+                    "--request-id",
+                    "every-code-cbusillo-code-123-test",
+                    "--host",
+                    "Chris-Studio",
+                    "--exit-code",
+                    "0",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "done")
 
 
 if __name__ == "__main__":

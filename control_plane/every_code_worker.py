@@ -20,6 +20,7 @@ from control_plane.workflows.ship import utc_now_timestamp
 
 
 EveryCodeWorkerStatus = Literal["empty", "running", "blocked"]
+EveryCodeWorkerFinishStatus = Literal["done", "blocked"]
 
 
 class EveryCodeWorkerStore(Protocol):
@@ -49,6 +50,7 @@ class EveryCodeWorkerStore(Protocol):
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
+
 
 class DaemonProcess(Protocol):
     pid: int
@@ -153,6 +155,26 @@ class EveryCodeWorkerStopResult:
         return {"status": self.status, "pid": self.pid, "detail": self.detail}
 
 
+@dataclass(frozen=True)
+class EveryCodeWorkerFinishResult:
+    status: EveryCodeWorkerFinishStatus
+    detail: str
+    request_id: str
+    repository: str
+    issue_number: int
+    result_pr_url: str = ""
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "status": self.status,
+            "detail": self.detail,
+            "request_id": self.request_id,
+            "repository": self.repository,
+            "issue_number": self.issue_number,
+            "result_pr_url": self.result_pr_url,
+        }
+
+
 def every_code_tmux_session_name(request_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
     return f"every-code-{normalized or 'request'}"[:80]
@@ -184,6 +206,42 @@ def render_every_code_command(
     )
 
 
+def build_every_code_session_command(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    command: str,
+    state_dir: Path,
+    host: str,
+    database_url: str = "",
+) -> str:
+    finish_command = [
+        "uv",
+        "run",
+        "launchplane",
+        "every-code",
+        "finish",
+        "--state-dir",
+        str(state_dir.expanduser().resolve()),
+        "--request-id",
+        record.request_id,
+        "--host",
+        host.strip(),
+        "--exit-code",
+        "$status",
+    ]
+    if database_url.strip():
+        finish_command.extend(("--database-url", database_url.strip()))
+    finish_shell = " ".join(
+        "$status" if part == "$status" else shlex.quote(part) for part in finish_command
+    )
+    return (
+        f"{command}\n"
+        "status=$?\n"
+        f"{finish_shell}\n"
+        "exit $status"
+    )
+
+
 def resolve_every_code_checkout_root(
     record: EveryCodeWorkRequestRecord,
     *,
@@ -204,6 +262,8 @@ def run_every_code_worker_once(
     checkout_root: Path | None = None,
     repository: str = "",
     command_template: str = "",
+    state_dir: Path | None = None,
+    database_url: str = "",
     tmux_binary: str = "tmux",
     runner: Runner | None = None,
 ) -> EveryCodeWorkerHandoffResult:
@@ -268,6 +328,14 @@ def run_every_code_worker_once(
         )
     if not existing_session:
         command = render_every_code_command(claimed_record, command_template=command_template)
+        if state_dir is not None:
+            command = build_every_code_session_command(
+                record=claimed_record,
+                command=command,
+                state_dir=state_dir,
+                database_url=database_url,
+                host=normalized_host,
+            )
         try:
             launch_result = run(
                 (
@@ -329,6 +397,8 @@ def run_every_code_worker_loop(
     checkout_root: Path | None = None,
     repository: str = "",
     command_template: str = "",
+    state_dir: Path | None = None,
+    database_url: str = "",
     tmux_binary: str = "tmux",
     interval_seconds: float = 60.0,
     max_iterations: int = 0,
@@ -357,6 +427,8 @@ def run_every_code_worker_loop(
             checkout_root=checkout_root,
             repository=repository,
             command_template=command_template,
+            state_dir=state_dir,
+            database_url=database_url,
             tmux_binary=tmux_binary,
             runner=runner,
         )
@@ -543,6 +615,44 @@ def stop_every_code_worker_daemon(
         status="stopped",
         pid=status.pid,
         detail="Every Code worker stop signal sent.",
+    )
+
+
+def finish_every_code_work_request(
+    *,
+    record_store: EveryCodeWorkerStore,
+    request_id: str,
+    host: str,
+    exit_code: int,
+    result_pr_url: str = "",
+    result_summary: str = "",
+) -> EveryCodeWorkerFinishResult:
+    record = record_store.read_every_code_work_request_record(request_id.strip())
+    succeeded = exit_code == 0
+    summary = result_summary.strip() or (
+        "Every Code session completed successfully."
+        if succeeded
+        else f"Every Code session exited with status {exit_code}."
+    )
+    updated_record = apply_every_code_work_request_status(
+        record,
+        EveryCodeWorkRequestStatusUpdate(
+            state="done" if succeeded else "blocked",
+            host=host.strip(),
+            updated_at=utc_now_timestamp(),
+            result_pr_url=result_pr_url.strip(),
+            result_summary=summary,
+            error_message="" if succeeded else summary,
+        ),
+    )
+    record_store.write_every_code_work_request_record(updated_record)
+    return EveryCodeWorkerFinishResult(
+        status="done" if succeeded else "blocked",
+        detail=summary,
+        request_id=updated_record.request_id,
+        repository=updated_record.repository,
+        issue_number=updated_record.issue_number,
+        result_pr_url=updated_record.result_pr_url,
     )
 
 

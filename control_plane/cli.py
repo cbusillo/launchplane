@@ -96,6 +96,7 @@ from control_plane.drivers.registry import build_driver_context_view
 from control_plane.every_code_worker import (
     build_every_code_worker_daemon_spec,
     every_code_worker_daemon_status,
+    finish_every_code_work_request,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -9565,6 +9566,8 @@ def every_code_run_once(
             checkout_root=checkout_root,
             repository=repository,
             command_template=command_template,
+            state_dir=state_dir,
+            database_url=database_url,
             tmux_binary=tmux_binary,
         )
     finally:
@@ -9646,6 +9649,8 @@ def every_code_run(
             checkout_root=checkout_root,
             repository=repository,
             command_template=command_template,
+            state_dir=state_dir,
+            database_url=database_url,
             tmux_binary=tmux_binary,
             interval_seconds=interval_seconds,
             max_iterations=max_iterations,
@@ -9753,6 +9758,53 @@ def every_code_stop(state_dir: Path) -> None:
 def every_code_status(state_dir: Path) -> None:
     spec = build_every_code_worker_daemon_spec(state_dir=state_dir)
     result = every_code_worker_daemon_status(spec=spec)
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("finish")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory used when --database-url is not set.",
+)
+@click.option("--request-id", required=True, help="Every Code work request id.")
+@click.option("--host", default="", help="Worker host name that claimed the request.")
+@click.option("--exit-code", type=int, required=True, help="Visible session exit code.")
+@click.option("--result-pr-url", default="", help="Optional PR URL created by the session.")
+@click.option("--result-summary", default="", help="Optional terminal result summary.")
+def every_code_finish(
+    database_url: str,
+    state_dir: Path,
+    request_id: str,
+    host: str,
+    exit_code: int,
+    result_pr_url: str,
+    result_summary: str,
+) -> None:
+    resolved_host = host.strip() or os.uname().nodename
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    try:
+        result = finish_every_code_work_request(
+            record_store=record_store,
+            request_id=request_id,
+            host=resolved_host,
+            exit_code=exit_code,
+            result_pr_url=result_pr_url,
+            result_summary=result_summary,
+        )
+    finally:
+        close = getattr(record_store, "close", None)
+        if callable(close):
+            close()
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
 
 

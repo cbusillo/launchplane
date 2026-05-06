@@ -545,7 +545,9 @@ state/
 - The local worker handoff is `uv run launchplane every-code run` for polling or
   `uv run launchplane every-code run-once` for a single scan. It claims queued
   requests, opens or reuses deterministic visible tmux sessions for local
-  checkouts, and records `running` or `blocked` status.
+  checkouts, records `running` or immediate `blocked` status, and wraps the
+  visible command so terminal success or failure calls
+  `uv run launchplane every-code finish`.
 - A Mac host can leave the poller running with
   `uv run launchplane every-code start`, inspect it with
   `uv run launchplane every-code status`, and stop it with
