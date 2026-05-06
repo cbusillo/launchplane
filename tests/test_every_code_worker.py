@@ -92,12 +92,18 @@ class _Runner:
 
     def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
-        if args[0] == "git" and args[3:6] == ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"):
+        if args[0] == "git" and args[3:6] == (
+            "symbolic-ref",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ):
             return subprocess.CompletedProcess(args, 0, "origin/main\n", "")
         if args[0] == "git" and args[3:6] == ("show-ref", "--verify", "--quiet"):
             return subprocess.CompletedProcess(args, 0 if self.existing_branch else 1, "", "")
         if args[0] == "git" and args[3:5] == ("branch", "--show-current"):
-            return subprocess.CompletedProcess(args, 0, every_code_worktree_branch(_queued_record()) + "\n", "")
+            return subprocess.CompletedProcess(
+                args, 0, every_code_worktree_branch(_queued_record()) + "\n", ""
+            )
         if args[0] == "git" and args[3:6] == ("worktree", "add", "-b"):
             worktree_root = Path(args[7])
             worktree_root.mkdir(parents=True, exist_ok=True)
@@ -283,9 +289,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_api_store_lists_claims_and_updates_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
-            _EveryCodeApiHandler.store = FilesystemRecordStore(
-                state_dir=temporary_root / "state"
-            )
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
             _EveryCodeApiHandler.store.write_every_code_work_request_record(_queued_record())
             server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
             server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -389,8 +393,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertEqual(
             root,
-            Path("state")
-            .resolve()
+            Path("state").resolve()
             / "every-code-worker"
             / "worktrees"
             / "cbusillo-code"
@@ -440,6 +443,29 @@ class EveryCodeWorkerTests(unittest.TestCase):
             runner.calls,
         )
 
+    def test_preview_label_request_labels_sellyouroutboard_pull_request(self) -> None:
+        runner = _Runner()
+
+        summary = request_every_code_pr_preview_label(
+            result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/71",
+            runner=runner,
+        )
+
+        self.assertIn("Requested Launchplane preview", summary)
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "edit",
+                "71",
+                "--repo",
+                "cbusillo/sellyouroutboard",
+                "--add-label",
+                "launchplane-preview",
+            ),
+            runner.calls,
+        )
+
     def test_preview_label_request_skips_ineligible_pull_request(self) -> None:
         runner = _Runner()
 
@@ -473,7 +499,10 @@ class EveryCodeWorkerTests(unittest.TestCase):
             every_code_worktree_root(_queued_record(), state_dir=state_dir),
         )
         self.assertEqual(prepared.worktree_branch, every_code_worktree_branch(_queued_record()))
-        self.assertIn(("git", "-C", str(checkout_root.resolve()), "fetch", "--quiet", "origin", "main"), runner.calls)
+        self.assertIn(
+            ("git", "-C", str(checkout_root.resolve()), "fetch", "--quiet", "origin", "main"),
+            runner.calls,
+        )
         self.assertTrue(any(call[3:6] == ("worktree", "add", "-b") for call in runner.calls))
 
     def test_prepare_checkout_reuses_matching_worker_worktree(self) -> None:
@@ -571,7 +600,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
             session_payload["launch_root"],
             str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
         )
-        self.assertEqual(session_payload["worktree_branch"], every_code_worktree_branch(_queued_record()))
+        self.assertEqual(
+            session_payload["worktree_branch"], every_code_worktree_branch(_queued_record())
+        )
         self.assertEqual(result.status, "running")
         self.assertEqual(record.state, "running")
         self.assertEqual(record.claimed_by_host, "Chris-Studio")
@@ -876,7 +907,9 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 result_pr_url="https://github.com/every/tenant-opw/pull/99",
                 runner=runner,
             )
-            record = store.read_every_code_work_request_record("every-code-every-tenant-opw-123-test")
+            record = store.read_every_code_work_request_record(
+                "every-code-every-tenant-opw-123-test"
+            )
 
         self.assertEqual(result.status, "done")
         self.assertIn("Requested Launchplane preview", record.result_summary)
@@ -1174,9 +1207,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "control_plane.every_code_worker._process_matches_expected_command",
                     return_value=False,
                 ):
-                    def launcher(
-                        _args: Sequence[str], _log_file: Path, _cwd: Path
-                    ) -> _Process:
+
+                    def launcher(_args: Sequence[str], _log_file: Path, _cwd: Path) -> _Process:
                         launched.append(1)
                         return _Process(5252)
 

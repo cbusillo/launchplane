@@ -50,6 +50,7 @@ LAUNCHPLANE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "GITHUB_WEBHOOK_SECRET"
 DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL = "testing"
 LaunchplanePullRequestAction = str
 LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
+    "sellyouroutboard": "sellyouroutboard-testing",
     "tenant-cm": "cm",
     "tenant-opw": "opw",
 }
