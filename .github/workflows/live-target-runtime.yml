@@ -1,0 +1,135 @@
+name: Live Target Runtime
+
+on:
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Product profile key
+        required: true
+        type: string
+      context:
+        description: Runtime context
+        required: true
+        type: string
+      instance:
+        description: Runtime instance
+        required: true
+        type: string
+      mode:
+        description: Plan or apply the live runtime sync
+        required: true
+        default: dry-run
+        type: choice
+        options:
+          - dry-run
+          - apply
+      deploy:
+        description: Trigger a deploy after applying env changes
+        required: true
+        default: false
+        type: boolean
+      no_cache:
+        description: Use no-cache when deploy is requested
+        required: true
+        default: false
+        type: boolean
+      deploy_timeout_seconds:
+        description: Optional deploy wait timeout in seconds
+        required: false
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  live-target-runtime:
+    name: ${{ inputs.mode }} ${{ inputs.context }}/${{ inputs.instance }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Request live target runtime sync
+        env:
+          SERVICE_URL: https://launchplane.shinycomputers.com
+          PRODUCT: ${{ inputs.product }}
+          CONTEXT: ${{ inputs.context }}
+          INSTANCE: ${{ inputs.instance }}
+          MODE: ${{ inputs.mode }}
+          DEPLOY: ${{ inputs.deploy }}
+          NO_CACHE: ${{ inputs.no_cache }}
+          DEPLOY_TIMEOUT_SECONDS: ${{ inputs.deploy_timeout_seconds }}
+        run: |
+          set -euo pipefail
+
+          if [ "$MODE" = "dry-run" ]; then
+            if [ "$DEPLOY" = "true" ] || [ "$NO_CACHE" = "true" ] || [ -n "$DEPLOY_TIMEOUT_SECONDS" ]; then
+              echo "Deploy options require mode=apply." >&2
+              exit 1
+            fi
+          fi
+
+          token_json="$(curl -fsSL \
+            -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=launchplane")"
+          oidc_token="$(jq -r '.value' <<<"$token_json")"
+          if [ -z "$oidc_token" ] || [ "$oidc_token" = "null" ]; then
+            echo "GitHub OIDC token response did not include a token." >&2
+            exit 1
+          fi
+
+          payload="$(jq -n \
+            --arg product "$PRODUCT" \
+            --arg context "$CONTEXT" \
+            --arg instance "$INSTANCE" \
+            --arg mode "$MODE" \
+            --argjson deploy "$DEPLOY" \
+            --argjson no_cache "$NO_CACHE" \
+            --arg deploy_timeout_seconds "$DEPLOY_TIMEOUT_SECONDS" \
+            '{
+              schema_version: 1,
+              product: $product,
+              context: $context,
+              instance: $instance,
+              mode: $mode,
+              deploy: $deploy,
+              no_cache: $no_cache
+            }
+            | if $deploy_timeout_seconds != "" then
+                . + {deploy_timeout_seconds: ($deploy_timeout_seconds | tonumber)}
+              else
+                .
+              end')"
+
+          response_file="live-target-runtime-response.json"
+          status_code="$(curl -sS -o "$response_file" -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Content-Type: application/json' \
+            -H "Idempotency-Key: live-target-runtime:${MODE}:${CONTEXT}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+            --data "$payload" \
+            "${SERVICE_URL}/v1/live-target-runtime/apply")"
+          cat "$response_file"
+          echo
+          if [ "$status_code" -lt 200 ] || [ "$status_code" -ge 300 ]; then
+            echo "Launchplane live target runtime request failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+          {
+            echo "## Live Target Runtime ${MODE}"
+            echo
+            jq -r '
+              .result as $result
+              | "- Context: \($result.context)/\($result.instance)",
+                "- Target: \($result.tracked_target.target_name) (\($result.tracked_target.target_type))",
+                "- Changed keys: \(($result.runtime_environment.changed_keys // []) | join(", "))",
+                "- Runtime key-safety: \($result.runtime_key_safety.status)",
+                "- Env updated: \($result.apply.env_updated)",
+                "- Deploy triggered: \($result.deploy.triggered)"
+            ' "$response_file"
+          } >>"$GITHUB_STEP_SUMMARY"
+
+      - name: Upload response artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: live-target-runtime-response
+          path: live-target-runtime-response.json

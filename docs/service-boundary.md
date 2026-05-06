@@ -424,13 +424,24 @@ requires DB-backed storage, returns only sanitized summaries, and exists so the
 Launchplane deploy workflow can seed product records without product repos
 storing live lifecycle truth.
 
+Live target runtime sync uses `POST /v1/live-target-runtime/apply`. The route
+accepts `mode: "dry-run"` or `mode: "apply"`, product/context/instance, and
+optional apply-only deploy controls. Dry-run requires `live_target_runtime.plan`;
+apply requires `live_target_runtime.apply`. The route resolves DB-backed runtime
+environment records, managed runtime secrets, and the tracked Dokploy target in
+the deployed Launchplane service, evaluates runtime key-safety policy, compares
+desired and live env by key, and returns sanitized key/count evidence without
+runtime values or secret plaintext. Apply updates only the Launchplane-owned
+keys on the live target, preserves unrelated live env, verifies persistence by
+key metadata, and can explicitly trigger a deploy when requested.
+
 Live target runtime applies are service-boundary work. Operators and agents must
 not run local CLI live-target mutation commands from arbitrary checkouts to make
 shared or production changes, because the local process may lack DB-backed
-tracked target authority or use stale bootstrap context. Add or use a deployed
-service API endpoint for live target runtime apply/redeploy flows so Launchplane
-can authorize with OIDC/session identity, resolve current DB-backed target
-records in the deployed runtime, and audit sanitized key/count evidence.
+tracked target authority or use stale bootstrap context. Use the deployed
+service route or a workflow that calls it so Launchplane can authorize with
+OIDC/session identity, resolve current DB-backed target records in the deployed
+runtime, and audit sanitized key/count evidence.
 
 Generic web deploys use `POST /v1/drivers/generic-web/deploy`. The request names
 the product, target instance, immutable artifact/image reference, and source ref;

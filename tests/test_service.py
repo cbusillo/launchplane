@@ -331,6 +331,27 @@ def _write_runtime_key_safety_policy(
         store.close()
 
 
+def _write_dokploy_managed_secrets(*, store: PostgresRecordStore) -> None:
+    control_plane_secrets.write_secret_value(
+        record_store=store,
+        scope="global",
+        integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+        name="host",
+        plaintext_value="https://dokploy.example.com",
+        binding_key="DOKPLOY_HOST",
+        actor="test",
+    )
+    control_plane_secrets.write_secret_value(
+        record_store=store,
+        scope="global",
+        integration=control_plane_secrets.DOKPLOY_SECRET_INTEGRATION,
+        name="token",
+        plaintext_value="dokploy-token",
+        binding_key="DOKPLOY_TOKEN",
+        actor="test",
+    )
+
+
 def _seed_tracked_target_records(
     *,
     database_url: str,
@@ -6832,6 +6853,281 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     ],
                 },
                 headers={"Idempotency-Key": "runtime-key-safety-policy:unauthorized"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_live_target_runtime_api_dry_run_returns_redacted_delta(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard",
+                        instance="prod",
+                        env={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                        updated_at="2026-05-06T17:00:00Z",
+                        source_label="test",
+                    )
+                )
+                _seed_tracked_target_records(
+                    database_url=database_url,
+                    context="sellyouroutboard",
+                    instance="prod",
+                    target_id="application-syo-prod",
+                    target_type="application",
+                    target_name="syo-prod-app",
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ):
+                    _write_dokploy_managed_secrets(store=store)
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                            ],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["live_target_runtime.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    return_value={
+                        "applicationId": "application-syo-prod",
+                        "name": "syo-prod-app",
+                        "env": "CONTACT_EMAIL_MODE=resend\n",
+                    },
+                ),
+                patch("control_plane.dokploy.update_dokploy_target_env") as update_env,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/live-target-runtime/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "dry-run",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                    headers={"Idempotency-Key": "live-target-runtime:dry-run"},
+                )
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2, sort_keys=True))
+        update_env.assert_not_called()
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(payload["records"]["target_id"], "application-syo-prod")
+        result = payload["result"]
+        self.assertEqual(result["mode"], "dry-run")
+        self.assertEqual(
+            result["runtime_environment"]["missing_keys"],
+            ["GOOGLE_ANALYTICS_MEASUREMENT_ID"],
+        )
+        self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
+
+    def test_live_target_runtime_api_apply_updates_env_and_verifies(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                store.write_runtime_environment_record(
+                    RuntimeEnvironmentRecord(
+                        scope="instance",
+                        context="sellyouroutboard",
+                        instance="prod",
+                        env={"GOOGLE_ANALYTICS_MEASUREMENT_ID": "G-9KRMER45KG"},
+                        updated_at="2026-05-06T17:00:00Z",
+                        source_label="test",
+                    )
+                )
+                _seed_tracked_target_records(
+                    database_url=database_url,
+                    context="sellyouroutboard",
+                    instance="prod",
+                    target_id="application-syo-prod",
+                    target_type="application",
+                    target_name="syo-prod-app",
+                )
+                with patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ):
+                    _write_dokploy_managed_secrets(store=store)
+            finally:
+                store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                            ],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["live_target_runtime.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/live-target-runtime.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            captured_env_updates: list[dict[str, object]] = []
+
+            def fetch_target_payload(**_kwargs: object) -> dict[str, object]:
+                env_text = "CONTACT_EMAIL_MODE=resend\n"
+                if captured_env_updates:
+                    env_text = str(captured_env_updates[-1]["env_text"])
+                return {
+                    "applicationId": "application-syo-prod",
+                    "name": "syo-prod-app",
+                    "env": env_text,
+                }
+
+            with (
+                patch.dict(
+                    os.environ,
+                    {
+                        "LAUNCHPLANE_DATABASE_URL": database_url,
+                        control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    },
+                    clear=True,
+                ),
+                patch(
+                    "control_plane.dokploy.fetch_dokploy_target_payload",
+                    side_effect=fetch_target_payload,
+                ),
+                patch(
+                    "control_plane.dokploy.update_dokploy_target_env",
+                    side_effect=lambda **kwargs: captured_env_updates.append(kwargs),
+                ),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/live-target-runtime/apply",
+                    payload={
+                        "schema_version": 1,
+                        "mode": "apply",
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                    headers={"Idempotency-Key": "live-target-runtime:apply"},
+                )
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2, sort_keys=True))
+        self.assertEqual(len(captured_env_updates), 1)
+        env_text = str(captured_env_updates[0]["env_text"])
+        self.assertIn("GOOGLE_ANALYTICS_MEASUREMENT_ID=G-9KRMER45KG", env_text)
+        self.assertNotIn("G-9KRMER45KG", json.dumps(payload))
+        result = payload["result"]
+        self.assertEqual(result["mode"], "apply")
+        self.assertTrue(result["apply"]["env_updated"])
+        self.assertEqual(result["apply"]["verification"]["status"], "pass")
+
+    def test_live_target_runtime_api_apply_requires_apply_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["live_target_runtime.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/live-target-runtime/apply",
+                payload={
+                    "schema_version": 1,
+                    "mode": "apply",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "instance": "prod",
+                },
+                headers={"Idempotency-Key": "live-target-runtime:unauthorized"},
             )
 
         self.assertEqual(status_code, 403)
