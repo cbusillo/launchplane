@@ -67,6 +67,11 @@ title: Secrets
   records with `launchplane runtime-key-safety list-policies`, and run a
   metadata-only check with `launchplane runtime-key-safety evaluate` before a
   workflow mutates runtime keys.
+- The Launchplane deploy workflow may reconcile known runtime binding
+  classifications through `POST /v1/runtime-key-safety/policies/apply`. That
+  service path is OIDC-authenticated, DB-backed, additive by binding key, and
+  carries only binding metadata such as class, context, and instance scope. It
+  must not carry secret plaintext or provider env dumps.
 - Evaluation reads only Launchplane managed secret bindings for the requested
   context and instance. If no active policy record exists, the gate fails closed
   instead of falling back to service-host env or product-local scripts.
