@@ -1338,7 +1338,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(close_payload["records"]["state"], "blocked")
         self.assertIn("closed without merge", close_payload["result"]["request"]["error_message"])
 
-    def test_every_code_pull_request_close_matches_pr_issue_url_without_result_pr_url(self) -> None:
+    def test_every_code_pull_request_close_matches_issue_url_without_result_pr_url(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
@@ -1365,10 +1365,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
             event_name="workflow_dispatch",
         )
-        issue_payload = _every_code_github_issue_labeled_payload(
-            issue_number=26,
-            issue_url="https://github.com/cbusillo/code/pull/26",
-        )
+        issue_payload = _every_code_github_issue_labeled_payload(issue_number=26)
         pr_payload = _every_code_github_pull_request_closed_payload()
         with (
             TemporaryDirectory() as temporary_directory_name,

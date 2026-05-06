@@ -2157,6 +2157,8 @@ def _handle_every_code_pull_request_webhook(
     pull_request_payload = _github_webhook_mapping(payload, "pull_request")
     repository = _github_webhook_string(repository_payload, "full_name")
     pr_url = _github_webhook_string(pull_request_payload, "html_url")
+    pr_number_value = pull_request_payload.get("number") if pull_request_payload else None
+    pr_number = pr_number_value if isinstance(pr_number_value, int) else None
     merged = bool(pull_request_payload.get("merged")) if pull_request_payload else False
     closed_at = _github_webhook_string(pull_request_payload, "closed_at") or _utc_now_timestamp()
     every_code_store = _every_code_work_request_store(record_store)
@@ -2202,7 +2204,12 @@ def _handle_every_code_pull_request_webhook(
             every_code_store,
             repository=repository,
         ):
-            if record.issue_url.strip() != pr_url:
+            if not _every_code_issue_url_matches_pull_request(
+                issue_url=record.issue_url,
+                repository=repository,
+                pr_url=pr_url,
+                pr_number=pr_number,
+            ):
                 continue
             matched_record = record
             closed_record = close_every_code_work_request_for_pull_request(
@@ -2253,6 +2260,27 @@ def _handle_every_code_pull_request_webhook(
     )
     accepted_payload["github_delivery_id"] = delivery_id
     return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+
+
+def _every_code_issue_url_matches_pull_request(
+    *,
+    issue_url: str,
+    repository: str,
+    pr_url: str,
+    pr_number: int | None,
+) -> bool:
+    normalized_issue_url = issue_url.strip().rstrip("/")
+    normalized_pr_url = pr_url.strip().rstrip("/")
+    if not normalized_issue_url or not normalized_pr_url:
+        return False
+    if normalized_issue_url == normalized_pr_url:
+        return True
+    if pr_number is None:
+        return False
+    normalized_repository = repository.strip().strip("/")
+    if not normalized_repository:
+        return False
+    return normalized_issue_url == f"https://github.com/{normalized_repository}/issues/{pr_number}"
 
 
 def _find_every_code_work_request_for_pull_request(
