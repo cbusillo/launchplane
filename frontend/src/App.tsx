@@ -248,6 +248,11 @@ function choiceKey(choice: DriverChoice): string {
   return `${choice.driverId}:${choice.testingContext}:${choice.prodContext}:${choice.previewContext}`;
 }
 
+function choiceDisplayKey(choice: DriverChoice): string {
+  const normalizedLabel = choice.label.trim().toLowerCase();
+  return `${choice.driverId}:${normalizedLabel}`;
+}
+
 function labelForDriverContext(
   driver: DriverDescriptor,
   context: string,
@@ -585,9 +590,17 @@ export function App() {
       ...driverChoices,
       ...DEFAULT_CHOICES,
     ];
+    const productDisplayKeys = new Set(
+      [...overviewChoices, ...profileChoices, ...DEFAULT_CHOICES].map(
+        choiceDisplayKey,
+      ),
+    );
     const seen = new Set<string>();
     return merged.filter((choice) => {
-      const key = choiceKey(choice);
+      const displayKey = choiceDisplayKey(choice);
+      const key = productDisplayKeys.has(displayKey)
+        ? displayKey
+        : choiceKey(choice);
       if (seen.has(key)) {
         return false;
       }
