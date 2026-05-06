@@ -62,6 +62,7 @@
 body {
   margin: 0;
   min-width: 320px;
+  overflow-x: clip;
   background: var(--bg-0);
   color: var(--fg);
   font-family: var(--font-ui);
@@ -107,6 +108,8 @@ p {
 
 .app-shell {
   min-height: 100vh;
+  max-width: 100vw;
+  overflow-x: clip;
   background: var(--bg-0);
 }
 
@@ -288,10 +291,9 @@ p {
 
 .operator-cockpit {
   display: grid;
-  grid-template-columns: minmax(230px, 0.62fr) minmax(0, 1.35fr) minmax(
-      280px,
-      0.82fr
-    );
+  grid-template-columns:
+    minmax(220px, 0.64fr) minmax(280px, 1.08fr) minmax(280px, 1fr)
+    minmax(260px, 0.82fr);
   gap: 1px;
   overflow: hidden;
   border: 1px solid var(--hair);
@@ -300,6 +302,7 @@ p {
 
 .cockpit-summary,
 .product-inventory-table,
+.work-graph-queue,
 .every-code-queue {
   min-width: 0;
   background: var(--bg-1);
@@ -318,6 +321,7 @@ p {
 }
 
 .product-inventory-table,
+.work-graph-queue,
 .every-code-queue {
   display: grid;
   align-content: start;
@@ -399,6 +403,102 @@ p {
   grid-template-columns: minmax(0, 1fr) auto;
   min-height: 50px;
   padding: 8px 10px;
+}
+
+.work-graph-head {
+  grid-template-columns: auto 1fr auto;
+}
+
+.work-graph-controls {
+  display: grid;
+  gap: 7px;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--hair);
+}
+
+.segmented-control button {
+  min-width: 0;
+  min-height: 30px;
+  border: 0;
+  background: var(--bg-2);
+  color: var(--fg-muted);
+  font-size: 11px;
+}
+
+.segmented-control button[data-selected="true"] {
+  background: color-mix(in oklab, var(--lane-preview) 18%, var(--bg-2));
+  color: var(--fg-strong);
+}
+
+.work-graph-row {
+  display: grid;
+  grid-template-columns: 42px minmax(0, 1fr);
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg);
+  padding: 8px;
+}
+
+.work-graph-score {
+  display: grid;
+  width: 34px;
+  height: 34px;
+  place-items: center;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--bg-1);
+  color: var(--fg-strong);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.work-graph-title {
+  display: grid;
+  min-width: 0;
+  gap: 2px;
+}
+
+.work-graph-title strong,
+.work-graph-title code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-graph-tags {
+  grid-column: 2;
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px;
+}
+
+.recommendation-chip {
+  display: inline-flex;
+  min-height: 24px;
+  align-items: center;
+  border: 1px solid var(--hair);
+  border-radius: 999px;
+  background: var(--bg-1);
+  color: var(--fg-muted);
+  padding: 0 8px;
+  font-size: 11px;
+}
+
+.work-graph-hidden {
+  color: var(--fg-faint);
 }
 
 .lane-grid {
@@ -1643,9 +1743,14 @@ p {
 
   .cockpit-metrics,
   .product-inventory-row,
-  .queue-row {
+  .queue-row,
+  .work-graph-row {
     grid-template-columns: minmax(0, 1fr);
     align-items: start;
+  }
+
+  .work-graph-tags {
+    grid-column: 1;
   }
 
   .kv-row,

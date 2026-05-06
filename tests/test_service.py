@@ -661,7 +661,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 github_oauth_config=_github_oauth_config(),
                 github_oauth_client=oauth_client,  # type: ignore[arg-type]
             )
-            cookie = self._signed_in_cookie(app)
+            cookie = _signed_in_cookie(app)
             status_code, payload = _invoke_app(
                 app,
                 method="GET",
@@ -689,7 +689,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 github_oauth_config=_github_oauth_config(),
                 github_oauth_client=oauth_client,  # type: ignore[arg-type]
             )
-            cookie = self._signed_in_cookie(app)
+            cookie = _signed_in_cookie(app)
             recreated_app = create_launchplane_service_app(
                 state_dir=Path(tmpdir) / "state",
                 verifier=_StubVerifier(_identity()),
@@ -1385,6 +1385,43 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_human_session_can_rank_work_graph_snapshot(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_humans": [
+                    {
+                        "logins": ["alice"],
+                        "roles": ["read_only"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["work_graph.rank"],
+                    }
+                ]
+            }
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            cookie = _signed_in_cookie(app)
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/rank",
+                payload={"snapshot": _work_graph_snapshot_payload(), "limit": 1},
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["queue"]["items"][0]["number"], 190)
 
     def test_health_endpoint_reports_storage_backend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
