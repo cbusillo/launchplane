@@ -21,6 +21,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
@@ -596,6 +597,46 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(claimed.claimed_by_host, "Chris-Studio")
         self.assertIsNone(second_claim)
         self.assertEqual(loaded.state, "claimed")
+
+    def test_every_code_pr_feedback_round_trip_and_filter(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            store = PostgresRecordStore(database_url=_sqlite_database_url(database_path))
+            store.ensure_schema()
+            older_record = EveryCodePrFeedbackRecord(
+                feedback_id="every-code-pr-feedback-cbusillo-code-26-old",
+                request_id="every-code-cbusillo-code-123-test",
+                repository="cbusillo/code",
+                pr_number=26,
+                pr_url="https://github.com/cbusillo/code/pull/26",
+                feedback_kind="issue_comment",
+                github_delivery_id="delivery-old",
+                github_id="100",
+                actor="cbusillo",
+                body="Please adjust the README wording.",
+                received_at="2026-05-06T17:00:00Z",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "feedback_id": "every-code-pr-feedback-cbusillo-code-26-new",
+                    "github_delivery_id": "delivery-new",
+                    "github_id": "101",
+                    "received_at": "2026-05-06T18:00:00Z",
+                }
+            )
+            store.write_every_code_pr_feedback_record(older_record)
+            store.write_every_code_pr_feedback_record(newer_record)
+
+            listed = store.list_every_code_pr_feedback_records(
+                repository="cbusillo/code",
+                pr_number=26,
+                status="pending",
+            )
+
+        self.assertEqual(
+            [record.feedback_id for record in listed],
+            [newer_record.feedback_id, older_record.feedback_id],
+        )
 
     def test_human_sessions_round_trip_and_delete(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

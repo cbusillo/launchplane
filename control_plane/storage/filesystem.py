@@ -13,6 +13,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
 )
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
@@ -195,6 +196,34 @@ class FilesystemRecordStore:
             return None
         self.write_every_code_work_request_record(claimed_record)
         return claimed_record
+
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
+        return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
+
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodePrFeedbackRecord,
+                "launchplane_every_code_pr_feedback",
+            )
+            if (not request_id or record.request_id == request_id)
+            and (not repository or record.repository == repository)
+            and (pr_number is None or record.pr_number == pr_number)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.received_at, record.feedback_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def write_product_profile_record(self, record: LaunchplaneProductProfileRecord) -> Path:
         return self._write_model("launchplane_product_profiles", record.product, record)

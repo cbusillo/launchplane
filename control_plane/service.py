@@ -41,6 +41,11 @@ from control_plane.contracts.every_code_work_request import (
     build_every_code_work_request_id,
     close_every_code_work_request_for_pull_request,
 )
+from control_plane.contracts.every_code_pr_feedback_record import (
+    EveryCodePrFeedbackKind,
+    EveryCodePrFeedbackRecord,
+    build_every_code_pr_feedback_id,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.preview_mutation_request import (
@@ -1888,6 +1893,20 @@ class _EveryCodeWorkRequestStore(Protocol):
         claimed_at: str,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
+    def write_every_code_pr_feedback_record(
+        self, record: EveryCodePrFeedbackRecord
+    ) -> object: ...
+
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
+
 
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
@@ -1896,6 +1915,8 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
         "read_every_code_work_request_record",
         "list_every_code_work_request_records",
         "claim_every_code_work_request_record",
+        "write_every_code_pr_feedback_record",
+        "list_every_code_pr_feedback_records",
     )
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
@@ -1911,6 +1932,13 @@ def _github_webhook_mapping(payload: dict[str, object], key: str) -> dict[str, o
     if isinstance(value, dict):
         return cast(dict[str, object], value)
     return None
+
+
+def _github_webhook_required_mapping(payload: dict[str, object], key: str) -> dict[str, object]:
+    value = _github_webhook_mapping(payload, key)
+    if value is None:
+        raise ValueError(f"GitHub webhook requires object field {key!r}")
+    return value
 
 
 def _github_webhook_string(mapping: dict[str, object] | None, key: str) -> str:
@@ -1980,6 +2008,15 @@ def _handle_every_code_github_webhook(
 
     payload = _decode_json_request_body(body_bytes)
     event_name = _github_webhook_header(environ, "X-GitHub-Event")
+    if event_name in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
+        return _handle_every_code_pr_feedback_webhook(
+            start_response=start_response,
+            trace_id=trace_id,
+            delivery_id=delivery_id,
+            event_name=event_name,
+            payload=payload,
+            record_store=record_store,
+        )
     if event_name == "pull_request":
         return _handle_every_code_pull_request_webhook(
             start_response=start_response,
@@ -2144,6 +2181,188 @@ def _handle_every_code_pull_request_webhook(
     )
     accepted_payload["github_delivery_id"] = delivery_id
     return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+
+
+def _handle_every_code_pr_feedback_webhook(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    delivery_id: str,
+    event_name: str,
+    payload: dict[str, object],
+    record_store: object,
+) -> list[bytes]:
+    if not _every_code_pr_feedback_action_supported(
+        event_name=event_name,
+        action=str(payload.get("action", "")),
+    ):
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "unsupported_action",
+                "github_delivery_id": delivery_id,
+            },
+        )
+
+    repository_payload = _github_webhook_mapping(payload, "repository")
+    repository = _github_webhook_string(repository_payload, "full_name")
+    pr_number, pr_url = _every_code_feedback_pr_reference(
+        event_name=event_name,
+        payload=payload,
+        repository=repository,
+    )
+    body_payload = _every_code_feedback_body_payload(event_name=event_name, payload=payload)
+    body = _github_webhook_string(body_payload, "body")
+    if not body.strip():
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "empty_feedback_body",
+                "github_delivery_id": delivery_id,
+            },
+        )
+
+    every_code_store = _every_code_work_request_store(record_store)
+    matched_record: EveryCodeWorkRequestRecord | None = None
+    for record in every_code_store.list_every_code_work_request_records(
+        repository=repository,
+        limit=100,
+    ):
+        if record.result_pr_url.strip() == pr_url:
+            matched_record = record
+            break
+    if matched_record is None:
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "linked_every_code_request_not_found",
+                "github_delivery_id": delivery_id,
+            },
+        )
+
+    sender_payload = _github_webhook_mapping(payload, "sender")
+    github_node_id = _github_webhook_string(body_payload, "node_id")
+    github_id_value = body_payload.get("id") if body_payload is not None else ""
+    github_id = str(github_id_value) if github_id_value is not None else ""
+    feedback_id = build_every_code_pr_feedback_id(
+        repository=repository,
+        pr_number=pr_number,
+        github_delivery_id=delivery_id,
+        github_node_id=github_node_id,
+        github_id=github_id,
+    )
+    existing_feedback_records = every_code_store.list_every_code_pr_feedback_records(
+        request_id=matched_record.request_id,
+        repository=repository,
+        pr_number=pr_number,
+        limit=100,
+    )
+    for existing_feedback in existing_feedback_records:
+        if existing_feedback.feedback_id == feedback_id:
+            return _json_response(
+                start_response=start_response,
+                status_code=202,
+                payload={
+                    "status": "accepted",
+                    "trace_id": trace_id,
+                    "deduped": True,
+                    "result": {
+                        "feedback_id": existing_feedback.feedback_id,
+                        "request_id": existing_feedback.request_id,
+                    },
+                    "github_delivery_id": delivery_id,
+                },
+            )
+
+    feedback_record = EveryCodePrFeedbackRecord(
+        feedback_id=feedback_id,
+        request_id=matched_record.request_id,
+        repository=repository,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        feedback_kind=_every_code_feedback_kind(event_name),
+        github_delivery_id=delivery_id,
+        github_node_id=github_node_id,
+        github_id=github_id,
+        actor=_github_webhook_string(sender_payload, "login"),
+        author_association=_github_webhook_string(body_payload, "author_association"),
+        body=body,
+        html_url=_github_webhook_string(body_payload, "html_url"),
+        submitted_at=_github_webhook_string(body_payload, "submitted_at"),
+        received_at=_utc_now_timestamp(),
+    )
+    every_code_store.write_every_code_pr_feedback_record(feedback_record)
+
+    accepted_payload = _accepted_payload(
+        trace_id=trace_id,
+        result={
+            "feedback_id": feedback_record.feedback_id,
+            "request_id": feedback_record.request_id,
+            "status": feedback_record.status,
+        },
+        driver_result={"feedback": feedback_record.model_dump(mode="json")},
+    )
+    accepted_payload["github_delivery_id"] = delivery_id
+    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+
+
+def _every_code_pr_feedback_action_supported(*, event_name: str, action: str) -> bool:
+    if event_name == "issue_comment":
+        return action == "created"
+    if event_name == "pull_request_review":
+        return action == "submitted"
+    if event_name == "pull_request_review_comment":
+        return action == "created"
+    return False
+
+
+def _every_code_feedback_kind(event_name: str) -> EveryCodePrFeedbackKind:
+    if event_name == "issue_comment":
+        return "issue_comment"
+    if event_name == "pull_request_review":
+        return "pull_request_review"
+    if event_name == "pull_request_review_comment":
+        return "pull_request_review_comment"
+    raise ValueError(f"Unsupported Every Code PR feedback event {event_name!r}")
+
+
+def _every_code_feedback_body_payload(
+    *, event_name: str, payload: dict[str, object]
+) -> dict[str, object]:
+    key = "review" if event_name == "pull_request_review" else "comment"
+    return _github_webhook_required_mapping(payload, key)
+
+
+def _every_code_feedback_pr_reference(
+    *,
+    event_name: str,
+    payload: dict[str, object],
+    repository: str,
+) -> tuple[int, str]:
+    if event_name == "issue_comment":
+        issue_payload = _github_webhook_required_mapping(payload, "issue")
+        pull_request_marker = issue_payload.get("pull_request")
+        if not isinstance(pull_request_marker, dict):
+            raise ValueError("Every Code PR feedback issue_comment requires pull_request issue")
+        pr_number_value = issue_payload.get("number")
+    else:
+        pull_request_payload = _github_webhook_required_mapping(payload, "pull_request")
+        pr_number_value = pull_request_payload.get("number")
+    if not isinstance(pr_number_value, int):
+        raise ValueError("Every Code PR feedback requires integer pull request number")
+    return pr_number_value, f"https://github.com/{repository}/pull/{pr_number_value}"
 
 
 def _idempotency_capable_store(record_store: object) -> _IdempotencyCapableStore | None:

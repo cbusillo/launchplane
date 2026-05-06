@@ -14,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -69,6 +70,45 @@ def _health_pass() -> HealthcheckEvidence:
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_write_and_list_every_code_pr_feedback_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = EveryCodePrFeedbackRecord(
+                feedback_id="every-code-pr-feedback-cbusillo-code-26-old",
+                request_id="every-code-cbusillo-code-123-test",
+                repository="cbusillo/code",
+                pr_number=26,
+                pr_url="https://github.com/cbusillo/code/pull/26",
+                feedback_kind="issue_comment",
+                github_delivery_id="delivery-old",
+                github_id="100",
+                actor="cbusillo",
+                body="Please adjust the README wording.",
+                received_at="2026-05-06T17:00:00Z",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "feedback_id": "every-code-pr-feedback-cbusillo-code-26-new",
+                    "github_delivery_id": "delivery-new",
+                    "github_id": "101",
+                    "received_at": "2026-05-06T18:00:00Z",
+                }
+            )
+
+            written_path = store.write_every_code_pr_feedback_record(older_record)
+            store.write_every_code_pr_feedback_record(newer_record)
+            listed_records = store.list_every_code_pr_feedback_records(
+                request_id="every-code-cbusillo-code-123-test",
+                status="pending",
+            )
+            self.assertTrue(written_path.exists())
+
+        self.assertEqual(
+            [record.feedback_id for record in listed_records],
+            [newer_record.feedback_id, older_record.feedback_id],
+        )
+
     def test_write_and_read_product_profile_record(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)
