@@ -173,9 +173,7 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "feedback": [
-                        record.model_dump(mode="json") for record in feedback_records
-                    ],
+                    "feedback": [record.model_dump(mode="json") for record in feedback_records],
                 },
             )
             return
@@ -187,9 +185,7 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 200,
                 {
                     "status": "ok",
-                    "requests": [
-                        record.model_dump(mode="json") for record in work_request_records
-                    ],
+                    "requests": [record.model_dump(mode="json") for record in work_request_records],
                 },
             )
             return
@@ -213,7 +209,9 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 for record in feedback_records
                 if record.feedback_id == payload["feedback_id"]
             )
-            updated_feedback_record = feedback_record.model_copy(update={"status": payload["status"]})
+            updated_feedback_record = feedback_record.model_copy(
+                update={"status": payload["status"]}
+            )
             self.store.write_every_code_pr_feedback_record(updated_feedback_record)
             self._write_json(
                 202,
@@ -329,9 +327,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_api_store_lists_and_updates_pr_feedback_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
-            _EveryCodeApiHandler.store = FilesystemRecordStore(
-                state_dir=temporary_root / "state"
-            )
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
             _EveryCodeApiHandler.store.write_every_code_pr_feedback_record(_feedback_record())
             server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
             server_thread = threading.Thread(target=server.serve_forever, daemon=True)
@@ -461,7 +457,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 "--repo",
                 "cbusillo/sellyouroutboard",
                 "--add-label",
-                "launchplane-preview",
+                "preview",
             ),
             runner.calls,
         )

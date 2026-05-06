@@ -54,6 +54,9 @@ LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
     "tenant-cm": "cm",
     "tenant-opw": "opw",
 }
+LAUNCHPLANE_TENANT_ANCHOR_PREVIEW_LABELS: dict[str, str] = {
+    "sellyouroutboard": "preview",
+}
 LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
     rf"```{re.escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     flags=re.IGNORECASE | re.DOTALL,
@@ -113,6 +116,13 @@ def launchplane_anchor_repo_context(*, repo: str) -> str:
 
 def launchplane_anchor_repo_eligible(*, repo: str) -> bool:
     return bool(launchplane_anchor_repo_context(repo=repo))
+
+
+def launchplane_anchor_repo_preview_label(*, repo: str) -> str:
+    repo_name = repo.strip()
+    if not launchplane_anchor_repo_eligible(repo=repo_name):
+        return ""
+    return LAUNCHPLANE_TENANT_ANCHOR_PREVIEW_LABELS.get(repo_name, LAUNCHPLANE_PREVIEW_ENABLE_LABEL)
 
 
 def classify_pull_request_event_for_launchplane(
