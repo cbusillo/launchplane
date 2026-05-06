@@ -40,6 +40,12 @@ it can reach, trust, or decrypt DB-backed state.
 | Process wiring | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT` | Service target env | Runtime/process wiring, not product config. |
 | Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config. |
 | Every Code worker bearer token | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config. |
+
+The Launchplane self-deploy workflow has a manual `omit_every_code_env`
+compatibility input for the one deploy that teaches an older running service to
+accept the Every Code env keys. Leave it unset for normal deploys so the service
+and worker keep the shared token/webhook secret in sync.
+
 | Work graph GitHub Project read source | `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER`, `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_GH_BINARY` | Service target env | Opt-in read source for compact Project fields plus bounded dependency, subissue, and PR check signals. Deploy automation forwards these values only when the GitHub Project token secret is present. Requires a `gh` credential with the GitHub CLI `project` scope. Does not store copied issue bodies. |
 | Work graph GitHub Project token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads. The token must have enough GitHub access for the configured Project and issue/PR signal reads. |
 
