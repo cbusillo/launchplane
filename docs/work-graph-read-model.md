@@ -98,8 +98,11 @@ The Launchplane image includes the GitHub CLI and disables interactive prompts
 for service use. The deployed service should receive `GH_TOKEN` from the
 `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deploy secret; the token must have enough
 access for the configured Project plus issue dependency, subissue, and PR check
-reads. A configured Project or signal source that cannot be read fails the
-snapshot request instead of silently dropping Project fields.
+reads. Deploy automation only forwards the Project provider env bundle when that
+token secret is present, so repository variables can be prepared without turning
+on unauthenticated runtime `gh` reads. A configured Project or signal source that
+cannot be read fails the snapshot request instead of silently dropping Project
+fields.
 
 ## Boundary
 

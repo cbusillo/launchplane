@@ -133,8 +133,10 @@ store GitHub issue bodies, and writes no state. A configured Project or signal
 read failure returns an error instead of a silently incomplete snapshot.
 The production image includes `gh` for this provider, and deploy automation maps
 the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` repository secret into service `GH_TOKEN`
-when present. That token is not a Launchplane record and must remain outside the
-repo.
+when present. Deploy automation also withholds the Project provider env bundle
+until that secret exists, so prepared repo variables do not enable
+unauthenticated runtime reads. That token is not a Launchplane record and must
+remain outside the repo.
 
 ## Host Assumption
 
