@@ -25,9 +25,8 @@ from control_plane.contracts.every_code_work_request import (
     resume_every_code_work_request,
 )
 from control_plane.workflows.launchplane import (
-    LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
     github_pull_request_reference,
-    launchplane_anchor_repo_eligible,
+    launchplane_anchor_repo_preview_label,
 )
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -72,9 +71,7 @@ class EveryCodeWorkerStore(Protocol):
         limit: int | None = None,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
-    def write_every_code_pr_feedback_record(
-        self, record: EveryCodePrFeedbackRecord
-    ) -> object: ...
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -1517,7 +1514,8 @@ def request_every_code_pr_preview_label(
     reference = github_pull_request_reference(pr_url=result_pr_url.strip())
     if reference is None:
         return ""
-    if not launchplane_anchor_repo_eligible(repo=reference["repo"]):
+    preview_label = launchplane_anchor_repo_preview_label(repo=reference["repo"])
+    if not preview_label:
         return ""
     run = runner or _run_subprocess
     repo = f"{reference['owner']}/{reference['repo']}"
@@ -1531,7 +1529,7 @@ def request_every_code_pr_preview_label(
                 "--repo",
                 repo,
                 "--add-label",
-                LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+                preview_label,
             )
         )
     except OSError as exc:
@@ -1539,7 +1537,7 @@ def request_every_code_pr_preview_label(
     if result.returncode != 0:
         detail = result.stderr.strip() or result.stdout.strip() or "gh pr edit failed"
         return f"Could not request Launchplane preview: {detail}"
-    return f"Requested Launchplane preview with `{LAUNCHPLANE_PREVIEW_ENABLE_LABEL}`."
+    return f"Requested Launchplane preview with `{preview_label}`."
 
 
 def _mark_every_code_pr_feedback(
