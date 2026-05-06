@@ -15,6 +15,7 @@ from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployRequest,
     execute_generic_web_deploy,
+    normalize_generic_web_artifact_id,
     resolve_generic_web_profile_lane,
 )
 
@@ -85,6 +86,24 @@ def _source_of_truth() -> DokploySourceOfTruth:
 
 
 class GenericWebDeployTests(unittest.TestCase):
+    def test_normalize_generic_web_artifact_id_qualifies_bare_release_tag(self) -> None:
+        artifact_id = normalize_generic_web_artifact_id(
+            profile=_profile(),
+            artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+        )
+
+        self.assertEqual(
+            artifact_id,
+            "ghcr.io/cbusillo/sellyouroutboard:sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+        )
+
+    def test_normalize_generic_web_artifact_id_rejects_other_repositories(self) -> None:
+        with self.assertRaises(click.ClickException):
+            normalize_generic_web_artifact_id(
+                profile=_profile(),
+                artifact_id="ghcr.io/cbusillo/other-app:sha-abc123",
+            )
+
     def test_execute_generic_web_deploy_writes_pass_record_for_profile_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())
 
@@ -114,11 +133,51 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.target_id, "target-123")
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "pass")
+        self.assertEqual(
+            store.deployments[0].artifact_identity.artifact_id,
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        )
         self.assertIsNotNone(store.deployments[0].resolved_target)
         resolved_target = store.deployments[0].resolved_target
         assert resolved_target is not None
         self.assertEqual(resolved_target.target_name, "sellyouroutboard-testing-app")
         deploy.assert_called_once()
+
+    def test_execute_generic_web_deploy_uses_qualified_bare_tag(self) -> None:
+        store = _GenericWebDeployStore(_profile())
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=_source_of_truth(),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_deploy.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch("control_plane.workflows.generic_web_deploy.execute_dokploy_artifact_deploy") as deploy,
+        ):
+            execute_generic_web_deploy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebDeployRequest(
+                    product="sellyouroutboard",
+                    instance="testing",
+                    artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+                    source_git_ref="2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+                ),
+            )
+
+        deploy_request = deploy.call_args.kwargs["ship_request"]
+        expected_artifact_id = (
+            "ghcr.io/cbusillo/sellyouroutboard:sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c"
+        )
+        self.assertEqual(deploy_request.artifact_id, expected_artifact_id)
+        self.assertEqual(store.deployments[0].artifact_identity.artifact_id, expected_artifact_id)
 
     def test_execute_generic_web_deploy_records_failure_when_provider_fails(self) -> None:
         store = _GenericWebDeployStore(_profile())

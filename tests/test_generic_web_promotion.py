@@ -17,9 +17,13 @@ from control_plane.contracts.product_profile_record import (
     ProductPromotionWorkflowProfile,
     ProductPreviewProfile,
 )
-from control_plane.contracts.promotion_record import HealthcheckEvidence, PromotionRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    HealthcheckEvidence,
+    PromotionRecord,
+)
 from control_plane.contracts.ship_request import ShipRequest
-from control_plane.workflows.generic_web_deploy import GenericWebDeployResult
+from control_plane.workflows.generic_web_deploy import GenericWebDeployRequest, GenericWebDeployResult
 from control_plane.workflows.generic_web_promotion import (
     GenericWebProdPromotionRequest,
     execute_generic_web_prod_promotion,
@@ -193,6 +197,52 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(deployment.destination_health.status, "pass")
         self.assertIn(("sellyouroutboard-testing", "prod"), store.inventories)
         self.assertEqual(healthcheck.call_count, 2)
+
+    def test_execute_prod_promotion_qualifies_bare_release_tag(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        seen_artifact_ids: list[str] = []
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            deploy_request = kwargs["request"]
+            self.assertIsInstance(deploy_request, GenericWebDeployRequest)
+            seen_artifact_ids.append(deploy_request.artifact_id)
+            store.write_deployment_record(
+                _deployment_record().model_copy(
+                    update={
+                        "artifact_identity": ArtifactIdentityReference(
+                            artifact_id=deploy_request.artifact_id
+                        )
+                    }
+                )
+            )
+            return _deploy_result()
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(
+                    artifact_id="sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+                    source_git_ref="2da6435e10cade0870ed5cbdf40c8048594f8b1c",
+                ),
+            )
+
+        expected_artifact_id = (
+            "ghcr.io/cbusillo/sellyouroutboard:sha-2da6435e10cade0870ed5cbdf40c8048594f8b1c"
+        )
+        self.assertEqual(seen_artifact_ids, [expected_artifact_id])
+        self.assertEqual(result.artifact_id, expected_artifact_id)
+        promotion = next(iter(store.promotions.values()))
+        self.assertEqual(promotion.artifact_identity.artifact_id, expected_artifact_id)
 
     def test_dry_run_returns_pending_evidence_without_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())
