@@ -92,11 +92,35 @@ def _fallback_target_name(*, profile: LaunchplaneProductProfileRecord, lane: Pro
     return f"{profile.product}-{lane.instance}"
 
 
+def normalize_generic_web_artifact_id(
+    *, profile: LaunchplaneProductProfileRecord, artifact_id: str
+) -> str:
+    normalized_artifact_id = artifact_id.strip()
+    image_repository = profile.image.repository.strip().rstrip("/")
+    if not normalized_artifact_id:
+        raise click.ClickException("Generic web deploy requires artifact_id.")
+    if normalized_artifact_id.startswith(f"{image_repository}@") or normalized_artifact_id.startswith(
+        f"{image_repository}:"
+    ):
+        return normalized_artifact_id
+    if normalized_artifact_id.startswith("sha256:"):
+        return f"{image_repository}@{normalized_artifact_id}"
+    if "/" in normalized_artifact_id or "@" in normalized_artifact_id:
+        raise click.ClickException(
+            "Generic web artifact_id must use the product image repository "
+            f"{image_repository!r}, or be a bare image tag."
+        )
+    return f"{image_repository}:{normalized_artifact_id}"
+
+
 def _fallback_ship_request(
     *, request: GenericWebDeployRequest, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile
 ) -> ShipRequest:
     return ShipRequest(
-        artifact_id=request.artifact_id,
+        artifact_id=normalize_generic_web_artifact_id(
+            profile=profile,
+            artifact_id=request.artifact_id,
+        ),
         context=lane.context,
         instance=lane.instance,
         source_git_ref=request.source_git_ref,
@@ -148,7 +172,10 @@ def _resolve_ship_request(
         profile=profile, lane=lane
     )
     ship_request = ShipRequest(
-        artifact_id=request.artifact_id,
+        artifact_id=normalize_generic_web_artifact_id(
+            profile=profile,
+            artifact_id=request.artifact_id,
+        ),
         context=lane.context,
         instance=lane.instance,
         source_git_ref=request.source_git_ref,

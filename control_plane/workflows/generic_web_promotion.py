@@ -29,6 +29,7 @@ from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebDeployRequest,
     execute_generic_web_deploy,
+    normalize_generic_web_artifact_id,
     resolve_generic_web_profile_lane,
 )
 from control_plane.workflows.inventory import build_environment_inventory
@@ -157,6 +158,14 @@ def execute_generic_web_prod_promotion(
     profile, source_lane, destination_lane = resolve_generic_web_promotion_lanes(
         record_store=record_store,
         request=request,
+    )
+    request = request.model_copy(
+        update={
+            "artifact_id": normalize_generic_web_artifact_id(
+                profile=profile,
+                artifact_id=request.artifact_id,
+            )
+        }
     )
     promotion_record_id = generate_promotion_record_id(
         context_name=destination_lane.context,
