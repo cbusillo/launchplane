@@ -738,9 +738,9 @@ export function App() {
             />
             <section className="lane-grid" aria-busy={loading}>
               <LanePanel
-                title="Prod"
-                laneKind="prod"
-                lane={prodDriverView?.lane_summary ?? null}
+                title="Testing"
+                laneKind="testing"
+                lane={testingDriverView?.lane_summary ?? null}
                 loading={loading}
               />
               <PromotionBridge
@@ -754,9 +754,9 @@ export function App() {
                 onAction={setReviewAction}
               />
               <LanePanel
-                title="Testing"
-                laneKind="testing"
-                lane={testingDriverView?.lane_summary ?? null}
+                title="Prod"
+                laneKind="prod"
+                lane={prodDriverView?.lane_summary ?? null}
                 loading={loading}
               />
             </section>
