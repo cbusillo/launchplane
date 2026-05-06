@@ -176,6 +176,23 @@ class EveryCodeWorkerApiStore:
         )
         return payload
 
+    def rerun_every_code_work_request_record(
+        self, *, request_id: str, trigger_actor: str = ""
+    ) -> EveryCodeWorkRequestRecord:
+        payload = self._request(
+            "POST",
+            "/v1/every-code/work-requests/rerun",
+            body={"request_id": request_id.strip(), "trigger_actor": trigger_actor.strip()},
+            idempotency_key=f"every-code-rerun-{request_id.strip()}-{trigger_actor.strip()}",
+        )
+        request_payload = payload.get("request")
+        result_payload = payload.get("result")
+        if request_payload is None and isinstance(result_payload, dict):
+            request_payload = result_payload.get("request")
+        if not isinstance(request_payload, dict):
+            raise EveryCodeWorkerApiError("Launchplane rerun response is invalid")
+        return EveryCodeWorkRequestRecord.model_validate(request_payload)
+
     def list_every_code_pr_feedback_records(
         self,
         *,

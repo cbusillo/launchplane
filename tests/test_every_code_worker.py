@@ -15,6 +15,7 @@ from click.testing import CliRunner
 from control_plane.cli import main
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.every_code_work_request import requeue_every_code_work_request
 from control_plane.every_code_worker import (
     EveryCodeWorkerApiStore,
     apply_every_code_pr_feedback_for_host,
@@ -226,6 +227,34 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if self.path == "/v1/every-code/work-requests/rerun":
+            work_request_record = self.store.read_every_code_work_request_record(
+                str(payload["request_id"])
+            )
+            requeued_record = work_request_record.model_copy(
+                update={
+                    "state": "queued",
+                    "trigger_actor": str(payload.get("trigger_actor") or "rerun"),
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "queued_at": "2026-05-06T00:02:00Z",
+                    "claimed_at": "",
+                    "claimed_by_host": "",
+                    "started_at": "",
+                    "finished_at": "",
+                    "result_pr_url": "",
+                    "result_summary": "",
+                    "error_message": "",
+                }
+            )
+            self.store.write_every_code_work_request_record(requeued_record)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "result": {"request": requeued_record.model_dump(mode="json")},
+                },
+            )
+            return
         if self.path == "/v1/every-code/work-requests/claim":
             claimed_record = self.store.claim_every_code_work_request_record(
                 request_id=str(payload["request_id"]),
@@ -244,6 +273,28 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                         "state": claimed_record.state,
                     },
                     "result": {"request": claimed_record.model_dump(mode="json")},
+                },
+            )
+            return
+        if self.path == "/v1/every-code/work-requests/rerun":
+            work_request_record = self.store.read_every_code_work_request_record(
+                str(payload["request_id"])
+            )
+            requeued_work_request_record = requeue_every_code_work_request(
+                work_request_record,
+                queued_at="2026-05-06T00:02:00Z",
+                trigger_actor=str(payload.get("trigger_actor") or ""),
+            )
+            self.store.write_every_code_work_request_record(requeued_work_request_record)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "records": {
+                        "request_id": requeued_work_request_record.request_id,
+                        "state": requeued_work_request_record.state,
+                    },
+                    "result": {"request": requeued_work_request_record.model_dump(mode="json")},
                 },
             )
             return
@@ -350,6 +401,49 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(len(feedback_records), 1)
         self.assertEqual(feedback_records[0].feedback_id, _feedback_record().feedback_id)
         self.assertEqual(listed_after_update[0].status, "applied")
+
+    def test_api_store_reruns_terminal_request_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            _EveryCodeApiHandler.store.write_every_code_work_request_record(
+                _queued_record().model_copy(
+                    update={
+                        "state": "blocked",
+                        "claimed_at": "2026-05-06T00:00:00Z",
+                        "claimed_by_host": "Chris-Studio",
+                        "started_at": "2026-05-06T00:01:00Z",
+                        "finished_at": "2026-05-06T00:02:00Z",
+                        "updated_at": "2026-05-06T00:02:00Z",
+                        "result_pr_url": "https://github.com/cbusillo/code/pull/26",
+                        "result_summary": "Detached session went stale.",
+                        "error_message": "Detached session went stale.",
+                    }
+                )
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                requeued_record = store.rerun_every_code_work_request_record(
+                    request_id=_queued_record().request_id,
+                    trigger_actor="cbusillo",
+                )
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(requeued_record.state, "queued")
+        self.assertEqual(requeued_record.trigger_actor, "cbusillo")
+        self.assertEqual(requeued_record.claimed_by_host, "")
+        self.assertEqual(requeued_record.result_pr_url, "")
+        self.assertEqual(requeued_record.error_message, "")
 
     def test_session_name_is_stable_and_tmux_safe(self) -> None:
         session_name = every_code_tmux_session_name("every code/cbusillo/code#123 !")

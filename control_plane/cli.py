@@ -38,6 +38,7 @@ from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_work_request import build_every_code_work_request_id
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
@@ -9715,6 +9716,87 @@ def every_code_finish(
             result_pr_url=result_pr_url,
             result_summary=result_summary,
         )
+    finally:
+        _close_store(record_store)
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("rerun-issue")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service base URL for API-backed worker mode.",
+)
+@click.option(
+    "--worker-token-env",
+    default=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the Every Code worker token.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory used when --database-url is not set.",
+)
+@click.option("--repository", required=True, help="GitHub owner/repo name.")
+@click.option("--issue-number", type=int, required=True, help="GitHub issue number.")
+@click.option("--trigger-label", default="every-code", show_default=True)
+@click.option("--actor", default="rerun", show_default=True)
+def every_code_rerun_issue(
+    database_url: str,
+    service_url: str,
+    worker_token_env: str,
+    state_dir: Path,
+    repository: str,
+    issue_number: int,
+    trigger_label: str,
+    actor: str,
+) -> None:
+    if service_url.strip():
+        record_store = _every_code_worker_store(
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+        )
+        try:
+            request_id = build_every_code_work_request_id(
+                repository=repository,
+                issue_number=issue_number,
+                trigger_label=trigger_label,
+            )
+            rerun = getattr(record_store, "rerun_every_code_work_request_record")
+            request = rerun(request_id=request_id, trigger_actor=actor)
+            payload = {
+                "status": "queued",
+                "detail": "Requeued terminal Every Code work request for this issue.",
+                "request": request.model_dump(mode="json"),
+            }
+        finally:
+            _close_store(record_store)
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    try:
+        result = control_plane_every_code_reconciliation.rerun_every_code_issue(
+            record_store=record_store,
+            repository=repository,
+            issue_number=issue_number,
+            trigger_label=trigger_label,
+            actor=actor,
+        )
+    except (FileNotFoundError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
     finally:
         _close_store(record_store)
     click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))

@@ -40,6 +40,7 @@ from control_plane.contracts.every_code_work_request import (
     apply_every_code_work_request_status,
     build_every_code_work_request_id,
     close_every_code_work_request_for_pull_request,
+    requeue_every_code_work_request,
 )
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackKind,
@@ -1266,6 +1267,19 @@ class EveryCodeWorkRequestStatusEnvelope(BaseModel):
     updated_at: str = ""
 
 
+class EveryCodeWorkRequestRerunEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    request_id: str
+    trigger_actor: str = ""
+
+    @model_validator(mode="after")
+    def _validate_rerun(self) -> "EveryCodeWorkRequestRerunEnvelope":
+        if not self.request_id.strip():
+            raise ValueError("Every Code work request rerun requires request_id")
+        return self
+
+
 class EveryCodePrFeedbackStatusEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1854,6 +1868,7 @@ def _build_write_routes() -> frozenset[str]:
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
         "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
+        "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
         "/v1/every-code/pr-feedback/status",
         "/v1/work-graph/rank",
@@ -2811,6 +2826,7 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         return True
     return method == "POST" and path in {
         "/v1/every-code/work-requests/claim",
+        "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
         "/v1/every-code/pr-feedback/status",
     }
@@ -2994,6 +3010,26 @@ def _handle_every_code_worker_write(
                 trace_id=trace_id,
                 result={"request_id": claimed_record.request_id, "state": claimed_record.state},
                 driver_result={"request": claimed_record.model_dump(mode="json")},
+            ),
+        )
+    if path == "/v1/every-code/work-requests/rerun":
+        rerun_request = EveryCodeWorkRequestRerunEnvelope.model_validate(payload)
+        existing_record = every_code_store.read_every_code_work_request_record(
+            rerun_request.request_id.strip()
+        )
+        requeued_record = requeue_every_code_work_request(
+            existing_record,
+            queued_at=_utc_now_timestamp(),
+            trigger_actor=rerun_request.trigger_actor,
+        )
+        every_code_store.write_every_code_work_request_record(requeued_record)
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload=_accepted_payload(
+                trace_id=trace_id,
+                result={"request_id": requeued_record.request_id, "state": requeued_record.state},
+                driver_result={"request": requeued_record.model_dump(mode="json")},
             ),
         )
     work_request_status_request = EveryCodeWorkRequestStatusEnvelope.model_validate(payload)
@@ -4301,13 +4337,27 @@ def create_launchplane_service_app(
                     query=query,
                 )
             payload = _read_json_request(environ)
-            return _handle_every_code_worker_write(
-                start_response=start_response,
-                trace_id=request_trace_id,
-                record_store=record_store,
-                path=path,
-                payload=payload,
-            )
+            try:
+                return _handle_every_code_worker_write(
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                    path=path,
+                    payload=payload,
+                )
+            except ValueError as error:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "invalid_payload",
+                            "message": str(error),
+                        },
+                    },
+                )
         try:
             if method == "GET":
                 identity = _read_identity(
@@ -5199,6 +5249,43 @@ def create_launchplane_service_app(
                             "error": {
                                 "code": "authorization_denied",
                                 "message": "Workflow cannot claim Every Code work requests.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                return _handle_every_code_worker_write(
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                    path=path,
+                    payload=payload,
+                )
+            elif path == "/v1/every-code/work-requests/rerun":
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="every_code_work_request.write",
+                    product="launchplane",
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot rerun Every Code work requests.",
                             },
                         },
                     )
