@@ -4963,11 +4963,19 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                if not authz_policy.allows(
-                    identity=identity,
-                    action="runtime_key_safety.write",
-                    product=runtime_policy_request.product,
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                if not (
+                    authz_policy.allows(
+                        identity=identity,
+                        action="runtime_key_safety.write",
+                        product=runtime_policy_request.product,
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    )
+                    or authz_policy.allows(
+                        identity=identity,
+                        action="launchplane_service_deploy.execute",
+                        product=runtime_policy_request.product,
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    )
                 ):
                     return _json_response(
                         start_response=start_response,
