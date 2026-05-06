@@ -4337,13 +4337,27 @@ def create_launchplane_service_app(
                     query=query,
                 )
             payload = _read_json_request(environ)
-            return _handle_every_code_worker_write(
-                start_response=start_response,
-                trace_id=request_trace_id,
-                record_store=record_store,
-                path=path,
-                payload=payload,
-            )
+            try:
+                return _handle_every_code_worker_write(
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                    record_store=record_store,
+                    path=path,
+                    payload=payload,
+                )
+            except ValueError as error:
+                return _json_response(
+                    start_response=start_response,
+                    status_code=400,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "invalid_payload",
+                            "message": str(error),
+                        },
+                    },
+                )
         try:
             if method == "GET":
                 identity = _read_identity(

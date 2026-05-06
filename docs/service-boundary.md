@@ -58,6 +58,7 @@ VeriReel product paths:
   - `GET /v1/every-code/work-requests/{request_id}`
   - `POST /v1/every-code/work-requests/create`
   - `POST /v1/every-code/work-requests/claim`
+  - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
 - work graph chooser route:
   - `GET /v1/work-graph/snapshot`
@@ -117,11 +118,12 @@ the Launchplane service and on the Mac worker host, then run the worker with
 `uv run launchplane every-code start --service-url https://...`. That token is
 scoped in code to `GET /v1/every-code/work-requests`,
 `GET /v1/every-code/work-requests/{request_id}`,
-`POST /v1/every-code/work-requests/claim`, and
+`POST /v1/every-code/work-requests/claim`,
+`POST /v1/every-code/work-requests/rerun`, and
 `POST /v1/every-code/work-requests/status`. It cannot create webhook requests,
 write product records, or access other Launchplane service routes. This keeps
 remote DB credentials on the Launchplane host while still allowing visible local
-Code/tmux work sessions to claim and report progress.
+Code/tmux work sessions to claim, rerun terminal requests, and report progress.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the

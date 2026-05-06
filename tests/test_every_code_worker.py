@@ -227,6 +227,34 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if self.path == "/v1/every-code/work-requests/rerun":
+            work_request_record = self.store.read_every_code_work_request_record(
+                str(payload["request_id"])
+            )
+            requeued_record = work_request_record.model_copy(
+                update={
+                    "state": "queued",
+                    "trigger_actor": str(payload.get("trigger_actor") or "rerun"),
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "queued_at": "2026-05-06T00:02:00Z",
+                    "claimed_at": "",
+                    "claimed_by_host": "",
+                    "started_at": "",
+                    "finished_at": "",
+                    "result_pr_url": "",
+                    "result_summary": "",
+                    "error_message": "",
+                }
+            )
+            self.store.write_every_code_work_request_record(requeued_record)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "result": {"request": requeued_record.model_dump(mode="json")},
+                },
+            )
+            return
         if self.path == "/v1/every-code/work-requests/claim":
             claimed_record = self.store.claim_every_code_work_request_record(
                 request_id=str(payload["request_id"]),
