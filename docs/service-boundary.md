@@ -406,6 +406,15 @@ the requested managed secret binding for the target runtime class. Request
 bodies for this route must not be copied into logs, issues, docs, or workflow
 artifacts because they can contain plaintext secret values.
 
+Runtime key-safety policy reconciliation uses
+`POST /v1/runtime-key-safety/policies/apply`. The route is restricted to
+workflows with `runtime_key_safety.write` for product/context `launchplane`,
+requires DB-backed storage, and writes metadata-only policy records for managed
+runtime secret binding keys. It merges requested rules into the latest active
+policy by binding key so deploy-time bootstrap can add required classifications
+without dropping existing policy coverage. Request and response payloads must
+not include secret plaintext.
+
 Product onboarding uses `POST /v1/product-onboarding/apply`. The route accepts
 the same operator-approved manifest as `launchplane product-onboarding apply`
 and writes the full Launchplane-owned bundle: product profile, Dokploy target

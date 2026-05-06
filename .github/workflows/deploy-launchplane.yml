@@ -486,6 +486,57 @@ jobs:
             return 1
           }
 
+          apply_runtime_key_safety_policy() {
+            local idempotency_suffix="$1"
+            local request_payload response_file status_code
+
+            request_payload="$({
+              jq -n \
+                '{
+                  schema_version: 1,
+                  product: "launchplane",
+                  source_label: "deploy:runtime-key-safety-policy",
+                  rules: [
+                    {
+                      binding_key: "DISCORD_TOKEN",
+                      secret_class: "prod_only",
+                      allowed_contexts: ["discord-blue"],
+                      allowed_instances: ["prod"]
+                    },
+                    {
+                      binding_key: "RESEND_API_KEY",
+                      secret_class: "prod_only",
+                      allowed_contexts: ["sellyouroutboard-prod"],
+                      allowed_instances: ["prod"]
+                    },
+                    {
+                      binding_key: "SMTP_PASSWORD",
+                      secret_class: "prod_only",
+                      allowed_contexts: ["sellyouroutboard-prod"],
+                      allowed_instances: ["prod"]
+                    }
+                  ]
+                }'
+            })"
+            response_file="$(mktemp)"
+            status_code="$(curl -sS \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: launchplane-runtime-key-safety-policy:${idempotency_suffix}:${GITHUB_SHA}" \
+              --data "$request_payload" \
+              "${{ steps.service.outputs.service_url }}/v1/runtime-key-safety/policies/apply")"
+            if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+              cat "$response_file"
+              return 0
+            fi
+            cat "$response_file" >&2
+            echo "Launchplane runtime key-safety policy request failed with HTTP ${status_code}." >&2
+            return 1
+          }
+
           post_launchplane_grant() {
             local workflow_file="$1"
             local action_name="$2"
@@ -601,6 +652,16 @@ jobs:
             work_graph.rank \
             deploy:work-graph-snapshot-validate-grant \
             work-graph-snapshot-validate
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            deploy-launchplane.yml \
+            launchplane \
+            launchplane \
+            runtime_key_safety.write \
+            deploy:runtime-key-safety-policy-grant \
+            runtime-key-safety-policy
+          apply_runtime_key_safety_policy \
+            launchplane-runtime-secret-classes
           post_syo_grant \
             promote-prod.yml \
             launchplane \

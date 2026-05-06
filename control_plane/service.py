@@ -77,6 +77,10 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
+from control_plane.contracts.runtime_key_safety_policy import (
+    RuntimeKeySafetyPolicyRecord,
+    RuntimeSecretSafetyRule,
+)
 from control_plane.contracts.work_graph_read_model import (
     WorkGraphPlanningIssueFacts,
     WorkGraphSnapshot,
@@ -1326,6 +1330,25 @@ class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
         return self
 
 
+class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    source_label: str = "service:runtime-key-safety-policy"
+    rules: tuple[RuntimeSecretSafetyRule, ...]
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "RuntimeKeySafetyPolicyApplyEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Runtime key-safety policy writes require product 'launchplane'.")
+        self.product = "launchplane"
+        self.source_label = self.source_label.strip() or "service:runtime-key-safety-policy"
+        if not self.rules:
+            raise ValueError("Runtime key-safety policy writes require at least one rule.")
+        return self
+
+
 class ProductOnboardingApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1769,6 +1792,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
+        "/v1/runtime-key-safety/policies/apply",
         "/v1/product-onboarding/apply",
         "/v1/product-config/apply",
         "/v1/product-profiles/context-cutover/apply",
@@ -2081,6 +2105,7 @@ def _accepted_payload(
                 "preview_lifecycle_cleanup_id",
                 "preview_lifecycle_plan_id",
                 "authz_policy_record_id",
+                "runtime_key_safety_policy_record_id",
                 "product_profile",
                 "dokploy_target_count",
                 "dokploy_target_id_count",
@@ -2613,6 +2638,14 @@ def _now_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _record_slug(value: str) -> str:
+    compact = "".join(
+        character.lower() if character.isalnum() else "-" for character in value.strip()
+    )
+    normalized = "-".join(part for part in compact.split("-") if part)
+    return normalized or "launchplane-record"
+
+
 def _build_every_code_work_request_record(
     request: EveryCodeWorkRequestCreateEnvelope, *, queued_at: str
 ) -> EveryCodeWorkRequestRecord:
@@ -2758,6 +2791,85 @@ def _write_github_actions_authz_policy_grant(
     )
     record_store.write_authz_policy_record(record)
     return updated_policy, record, changed
+
+
+def _summarize_runtime_key_safety_policy_record(
+    record: RuntimeKeySafetyPolicyRecord,
+) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "status": record.status,
+        "source": record.source,
+        "updated_at": record.updated_at,
+        "policy_sha256": record.policy_sha256,
+        "rule_count": len(record.rules),
+        "binding_keys": [rule.binding_key for rule in record.rules],
+    }
+
+
+def _write_runtime_key_safety_policy(
+    *,
+    record_store: PostgresRecordStore,
+    request: RuntimeKeySafetyPolicyApplyEnvelope,
+) -> tuple[RuntimeKeySafetyPolicyRecord, bool]:
+    existing_records = record_store.list_runtime_key_safety_policy_records(status="active", limit=1)
+    existing_record = existing_records[0] if existing_records else None
+    rules = _merged_runtime_key_safety_rules(
+        existing_record.rules if existing_record is not None else (), request.rules
+    )
+    updated_at = _now_timestamp()
+    pending_record = RuntimeKeySafetyPolicyRecord(
+        record_id="runtime-key-safety-policy-pending",
+        status="active",
+        source=request.source_label,
+        updated_at=updated_at,
+        rules=rules,
+    )
+    if (
+        existing_record is not None
+        and existing_record.policy_sha256 == pending_record.policy_sha256
+    ):
+        return existing_record, False
+    record = pending_record.model_copy(
+        update={
+            "record_id": "runtime-key-safety-policy-"
+            f"{_record_slug(updated_at)}-{pending_record.policy_sha256[:12]}",
+        }
+    )
+    record_store.write_runtime_key_safety_policy_record(record)
+    return record, True
+
+
+def _merged_runtime_key_safety_rules(
+    existing_rules: tuple[RuntimeSecretSafetyRule, ...],
+    requested_rules: tuple[RuntimeSecretSafetyRule, ...],
+) -> tuple[RuntimeSecretSafetyRule, ...]:
+    rules_by_binding_key = {rule.binding_key: rule for rule in existing_rules}
+    for requested_rule in requested_rules:
+        existing_rule = rules_by_binding_key.get(requested_rule.binding_key)
+        if existing_rule is None or existing_rule.secret_class != requested_rule.secret_class:
+            rules_by_binding_key[requested_rule.binding_key] = requested_rule
+            continue
+        rules_by_binding_key[requested_rule.binding_key] = requested_rule.model_copy(
+            update={
+                "allowed_contexts": _merged_runtime_key_safety_scope_values(
+                    existing_rule.allowed_contexts, requested_rule.allowed_contexts
+                ),
+                "allowed_instances": _merged_runtime_key_safety_scope_values(
+                    existing_rule.allowed_instances, requested_rule.allowed_instances
+                ),
+                "description": requested_rule.description or existing_rule.description,
+            }
+        )
+    return tuple(rules_by_binding_key[key] for key in sorted(rules_by_binding_key))
+
+
+def _merged_runtime_key_safety_scope_values(
+    existing_values: tuple[str, ...], requested_values: tuple[str, ...]
+) -> tuple[str, ...]:
+    if not existing_values or not requested_values:
+        return ()
+    return tuple(sorted({*existing_values, *requested_values}))
 
 
 def _request_launchplane_self_deploy(
@@ -4834,6 +4946,64 @@ def create_launchplane_service_app(
                 }
                 driver_result = {
                     "authz_policy": _summarize_authz_policy_record(authz_policy_record),
+                    "changed": changed,
+                }
+            elif path == "/v1/runtime-key-safety/policies/apply":
+                runtime_policy_request = RuntimeKeySafetyPolicyApplyEnvelope.model_validate(payload)
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Runtime key-safety policy writes require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="runtime_key_safety.write",
+                    product=runtime_policy_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write Launchplane runtime key-safety policy records.",
+                            },
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                runtime_policy_record, changed = _write_runtime_key_safety_policy(
+                    record_store=record_store,
+                    request=runtime_policy_request,
+                )
+                result = {
+                    "runtime_key_safety_policy_record_id": runtime_policy_record.record_id,
+                    "runtime_key_safety_policy_changed": str(changed).lower(),
+                }
+                driver_result = {
+                    "runtime_key_safety_policy": _summarize_runtime_key_safety_policy_record(
+                        runtime_policy_record
+                    ),
                     "changed": changed,
                 }
             elif path == "/v1/product-onboarding/apply":
