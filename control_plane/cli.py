@@ -92,6 +92,10 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretScope
 from control_plane.contracts.ship_request import ShipRequest
+from control_plane.contracts.work_graph_read_model import (
+    WorkGraphSnapshot,
+    build_work_graph_queue,
+)
 from control_plane.drivers.registry import build_driver_context_view
 from control_plane.every_code_worker import (
     build_every_code_worker_daemon_spec,
@@ -9508,6 +9512,29 @@ def service() -> None:
 @main.group("every-code")
 def every_code() -> None:
     """Every Code local worker commands."""
+
+
+@main.group("work-graph")
+def work_graph() -> None:
+    """Work graph recommendation commands."""
+
+
+@work_graph.command("rank")
+@click.option(
+    "--snapshot-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Operator-provided Code Plans/GitHub work graph snapshot JSON.",
+)
+@click.option("--limit", type=click.IntRange(min=1), default=25, show_default=True)
+def work_graph_rank(snapshot_file: Path, limit: int) -> None:
+    try:
+        snapshot_payload = json.loads(snapshot_file.read_text())
+        snapshot = WorkGraphSnapshot.model_validate(snapshot_payload)
+        queue = build_work_graph_queue(snapshot, limit=limit)
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(queue.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @every_code.command("run-once")

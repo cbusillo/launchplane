@@ -25,6 +25,8 @@ Use these docs as the source of truth for `launchplane`.
   review rubric.
 - [operator-experience.md](operator-experience.md) — API-first product,
   environment, settings, promotion, cleanup, and UI rebuild contract.
+- [work-graph-read-model.md](work-graph-read-model.md) — Code Plans/GitHub work
+  graph snapshot and recommendation queue contract.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
 - [records.md](records.md) — persisted record formats and storage policy.
 - [public-readiness.md](public-readiness.md) — current blockers and exit criteria
