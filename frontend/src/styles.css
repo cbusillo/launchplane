@@ -470,9 +470,40 @@ p {
   gap: 2px;
 }
 
+.work-graph-content {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+}
+
 .work-graph-title strong,
 .work-graph-title code {
   overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-graph-meta {
+  display: flex;
+  min-width: 0;
+  flex-wrap: wrap;
+  gap: 5px 10px;
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+.work-graph-meta span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.work-graph-finish {
+  overflow: hidden;
+  color: var(--fg-muted);
+  font-size: 12px;
+  line-height: 1.35;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -485,7 +516,8 @@ p {
   gap: 5px;
 }
 
-.recommendation-chip {
+.recommendation-chip,
+.reason-chip {
   display: inline-flex;
   min-height: 24px;
   align-items: center;
@@ -495,6 +527,14 @@ p {
   color: var(--fg-muted);
   padding: 0 8px;
   font-size: 11px;
+}
+
+.reason-chip {
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--fg-faint);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .work-graph-hidden {
