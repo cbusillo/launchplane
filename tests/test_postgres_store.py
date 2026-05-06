@@ -576,6 +576,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
 
             listed = store.list_every_code_work_request_records(state="queued")
+            offset_listed = store.list_every_code_work_request_records(
+                state="queued",
+                limit=1,
+                offset=1,
+            )
             claimed = store.claim_every_code_work_request_record(
                 request_id=newer_record.request_id,
                 host="Chris-Studio",
@@ -588,7 +593,11 @@ class PostgresRecordStoreTests(unittest.TestCase):
             )
             loaded = store.read_every_code_work_request_record(newer_record.request_id)
 
-        self.assertEqual([record.request_id for record in listed], [newer_record.request_id, older_record.request_id])
+        self.assertEqual(
+            [record.request_id for record in listed],
+            [newer_record.request_id, older_record.request_id],
+        )
+        self.assertEqual([record.request_id for record in offset_listed], [older_record.request_id])
         self.assertFalse(duplicate_created)
         self.assertEqual(created_duplicate.updated_at, newer_record.updated_at)
         self.assertIsNotNone(claimed)
@@ -632,10 +641,20 @@ class PostgresRecordStoreTests(unittest.TestCase):
                 pr_number=26,
                 status="pending",
             )
+            offset_listed = store.list_every_code_pr_feedback_records(
+                repository="cbusillo/code",
+                pr_number=26,
+                status="pending",
+                limit=1,
+                offset=1,
+            )
 
         self.assertEqual(
             [record.feedback_id for record in listed],
             [newer_record.feedback_id, older_record.feedback_id],
+        )
+        self.assertEqual(
+            [record.feedback_id for record in offset_listed], [older_record.feedback_id]
         )
 
     def test_human_sessions_round_trip_and_delete(self) -> None:

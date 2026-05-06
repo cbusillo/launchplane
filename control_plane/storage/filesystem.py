@@ -48,9 +48,7 @@ class FilesystemRecordStore:
         )
         return record_path
 
-    def _create_model_if_absent(
-        self, record_type: str, record_id: str, model: BaseModel
-    ) -> bool:
+    def _create_model_if_absent(self, record_type: str, record_id: str, model: BaseModel) -> bool:
         record_path = self._record_path(record_type, record_id)
         record_path.parent.mkdir(parents=True, exist_ok=True)
         try:
@@ -168,6 +166,7 @@ class FilesystemRecordStore:
         state: str = "",
         repository: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]:
         records = [
             record
@@ -179,6 +178,8 @@ class FilesystemRecordStore:
             and (not repository or record.repository == repository)
         ]
         records.sort(key=lambda record: (record.updated_at, record.request_id), reverse=True)
+        if offset > 0:
+            records = records[offset:]
         if limit is not None:
             records = records[:limit]
         return tuple(records)
@@ -208,6 +209,7 @@ class FilesystemRecordStore:
         pr_number: int | None = None,
         status: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]:
         records = [
             record
@@ -221,6 +223,8 @@ class FilesystemRecordStore:
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.received_at, record.feedback_id), reverse=True)
+        if offset > 0:
+            records = records[offset:]
         if limit is not None:
             records = records[:limit]
         return tuple(records)

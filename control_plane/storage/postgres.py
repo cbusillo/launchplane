@@ -750,11 +750,14 @@ class PostgresRecordStore(HumanSessionStore):
         filters: Sequence[object] = (),
         order_by: Sequence[object],
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[RecordModel, ...]:
         statement = select(orm_model)
         if filters:
             statement = statement.where(*cast(Sequence[_SqlFilter], filters))
         statement = statement.order_by(*cast(Sequence[_SqlOrderBy], order_by))
+        if offset > 0:
+            statement = statement.offset(offset)
         if limit is not None:
             statement = statement.limit(limit)
         with self._session_factory() as session:
@@ -1248,6 +1251,7 @@ class PostgresRecordStore(HumanSessionStore):
         state: str = "",
         repository: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]:
         filters: list[_SqlFilter] = []
         if state:
@@ -1263,6 +1267,7 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneEveryCodeWorkRequestRow.request_id.desc(),
             ),
             limit=limit,
+            offset=offset,
         )
 
     def claim_every_code_work_request_record(
@@ -1322,6 +1327,7 @@ class PostgresRecordStore(HumanSessionStore):
         pr_number: int | None = None,
         status: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]:
         filters: list[object] = []
         if request_id:
@@ -1341,6 +1347,7 @@ class PostgresRecordStore(HumanSessionStore):
                 LaunchplaneEveryCodePrFeedbackRow.feedback_id.desc(),
             ),
             limit=limit,
+            offset=offset,
         )
 
     def write_preview_lifecycle_plan_record(self, record: PreviewLifecyclePlanRecord) -> None:

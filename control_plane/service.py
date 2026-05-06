@@ -12,7 +12,7 @@ import secrets
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
-from typing import BinaryIO, Callable, Generic, Literal, Protocol, TypeVar, cast
+from typing import BinaryIO, Callable, Generic, Iterable, Literal, Protocol, TypeVar, cast
 from urllib.parse import parse_qs, unquote
 from wsgiref.simple_server import WSGIServer, make_server
 from wsgiref.types import WSGIApplication
@@ -1904,6 +1904,7 @@ class _EveryCodeWorkRequestStore(Protocol):
         state: str = "",
         repository: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
 
     def claim_every_code_work_request_record(
@@ -1914,9 +1915,7 @@ class _EveryCodeWorkRequestStore(Protocol):
         claimed_at: str,
     ) -> EveryCodeWorkRequestRecord | None: ...
 
-    def write_every_code_pr_feedback_record(
-        self, record: EveryCodePrFeedbackRecord
-    ) -> object: ...
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
 
     def list_every_code_pr_feedback_records(
         self,
@@ -1926,6 +1925,7 @@ class _EveryCodeWorkRequestStore(Protocol):
         pr_number: int | None = None,
         status: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
 
@@ -2145,26 +2145,62 @@ def _handle_every_code_pull_request_webhook(
     merged = bool(pull_request_payload.get("merged")) if pull_request_payload else False
     closed_at = _github_webhook_string(pull_request_payload, "closed_at") or _utc_now_timestamp()
     every_code_store = _every_code_work_request_store(record_store)
-    matched_record: EveryCodeWorkRequestRecord | None = None
-    updated_record: EveryCodeWorkRequestRecord | None = None
-    for record in every_code_store.list_every_code_work_request_records(
+    matched_record = _find_every_code_work_request_for_pull_request(
+        every_code_store,
         repository=repository,
-        limit=100,
-    ):
-        if record.result_pr_url.strip() != pr_url:
-            continue
-        matched_record = record
+        pr_url=pr_url,
+    )
+    updated_record: EveryCodeWorkRequestRecord | None = None
+    if matched_record is not None:
         closed_record = close_every_code_work_request_for_pull_request(
-            record,
+            matched_record,
             pr_url=pr_url,
             merged=merged,
             closed_at=closed_at,
         )
-        if closed_record is None:
+        if closed_record is not None:
+            every_code_store.write_every_code_work_request_record(closed_record)
+            updated_record = closed_record
+
+    if updated_record is None and matched_record is None:
+        feedback_record = _find_every_code_pr_feedback_for_pull_request(
+            every_code_store,
+            repository=repository,
+            pr_url=pr_url,
+        )
+        if feedback_record is not None:
+            matched_record = every_code_store.read_every_code_work_request_record(
+                feedback_record.request_id
+            )
+            closed_record = close_every_code_work_request_for_pull_request(
+                matched_record,
+                pr_url=pr_url,
+                merged=merged,
+                closed_at=closed_at,
+            )
+            if closed_record is not None:
+                every_code_store.write_every_code_work_request_record(closed_record)
+                updated_record = closed_record
+
+    if updated_record is None and matched_record is None:
+        for record in _iter_every_code_work_request_records(
+            every_code_store,
+            repository=repository,
+        ):
+            if record.issue_url.strip() != pr_url:
+                continue
+            matched_record = record
+            closed_record = close_every_code_work_request_for_pull_request(
+                record,
+                pr_url=pr_url,
+                merged=merged,
+                closed_at=closed_at,
+            )
+            if closed_record is None:
+                break
+            every_code_store.write_every_code_work_request_record(closed_record)
+            updated_record = closed_record
             break
-        every_code_store.write_every_code_work_request_record(closed_record)
-        updated_record = closed_record
-        break
 
     if matched_record is None:
         return _json_response(
@@ -2202,6 +2238,78 @@ def _handle_every_code_pull_request_webhook(
     )
     accepted_payload["github_delivery_id"] = delivery_id
     return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+
+
+def _find_every_code_work_request_for_pull_request(
+    every_code_store: _EveryCodeWorkRequestStore,
+    *,
+    repository: str,
+    pr_url: str,
+) -> EveryCodeWorkRequestRecord | None:
+    for record in _iter_every_code_work_request_records(
+        every_code_store,
+        repository=repository,
+    ):
+        if record.result_pr_url.strip() == pr_url:
+            return record
+    return None
+
+
+def _find_every_code_pr_feedback_for_pull_request(
+    every_code_store: _EveryCodeWorkRequestStore,
+    *,
+    repository: str,
+    pr_url: str,
+) -> EveryCodePrFeedbackRecord | None:
+    for record in _iter_every_code_pr_feedback_records(
+        every_code_store,
+        repository=repository,
+    ):
+        if record.pr_url.strip() == pr_url:
+            return record
+    return None
+
+
+def _iter_every_code_work_request_records(
+    every_code_store: _EveryCodeWorkRequestStore,
+    *,
+    repository: str,
+) -> Iterable[EveryCodeWorkRequestRecord]:
+    page_size = 100
+    offset = 0
+    while True:
+        records = every_code_store.list_every_code_work_request_records(
+            repository=repository,
+            limit=page_size,
+            offset=offset,
+        )
+        if not records:
+            break
+        yield from records
+        if len(records) < page_size:
+            break
+        offset += page_size
+
+
+def _iter_every_code_pr_feedback_records(
+    every_code_store: _EveryCodeWorkRequestStore,
+    *,
+    repository: str,
+) -> Iterable[EveryCodePrFeedbackRecord]:
+    page_size = 100
+    offset = 0
+    while True:
+        records = every_code_store.list_every_code_pr_feedback_records(
+            repository=repository,
+            limit=page_size,
+            offset=offset,
+        )
+        if not records:
+            break
+        yield from records
+        if len(records) < page_size:
+            break
+        offset += page_size
 
 
 def _handle_every_code_pr_feedback_webhook(
@@ -2738,12 +2846,14 @@ def _every_code_read_payload(
         pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
         pr_number_filter = int(pr_number_value) if pr_number_value else None
         limit = int(str((query.get("limit") or ["50"])[0] or "50"))
+        offset = int(str((query.get("offset") or ["0"])[0] or "0"))
         feedback_records = every_code_store.list_every_code_pr_feedback_records(
             request_id=request_id_filter,
             repository=repository_filter,
             pr_number=pr_number_filter,
             status=status_filter,
             limit=limit,
+            offset=offset,
         )
         return {
             "request_id": request_id_filter,
@@ -2757,10 +2867,12 @@ def _every_code_read_payload(
     state_filter = str((query.get("state") or [""])[0] or "").strip()
     repository_filter = str((query.get("repository") or [""])[0] or "").strip()
     limit = int(str((query.get("limit") or ["50"])[0] or "50"))
+    offset = int(str((query.get("offset") or ["0"])[0] or "0"))
     work_request_records = every_code_store.list_every_code_work_request_records(
         state=state_filter,
         repository=repository_filter,
         limit=limit,
+        offset=offset,
     )
     return {
         "state": state_filter,

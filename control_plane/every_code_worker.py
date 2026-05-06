@@ -47,6 +47,7 @@ class EveryCodeWorkerStore(Protocol):
         state: str = "",
         repository: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
 
     def claim_every_code_work_request_record(
@@ -69,6 +70,7 @@ class EveryCodeWorkerStore(Protocol):
         pr_number: int | None = None,
         status: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
@@ -110,6 +112,7 @@ class EveryCodeWorkerApiStore:
         state: str = "",
         repository: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]:
         query: dict[str, object] = {}
         if state.strip():
@@ -118,6 +121,8 @@ class EveryCodeWorkerApiStore:
             query["repository"] = repository.strip()
         if limit is not None:
             query["limit"] = limit
+        if offset > 0:
+            query["offset"] = offset
         suffix = f"?{urlencode(query)}" if query else ""
         payload = self._request("GET", f"/v1/every-code/work-requests{suffix}")
         requests = payload.get("requests", [])
@@ -179,6 +184,7 @@ class EveryCodeWorkerApiStore:
         pr_number: int | None = None,
         status: str = "",
         limit: int | None = None,
+        offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]:
         query: dict[str, object] = {}
         if request_id.strip():
@@ -191,6 +197,8 @@ class EveryCodeWorkerApiStore:
             query["status"] = status.strip()
         if limit is not None:
             query["limit"] = limit
+        if offset > 0:
+            query["offset"] = offset
         suffix = f"?{urlencode(query)}" if query else ""
         payload = self._request("GET", f"/v1/every-code/pr-feedback{suffix}")
         feedback = payload.get("feedback", [])

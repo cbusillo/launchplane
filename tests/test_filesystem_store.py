@@ -102,11 +102,20 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                 request_id="every-code-cbusillo-code-123-test",
                 status="pending",
             )
+            offset_records = store.list_every_code_pr_feedback_records(
+                request_id="every-code-cbusillo-code-123-test",
+                status="pending",
+                limit=1,
+                offset=1,
+            )
             self.assertTrue(written_path.exists())
 
         self.assertEqual(
             [record.feedback_id for record in listed_records],
             [newer_record.feedback_id, older_record.feedback_id],
+        )
+        self.assertEqual(
+            [record.feedback_id for record in offset_records], [older_record.feedback_id]
         )
 
     def test_write_and_read_product_profile_record(self) -> None:
