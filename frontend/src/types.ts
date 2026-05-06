@@ -498,6 +498,92 @@ export interface EveryCodeWorkRequestListPayload {
   requests: EveryCodeWorkRequestRecord[];
 }
 
+export type WorkGraphRepoClassification =
+  | "managed_runtime"
+  | "active_awareness"
+  | "support_dependency"
+  | "out_of_scope";
+export type WorkGraphFocus =
+  | "Now"
+  | "Next"
+  | "Waiting"
+  | "Later"
+  | "Done"
+  | "Unknown";
+export type WorkGraphState = "ready" | "waiting" | "blocked" | "done" | "hidden";
+export type WorkGraphRecommendation =
+  | "quick_win"
+  | "deep_work"
+  | "switch_projects"
+  | "blocked_cleanup"
+  | "attention_needed"
+  | "watch";
+
+export interface WorkGraphRepoSnapshot {
+  repository: string;
+  classification: WorkGraphRepoClassification;
+  product?: string;
+  display_name?: string;
+}
+
+export interface WorkGraphIssueSnapshot {
+  repository: string;
+  number: number;
+  title: string;
+  url: string;
+  state?: "open" | "closed";
+  focus?: WorkGraphFocus;
+  manager?: string;
+  finish_line?: string;
+  labels?: string[];
+  blocked_by?: number;
+  blocking?: number;
+  subissues_total?: number;
+  subissues_completed?: number;
+  updated_at?: string;
+  is_pull_request?: boolean;
+  check_state?: "success" | "pending" | "failure" | "unknown";
+  deploy_state?: "success" | "pending" | "failure" | "unknown";
+}
+
+export interface WorkGraphSnapshot {
+  schema_version?: 1;
+  generated_at: string;
+  repos: WorkGraphRepoSnapshot[];
+  issues: WorkGraphIssueSnapshot[];
+}
+
+export interface WorkGraphQueueItem {
+  repository: string;
+  repo_classification: WorkGraphRepoClassification;
+  product: string;
+  product_display_name: string;
+  number: number;
+  title: string;
+  url: string;
+  focus: WorkGraphFocus;
+  manager: string;
+  finish_line: string;
+  state: WorkGraphState;
+  recommendation: WorkGraphRecommendation;
+  score: number;
+  updated_at: string;
+  reasons: Array<{ code: string; detail: string }>;
+}
+
+export interface WorkGraphRankPayload {
+  status: "accepted";
+  trace_id: string;
+  result: {
+    queue: {
+      schema_version: number;
+      generated_at: string;
+      items: WorkGraphQueueItem[];
+      hidden_count: number;
+    };
+  };
+}
+
 export interface GenericWebProdPromotionRequest {
   schema_version: 1;
   product: string;

@@ -1120,6 +1120,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
     }
 )
+_HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
@@ -3453,7 +3454,10 @@ def create_launchplane_service_app(
                     session_manager=session_manager,
                 )
             else:
-                if path in _HUMAN_IDENTITY_MUTATION_ROUTES:
+                if (
+                    path in _HUMAN_IDENTITY_MUTATION_ROUTES
+                    or path in _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES
+                ):
                     identity = _read_identity(
                         environ=environ,
                         verifier=verifier,

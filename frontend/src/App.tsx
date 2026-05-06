@@ -16,6 +16,7 @@ import {
   Play,
   Plus,
   RefreshCw,
+  Route,
   Save,
   ShieldAlert,
   ShieldCheck,
@@ -38,6 +39,7 @@ import {
   logout,
   readAuthSession,
   readDriverView,
+  rankWorkGraphSnapshot,
 } from "./api";
 import type {
   AuthIdentity,
@@ -63,6 +65,10 @@ import type {
   Safety,
   Status,
   FreshnessStatus,
+  WorkGraphQueueItem,
+  WorkGraphRecommendation,
+  WorkGraphSnapshot,
+  WorkGraphState,
 } from "./types";
 
 type Theme = "dark" | "light";
@@ -122,6 +128,8 @@ type SecretConfigRow = {
   value: string;
   description: string;
 };
+type WorkGraphFilter = WorkGraphState | "all";
+type WorkGraphMode = WorkGraphRecommendation | "all";
 
 const THEME_STORAGE_KEY = "launchplane.theme";
 const DEFAULT_CHOICES: DriverChoice[] = [
@@ -366,6 +374,12 @@ export function App() {
   const [workRequests, setWorkRequests] = useState<
     EveryCodeWorkRequestRecord[]
   >([]);
+  const [workGraphItems, setWorkGraphItems] = useState<WorkGraphQueueItem[]>([]);
+  const [workGraphHiddenCount, setWorkGraphHiddenCount] = useState(0);
+  const [workGraphError, setWorkGraphError] = useState("");
+  const [workGraphFilter, setWorkGraphFilter] =
+    useState<WorkGraphFilter>("all");
+  const [workGraphMode, setWorkGraphMode] = useState<WorkGraphMode>("all");
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
   const [testingView, setTestingView] = useState<DriverContextView | null>(
@@ -383,7 +397,6 @@ export function App() {
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(
     null,
   );
-
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
     window.sessionStorage.setItem(THEME_STORAGE_KEY, theme);
@@ -425,6 +438,9 @@ export function App() {
       setProductProfiles([]);
       setProductOverviews([]);
       setWorkRequests([]);
+      setWorkGraphItems([]);
+      setWorkGraphHiddenCount(0);
+      setWorkGraphError("");
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -463,7 +479,7 @@ export function App() {
       })),
     ])
       .then(
-        ([
+        async ([
           driverPayload,
           prodPayload,
           testingPayload,
@@ -482,6 +498,39 @@ export function App() {
           setPreviewView(previewPayload?.view ?? null);
           setProductOverviews(productsPayload.products);
           setWorkRequests(workRequestsPayload.requests);
+          const workGraphSnapshot = buildWorkGraphSnapshot(
+            productsPayload.products,
+            workRequestsPayload.requests,
+          );
+          if (!workGraphSnapshot.issues.length) {
+            setWorkGraphItems([]);
+            setWorkGraphHiddenCount(0);
+            setWorkGraphError("");
+            return;
+          }
+          try {
+            const workGraphPayload = await rankWorkGraphSnapshot(
+              workGraphSnapshot,
+              12,
+            );
+            if (controller.signal.aborted) {
+              return;
+            }
+            setWorkGraphItems(workGraphPayload.result.queue.items);
+            setWorkGraphHiddenCount(workGraphPayload.result.queue.hidden_count);
+            setWorkGraphError("");
+          } catch (apiError) {
+            if (controller.signal.aborted) {
+              return;
+            }
+            setWorkGraphItems([]);
+            setWorkGraphHiddenCount(0);
+            setWorkGraphError(
+              apiError instanceof Error
+                ? apiError.message
+                : "Work graph ranking failed.",
+            );
+          }
         },
       )
       .catch((apiError: unknown) => {
@@ -613,6 +662,9 @@ export function App() {
       setProductProfiles([]);
       setProductOverviews([]);
       setWorkRequests([]);
+      setWorkGraphItems([]);
+      setWorkGraphHiddenCount(0);
+      setWorkGraphError("");
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -652,10 +704,17 @@ export function App() {
               products={productOverviews}
               selectedProduct={selectedProductOverview}
               workRequests={workRequests}
+              workGraphItems={workGraphItems}
+              workGraphHiddenCount={workGraphHiddenCount}
+              workGraphError={workGraphError}
+              workGraphFilter={workGraphFilter}
+              workGraphMode={workGraphMode}
               loading={loading}
               onSelectProduct={(product) =>
                 setSelected(choiceFromProductOverview(product))
               }
+              onWorkGraphFilterChange={setWorkGraphFilter}
+              onWorkGraphModeChange={setWorkGraphMode}
             />
             <ProductOverviewShell
               product={selectedProductOverview}
@@ -860,14 +919,28 @@ function ProductInventoryCockpit({
   products,
   selectedProduct,
   workRequests,
+  workGraphItems,
+  workGraphHiddenCount,
+  workGraphError,
+  workGraphFilter,
+  workGraphMode,
   loading,
   onSelectProduct,
+  onWorkGraphFilterChange,
+  onWorkGraphModeChange,
 }: {
   products: ProductSiteOverview[];
   selectedProduct: ProductSiteOverview | null;
   workRequests: EveryCodeWorkRequestRecord[];
+  workGraphItems: WorkGraphQueueItem[];
+  workGraphHiddenCount: number;
+  workGraphError: string;
+  workGraphFilter: WorkGraphFilter;
+  workGraphMode: WorkGraphMode;
   loading: boolean;
   onSelectProduct: (product: ProductSiteOverview) => void;
+  onWorkGraphFilterChange: (filter: WorkGraphFilter) => void;
+  onWorkGraphModeChange: (mode: WorkGraphMode) => void;
 }) {
   const activeWork = workRequests.filter((request) =>
     ["queued", "claimed", "running", "blocked"].includes(request.state),
@@ -957,8 +1030,155 @@ function ProductInventoryCockpit({
           </button>
         ))}
       </div>
+      <WorkGraphQueue
+        items={workGraphItems}
+        hiddenCount={workGraphHiddenCount}
+        error={workGraphError}
+        filter={workGraphFilter}
+        mode={workGraphMode}
+        loading={loading}
+        onFilterChange={onWorkGraphFilterChange}
+        onModeChange={onWorkGraphModeChange}
+      />
       <EveryCodeQueue requests={activeWork} loading={loading} />
     </section>
+  );
+}
+
+function WorkGraphQueue({
+  items,
+  hiddenCount,
+  error,
+  filter,
+  mode,
+  loading,
+  onFilterChange,
+  onModeChange,
+}: {
+  items: WorkGraphQueueItem[];
+  hiddenCount: number;
+  error: string;
+  filter: WorkGraphFilter;
+  mode: WorkGraphMode;
+  loading: boolean;
+  onFilterChange: (filter: WorkGraphFilter) => void;
+  onModeChange: (mode: WorkGraphMode) => void;
+}) {
+  const filteredItems = items.filter((item) => {
+    const stateMatches = filter === "all" || item.state === filter;
+    const modeMatches = mode === "all" || item.recommendation === mode;
+    return stateMatches && modeMatches;
+  });
+  const readyCount = items.filter((item) => item.state === "ready").length;
+  const blockedCount = items.filter((item) => item.state === "blocked").length;
+  const status: Status | string = error
+    ? "fail"
+    : blockedCount
+      ? "blocked"
+      : readyCount
+        ? "pending"
+        : items.length
+          ? "unknown"
+          : "pass";
+
+  return (
+    <div className="work-graph-queue">
+      <div className="queue-head work-graph-head">
+        <span>What next</span>
+        <strong>{items.length ? `${items.length} ranked` : "clear"}</strong>
+        <StatusPill status={status} />
+      </div>
+      <div className="work-graph-controls" aria-label="Work graph filters">
+        <SegmentedControl<WorkGraphFilter>
+          ariaLabel="Work state"
+          value={filter}
+          options={[
+            { value: "all", label: "All" },
+            { value: "ready", label: "Ready" },
+            { value: "blocked", label: "Blocked" },
+            { value: "waiting", label: "Waiting" },
+          ]}
+          onChange={onFilterChange}
+        />
+        <SegmentedControl<WorkGraphMode>
+          ariaLabel="Recommendation"
+          value={mode}
+          options={[
+            { value: "all", label: "Any" },
+            { value: "quick_win", label: "Quick" },
+            { value: "deep_work", label: "Deep" },
+            { value: "attention_needed", label: "Needs" },
+          ]}
+          onChange={onModeChange}
+        />
+      </div>
+      {error ? (
+        <StateBlock icon={<ShieldAlert size={18} />} title={error} />
+      ) : null}
+      {loading && !items.length ? <SkeletonRows /> : null}
+      {!loading && !error && !items.length ? (
+        <StateBlock icon={<Route size={18} />} title="No ranked work yet" />
+      ) : null}
+      {!loading && !error && items.length && !filteredItems.length ? (
+        <StateBlock icon={<Route size={18} />} title="No work matches filters" />
+      ) : null}
+      {filteredItems.slice(0, 5).map((item) => (
+        <a
+          className="work-graph-row"
+          href={item.url}
+          key={`${item.repository}:${item.number}`}
+          target="_blank"
+          rel="noreferrer"
+        >
+          <span className="work-graph-score">{item.score}</span>
+          <span className="work-graph-title">
+            <strong>{item.title}</strong>
+            <code>
+              {item.repository}#{item.number}
+            </code>
+          </span>
+          <span className="work-graph-tags">
+            <span className="status-pill" data-status={workGraphStateStatus(item.state)}>
+              <StatusIcon status={workGraphStateStatus(item.state)} />
+              {item.state}
+            </span>
+            <span className="recommendation-chip">
+              {recommendationLabel(item.recommendation)}
+            </span>
+          </span>
+        </a>
+      ))}
+      {hiddenCount ? (
+        <code className="work-graph-hidden">{hiddenCount} hidden by rank or state</code>
+      ) : null}
+    </div>
+  );
+}
+
+function SegmentedControl<T extends string>({
+  ariaLabel,
+  value,
+  options,
+  onChange,
+}: {
+  ariaLabel: string;
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="segmented-control" aria-label={ariaLabel}>
+      {options.map((option) => (
+        <button
+          type="button"
+          key={option.value}
+          data-selected={option.value === value}
+          onClick={() => onChange(option.value)}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
   );
 }
 
@@ -2824,6 +3044,10 @@ function StateFixtureGallery({
   const [selectedEvidence, setSelectedEvidence] = useState<EvidenceRow | null>(
     null,
   );
+  const [fixtureWorkGraphFilter, setFixtureWorkGraphFilter] =
+    useState<WorkGraphFilter>("all");
+  const [fixtureWorkGraphMode, setFixtureWorkGraphMode] =
+    useState<WorkGraphMode>("all");
   const readyProd = fixtureLane({
     instance: "prod",
     artifact: "ghcr.io/every/verireel@sha256:11112222",
@@ -2945,6 +3169,59 @@ function StateFixtureGallery({
       error_message: "",
     },
   ];
+  const fixtureWorkGraphItems: WorkGraphQueueItem[] = [
+    {
+      repository: "cbusillo/launchplane",
+      repo_classification: "managed_runtime",
+      product: "launchplane",
+      product_display_name: "Launchplane",
+      number: 190,
+      title: "Build What To Work On Next cockpit",
+      url: "https://github.com/cbusillo/launchplane/issues/190",
+      focus: "Now",
+      manager: "Code",
+      finish_line: "Ranked queue visible in the operator UI.",
+      state: "ready",
+      recommendation: "deep_work",
+      score: 126,
+      updated_at: "2026-05-06T02:12:00Z",
+      reasons: [{ code: "focus", detail: "Now lane" }],
+    },
+    {
+      repository: "cbusillo/verireel",
+      repo_classification: "managed_runtime",
+      product: "verireel",
+      product_display_name: "VeriReel",
+      number: 169,
+      title: "Stabilize app-maintenance E2E cleanup",
+      url: "https://github.com/cbusillo/verireel/pull/169",
+      focus: "Next",
+      manager: "Code",
+      finish_line: "Testing image publish is green.",
+      state: "ready",
+      recommendation: "quick_win",
+      score: 110,
+      updated_at: "2026-05-06T01:03:00Z",
+      reasons: [{ code: "small", detail: "No subissues" }],
+    },
+    {
+      repository: "cbusillo/launchplane",
+      repo_classification: "managed_runtime",
+      product: "launchplane",
+      product_display_name: "Launchplane",
+      number: 248,
+      title: "Finish runtime key safety rollout",
+      url: "https://github.com/cbusillo/launchplane/issues/248",
+      focus: "Waiting",
+      manager: "Code",
+      finish_line: "All runtime secret paths are gated.",
+      state: "blocked",
+      recommendation: "blocked_cleanup",
+      score: 42,
+      updated_at: "2026-05-05T23:00:00Z",
+      reasons: [{ code: "blocked", detail: "Waiting on downstream validation" }],
+    },
+  ];
 
   return (
     <section className="fixture-gallery">
@@ -2957,8 +3234,15 @@ function StateFixtureGallery({
           products={fixtureProducts}
           selectedProduct={fixtureProducts[0]}
           workRequests={fixtureRequests}
+          workGraphItems={fixtureWorkGraphItems}
+          workGraphHiddenCount={2}
+          workGraphError=""
+          workGraphFilter={fixtureWorkGraphFilter}
+          workGraphMode={fixtureWorkGraphMode}
           loading={false}
           onSelectProduct={() => undefined}
+          onWorkGraphFilterChange={setFixtureWorkGraphFilter}
+          onWorkGraphModeChange={setFixtureWorkGraphMode}
         />
       </div>
       <div className="fixture-grid">
@@ -4085,6 +4369,90 @@ function workRequestStatus(state: EveryCodeWorkRequestRecord["state"]): Status |
     return "pending";
   }
   return "unknown";
+}
+
+function workGraphStateStatus(state: WorkGraphState): Status | string {
+  if (state === "ready") {
+    return "pending";
+  }
+  if (state === "blocked") {
+    return "blocked";
+  }
+  if (state === "waiting") {
+    return "unknown";
+  }
+  return "pass";
+}
+
+function recommendationLabel(recommendation: WorkGraphRecommendation): string {
+  return recommendation.replaceAll("_", " ");
+}
+
+function focusForWorkRequest(
+  request: EveryCodeWorkRequestRecord,
+): WorkGraphSnapshot["issues"][number]["focus"] {
+  if (request.state === "blocked") {
+    return "Waiting";
+  }
+  if (request.state === "done") {
+    return "Done";
+  }
+  if (request.state === "running" || request.state === "claimed") {
+    return "Now";
+  }
+  return "Next";
+}
+
+function buildWorkGraphSnapshot(
+  products: ProductSiteOverview[],
+  workRequests: EveryCodeWorkRequestRecord[],
+): WorkGraphSnapshot {
+  const repoSnapshots = new Map<string, WorkGraphSnapshot["repos"][number]>();
+  for (const product of products) {
+    const repository = product.repository.trim();
+    if (!repository || !repository.includes("/")) {
+      continue;
+    }
+    repoSnapshots.set(repository.toLowerCase(), {
+      repository,
+      classification: "managed_runtime",
+      product: product.product,
+      display_name: product.display_name || product.product,
+    });
+  }
+  for (const request of workRequests) {
+    const repository = request.repository.trim();
+    if (!repository || !repository.includes("/")) {
+      continue;
+    }
+    if (!repoSnapshots.has(repository.toLowerCase())) {
+      repoSnapshots.set(repository.toLowerCase(), {
+        repository,
+        classification: "active_awareness",
+        display_name: repository.split("/").at(-1) ?? repository,
+      });
+    }
+  }
+  return {
+    schema_version: 1,
+    generated_at: new Date().toISOString(),
+    repos: Array.from(repoSnapshots.values()),
+    issues: workRequests.map((request) => ({
+      repository: request.repository,
+      number: request.issue_number,
+      title: request.issue_title || `Issue #${request.issue_number}`,
+      url: request.issue_url,
+      state: request.state === "done" ? "closed" : "open",
+      focus: focusForWorkRequest(request),
+      manager: request.claimed_by_host || request.trigger_actor || "Code",
+      finish_line: request.result_summary,
+      labels: [request.trigger_label].filter(Boolean),
+      blocked_by: request.state === "blocked" ? 1 : 0,
+      updated_at: request.updated_at || request.queued_at,
+      check_state: request.state === "blocked" ? "failure" : "unknown",
+      deploy_state: "unknown",
+    })),
+  };
 }
 
 function safetyLabel(safety: Safety): string {

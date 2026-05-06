@@ -13,6 +13,8 @@ import type {
   ProductConfigApplyRequest,
   ProductListPayload,
   ProductProfileListPayload,
+  WorkGraphRankPayload,
+  WorkGraphSnapshot,
 } from "./types";
 
 export class LaunchplaneApiError extends Error {
@@ -101,6 +103,16 @@ export function listEveryCodeWorkRequests(
   return requestJson<EveryCodeWorkRequestListPayload>(
     `/v1/every-code/work-requests?limit=${encodeURIComponent(String(limit))}`,
   );
+}
+
+export function rankWorkGraphSnapshot(
+  snapshot: WorkGraphSnapshot,
+  limit = 12,
+): Promise<WorkGraphRankPayload> {
+  return requestJson<WorkGraphRankPayload>("/v1/work-graph/rank", "POST", {
+    snapshot,
+    limit,
+  });
 }
 
 export function applyProductConfig(
