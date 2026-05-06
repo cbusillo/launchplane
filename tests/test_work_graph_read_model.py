@@ -8,6 +8,7 @@ from control_plane.contracts.every_code_work_request import EveryCodeWorkRequest
 from control_plane.contracts.product_environment_read_model import ProductSiteOverview
 from control_plane.contracts.work_graph_read_model import (
     WorkGraphIssueSnapshot,
+    WorkGraphPlanningIssueFacts,
     WorkGraphRepoSnapshot,
     WorkGraphSnapshot,
     build_work_graph_queue,
@@ -229,6 +230,83 @@ class WorkGraphReadModelTests(unittest.TestCase):
         self.assertEqual(issues["cbusillo/launchplane"].focus, "Next")
         self.assertEqual(issues["cbusillo/code"].focus, "Waiting")
         self.assertEqual(issues["cbusillo/code"].blocked_by, 1)
+
+    def test_build_snapshot_applies_compact_planning_facts_without_copying_bodies(
+        self,
+    ) -> None:
+        snapshot = build_work_graph_snapshot_from_records(
+            generated_at="2026-05-06T03:55:00Z",
+            product_overviews=(_product_overview(),),
+            work_requests=(_work_request(trigger_label="every-code"),),
+            planning_issue_facts=(
+                WorkGraphPlanningIssueFacts.model_validate(
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "number": 190,
+                        "focus": "Now",
+                        "manager": "Chris",
+                        "finish_line": "Ranked queue is driven by Code Plans fields.",
+                        "labels": ("plan", "plan:active"),
+                        "blocking": 2,
+                        "updated_at": "2026-05-06T03:54:00Z",
+                        "check_state": "success",
+                    }
+                ),
+            ),
+        )
+
+        issue = snapshot.issues[0]
+        self.assertEqual(issue.focus, "Now")
+        self.assertEqual(issue.manager, "Chris")
+        self.assertEqual(issue.finish_line, "Ranked queue is driven by Code Plans fields.")
+        self.assertEqual(issue.labels, ("every-code", "plan", "plan:active"))
+        self.assertEqual(issue.blocking, 2)
+        self.assertEqual(issue.updated_at, "2026-05-06T03:54:00Z")
+        self.assertEqual(issue.check_state, "success")
+
+    def test_empty_planning_facts_do_not_erase_every_code_facts(self) -> None:
+        snapshot = build_work_graph_snapshot_from_records(
+            generated_at="2026-05-06T03:55:00Z",
+            product_overviews=(_product_overview(),),
+            work_requests=(
+                _work_request(
+                    state="claimed",
+                    claimed_at="2026-05-06T03:49:00Z",
+                    claimed_by_host="local-mac",
+                    updated_at="2026-05-06T03:50:00Z",
+                ),
+            ),
+            planning_issue_facts=(
+                WorkGraphPlanningIssueFacts.model_validate(
+                    {"repository": "cbusillo/launchplane", "number": 190}
+                ),
+            ),
+        )
+
+        issue = snapshot.issues[0]
+        self.assertEqual(issue.focus, "Now")
+        self.assertEqual(issue.manager, "local-mac")
+        self.assertEqual(issue.updated_at, "2026-05-06T03:50:00Z")
+
+    def test_sparse_planning_subissue_completion_does_not_break_snapshot(self) -> None:
+        snapshot = build_work_graph_snapshot_from_records(
+            generated_at="2026-05-06T03:55:00Z",
+            product_overviews=(_product_overview(),),
+            work_requests=(_work_request(),),
+            planning_issue_facts=(
+                WorkGraphPlanningIssueFacts.model_validate(
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "number": 190,
+                        "subissues_completed": 1,
+                    }
+                ),
+            ),
+        )
+
+        issue = snapshot.issues[0]
+        self.assertEqual(issue.subissues_total, 0)
+        self.assertEqual(issue.subissues_completed, 0)
 
 
 if __name__ == "__main__":

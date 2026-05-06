@@ -69,13 +69,17 @@ The snapshot route uses the same `work_graph.rank` authorization. It composes
 current product overviews with durable Every Code work-request records,
 classifies product repositories as `managed_runtime`, classifies other request
 repositories as `active_awareness`, and returns source counts with the snapshot.
-It does not fetch live GitHub issue bodies or Project fields and does not write
-new records.
+The route can also apply compact planning facts from a caller-owned ingestion
+provider, such as Focus, Manager, Finish Line, labels, dependency counts,
+subissue counts, updated time, and check/deploy state. Empty planning facts do
+not erase Every Code work-request facts. It does not fetch or store GitHub issue
+bodies and does not write new records.
 
 ## Boundary
 
-Do not store copied issue bodies or Project fields as Launchplane authority.
-When Launchplane needs durable history, store snapshots with provenance and make
-their freshness visible. The normal operator view should link back to GitHub for
-planning details and use Launchplane only to rank, explain, and connect work to
-product/environment evidence.
+Do not store copied issue bodies as Launchplane authority. Project fields may be
+used as compact transient facts for ranking and display, but GitHub Projects
+remain the source of truth. When Launchplane needs durable history, store
+snapshots with provenance and make their freshness visible. The normal operator
+view should link back to GitHub for planning details and use Launchplane only to
+rank, explain, and connect work to product/environment evidence.
