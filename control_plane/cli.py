@@ -9581,6 +9581,12 @@ def work_graph_rank(snapshot_file: Path, limit: int) -> None:
     default=None,
     help="Explicit checkout root for the claimed request.",
 )
+@click.option(
+    "--worktree-state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="State directory where worker-owned request worktrees are created.",
+)
 @click.option("--repository", default="", help="Optional owner/repo queue filter.")
 @click.option(
     "--command-template",
@@ -9596,6 +9602,7 @@ def every_code_run_once(
     host: str,
     workspace_root: Path,
     checkout_root: Path | None,
+    worktree_state_dir: Path | None,
     repository: str,
     command_template: str,
     tmux_binary: str,
@@ -9613,6 +9620,7 @@ def every_code_run_once(
             host=resolved_host,
             workspace_root=workspace_root,
             checkout_root=checkout_root,
+            worktree_state_dir=worktree_state_dir,
             repository=repository,
             command_template=command_template,
             state_dir=state_dir,
@@ -9693,6 +9701,12 @@ def _close_store(record_store: object) -> None:
     default=None,
     help="Explicit checkout root for claimed requests.",
 )
+@click.option(
+    "--worktree-state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="State directory where worker-owned request worktrees are created.",
+)
 @click.option("--repository", default="", help="Optional owner/repo queue filter.")
 @click.option(
     "--command-template",
@@ -9722,6 +9736,7 @@ def every_code_run(
     host: str,
     workspace_root: Path,
     checkout_root: Path | None,
+    worktree_state_dir: Path | None,
     repository: str,
     command_template: str,
     tmux_binary: str,
@@ -9741,6 +9756,7 @@ def every_code_run(
             host=resolved_host,
             workspace_root=workspace_root,
             checkout_root=checkout_root,
+            worktree_state_dir=worktree_state_dir,
             repository=repository,
             command_template=command_template,
             state_dir=state_dir,
@@ -9798,6 +9814,12 @@ def every_code_run(
     default=None,
     help="Explicit checkout root for claimed requests.",
 )
+@click.option(
+    "--worktree-state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=None,
+    help="State directory where worker-owned request worktrees are created.",
+)
 @click.option("--repository", default="", help="Optional owner/repo queue filter.")
 @click.option(
     "--command-template",
@@ -9820,6 +9842,7 @@ def every_code_start(
     host: str,
     workspace_root: Path,
     checkout_root: Path | None,
+    worktree_state_dir: Path | None,
     repository: str,
     command_template: str,
     tmux_binary: str,
@@ -9839,6 +9862,7 @@ def every_code_start(
         host=host.strip() or os.uname().nodename,
         workspace_root=workspace_root,
         checkout_root=checkout_root,
+        worktree_state_dir=worktree_state_dir,
         repository=repository,
         command_template=command_template,
         tmux_binary=tmux_binary,

@@ -20,8 +20,11 @@ from control_plane.every_code_worker import (
     default_every_code_command,
     every_code_claim_comment_body,
     every_code_tmux_session_name,
+    every_code_worktree_branch,
+    every_code_worktree_root,
     every_code_worker_daemon_status,
     finish_every_code_work_request,
+    prepare_every_code_checkout,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -48,12 +51,31 @@ def _queued_record() -> EveryCodeWorkRequestRecord:
 
 
 class _Runner:
-    def __init__(self, *, fail_issue_comment: bool = False) -> None:
+    def __init__(self, *, fail_issue_comment: bool = False, existing_branch: bool = False) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.fail_issue_comment = fail_issue_comment
+        self.existing_branch = existing_branch
 
     def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
+        if args[0] == "git" and args[3:6] == ("symbolic-ref", "--short", "refs/remotes/origin/HEAD"):
+            return subprocess.CompletedProcess(args, 0, "origin/main\n", "")
+        if args[0] == "git" and args[3:6] == ("show-ref", "--verify", "--quiet"):
+            return subprocess.CompletedProcess(args, 0 if self.existing_branch else 1, "", "")
+        if args[0] == "git" and args[3:5] == ("branch", "--show-current"):
+            return subprocess.CompletedProcess(args, 0, every_code_worktree_branch(_queued_record()) + "\n", "")
+        if args[0] == "git" and args[3:6] == ("worktree", "add", "-b"):
+            worktree_root = Path(args[7])
+            worktree_root.mkdir(parents=True, exist_ok=True)
+            (worktree_root / ".git").write_text("gitdir: test\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[0] == "git" and args[3:5] == ("worktree", "add"):
+            worktree_root = Path(args[5])
+            worktree_root.mkdir(parents=True, exist_ok=True)
+            (worktree_root / ".git").write_text("gitdir: test\n", encoding="utf-8")
+            return subprocess.CompletedProcess(args, 0, "", "")
+        if args[0] == "git":
+            return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ("gh", "issue", "comment"):
             if self.fail_issue_comment:
                 return subprocess.CompletedProcess(args, 1, "", "rate limited")
@@ -218,6 +240,25 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("`every-code-test`", body)
         self.assertIn("`every-code-cbusillo-code-123-test`", body)
 
+    def test_worktree_path_and_branch_are_deterministic(self) -> None:
+        record = _queued_record()
+        root = every_code_worktree_root(record, state_dir=Path("state"))
+        branch = every_code_worktree_branch(record)
+
+        self.assertEqual(
+            root,
+            Path("state")
+            .resolve()
+            / "every-code-worker"
+            / "worktrees"
+            / "cbusillo-code"
+            / "every-code-cbusillo-code-123-test",
+        )
+        self.assertEqual(
+            branch,
+            "every-code/cbusillo-code-123-every-code-cbusillo-code-123-test",
+        )
+
     def test_session_command_reports_terminal_status(self) -> None:
         command = build_every_code_session_command(
             record=_queued_record(),
@@ -234,11 +275,100 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
         self.assertIn("--exit-code $status", command)
 
+    def test_prepare_checkout_creates_worker_owned_worktree(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            state_dir = temporary_root / "state"
+            runner = _Runner()
+
+            prepared = prepare_every_code_checkout(
+                _queued_record(),
+                workspace_root=temporary_root / "Developer",
+                state_dir=state_dir,
+                runner=runner,
+            )
+
+        self.assertEqual(prepared.source_checkout_root, checkout_root.resolve())
+        self.assertEqual(
+            prepared.launch_root,
+            every_code_worktree_root(_queued_record(), state_dir=state_dir),
+        )
+        self.assertEqual(prepared.worktree_branch, every_code_worktree_branch(_queued_record()))
+        self.assertIn(("git", "-C", str(checkout_root.resolve()), "fetch", "--quiet", "origin", "main"), runner.calls)
+        self.assertTrue(any(call[3:6] == ("worktree", "add", "-b") for call in runner.calls))
+
+    def test_prepare_checkout_reuses_matching_worker_worktree(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            state_dir = temporary_root / "state"
+            worktree_root = every_code_worktree_root(_queued_record(), state_dir=state_dir)
+            worktree_root.mkdir(parents=True)
+            (worktree_root / ".git").write_text("gitdir: test\n", encoding="utf-8")
+            runner = _Runner()
+
+            prepared = prepare_every_code_checkout(
+                _queued_record(),
+                workspace_root=temporary_root / "Developer",
+                state_dir=state_dir,
+                runner=runner,
+            )
+
+        self.assertEqual(prepared.launch_root, worktree_root)
+        self.assertFalse(any(call[3:6] == ("worktree", "add", "-b") for call in runner.calls))
+
+    def test_prepare_checkout_reuses_existing_request_branch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            state_dir = temporary_root / "state"
+            runner = _Runner(existing_branch=True)
+
+            prepared = prepare_every_code_checkout(
+                _queued_record(),
+                workspace_root=temporary_root / "Developer",
+                state_dir=state_dir,
+                runner=runner,
+            )
+
+        self.assertEqual(
+            prepared.launch_root,
+            every_code_worktree_root(_queued_record(), state_dir=state_dir),
+        )
+        self.assertFalse(any(call[3] == "fetch" for call in runner.calls))
+        self.assertTrue(any(call[3:5] == ("worktree", "add") for call in runner.calls))
+        self.assertFalse(any(call[3:6] == ("worktree", "add", "-b") for call in runner.calls))
+
+    def test_prepare_checkout_rejects_existing_non_git_worktree(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            state_dir = temporary_root / "state"
+            every_code_worktree_root(_queued_record(), state_dir=state_dir).mkdir(parents=True)
+
+            with self.assertRaisesRegex(RuntimeError, "not a git checkout"):
+                prepare_every_code_checkout(
+                    _queued_record(),
+                    workspace_root=temporary_root / "Developer",
+                    state_dir=state_dir,
+                    runner=_Runner(),
+                )
+
     def test_run_once_claims_request_and_launches_tmux_session(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
             checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
             store.write_every_code_work_request_record(_queued_record())
             runner = _Runner()
@@ -256,16 +386,25 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(record.state, "running")
         self.assertEqual(record.claimed_by_host, "Chris-Studio")
         self.assertEqual(result.checkout_root, str(checkout_root.resolve()))
-        self.assertEqual(runner.calls[0][1], "has-session")
-        self.assertEqual(runner.calls[1][1], "new-session")
-        self.assertIn("every-code finish", runner.calls[1][-1])
-        self.assertEqual(runner.calls[2][:3], ("gh", "issue", "comment"))
+        self.assertEqual(
+            result.worktree_root,
+            str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
+        )
+        self.assertEqual(result.worktree_branch, every_code_worktree_branch(_queued_record()))
+        launch_call = next(call for call in runner.calls if call[1] == "new-session")
+        self.assertEqual(
+            launch_call[6],
+            str(every_code_worktree_root(_queued_record(), state_dir=temporary_root / "state")),
+        )
+        self.assertIn("every-code finish", launch_call[-1])
+        self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
 
     def test_run_once_still_launches_tmux_when_claim_comment_fails(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
             checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
             store.write_every_code_work_request_record(_queued_record())
             runner = _Runner(fail_issue_comment=True)
@@ -283,14 +422,15 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(record.state, "running")
         self.assertIn("Visible tmux session", record.result_summary)
         self.assertIn("Could not post GitHub working comment", record.result_summary)
-        self.assertEqual(runner.calls[1][1], "new-session")
-        self.assertEqual(runner.calls[2][:3], ("gh", "issue", "comment"))
+        self.assertTrue(any(call[1] == "new-session" for call in runner.calls))
+        self.assertTrue(any(call[:3] == ("gh", "issue", "comment") for call in runner.calls))
 
     def test_finish_marks_running_request_done(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
             checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
             store.write_every_code_work_request_record(_queued_record())
             run_every_code_worker_once(
@@ -320,6 +460,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
             checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
             store.write_every_code_work_request_record(_queued_record())
             run_every_code_worker_once(
@@ -379,6 +520,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
             checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
             store.write_every_code_work_request_record(_queued_record())
             runner = _Runner()
@@ -472,6 +614,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 service_url="https://launchplane.example",
                 host="Chris-Studio",
                 workspace_root=temporary_root / "Developer",
+                worktree_state_dir=temporary_root / "worktrees",
                 repository="cbusillo/code",
                 interval_seconds=15,
             )
@@ -483,6 +626,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("postgres://example", spec.command)
         self.assertIn("--service-url", spec.command)
         self.assertIn("https://launchplane.example", spec.command)
+        self.assertIn("--worktree-state-dir", spec.command)
+        self.assertIn(str((temporary_root / "worktrees").resolve()), spec.command)
         self.assertIn("cbusillo/code", spec.command)
 
     def test_start_daemon_writes_pid_file_and_log_path(self) -> None:
@@ -682,6 +827,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "code"
             checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
             store = FilesystemRecordStore(state_dir=temporary_root / "state")
             store.write_every_code_work_request_record(_queued_record())
             run_every_code_worker_once(
