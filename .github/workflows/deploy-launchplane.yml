@@ -58,6 +58,8 @@ jobs:
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
       LAUNCHPLANE_SESSION_SECRET: ${{ secrets.LAUNCHPLANE_SESSION_SECRET }}
       LAUNCHPLANE_WORK_GRAPH_GH_TOKEN: ${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}
+      LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN }}
+      LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET }}
     steps:
       - name: Resolve deploy inputs
         id: prep
@@ -217,6 +219,8 @@ jobs:
                 --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
                 --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
+                --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
+                --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
                 '(
                   {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -224,7 +228,9 @@ jobs:
                   LAUNCHPLANE_PUBLIC_URL: $public_url,
                   LAUNCHPLANE_SESSION_SECRET: $session_secret,
                   LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
+                  LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: $every_code_worker_token,
+                  LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: $every_code_webhook_secret
                   }
                   + (
                     if $work_graph_gh_token != "" then
