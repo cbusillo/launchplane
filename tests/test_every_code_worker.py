@@ -223,6 +223,10 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertIn("https://github.com/cbusillo/code/issues/123", command)
         self.assertIn("every-code-cbusillo-code-123-test", command)
+        self.assertIn("read the issue body and every issue comment", command)
+        self.assertIn("newer comments", command)
+        self.assertIn("images or attachments", command)
+        self.assertIn("isolated Every Code worktree", command)
         self.assertIn("Closes #123", command)
         self.assertIn("Use `Refs` only", command)
         self.assertIn("let the session exit", command)
