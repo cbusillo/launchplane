@@ -17,6 +17,7 @@ import click
 from pydantic import ValidationError
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import every_code_reconciliation as control_plane_every_code_reconciliation
 from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_context_audit as control_plane_product_context_audit
@@ -9559,6 +9560,65 @@ def every_code_run_once(
             command_template=command_template,
             tmux_binary=tmux_binary,
         )
+    finally:
+        close = getattr(record_store, "close", None)
+        if callable(close):
+            close()
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("reconcile-issue")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory used when --database-url is not set.",
+)
+@click.option("--repository", required=True, help="GitHub owner/repo name.")
+@click.option("--issue-number", type=int, required=True, help="GitHub issue number.")
+@click.option("--issue-url", required=True, help="GitHub issue URL.")
+@click.option("--issue-title", default="", help="GitHub issue title.")
+@click.option(
+    "--label",
+    "labels",
+    multiple=True,
+    help="Issue label name. Repeat for each current issue label.",
+)
+@click.option("--trigger-label", default="every-code", show_default=True)
+@click.option("--actor", default="reconciliation", show_default=True)
+def every_code_reconcile_issue(
+    database_url: str,
+    state_dir: Path,
+    repository: str,
+    issue_number: int,
+    issue_url: str,
+    issue_title: str,
+    labels: tuple[str, ...],
+    trigger_label: str,
+    actor: str,
+) -> None:
+    record_store = _store(state_dir=state_dir, database_url=database_url)
+    try:
+        result = control_plane_every_code_reconciliation.reconcile_every_code_issue(
+            record_store=record_store,
+            repository=repository,
+            issue_number=issue_number,
+            issue_url=issue_url,
+            issue_title=issue_title,
+            labels=labels,
+            trigger_label=trigger_label,
+            actor=actor,
+        )
+    except ValueError as error:
+        raise click.ClickException(str(error)) from error
     finally:
         close = getattr(record_store, "close", None)
         if callable(close):

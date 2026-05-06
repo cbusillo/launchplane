@@ -545,6 +545,12 @@ state/
 - The first local worker handoff is `uv run launchplane every-code run-once`.
   It claims one queued request, opens or reuses a deterministic visible tmux
   session for the local checkout, and records `running` or `blocked` status.
+- Missed or manually inspected issue labels can be reconciled without polling by
+  running `uv run launchplane every-code reconcile-issue` with the known issue
+  repository, number, URL, title, and current labels. Reconciliation creates the
+  same deterministic request id when the trigger label is present, dedupes an
+  existing request without overwriting worker state, and skips issues that do
+  not currently carry the trigger label.
 - Launchplane owns this coordination record so GitHub webhooks, reconciliation,
   local Mac workers, and the future operator UI share one inspectable source of
   truth instead of relying on GitHub API polling or local shell lock files.
