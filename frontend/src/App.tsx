@@ -248,6 +248,11 @@ function choiceKey(choice: DriverChoice): string {
   return `${choice.driverId}:${choice.testingContext}:${choice.prodContext}:${choice.previewContext}`;
 }
 
+function choiceDisplayKey(choice: DriverChoice): string {
+  const normalizedLabel = choice.label.trim().toLowerCase();
+  return `${choice.driverId}:${normalizedLabel}`;
+}
+
 function labelForDriverContext(
   driver: DriverDescriptor,
   context: string,
@@ -585,9 +590,17 @@ export function App() {
       ...driverChoices,
       ...DEFAULT_CHOICES,
     ];
+    const productDisplayKeys = new Set(
+      [...overviewChoices, ...profileChoices, ...DEFAULT_CHOICES].map(
+        choiceDisplayKey,
+      ),
+    );
     const seen = new Set<string>();
     return merged.filter((choice) => {
-      const key = choiceKey(choice);
+      const displayKey = choiceDisplayKey(choice);
+      const key = productDisplayKeys.has(displayKey)
+        ? displayKey
+        : choiceKey(choice);
       if (seen.has(key)) {
         return false;
       }
@@ -678,6 +691,7 @@ export function App() {
         choices={choices}
         selected={selected}
         onSelect={setSelected}
+        authenticated={authStatus === "signed_in"}
         theme={theme}
         onThemeChange={setTheme}
         loading={loading}
@@ -800,6 +814,7 @@ function Header({
   choices,
   selected,
   onSelect,
+  authenticated,
   theme,
   onThemeChange,
   loading,
@@ -810,6 +825,7 @@ function Header({
   choices: DriverChoice[];
   selected: DriverChoice;
   onSelect: (choice: DriverChoice) => void;
+  authenticated: boolean;
   theme: Theme;
   onThemeChange: (theme: Theme) => void;
   loading: boolean;
@@ -819,6 +835,10 @@ function Header({
 }) {
   const selectedValue = choiceKey(selected);
   const selectId = "launchplane-product-select";
+  const brandTitle = authenticated ? selected.label : "Launchplane";
+  const brandMeta = authenticated
+    ? [selected.driverLabel, selected.repository ?? "stable lanes"]
+    : ["operator access", "authentication required"];
 
   return (
     <header className="topbar">
@@ -827,10 +847,10 @@ function Header({
           <img src={launchplaneIconUrl} alt="" />
         </div>
         <div>
-          <div className="brand-title">{selected.label}</div>
+          <div className="brand-title">{brandTitle}</div>
           <div className="brand-meta">
-            <span>{selected.driverLabel}</span>
-            <span>{selected.repository ?? "stable lanes"}</span>
+            <span>{brandMeta[0]}</span>
+            <span>{brandMeta[1]}</span>
           </div>
         </div>
       </div>
@@ -841,44 +861,50 @@ function Header({
             <strong>{identity.role === "admin" ? "Admin" : "Read only"}</strong>
           </div>
         ) : null}
-        <label className="select-label">
-          <span>Product</span>
-          <select
-            id={selectId}
-            aria-label="Launchplane product"
-            value={selectedValue}
-            onChange={(event) => {
-              const choice = choices.find(
-                (item) => choiceKey(item) === event.target.value,
-              );
-              if (choice) {
-                onSelect(choice);
+        {authenticated ? (
+          <>
+            <label className="select-label">
+              <span>Product</span>
+              <select
+                id={selectId}
+                aria-label="Launchplane product"
+                value={selectedValue}
+                onChange={(event) => {
+                  const choice = choices.find(
+                    (item) => choiceKey(item) === event.target.value,
+                  );
+                  if (choice) {
+                    onSelect(choice);
+                  }
+                }}
+              >
+                {choices.map((choice) => (
+                  <option key={choiceKey(choice)} value={choiceKey(choice)}>
+                    {choice.label}
+                  </option>
+                ))}
+              </select>
+              <ChevronDown size={14} aria-hidden="true" />
+            </label>
+            <button
+              className="icon-button"
+              type="button"
+              title="Refresh"
+              aria-label={
+                loading
+                  ? "Refreshing Launchplane view"
+                  : "Refresh Launchplane view"
               }
-            }}
-          >
-            {choices.map((choice) => (
-              <option key={choiceKey(choice)} value={choiceKey(choice)}>
-                {choice.label}
-              </option>
-            ))}
-          </select>
-          <ChevronDown size={14} aria-hidden="true" />
-        </label>
-        <button
-          className="icon-button"
-          type="button"
-          title="Refresh"
-          aria-label={
-            loading ? "Refreshing Launchplane view" : "Refresh Launchplane view"
-          }
-          onClick={onRefresh}
-        >
-          {loading ? (
-            <Loader2 className="spin" size={16} />
-          ) : (
-            <RefreshCw size={16} />
-          )}
-        </button>
+              onClick={onRefresh}
+            >
+              {loading ? (
+                <Loader2 className="spin" size={16} />
+              ) : (
+                <RefreshCw size={16} />
+              )}
+            </button>
+          </>
+        ) : null}
         {identity ? (
           <button
             className="icon-button"
