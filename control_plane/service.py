@@ -24,6 +24,7 @@ from jwt import InvalidTokenError
 
 from control_plane import dokploy as control_plane_dokploy
 from control_plane import product_config as control_plane_product_config
+from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
 from control_plane import product_read_service as control_plane_product_read_service
@@ -5733,40 +5734,29 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                try:
-                    driver_result = control_plane_product_config.apply_product_config_bundle(
-                        record_store=record_store,
-                        payload=product_config_request.product_config_payload(),
-                        mode=cast(
-                            control_plane_product_config.ProductConfigMode,
-                            product_config_request.mode,
-                        ),
-                        actor=_identity_actor(identity),
-                        source_label=product_config_request.source_label,
-                    )
-                except control_plane_product_config.ProductConfigError as error:
-                    error_code = error.code
-                    error_message = "Product config request failed validation."
-                    status_code = 400
-                    if error_code == "secret_configuration_required":
-                        status_code = 503
-                        error_message = (
-                            "Launchplane service is missing required secret write configuration."
-                        )
-                    if error_code == "runtime_key_safety_unavailable":
-                        status_code = 503
-                        error_message = "Launchplane runtime key-safety policy is unavailable."
-                    if error_code == "runtime_key_safety_failed":
-                        error_message = "Product config runtime key-safety gate failed."
+                (
+                    driver_result,
+                    product_config_error,
+                ) = control_plane_product_config_service.apply_product_config_service_request(
+                    record_store=record_store,
+                    payload=product_config_request.product_config_payload(),
+                    mode=cast(
+                        control_plane_product_config.ProductConfigMode,
+                        product_config_request.mode,
+                    ),
+                    actor=_identity_actor(identity),
+                    source_label=product_config_request.source_label,
+                )
+                if product_config_error is not None:
                     return _json_response(
                         start_response=start_response,
-                        status_code=status_code,
+                        status_code=product_config_error.status_code,
                         payload={
                             "status": "rejected",
                             "trace_id": request_trace_id,
                             "error": {
-                                "code": error_code,
-                                "message": error_message,
+                                "code": product_config_error.code,
+                                "message": product_config_error.message,
                             },
                         },
                     )
