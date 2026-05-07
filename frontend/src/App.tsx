@@ -25,6 +25,7 @@ import {
   logout,
   readAuthSession,
   readDriverView,
+  readProductEnvironmentConfigStatus,
 } from "./api";
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { formatTime, labelForStatus } from "./format";
@@ -47,6 +48,7 @@ import {
   runtimeScopeForTarget,
   secretScopeForTarget,
 } from "./ProductConfigPanel";
+import { ProductConfigStatusPanel } from "./ProductConfigStatusPanel";
 import { RuntimeAuthorityList } from "./RuntimeAuthorityList";
 import { StatusIcon, StatusPill, StateBlock, SkeletonRows } from "./status-ui";
 import { TrustBadge } from "./TrustBadge";
@@ -71,6 +73,7 @@ import type {
   LaneSummary,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductEnvironmentConfigStatus,
   ProductEnvironmentSummary,
   ProductProfileRecord,
   ProductSiteOverview,
@@ -206,6 +209,11 @@ export function App() {
   const [workRequests, setWorkRequests] = useState<
     EveryCodeWorkRequestRecord[]
   >([]);
+  const [configStatuses, setConfigStatuses] = useState<
+    ProductEnvironmentConfigStatus[]
+  >([]);
+  const [configStatusLoading, setConfigStatusLoading] = useState(false);
+  const [configStatusError, setConfigStatusError] = useState("");
   const {
     workGraphItems,
     workGraphHiddenCount,
@@ -221,6 +229,10 @@ export function App() {
     productProfiles,
     productOverviews,
   });
+  const selectedProductOverview =
+    productOverviews.find(
+      (overview) => overview.product === selected.driverId,
+    ) ?? null;
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
   const [testingView, setTestingView] = useState<DriverContextView | null>(
     null,
@@ -277,6 +289,8 @@ export function App() {
       setDrivers([]);
       setProductProfiles([]);
       setProductOverviews([]);
+      setConfigStatuses([]);
+      setConfigStatusError("");
       setWorkRequests([]);
       resetWorkGraph();
       setProdView(null);
@@ -361,6 +375,53 @@ export function App() {
     return () => controller.abort();
   }, [authStatus, selected, refreshKey, refreshWorkGraph, resetWorkGraph]);
 
+  useEffect(() => {
+    if (authStatus !== "signed_in" || !selectedProductOverview) {
+      setConfigStatuses([]);
+      setConfigStatusError("");
+      setConfigStatusLoading(false);
+      return;
+    }
+    const controller = new AbortController();
+    const environments = selectedProductOverview.environments.filter(
+      (environment) => environment.environment.trim(),
+    );
+    setConfigStatusLoading(true);
+    setConfigStatusError("");
+    Promise.all(
+      environments.map((environment) =>
+        readProductEnvironmentConfigStatus(
+          selectedProductOverview.product,
+          environment.environment,
+        ).then((payload) => payload.config_status),
+      ),
+    )
+      .then((statuses) => {
+        if (!controller.signal.aborted) {
+          setConfigStatuses(statuses);
+        }
+      })
+      .catch((apiError: unknown) => {
+        if (controller.signal.aborted) {
+          return;
+        }
+        setConfigStatuses([]);
+        if (apiError instanceof LaunchplaneApiError) {
+          setConfigStatusError(apiError.message);
+        } else if (apiError instanceof Error) {
+          setConfigStatusError(apiError.message);
+        } else {
+          setConfigStatusError("Config status request failed.");
+        }
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) {
+          setConfigStatusLoading(false);
+        }
+      });
+    return () => controller.abort();
+  }, [authStatus, selectedProductOverview, refreshKey]);
+
   const currentDriver = drivers.find(
     (driver) => driver.driver_id === selected.driverId,
   );
@@ -371,11 +432,6 @@ export function App() {
     prodDriverView?.descriptor ??
     testingDriverView?.descriptor ??
     currentDriver;
-  const selectedProductOverview =
-    productOverviews.find(
-      (overview) => overview.product === selected.driverId,
-    ) ?? null;
-
   const actions = useMemo(() => {
     return (
       selectedDriver?.actions ??
@@ -402,6 +458,8 @@ export function App() {
       setDrivers([]);
       setProductProfiles([]);
       setProductOverviews([]);
+      setConfigStatuses([]);
+      setConfigStatusError("");
       setWorkRequests([]);
       resetWorkGraph();
       setProdView(null);
@@ -485,6 +543,11 @@ export function App() {
                 loading={loading}
               />
             </section>
+            <ProductConfigStatusPanel
+              statuses={configStatuses}
+              loading={configStatusLoading}
+              error={configStatusError}
+            />
             <ProductConfigPanel
               productDefault={selectedDriver?.product ?? selected.driverId}
               contextDefault={selected.prodContext}
@@ -976,6 +1039,78 @@ function StateFixtureGallery({
       available_actions: [],
     },
   ];
+  const fixtureConfigStatuses: ProductEnvironmentConfigStatus[] = [
+    {
+      schema_version: 1,
+      product: "sellyouroutboard",
+      display_name: "SellYourOutboard",
+      repository: "cbusillo/sellyouroutboard",
+      driver_id: "generic-web",
+      base_driver_id: "generic-web",
+      environment: "testing",
+      context: "sellyouroutboard-testing",
+      runtime_settings: [
+        {
+          key: "RESEND_FROM_EMAIL",
+          status: "configured",
+          context: "sellyouroutboard-testing",
+          instance: "testing",
+          source_label: "product-config-api",
+          updated_at: "2026-05-07T22:32:00Z",
+          trust_state: "recorded",
+        },
+      ],
+      managed_secrets: [
+        {
+          binding_key: "RESEND_API_KEY",
+          status: "configured",
+          integration: "runtime_environment",
+          context: "sellyouroutboard-testing",
+          instance: "testing",
+          updated_at: "2026-05-07T22:31:00Z",
+          trust_state: "recorded",
+        },
+      ],
+      warnings: [],
+      trust_state: "recorded",
+      provenance: readyTesting.provenance,
+    },
+    {
+      schema_version: 1,
+      product: "sellyouroutboard",
+      display_name: "SellYourOutboard",
+      repository: "cbusillo/sellyouroutboard",
+      driver_id: "generic-web",
+      base_driver_id: "generic-web",
+      environment: "prod",
+      context: "sellyouroutboard-prod",
+      runtime_settings: [
+        {
+          key: "RESEND_FROM_EMAIL",
+          status: "configured",
+          context: "sellyouroutboard-prod",
+          instance: "prod",
+          source_label: "product-config-api",
+          updated_at: "2026-05-07T22:36:00Z",
+          trust_state: "recorded",
+        },
+      ],
+      managed_secrets: [
+        {
+          binding_key: "RESEND_API_KEY",
+          status: "missing",
+          integration: "runtime_environment",
+          context: "sellyouroutboard-prod",
+          instance: "prod",
+          updated_at: "",
+          trust_state: "missing",
+        },
+      ],
+      warnings: [],
+      trust_state: "missing",
+      provenance: missingBackupProd.provenance,
+    },
+  ];
   const fixtureRequests: EveryCodeWorkRequestRecord[] = [
     {
       schema_version: 1,
@@ -1171,6 +1306,13 @@ function StateFixtureGallery({
           testing={readyTesting}
           previews={[]}
           onSelect={setSelectedEvidence}
+        />
+      </div>
+      <div className="fixture-wide">
+        <ProductConfigStatusPanel
+          statuses={fixtureConfigStatuses}
+          loading={false}
+          error=""
         />
       </div>
       <div className="fixture-wide">

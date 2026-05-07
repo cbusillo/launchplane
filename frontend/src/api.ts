@@ -11,6 +11,7 @@ import type {
   LogoutPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductEnvironmentConfigStatusPayload,
   ProductListPayload,
   ProductProfileListPayload,
   WorkGraphRankPayload,
@@ -96,6 +97,15 @@ export function listProductProfiles(
 
 export function listProducts(): Promise<ProductListPayload> {
   return requestJson<ProductListPayload>("/v1/products");
+}
+
+export function readProductEnvironmentConfigStatus(
+  product: string,
+  environment: string,
+): Promise<ProductEnvironmentConfigStatusPayload> {
+  return requestJson<ProductEnvironmentConfigStatusPayload>(
+    `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/config-status`,
+  );
 }
 
 export function listEveryCodeWorkRequests(
