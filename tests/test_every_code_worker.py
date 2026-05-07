@@ -33,6 +33,7 @@ from control_plane.every_code_worker import (
     prepare_every_code_checkout,
     request_ready_every_code_pr_preview_labels,
     request_every_code_pr_preview_label,
+    route_every_code_pr_check_failures,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -782,6 +783,161 @@ class EveryCodeWorkerTests(unittest.TestCase):
             ),
             runner.calls,
         )
+
+    def test_check_failure_route_records_app_failure_feedback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {
+                            "name": "automated_tests",
+                            "status": "COMPLETED",
+                            "conclusion": "FAILURE",
+                            "detailsUrl": "https://github.com/cbusillo/sellyouroutboard/actions/runs/1001/job/2002",
+                        },
+                    ],
+                }
+            )
+
+            result = route_every_code_pr_check_failures(
+                record_store=store,
+                runner=runner,
+            )
+            feedback = store.list_every_code_pr_feedback_records(status="pending")
+
+        self.assertEqual(result.routed, 1)
+        self.assertEqual(len(feedback), 1)
+        self.assertIn("automated_tests", feedback[0].body)
+        self.assertIn("same branch", feedback[0].body)
+        self.assertIn("check-failure", feedback[0].feedback_id)
+
+    def test_check_failure_route_suppresses_duplicate_app_failure(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "build", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ],
+                }
+            )
+
+            first = route_every_code_pr_check_failures(record_store=store, runner=runner)
+            second = route_every_code_pr_check_failures(record_store=store, runner=runner)
+            feedback = store.list_every_code_pr_feedback_records(status="pending")
+
+        self.assertEqual(first.routed, 1)
+        self.assertEqual(second.duplicate, 1)
+        self.assertEqual(len(feedback), 1)
+
+    def test_check_failure_route_retries_preview_infra_without_feedback(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {
+                            "name": "publish_preview_image",
+                            "status": "COMPLETED",
+                            "conclusion": "FAILURE",
+                            "detailsUrl": "https://github.com/cbusillo/sellyouroutboard/actions/runs/1001/job/2002",
+                        },
+                    ],
+                }
+            )
+
+            result = route_every_code_pr_check_failures(
+                record_store=store,
+                runner=runner,
+            )
+            pending_feedback = store.list_every_code_pr_feedback_records(status="pending")
+            ignored_feedback = store.list_every_code_pr_feedback_records(status="ignored")
+
+        self.assertEqual(result.retried_infra, 1)
+        self.assertEqual(pending_feedback, ())
+        self.assertEqual(len(ignored_feedback), 1)
+        self.assertIn(
+            (
+                "gh",
+                "run",
+                "rerun",
+                "1001",
+                "--repo",
+                "cbusillo/sellyouroutboard",
+                "--failed",
+            ),
+            runner.calls,
+        )
+
+    def test_check_failure_route_marks_previous_pending_failure_ignored_after_recovery(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            failing_runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "build", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ],
+                }
+            )
+            route_every_code_pr_check_failures(record_store=store, runner=failing_runner)
+            passing_runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "build", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    ],
+                }
+            )
+
+            result = route_every_code_pr_check_failures(
+                record_store=store,
+                runner=passing_runner,
+            )
+            pending_feedback = store.list_every_code_pr_feedback_records(status="pending")
+            ignored_feedback = store.list_every_code_pr_feedback_records(status="ignored")
+
+        self.assertEqual(result.recovered, 1)
+        self.assertEqual(pending_feedback, ())
+        self.assertEqual(len(ignored_feedback), 1)
 
     def test_prepare_checkout_creates_worker_owned_worktree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

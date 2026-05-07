@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -426,6 +427,30 @@ class EveryCodePreviewGateResult:
             "labeled": self.labeled,
             "pending": self.pending,
             "blocked": self.blocked,
+            "skipped": self.skipped,
+        }
+
+
+@dataclass(frozen=True)
+class EveryCodePrFailureRouteResult:
+    checked: int = 0
+    routed: int = 0
+    pending: int = 0
+    duplicate: int = 0
+    retried_infra: int = 0
+    persistent_infra: int = 0
+    recovered: int = 0
+    skipped: int = 0
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "checked": self.checked,
+            "routed": self.routed,
+            "pending": self.pending,
+            "duplicate": self.duplicate,
+            "retried_infra": self.retried_infra,
+            "persistent_infra": self.persistent_infra,
+            "recovered": self.recovered,
             "skipped": self.skipped,
         }
 
@@ -1065,6 +1090,21 @@ def run_every_code_worker_loop(
             repository=repository,
             runner=runner,
         )
+        route_every_code_pr_check_failures(
+            record_store=record_store,
+            repository=repository,
+            runner=runner,
+        )
+        apply_every_code_pr_feedback_for_host(
+            record_store=record_store,
+            host=host,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+            tmux_binary=tmux_binary,
+            runner=runner,
+        )
         last_result = run_every_code_worker_once(
             record_store=record_store,
             host=host,
@@ -1675,6 +1715,144 @@ def request_ready_every_code_pr_preview_labels(
     )
 
 
+def route_every_code_pr_check_failures(
+    *,
+    record_store: EveryCodeWorkerStore,
+    repository: str = "",
+    limit: int = 50,
+    runner: Runner | None = None,
+) -> EveryCodePrFailureRouteResult:
+    normalized_repository = repository.strip()
+    records = (
+        *record_store.list_every_code_work_request_records(
+            state="running",
+            repository=normalized_repository,
+            limit=limit,
+        ),
+        *record_store.list_every_code_work_request_records(
+            state="done",
+            repository=normalized_repository,
+            limit=limit,
+        ),
+    )
+    if not records:
+        return EveryCodePrFailureRouteResult()
+
+    run = runner or _run_subprocess
+    checked = 0
+    routed = 0
+    pending = 0
+    duplicate = 0
+    retried_infra = 0
+    persistent_infra = 0
+    recovered = 0
+    skipped = 0
+    for record in records:
+        result_pr_url = _every_code_preview_pr_url_for_record(record, runner=run)
+        if not result_pr_url:
+            skipped += 1
+            continue
+        reference = github_pull_request_reference(pr_url=result_pr_url)
+        if reference is None:
+            skipped += 1
+            continue
+        payload = _github_pr_view_payload(
+            owner=reference["owner"],
+            repo=reference["repo"],
+            pr_number=reference["pr_number"],
+            runner=run,
+        )
+        if payload is None or str(payload.get("state") or "").upper() != "OPEN":
+            skipped += 1
+            continue
+        check_rollup = payload.get("statusCheckRollup")
+        if not isinstance(check_rollup, list):
+            pending += 1
+            continue
+        relevant_checks = _every_code_relevant_pr_checks(check_rollup)
+        if not relevant_checks:
+            recovered += _ignore_pending_every_code_check_failure_feedback(
+                record_store=record_store,
+                request_id=record.request_id,
+                pr_number=reference["pr_number"],
+            )
+            continue
+        if any(_github_check_status(item) != "COMPLETED" for item in relevant_checks):
+            pending += 1
+            continue
+        checked += 1
+        failed_checks = [
+            item for item in relevant_checks if _github_check_conclusion(item) != "SUCCESS"
+        ]
+        if not failed_checks:
+            recovered += _ignore_pending_every_code_check_failure_feedback(
+                record_store=record_store,
+                request_id=record.request_id,
+                pr_number=reference["pr_number"],
+            )
+            continue
+        app_failures = [
+            item
+            for item in failed_checks
+            if _every_code_pr_failure_kind(item) == "app"
+        ]
+        if app_failures:
+            feedback = _build_every_code_check_failure_feedback(
+                record=record,
+                pr_number=reference["pr_number"],
+                pr_url=result_pr_url,
+                checks=app_failures,
+                payload=payload,
+            )
+            existing = _find_every_code_pr_feedback_record(
+                record_store=record_store,
+                feedback_id=feedback.feedback_id,
+                request_id=record.request_id,
+                pr_number=reference["pr_number"],
+            )
+            if existing is None:
+                record_store.write_every_code_pr_feedback_record(feedback)
+                routed += 1
+            elif existing.status == "pending":
+                duplicate += 1
+            else:
+                duplicate += 1
+            continue
+        infra_marker = _build_every_code_infra_retry_feedback(
+            record=record,
+            pr_number=reference["pr_number"],
+            pr_url=result_pr_url,
+            checks=failed_checks,
+            payload=payload,
+        )
+        existing_marker = _find_every_code_pr_feedback_record(
+            record_store=record_store,
+            feedback_id=infra_marker.feedback_id,
+            request_id=record.request_id,
+            pr_number=reference["pr_number"],
+        )
+        if existing_marker is None:
+            _rerun_failed_every_code_infra_checks(
+                repository=record.repository,
+                checks=failed_checks,
+                runner=run,
+            )
+            record_store.write_every_code_pr_feedback_record(infra_marker)
+            retried_infra += 1
+        else:
+            persistent_infra += 1
+    return EveryCodePrFailureRouteResult(
+        checked=checked,
+        routed=routed,
+        pending=pending,
+        duplicate=duplicate,
+        retried_infra=retried_infra,
+        persistent_infra=persistent_infra,
+        recovered=recovered,
+        skipped=skipped,
+    )
+
+
 def every_code_pr_preview_readiness(
     *,
     result_pr_url: str,
@@ -1701,19 +1879,253 @@ def every_code_pr_preview_readiness(
     check_rollup = payload.get("statusCheckRollup")
     if not isinstance(check_rollup, list):
         return "pending"
-    relevant_checks = [
-        item
-        for item in check_rollup
-        if isinstance(item, dict)
-        and str(item.get("conclusion") or "").upper() != "SKIPPED"
-    ]
+    relevant_checks = _every_code_relevant_pr_checks(check_rollup)
     if not relevant_checks:
         return "ready"
-    if any(str(item.get("status") or "").upper() != "COMPLETED" for item in relevant_checks):
+    if any(_github_check_status(item) != "COMPLETED" for item in relevant_checks):
         return "pending"
-    if all(str(item.get("conclusion") or "").upper() == "SUCCESS" for item in relevant_checks):
+    if all(_github_check_conclusion(item) == "SUCCESS" for item in relevant_checks):
         return "ready"
     return "blocked"
+
+
+def _every_code_relevant_pr_checks(
+    check_rollup: list[object],
+) -> list[dict[str, object]]:
+    return [
+        item
+        for item in check_rollup
+        if isinstance(item, dict) and _github_check_conclusion(item) != "SKIPPED"
+    ]
+
+
+def _github_check_status(check: dict[str, object]) -> str:
+    return str(check.get("status") or "").upper()
+
+
+def _github_check_conclusion(check: dict[str, object]) -> str:
+    return str(check.get("conclusion") or "").upper()
+
+
+def _github_check_name(check: dict[str, object]) -> str:
+    return str(check.get("name") or "").strip()
+
+
+def _github_check_details_url(check: dict[str, object]) -> str:
+    value = check.get("detailsUrl") or check.get("details_url") or check.get("url")
+    return str(value or "").strip()
+
+
+def _every_code_pr_failure_kind(check: dict[str, object]) -> Literal["app", "infra"]:
+    name = _github_check_name(check).lower().replace("-", "_").replace(" ", "_")
+    infra_names = {
+        "prepare_preview",
+        "preview_prepare",
+        "publish_preview_image",
+        "provision_preview",
+        "verify_preview",
+        "report_preview_feedback",
+        "request_pending_feedback",
+        "launchplane_preview",
+        "preview_control_plane",
+    }
+    if name in infra_names or name.startswith("preview_"):
+        return "infra"
+    return "app"
+
+
+def _every_code_check_failure_key(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    pr_number: int,
+    checks: Sequence[dict[str, object]],
+    payload: dict[str, object],
+) -> str:
+    head_sha = str(payload.get("headRefOid") or "").strip()[:16]
+    check_identity = "|".join(
+        sorted(
+            f"{_github_check_name(check)}:{_github_check_conclusion(check)}:{_github_check_details_url(check)}"
+            for check in checks
+        )
+    )
+    digest = hashlib.sha256(
+        f"{record.request_id}|{pr_number}|{head_sha}|{check_identity}".encode("utf-8")
+    ).hexdigest()[:16]
+    return f"{head_sha or 'unknown'}-{digest}"
+
+
+def _build_every_code_check_failure_feedback(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    pr_number: int,
+    pr_url: str,
+    checks: Sequence[dict[str, object]],
+    payload: dict[str, object],
+) -> EveryCodePrFeedbackRecord:
+    key = _every_code_check_failure_key(
+        record=record,
+        pr_number=pr_number,
+        checks=checks,
+        payload=payload,
+    )
+    github_id = f"check-failure-{key}"
+    now = utc_now_timestamp()
+    return EveryCodePrFeedbackRecord(
+        feedback_id=f"every-code-pr-feedback-{record.repository.replace('/', '-')}-{pr_number}-{github_id}",
+        request_id=record.request_id,
+        repository=record.repository,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        feedback_kind="issue_comment",
+        github_delivery_id=f"launchplane-check-failure-{key}",
+        github_node_id=github_id,
+        actor="launchplane",
+        body=_every_code_check_failure_feedback_body(checks=checks, payload=payload),
+        html_url=pr_url,
+        received_at=now,
+        submitted_at=now,
+        status="pending",
+    )
+
+
+def _build_every_code_infra_retry_feedback(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    pr_number: int,
+    pr_url: str,
+    checks: Sequence[dict[str, object]],
+    payload: dict[str, object],
+) -> EveryCodePrFeedbackRecord:
+    key = _every_code_check_failure_key(
+        record=record,
+        pr_number=pr_number,
+        checks=checks,
+        payload=payload,
+    )
+    github_id = f"infra-retry-{key}"
+    now = utc_now_timestamp()
+    return EveryCodePrFeedbackRecord(
+        feedback_id=f"every-code-pr-feedback-{record.repository.replace('/', '-')}-{pr_number}-{github_id}",
+        request_id=record.request_id,
+        repository=record.repository,
+        pr_number=pr_number,
+        pr_url=pr_url,
+        feedback_kind="issue_comment",
+        github_delivery_id=f"launchplane-infra-retry-{key}",
+        github_node_id=github_id,
+        actor="launchplane",
+        body=_every_code_infra_retry_feedback_body(checks=checks, payload=payload),
+        html_url=pr_url,
+        received_at=now,
+        submitted_at=now,
+        status="ignored",
+    )
+
+
+def _every_code_check_failure_feedback_body(
+    *,
+    checks: Sequence[dict[str, object]],
+    payload: dict[str, object],
+) -> str:
+    head_sha = str(payload.get("headRefOid") or "").strip()
+    lines = [
+        "GitHub checks failed on this Every Code PR. Treat this as actionable PR feedback and fix the same branch.",
+    ]
+    if head_sha:
+        lines.append(f"Head SHA: {head_sha}")
+    lines.append("")
+    lines.append("Failed checks:")
+    for check in checks:
+        detail = _github_check_details_url(check)
+        suffix = f" - {detail}" if detail else ""
+        lines.append(
+            f"- {_github_check_name(check) or 'unnamed check'}: {_github_check_conclusion(check) or 'FAILED'}{suffix}"
+        )
+    return "\n".join(lines)
+
+
+def _every_code_infra_retry_feedback_body(
+    *,
+    checks: Sequence[dict[str, object]],
+    payload: dict[str, object],
+) -> str:
+    head_sha = str(payload.get("headRefOid") or "").strip()
+    lines = ["Launchplane retried a preview infrastructure failure for this PR."]
+    if head_sha:
+        lines.append(f"Head SHA: {head_sha}")
+    lines.append("")
+    lines.append("Infra checks:")
+    for check in checks:
+        detail = _github_check_details_url(check)
+        suffix = f" - {detail}" if detail else ""
+        lines.append(
+            f"- {_github_check_name(check) or 'unnamed check'}: {_github_check_conclusion(check) or 'FAILED'}{suffix}"
+        )
+    return "\n".join(lines)
+
+
+def _find_every_code_pr_feedback_record(
+    *,
+    record_store: EveryCodeWorkerStore,
+    feedback_id: str,
+    request_id: str,
+    pr_number: int,
+) -> EveryCodePrFeedbackRecord | None:
+    for feedback in record_store.list_every_code_pr_feedback_records(
+        request_id=request_id,
+        pr_number=pr_number,
+        limit=200,
+    ):
+        if feedback.feedback_id == feedback_id:
+            return feedback
+    return None
+
+
+def _ignore_pending_every_code_check_failure_feedback(
+    *,
+    record_store: EveryCodeWorkerStore,
+    request_id: str,
+    pr_number: int,
+) -> int:
+    ignored = 0
+    for feedback in record_store.list_every_code_pr_feedback_records(
+        request_id=request_id,
+        pr_number=pr_number,
+        status="pending",
+        limit=200,
+    ):
+        if "check-failure-" not in feedback.feedback_id:
+            continue
+        record_store.write_every_code_pr_feedback_record(
+            feedback.model_copy(update={"status": "ignored"})
+        )
+        ignored += 1
+    return ignored
+
+
+def _rerun_failed_every_code_infra_checks(
+    *,
+    repository: str,
+    checks: Sequence[dict[str, object]],
+    runner: Runner,
+) -> None:
+    rerun_run_ids = {
+        run_id
+        for check in checks
+        if (run_id := _github_actions_run_id_from_url(_github_check_details_url(check)))
+    }
+    for run_id in sorted(rerun_run_ids):
+        try:
+            runner(("gh", "run", "rerun", run_id, "--repo", repository, "--failed"))
+        except OSError:
+            continue
+
+
+def _github_actions_run_id_from_url(url: str) -> str:
+    match = re.search(r"/actions/runs/(\d+)(?:/|$)", url)
+    if match is None:
+        return ""
+    return match.group(1)
 
 
 def _every_code_preview_pr_url_for_record(
@@ -1781,7 +2193,7 @@ def _github_pr_view_payload(
                 "--repo",
                 f"{owner}/{repo}",
                 "--json",
-                "state,labels,statusCheckRollup",
+                "state,labels,headRefOid,statusCheckRollup",
             )
         )
     except OSError:
