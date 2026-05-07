@@ -29,7 +29,6 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
-from control_plane import runtime_key_safety_service as control_plane_runtime_key_safety_service
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -89,7 +88,12 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
-from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
+from control_plane.runtime_key_safety_http import (
+    RuntimeKeySafetyPolicyRouteResult,
+    apply_runtime_key_safety_policy_route,
+    runtime_key_safety_database_required_response,
+    validate_runtime_key_safety_policy_request,
+)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
@@ -1318,25 +1322,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
 
 class EveryCodePreviewGateEnvelope(EveryCodePreviewGateRecord):
     pass
-
-
-class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    product: str
-    source_label: str = "service:runtime-key-safety-policy"
-    rules: tuple[RuntimeSecretSafetyRule, ...]
-
-    @model_validator(mode="after")
-    def _validate_alignment(self) -> "RuntimeKeySafetyPolicyApplyEnvelope":
-        if self.product.strip() != "launchplane":
-            raise ValueError("Runtime key-safety policy writes require product 'launchplane'.")
-        self.product = "launchplane"
-        self.source_label = self.source_label.strip() or "service:runtime-key-safety-policy"
-        if not self.rules:
-            raise ValueError("Runtime key-safety policy writes require at least one rule.")
-        return self
 
 
 class ProductOnboardingApplyEnvelope(BaseModel):
@@ -5611,45 +5596,24 @@ def create_launchplane_service_app(
                     )
                 )
             elif path == "/v1/runtime-key-safety/policies/apply":
-                runtime_policy_request = RuntimeKeySafetyPolicyApplyEnvelope.model_validate(payload)
+                runtime_policy_request, runtime_policy_response = (
+                    validate_runtime_key_safety_policy_request(
+                        authz_policy=authz_policy,
+                        identity=identity,
+                        payload=payload,
+                        trace_id=request_trace_id,
+                        json_response=_json_response,
+                        start_response=start_response,
+                    )
+                )
+                if runtime_policy_response is not None:
+                    return runtime_policy_response
+                assert runtime_policy_request is not None
                 if not isinstance(record_store, PostgresRecordStore):
-                    return _json_response(
+                    return runtime_key_safety_database_required_response(
+                        trace_id=request_trace_id,
+                        json_response=_json_response,
                         start_response=start_response,
-                        status_code=503,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "database_required",
-                                "message": "Runtime key-safety policy writes require Launchplane database storage.",
-                            },
-                        },
-                    )
-                if not (
-                    authz_policy.allows(
-                        identity=identity,
-                        action="runtime_key_safety.write",
-                        product=runtime_policy_request.product,
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    )
-                    or authz_policy.allows(
-                        identity=identity,
-                        action="launchplane_service_deploy.execute",
-                        product=runtime_policy_request.product,
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    )
-                ):
-                    return _json_response(
-                        start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot write Launchplane runtime key-safety policy records.",
-                            },
-                        },
                     )
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
@@ -5662,26 +5626,15 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                (
-                    runtime_policy_record,
-                    changed,
-                ) = control_plane_runtime_key_safety_service.write_runtime_key_safety_policy(
+                runtime_policy_result = apply_runtime_key_safety_policy_route(
                     record_store=record_store,
-                    rules=runtime_policy_request.rules,
-                    source_label=runtime_policy_request.source_label,
+                    request=runtime_policy_request,
                     now_timestamp=_now_timestamp,
                     record_slug=_record_slug,
                 )
-                result = {
-                    "runtime_key_safety_policy_record_id": runtime_policy_record.record_id,
-                    "runtime_key_safety_policy_changed": str(changed).lower(),
-                }
-                driver_result = {
-                    "runtime_key_safety_policy": control_plane_runtime_key_safety_service.summarize_runtime_key_safety_policy_record(
-                        runtime_policy_record
-                    ),
-                    "changed": changed,
-                }
+                assert isinstance(runtime_policy_result, RuntimeKeySafetyPolicyRouteResult)
+                result = runtime_policy_result.result
+                driver_result = runtime_policy_result.driver_result
             elif path == "/v1/live-target-runtime/apply":
                 live_target_runtime_request = LiveTargetRuntimeApplyEnvelope.model_validate(payload)
                 action = (
