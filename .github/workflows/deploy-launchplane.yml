@@ -375,6 +375,9 @@ jobs:
                 '{
                   schema_version: 1,
                   product: "launchplane",
+                  mode: "apply",
+                  reason: ("Deploy workflow ensuring authz grant " + $source_label),
+                  related_issue: "cbusillo/launchplane#83",
                   grant: {
                     repository: $repository,
                     workflow_refs: [$workflow_ref],

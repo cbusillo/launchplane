@@ -32,6 +32,7 @@ class LaunchplaneAuthzPolicyRecord(BaseModel):
     updated_at: str
     policy_sha256: str = Field(default="")
     policy: LaunchplaneAuthzPolicy
+    audit: dict[str, object] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _validate_record(self) -> "LaunchplaneAuthzPolicyRecord":
