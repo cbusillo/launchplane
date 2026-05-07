@@ -1,4 +1,4 @@
-import { AlertTriangle, Database } from "lucide-react";
+import { AlertTriangle, Database, ExternalLink } from "lucide-react";
 
 import { KeyValue, PanelHead } from "./panel-ui";
 import { SkeletonRows, StateBlock, StatusPill } from "./status-ui";
@@ -11,12 +11,20 @@ export function ProductOverviewShell({
   product,
   selected,
   loading,
+  selectedEnvironment,
+  onSelectEnvironment,
 }: {
   product: ProductSiteOverview | null;
   selected: DriverChoice;
   loading: boolean;
+  selectedEnvironment: string;
+  onSelectEnvironment: (environment: string) => void;
 }) {
   const environments = product?.environments ?? [];
+  const activeEnvironment =
+    environments.find(
+      (environment) => environment.environment === selectedEnvironment,
+    ) ?? environments[0];
   const enabledActions = product?.available_actions.filter(
     (action) => action.enabled,
   );
@@ -63,15 +71,20 @@ export function ProductOverviewShell({
           <div className="product-environment-strip">
             {environments.length ? (
               environments.map((environment) => (
-                <div
+                <button
+                  type="button"
                   className="product-environment-pill"
                   key={`${environment.environment}:${environment.context}`}
                   data-environment={environment.environment}
+                  data-selected={
+                    activeEnvironment?.environment === environment.environment
+                  }
+                  onClick={() => onSelectEnvironment(environment.environment)}
                 >
                   <span>{environment.environment}</span>
                   <strong>{freshnessLabel(environment.trust_state)}</strong>
                   <code>{environment.context}</code>
-                </div>
+                </button>
               ))
             ) : (
               <StateBlock
@@ -103,6 +116,9 @@ export function ProductOverviewShell({
           </div>
         </div>
       )}
+      {!loading && activeEnvironment ? (
+        <EnvironmentDetailStrip environment={activeEnvironment} />
+      ) : null}
       {product?.warnings.length ? (
         <div className="overview-warning-list">
           {product.warnings.map((warning) => (
@@ -114,5 +130,66 @@ export function ProductOverviewShell({
         </div>
       ) : null}
     </section>
+  );
+}
+
+function EnvironmentDetailStrip({
+  environment,
+}: {
+  environment: ProductSiteOverview["environments"][number];
+}) {
+  const enabledActions = environment.available_actions.filter(
+    (action) => action.enabled,
+  );
+  const blockedActions = environment.available_actions.filter(
+    (action) => !action.enabled,
+  );
+  return (
+    <div className="environment-detail-strip" data-environment={environment.environment}>
+      <div className="environment-detail-identity">
+        <span className={`lane-chip lane-chip-${environment.environment}`}>
+          {environment.environment}
+        </span>
+        <code>{environment.context}</code>
+        {environment.base_url ? (
+          <a href={environment.base_url} target="_blank" rel="noreferrer">
+            <ExternalLink size={13} aria-hidden="true" />
+            {environment.base_url}
+          </a>
+        ) : null}
+      </div>
+      <div className="environment-detail-facts">
+        <KeyValue
+          label="Health URL"
+          value={environment.health_url}
+          mono
+          muted={!environment.health_url}
+        />
+        <KeyValue
+          label="Enabled lane actions"
+          value={`${enabledActions.length} enabled`}
+          status={enabledActions.length ? "pass" : "unknown"}
+        />
+        <KeyValue
+          label="Blocked lane actions"
+          value={`${blockedActions.length} blocked`}
+          status={blockedActions.length ? "blocked" : "pass"}
+        />
+      </div>
+      {environment.available_actions.length ? (
+        <div className="environment-action-strip">
+          {environment.available_actions.slice(0, 4).map((action) => (
+            <span
+              className="environment-action-chip"
+              data-enabled={action.enabled}
+              key={action.action_id}
+              title={action.disabled_reasons.join("; ") || action.description}
+            >
+              {action.label}
+            </span>
+          ))}
+        </div>
+      ) : null}
+    </div>
   );
 }

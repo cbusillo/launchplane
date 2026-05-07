@@ -233,6 +233,11 @@ export function App() {
     productOverviews.find(
       (overview) => overview.product === selected.driverId,
     ) ?? null;
+  const [selectedEnvironment, setSelectedEnvironment] = useState("prod");
+  const activeEnvironment =
+    selectedProductOverview?.environments.find(
+      (environment) => environment.environment === selectedEnvironment,
+    ) ?? selectedProductOverview?.environments[0];
   const [prodView, setProdView] = useState<DriverContextView | null>(null);
   const [testingView, setTestingView] = useState<DriverContextView | null>(
     null,
@@ -386,9 +391,15 @@ export function App() {
     const environments = selectedProductOverview.environments.filter(
       (environment) => environment.environment.trim(),
     );
+    setConfigStatuses([]);
+    if (!environments.length) {
+      setConfigStatusError("");
+      setConfigStatusLoading(false);
+      return;
+    }
     setConfigStatusLoading(true);
     setConfigStatusError("");
-    Promise.all(
+    Promise.allSettled(
       environments.map((environment) =>
         readProductEnvironmentConfigStatus(
           selectedProductOverview.product,
@@ -396,9 +407,23 @@ export function App() {
         ).then((payload) => payload.config_status),
       ),
     )
-      .then((statuses) => {
+      .then((results) => {
         if (!controller.signal.aborted) {
+          const statuses = results.flatMap((result) =>
+            result.status === "fulfilled" ? [result.value] : [],
+          );
+          const failures = results.flatMap((result, index) =>
+            result.status === "rejected"
+              ? [
+                  configStatusErrorMessage(
+                    environments[index].environment,
+                    result.reason,
+                  ),
+                ]
+              : [],
+          );
           setConfigStatuses(statuses);
+          setConfigStatusError(failures[0] ?? "");
         }
       })
       .catch((apiError: unknown) => {
@@ -421,6 +446,17 @@ export function App() {
       });
     return () => controller.abort();
   }, [authStatus, selectedProductOverview, refreshKey]);
+
+  useEffect(() => {
+    if (
+      selectedProductOverview?.environments.length &&
+      !selectedProductOverview.environments.some(
+        (environment) => environment.environment === selectedEnvironment,
+      )
+    ) {
+      setSelectedEnvironment(selectedProductOverview.environments[0].environment);
+    }
+  }, [selectedProductOverview, selectedEnvironment]);
 
   const currentDriver = drivers.find(
     (driver) => driver.driver_id === selected.driverId,
@@ -518,6 +554,8 @@ export function App() {
               product={selectedProductOverview}
               selected={selected}
               loading={loading}
+              selectedEnvironment={activeEnvironment?.environment ?? selectedEnvironment}
+              onSelectEnvironment={setSelectedEnvironment}
             />
             <section className="lane-grid" aria-busy={loading}>
               <LanePanel
@@ -930,6 +968,17 @@ function EvidenceDetailDrawer({
   );
 }
 
+function configStatusErrorMessage(environment: string, apiError: unknown): string {
+  const prefix = `${environment} config status`;
+  if (apiError instanceof LaunchplaneApiError) {
+    return `${prefix}: ${apiError.message}`;
+  }
+  if (apiError instanceof Error) {
+    return `${prefix}: ${apiError.message}`;
+  }
+  return `${prefix}: request failed.`;
+}
+
 function StateFixtureGallery({
   actions,
 }: {
@@ -942,6 +991,7 @@ function StateFixtureGallery({
     useState<WorkGraphFilter>("all");
   const [fixtureWorkGraphMode, setFixtureWorkGraphMode] =
     useState<WorkGraphMode>("all");
+  const [fixtureEnvironment, setFixtureEnvironment] = useState("prod");
   const readyProd = fixtureLane({
     instance: "prod",
     artifact: "ghcr.io/every/verireel@sha256:11112222",
@@ -976,7 +1026,16 @@ function StateFixtureGallery({
       trust_state: "verified",
       provenance: readyTesting.provenance,
       warnings: [],
-      available_actions: [],
+      available_actions: FIXTURE_GENERIC_WEB_ACTIONS.map((action) => ({
+        ...action,
+        authz_action: "product_environment.write",
+        enabled: action.action_id === "prod_promotion_workflow",
+        disabled_reasons:
+          action.action_id === "prod_promotion"
+            ? ["Prod promotion runs through the product-owned workflow."]
+            : [],
+        trust_state: "verified",
+      })),
     },
     {
       environment: "prod",
@@ -986,7 +1045,13 @@ function StateFixtureGallery({
       trust_state: "verified",
       provenance: readyProd.provenance,
       warnings: [],
-      available_actions: [],
+      available_actions: FIXTURE_GENERIC_WEB_ACTIONS.map((action) => ({
+        ...action,
+        authz_action: "product_environment.write",
+        enabled: false,
+        disabled_reasons: ["Prod lane writes require fresh backup evidence."],
+        trust_state: "recorded",
+      })),
     },
   ];
   const fixtureProducts: ProductSiteOverview[] = [
@@ -1298,6 +1363,15 @@ function StateFixtureGallery({
         <RuntimeAuthorityList
           driver={FIXTURE_VERIREEL_DRIVER}
           lane={readyProd}
+        />
+      </div>
+      <div className="fixture-wide">
+        <ProductOverviewShell
+          product={fixtureProducts[0]}
+          selected={choiceFromProductOverview(fixtureProducts[0])}
+          loading={false}
+          selectedEnvironment={fixtureEnvironment}
+          onSelectEnvironment={setFixtureEnvironment}
         />
       </div>
       <div className="fixture-wide">
