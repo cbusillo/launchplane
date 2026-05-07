@@ -526,6 +526,14 @@ target identifiers remain evidence metadata; runtime values, secret plaintext,
 secret ciphertext, and product-specific driver payloads are not exposed as
 shared top-level fields.
 
+`GET /v1/products/{product}/environments/{environment}/config-status` is a
+redacted product/site read under the same action. It compares product-profile
+expected runtime keys and managed secret bindings with recorded lane runtime
+environment records and managed secret binding metadata. Expected keys describe
+product intent; status is derived from records. The response exposes configured,
+missing, or disabled status plus key/source metadata only; managed secret IDs
+remain out of this readiness view.
+
 Product activity reads are intentionally record-link oriented. They summarize
 deployments, promotions, rollbacks, backup gates, preview identity/lifecycle,
 preview feedback, and matching authz-policy changes with driver/action IDs and

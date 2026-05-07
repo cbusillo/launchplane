@@ -13,6 +13,8 @@ from control_plane.contracts.preview_summary import LaunchplanePreviewSummary
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
+    ProductRuntimeConfigRequirement,
+    ProductSecretConfigRequirement,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
@@ -25,6 +27,14 @@ from control_plane.drivers.registry import (
 
 ActionAllowed = Callable[[str, str, str], bool]
 ProductSecretBindingTrustState = FreshnessStatus | Literal["disabled"]
+ProductConfigItemStatus = Literal[
+    "configured",
+    "missing",
+    "disabled",
+    "unvalidated",
+    "stale",
+    "unsupported",
+]
 
 
 class ProductReadModelStore(Protocol):
@@ -190,6 +200,48 @@ class ProductEnvironmentDetail(BaseModel):
     provenance: DataProvenance
 
 
+class ProductRuntimeConfigStatusItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    status: ProductConfigItemStatus
+    context: str = ""
+    instance: str = ""
+    source_label: str = ""
+    updated_at: str = ""
+    trust_state: FreshnessStatus = "missing"
+
+
+class ProductManagedSecretConfigStatusItem(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_key: str
+    status: ProductConfigItemStatus
+    integration: str
+    context: str = ""
+    instance: str = ""
+    updated_at: str = ""
+    trust_state: ProductSecretBindingTrustState | Literal["unsupported"] = "missing"
+
+
+class ProductEnvironmentConfigStatus(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    display_name: str
+    repository: str
+    driver_id: str
+    base_driver_id: str = ""
+    environment: str
+    context: str
+    runtime_settings: tuple[ProductRuntimeConfigStatusItem, ...] = ()
+    managed_secrets: tuple[ProductManagedSecretConfigStatusItem, ...] = ()
+    warnings: tuple[str, ...] = ()
+    trust_state: FreshnessStatus
+    provenance: DataProvenance
+
+
 class ProductActivityRecordLink(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -327,6 +379,57 @@ def build_product_environment_detail(
         ),
         warnings=warnings,
         trust_state=provenance.freshness_status,
+        provenance=provenance,
+    )
+
+
+def build_product_environment_config_status(
+    *,
+    record_store: ProductReadModelStore,
+    product: str,
+    environment: str,
+) -> ProductEnvironmentConfigStatus:
+    profile = record_store.read_product_profile_record(product)
+    lane = _find_lane(profile=profile, environment=environment)
+    descriptor, descriptor_warning = _read_profile_descriptor(profile)
+    lane_summary = _read_product_lane_summary(
+        record_store=record_store,
+        profile=profile,
+        lane=lane,
+    )
+    provenance = (
+        lane_summary.provenance if lane_summary is not None else _missing_lane_provenance(lane)
+    )
+    runtime_settings = _runtime_config_status_items(
+        requirements=profile.expected_config.runtime_environment_keys,
+        lane=lane,
+        lane_summary=lane_summary,
+    )
+    managed_secrets = _managed_secret_config_status_items(
+        requirements=profile.expected_config.managed_secret_bindings,
+        lane=lane,
+        lane_summary=lane_summary,
+    )
+    warnings = tuple(warning for warning in (descriptor_warning,) if warning)
+    trust_state = _combine_trust_states(
+        (
+            *(_config_item_freshness(item.status) for item in runtime_settings),
+            *(_config_item_freshness(item.status) for item in managed_secrets),
+        ),
+        fallback=provenance.freshness_status,
+    )
+    return ProductEnvironmentConfigStatus(
+        product=profile.product,
+        display_name=profile.display_name,
+        repository=profile.repository,
+        driver_id=profile.driver_id,
+        base_driver_id=descriptor.base_driver_id if descriptor is not None else "",
+        environment=lane.instance,
+        context=lane.context,
+        runtime_settings=runtime_settings,
+        managed_secrets=managed_secrets,
+        warnings=warnings,
+        trust_state=trust_state,
         provenance=provenance,
     )
 
@@ -1171,6 +1274,158 @@ def _secret_binding_summary(binding: SecretBinding) -> ProductSecretBindingSumma
         updated_at=binding.updated_at,
         trust_state="recorded" if binding.status == "configured" else "disabled",
     )
+
+
+def _runtime_config_status_items(
+    *,
+    requirements: tuple[ProductRuntimeConfigRequirement, ...],
+    lane: ProductLaneProfile,
+    lane_summary: LaunchplaneLaneSummary | None,
+) -> tuple[ProductRuntimeConfigStatusItem, ...]:
+    applicable_requirements = tuple(
+        requirement
+        for requirement in requirements
+        if _config_requirement_applies(
+            requirement_context=requirement.context,
+            requirement_instance=requirement.instance,
+            lane=lane,
+        )
+    )
+    if not applicable_requirements:
+        return ()
+    records = lane_summary.runtime_environment_records if lane_summary is not None else ()
+    return tuple(
+        _runtime_config_status_item(requirement=requirement, records=records, lane=lane)
+        for requirement in applicable_requirements
+    )
+
+
+def _runtime_config_status_item(
+    *,
+    requirement: ProductRuntimeConfigRequirement,
+    records: tuple[RuntimeEnvironmentRecord, ...],
+    lane: ProductLaneProfile,
+) -> ProductRuntimeConfigStatusItem:
+    matching_record = next(
+        (record for record in records if _runtime_record_provides_key(record, requirement.key)),
+        None,
+    )
+    context = requirement.context or lane.context
+    instance = requirement.instance or (lane.instance if requirement.context else "")
+    if matching_record is None:
+        return ProductRuntimeConfigStatusItem(
+            key=requirement.key,
+            status="missing",
+            context=context,
+            instance=instance,
+            trust_state="missing",
+        )
+    return ProductRuntimeConfigStatusItem(
+        key=requirement.key,
+        status="configured",
+        context=matching_record.context,
+        instance=matching_record.instance,
+        source_label=matching_record.source_label,
+        updated_at=matching_record.updated_at,
+        trust_state="recorded",
+    )
+
+
+def _runtime_record_provides_key(record: RuntimeEnvironmentRecord, key: str) -> bool:
+    return key in record.env
+
+
+def _managed_secret_config_status_items(
+    *,
+    requirements: tuple[ProductSecretConfigRequirement, ...],
+    lane: ProductLaneProfile,
+    lane_summary: LaunchplaneLaneSummary | None,
+) -> tuple[ProductManagedSecretConfigStatusItem, ...]:
+    applicable_requirements = tuple(
+        requirement
+        for requirement in requirements
+        if _config_requirement_applies(
+            requirement_context=requirement.context,
+            requirement_instance=requirement.instance,
+            lane=lane,
+        )
+    )
+    if not applicable_requirements:
+        return ()
+    bindings = lane_summary.secret_bindings if lane_summary is not None else ()
+    return tuple(
+        _managed_secret_config_status_item(
+            requirement=requirement,
+            bindings=bindings,
+            lane=lane,
+        )
+        for requirement in applicable_requirements
+    )
+
+
+def _managed_secret_config_status_item(
+    *,
+    requirement: ProductSecretConfigRequirement,
+    bindings: tuple[SecretBinding, ...],
+    lane: ProductLaneProfile,
+) -> ProductManagedSecretConfigStatusItem:
+    matching_binding = next(
+        (
+            binding
+            for binding in bindings
+            if binding.integration == requirement.integration
+            and binding.binding_key == requirement.binding_key
+        ),
+        None,
+    )
+    context = requirement.context or lane.context
+    instance = requirement.instance or (lane.instance if requirement.context else "")
+    if matching_binding is None:
+        return ProductManagedSecretConfigStatusItem(
+            binding_key=requirement.binding_key,
+            status="missing",
+            integration=requirement.integration,
+            context=context,
+            instance=instance,
+            trust_state="missing",
+        )
+    if matching_binding.status == "disabled":
+        status: ProductConfigItemStatus = "disabled"
+        trust_state: ProductSecretBindingTrustState = "disabled"
+    else:
+        status = "configured"
+        trust_state = "recorded"
+    return ProductManagedSecretConfigStatusItem(
+        binding_key=requirement.binding_key,
+        status=status,
+        integration=matching_binding.integration,
+        context=matching_binding.context,
+        instance=matching_binding.instance,
+        updated_at=matching_binding.updated_at,
+        trust_state=trust_state,
+    )
+
+
+def _config_item_freshness(status: ProductConfigItemStatus) -> FreshnessStatus:
+    if status == "configured":
+        return "recorded"
+    if status in {"disabled", "unvalidated"}:
+        return "missing"
+    if status == "stale":
+        return "stale"
+    if status == "unsupported":
+        return "unsupported"
+    return "missing"
+
+
+def _config_requirement_applies(
+    *, requirement_context: str, requirement_instance: str, lane: ProductLaneProfile
+) -> bool:
+    if not requirement_context:
+        return True
+    if requirement_context != lane.context:
+        return False
+    return not requirement_instance or requirement_instance == lane.instance
 
 
 def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTargetSummary:

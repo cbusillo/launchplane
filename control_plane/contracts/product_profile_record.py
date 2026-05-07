@@ -126,6 +126,76 @@ class ProductPromotionWorkflowProfile(BaseModel):
         return self
 
 
+class ProductRuntimeConfigRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    context: str = ""
+    instance: str = ""
+
+    @model_validator(mode="after")
+    def _validate_requirement(self) -> "ProductRuntimeConfigRequirement":
+        if not self.key.strip():
+            raise ValueError("product runtime config requirement requires key")
+        if self.instance.strip() and not self.context.strip():
+            raise ValueError("instance runtime config requirement requires context")
+        self.key = self.key.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        return self
+
+
+class ProductSecretConfigRequirement(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    binding_key: str
+    integration: str = "runtime_environment"
+    context: str = ""
+    instance: str = ""
+
+    @model_validator(mode="after")
+    def _validate_requirement(self) -> "ProductSecretConfigRequirement":
+        if not self.binding_key.strip():
+            raise ValueError("product secret config requirement requires binding_key")
+        if not self.integration.strip():
+            raise ValueError("product secret config requirement requires integration")
+        if self.instance.strip() and not self.context.strip():
+            raise ValueError("instance secret config requirement requires context")
+        self.binding_key = self.binding_key.strip()
+        self.integration = self.integration.strip()
+        self.context = self.context.strip()
+        self.instance = self.instance.strip()
+        return self
+
+
+class ProductExpectedConfigProfile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    runtime_environment_keys: tuple[ProductRuntimeConfigRequirement, ...] = ()
+    managed_secret_bindings: tuple[ProductSecretConfigRequirement, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_expected_config(self) -> "ProductExpectedConfigProfile":
+        runtime_keys = [
+            (requirement.context, requirement.instance, requirement.key)
+            for requirement in self.runtime_environment_keys
+        ]
+        if len(runtime_keys) != len(set(runtime_keys)):
+            raise ValueError("product expected runtime config keys must be unique")
+        secret_keys = [
+            (
+                requirement.integration,
+                requirement.context,
+                requirement.instance,
+                requirement.binding_key,
+            )
+            for requirement in self.managed_secret_bindings
+        ]
+        if len(secret_keys) != len(set(secret_keys)):
+            raise ValueError("product expected secret config bindings must be unique")
+        return self
+
+
 class LaunchplaneProductProfileRecord(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -142,6 +212,9 @@ class LaunchplaneProductProfileRecord(BaseModel):
     preview: ProductPreviewProfile = Field(default_factory=ProductPreviewProfile)
     promotion_workflow: ProductPromotionWorkflowProfile = Field(
         default_factory=ProductPromotionWorkflowProfile
+    )
+    expected_config: ProductExpectedConfigProfile = Field(
+        default_factory=ProductExpectedConfigProfile
     )
     updated_at: str
     source: str

@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.product_profile_record import (
+    ProductExpectedConfigProfile,
     ProductPreviewProfile,
     ProductPromotionWorkflowProfile,
 )
@@ -117,6 +118,10 @@ class ProductOnboardingSecretBindingManifest(BaseModel):
         return self
 
 
+class ProductOnboardingExpectedConfigManifest(ProductExpectedConfigProfile):
+    pass
+
+
 class ProductOnboardingManifest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -138,6 +143,9 @@ class ProductOnboardingManifest(BaseModel):
     dokploy_targets: tuple[ProductOnboardingTargetManifest, ...] = ()
     runtime_environments: tuple[ProductOnboardingRuntimeEnvironmentManifest, ...] = ()
     secret_bindings: tuple[ProductOnboardingSecretBindingManifest, ...] = ()
+    expected_config: ProductOnboardingExpectedConfigManifest = Field(
+        default_factory=ProductOnboardingExpectedConfigManifest
+    )
     updated_at: str = ""
     source_label: str = "product-onboarding"
 
@@ -213,4 +221,43 @@ class ProductOnboardingManifest(BaseModel):
                     "instance secret binding must match a stable lane: "
                     f"{binding.context}/{binding.instance}"
                 )
+        for runtime_requirement in self.expected_config.runtime_environment_keys:
+            self._validate_expected_config_route(
+                allowed_contexts=allowed_contexts,
+                lane_routes=lane_routes,
+                context=runtime_requirement.context,
+                instance=runtime_requirement.instance,
+                label="runtime config requirement",
+            )
+        for secret_requirement in self.expected_config.managed_secret_bindings:
+            self._validate_expected_config_route(
+                allowed_contexts=allowed_contexts,
+                lane_routes=lane_routes,
+                context=secret_requirement.context,
+                instance=secret_requirement.instance,
+                label="secret config requirement",
+            )
         return self
+
+    @staticmethod
+    def _validate_expected_config_route(
+        *,
+        allowed_contexts: set[str],
+        lane_routes: set[tuple[str, str]],
+        context: str,
+        instance: str,
+        label: str,
+    ) -> None:
+        if not context.strip():
+            return
+        if context.strip() not in allowed_contexts:
+            raise ValueError(f"{label} context is not owned by the product profile: {context}")
+        if instance.strip() and (context.strip(), instance.strip()) not in lane_routes:
+            raise ValueError(
+                f"instance {label} must match a stable lane: {context}/{instance}"
+            )
+
+    def product_expected_config_profile(self) -> ProductExpectedConfigProfile:
+        return ProductExpectedConfigProfile.model_validate(
+            self.expected_config.model_dump(mode="json")
+        )

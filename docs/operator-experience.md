@@ -64,6 +64,7 @@ The first product/site read endpoints are:
 - `GET /v1/products/{product}`
 - `GET /v1/products/{product}/activity`
 - `GET /v1/products/{product}/environments/{environment}`
+- `GET /v1/products/{product}/environments/{environment}/config-status`
 
 These endpoints are profile and driver driven. A standard `generic-web` site
 should appear in the read model from Launchplane records alone: product profile,
@@ -77,6 +78,14 @@ records. Events carry product, context, environment, driver id, action id,
 status, timestamp, and record links so the UI can render deployments,
 promotions, rollbacks, backup gates, previews, cleanup, feedback, and relevant
 authz changes without loading raw record payloads.
+
+Product environment config status compares product-profile expected config
+requirements against recorded runtime-environment keys and managed secret
+bindings for the stable lane. Expected keys are declarative product intent;
+configured, missing, and disabled states are derived from Launchplane records.
+The response includes key names, binding metadata, status, source, and freshness
+only. It never includes runtime values, managed secret IDs, secret plaintext, or
+ciphertext.
 
 ## Promotion Safety
 

@@ -10,10 +10,12 @@ from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
     build_product_activity_read_model,
+    build_product_environment_config_status,
     build_product_environment_detail,
     build_product_site_overview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -53,6 +55,16 @@ def _site_profile_payload(
             "enabled": preview_enabled,
             "context": preview_context,
             "slug_template": "pr-{number}",
+        },
+        "expected_config": {
+            "runtime_environment_keys": [
+                {"key": "PUBLIC_BASE_URL", "context": testing_context, "instance": "testing"},
+                {"key": "RESEND_FROM_EMAIL", "context": prod_context, "instance": "prod"},
+            ],
+            "managed_secret_bindings": [
+                {"binding_key": "SMTP_PASSWORD", "context": prod_context, "instance": "prod"},
+                {"binding_key": "RESEND_API_KEY", "context": prod_context, "instance": "prod"},
+            ],
         },
         "updated_at": "2026-05-02T22:30:00Z",
         "source": "test",
@@ -640,6 +652,58 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         self.assertEqual(detail.managed_secrets[0].status, "disabled")
         self.assertEqual(detail.managed_secrets[0].trust_state, "disabled")
+
+    def test_product_environment_config_status_reports_expected_key_states(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_path = Path(temporary_directory_name) / "launchplane.sqlite3"
+            database_url = f"sqlite+pysqlite:///{database_path}"
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            profile = LaunchplaneProductProfileRecord.model_validate(
+                _site_profile_payload(preview_enabled=False, preview_context="")
+            )
+            store.write_product_profile_record(profile)
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="example-site-prod",
+                    instance="prod",
+                    env={"RESEND_FROM_EMAIL": "noreply@example.invalid"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+            )
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="binding-1",
+                    secret_id="secret-1",
+                    integration="runtime_environment",
+                    binding_key="SMTP_PASSWORD",
+                    context="example-site-prod",
+                    instance="prod",
+                    status="disabled",
+                    created_at="2026-05-02T22:31:00Z",
+                    updated_at="2026-05-02T22:32:00Z",
+                )
+            )
+
+            config_status = build_product_environment_config_status(
+                record_store=store,
+                product=profile.product,
+                environment="prod",
+            )
+
+        runtime_statuses = {item.key: item.status for item in config_status.runtime_settings}
+        secret_statuses = {
+            item.binding_key: item.status for item in config_status.managed_secrets
+        }
+        self.assertEqual(runtime_statuses, {"RESEND_FROM_EMAIL": "configured"})
+        self.assertEqual(
+            secret_statuses,
+            {"SMTP_PASSWORD": "disabled", "RESEND_API_KEY": "missing"},
+        )
+        response_text = config_status.model_dump_json()
+        self.assertNotIn("noreply@example.invalid", response_text)
 
     def test_product_activity_read_model_aggregates_product_records(self) -> None:
         profile = LaunchplaneProductProfileRecord.model_validate(

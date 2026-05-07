@@ -76,6 +76,22 @@ def _manifest_payload() -> dict[str, object]:
                 "instance": "prod",
             }
         ],
+        "expected_config": {
+            "runtime_environment_keys": [
+                {
+                    "key": "PUBLIC_BASE_URL",
+                    "context": "example-site-testing",
+                    "instance": "testing",
+                }
+            ],
+            "managed_secret_bindings": [
+                {
+                    "binding_key": "SMTP_PASSWORD",
+                    "context": "example-site-prod",
+                    "instance": "prod",
+                }
+            ],
+        },
         "updated_at": "2026-05-03T01:30:00Z",
         "source_label": "test:onboarding",
     }
@@ -111,6 +127,11 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(profile.driver_id, "generic-web")
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertEqual(profile.lanes[1].health_url, "https://example.invalid/status")
+        self.assertEqual(profile.expected_config.runtime_environment_keys[0].key, "PUBLIC_BASE_URL")
+        self.assertEqual(
+            profile.expected_config.managed_secret_bindings[0].binding_key,
+            "SMTP_PASSWORD",
+        )
         self.assertEqual(len(targets), 2)
         self.assertEqual(len(target_ids), 2)
         self.assertEqual(len(runtime_records), 1)
@@ -144,6 +165,20 @@ class ProductOnboardingTests(unittest.TestCase):
         ]
 
         with self.assertRaisesRegex(ValueError, "target requires target_id"):
+            ProductOnboardingManifest.model_validate(payload)
+
+    def test_product_onboarding_manifest_rejects_duplicate_expected_config_keys(
+        self,
+    ) -> None:
+        payload = _manifest_payload()
+        payload["expected_config"] = {
+            "runtime_environment_keys": [
+                {"key": "PUBLIC_BASE_URL", "context": "example-site-prod", "instance": "prod"},
+                {"key": "PUBLIC_BASE_URL", "context": "example-site-prod", "instance": "prod"},
+            ]
+        }
+
+        with self.assertRaisesRegex(ValueError, "expected runtime config keys must be unique"):
             ProductOnboardingManifest.model_validate(payload)
 
     def test_product_onboarding_cli_applies_manifest_without_secret_values(self) -> None:
