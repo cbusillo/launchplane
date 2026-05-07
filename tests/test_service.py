@@ -501,6 +501,35 @@ def _every_code_github_pr_comment_payload(
     }
 
 
+def _every_code_github_issue_comment_payload(
+    *,
+    repository: str = "cbusillo/code",
+    issue_number: int = 123,
+    issue_author: str = "Mbanks89",
+    sender: str = "Mbanks89",
+    body: str = "/preview ok",
+    comment_id: int = 2001,
+) -> dict[str, object]:
+    return {
+        "action": "created",
+        "repository": {"full_name": repository},
+        "issue": {
+            "number": issue_number,
+            "html_url": f"https://github.com/{repository}/issues/{issue_number}",
+            "title": "Wire local automation",
+            "user": {"login": issue_author},
+        },
+        "comment": {
+            "id": comment_id,
+            "node_id": f"IC_kwDO_issue_{comment_id}",
+            "html_url": f"https://github.com/{repository}/issues/{issue_number}#issuecomment-{comment_id}",
+            "body": body,
+            "author_association": "CONTRIBUTOR",
+        },
+        "sender": {"login": sender},
+    }
+
+
 def _work_graph_snapshot_payload() -> dict[str, object]:
     return {
         "generated_at": "2026-05-06T01:45:00Z",
@@ -1948,6 +1977,211 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(feedback["request_id"], request_id)
         self.assertEqual(feedback["feedback_kind"], "issue_comment")
         self.assertEqual(feedback["body"], "Please tighten this wording before merge.")
+
+    def test_every_code_preview_ok_comment_marks_pr_ready_to_merge(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+        )
+        comment_payload = _every_code_github_issue_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+            body="/preview ok",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+            patch(
+                "control_plane.service.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                side_effect=[
+                    [{"name": "preview-approved"}],
+                    {},
+                    {},
+                    [{"name": "ready-to-merge"}],
+                    {"owner": {"login": "cbusillo", "type": "User"}},
+                    {"assignees": [{"login": "cbusillo"}]},
+                ],
+            ) as github_request,
+            patch(
+                "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                return_value={"id": 987},
+            ) as create_comment,
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            claim_status, _claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            status_status, _status_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/88",
+                    "result_summary": "Opened PR.",
+                    "updated_at": "2026-05-07T12:40:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            ok_status, ok_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-preview-ok",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(claim_status, 202)
+        self.assertEqual(status_status, 202)
+        self.assertEqual(ok_status, 202, ok_response)
+        preview_validation = ok_response["result"]["preview_validation"]
+        self.assertEqual(preview_validation["command"], "ok")
+        self.assertEqual(preview_validation["merge_owner"], "cbusillo")
+        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"labels": ["ready-to-merge"]})
+        self.assertEqual(github_request.call_args_list[5].kwargs["body"], {"assignees": ["cbusillo"]})
+        create_comment.assert_called_once()
+        self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
+
+    def test_every_code_preview_changes_routes_feedback_to_session(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+        )
+        comment_payload = _every_code_github_issue_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+            body="/preview changes The delete button still misses bulk uploads.",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+            patch(
+                "control_plane.service.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                side_effect=[
+                    [{"name": "preview-changes-requested"}],
+                    {},
+                    {},
+                    {},
+                ],
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            claim_status, _claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            status_status, _status_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/88",
+                    "result_summary": "Opened PR.",
+                    "updated_at": "2026-05-07T12:40:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            changes_status, changes_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-preview-changes",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(claim_status, 202)
+        self.assertEqual(status_status, 202)
+        self.assertEqual(changes_status, 202, changes_response)
+        preview_validation = changes_response["result"]["preview_validation"]
+        self.assertEqual(preview_validation["command"], "changes")
+        feedback = preview_validation["feedback_id"]
+        self.assertIn("every-code-pr-feedback-cbusillo-sellyouroutboard-88", feedback)
 
     def test_every_code_pr_comment_webhook_matches_linked_issue(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

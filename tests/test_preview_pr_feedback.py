@@ -31,7 +31,7 @@ def _every_code_request(*, result_pr_url: str = "") -> EveryCodeWorkRequestRecor
 
 
 class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
-    def test_ready_feedback_notifies_issue_author_and_requests_review(self) -> None:
+    def test_ready_feedback_notifies_issue_author_on_source_issue(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
             request = _every_code_request(
@@ -66,8 +66,10 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                     side_effect=[
                         {"user": {"login": "code-agent"}, "head": {"ref": "feature/preview"}},
                         {"user": {"login": "Mbanks89"}},
-                        {"users": []},
-                        {"requested_reviewers": [{"login": "Mbanks89"}]},
+                        {"owner": {"login": "cbusillo", "type": "User"}},
+                        [{"name": "preview-ready"}],
+                        {},
+                        {},
                     ],
                 ) as github_request,
             ):
@@ -100,11 +102,15 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         self.assertEqual(source_issue_call.kwargs["issue_number"], 82)
         self.assertIn("@Mbanks89", source_issue_call.kwargs["body"])
         self.assertIn("https://pr-88.sellyouroutboard.dev", source_issue_call.kwargs["body"])
-        self.assertIn("requested you as a reviewer", source_issue_call.kwargs["body"])
+        self.assertIn("Confirm the preview resolves: Improve image previews", source_issue_call.kwargs["body"])
+        self.assertIn("/preview ok", source_issue_call.kwargs["body"])
+        self.assertNotIn("/preview approve", source_issue_call.kwargs["body"])
+        self.assertIn("author%3AMbanks89", source_issue_call.kwargs["body"])
+        self.assertIn("assignee%3Acbusillo", source_issue_call.kwargs["body"])
         self.assertEqual(github_request.call_args_list[3].kwargs["method"], "POST")
-        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"reviewers": ["Mbanks89"]})
+        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"labels": ["preview-ready"]})
 
-    def test_ready_feedback_updates_issue_comment_and_skips_pr_author_review(self) -> None:
+    def test_ready_feedback_updates_issue_comment_without_review_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
             request = _every_code_request()
@@ -143,6 +149,10 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
                             "head": {"ref": every_code_worktree_branch(request)},
                         },
                         {"user": {"login": "Mbanks89"}},
+                        {"owner": {"login": "cbusillo", "type": "User"}},
+                        [{"name": "preview-ready"}],
+                        {},
+                        {},
                     ],
                 ) as github_request,
             ):
@@ -165,8 +175,9 @@ class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
         create_comment.assert_not_called()
         self.assertEqual(update_comment.call_count, 2)
         self.assertEqual(update_comment.call_args_list[1].kwargs["comment_id"], 456)
-        self.assertIn("skipped because you opened the pull request", update_comment.call_args_list[1].kwargs["body"])
-        self.assertEqual(github_request.call_count, 2)
+        self.assertIn("comment `/preview ok`", update_comment.call_args_list[1].kwargs["body"])
+        self.assertNotIn("reviewer", update_comment.call_args_list[1].kwargs["body"].lower())
+        self.assertEqual(github_request.call_count, 6)
 
     def test_pending_feedback_renders_neutral_waiting_comment(self) -> None:
         with (
