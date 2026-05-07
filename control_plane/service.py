@@ -1965,6 +1965,10 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     raise TypeError("record store does not support Every Code work requests")
 
 
+def _supports_every_code_work_requests(record_store: object) -> bool:
+    return hasattr(record_store, "list_every_code_work_request_records")
+
+
 def _github_webhook_header(environ: dict[str, object], name: str) -> str:
     return str(environ.get(f"HTTP_{name.upper().replace('-', '_')}", "")).strip()
 
@@ -7621,6 +7625,11 @@ def create_launchplane_service_app(
                     revision=preview_pr_feedback_request.revision,
                     run_url=preview_pr_feedback_request.run_url,
                     failure_summary=preview_pr_feedback_request.failure_summary,
+                    every_code_record_store=(
+                        record_store
+                        if _supports_every_code_work_requests(record_store)
+                        else None
+                    ),
                 )
                 preview_pr_feedback_id = _write_preview_pr_feedback_if_supported(
                     record_store=record_store,

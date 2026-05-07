@@ -1,11 +1,173 @@
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.every_code_worker import every_code_worktree_branch
+from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.preview_pr_feedback import build_preview_pr_feedback_record
 
 
+def _every_code_request(*, result_pr_url: str = "") -> EveryCodeWorkRequestRecord:
+    return EveryCodeWorkRequestRecord(
+        request_id="every-code-cbusillo-sellyouroutboard-82-test",
+        source="github_issue_label",
+        state="running",
+        repository="cbusillo/sellyouroutboard",
+        issue_number=82,
+        issue_url="https://github.com/cbusillo/sellyouroutboard/issues/82",
+        issue_title="Improve image previews",
+        trigger_label="every-code",
+        trigger_actor="Mbanks89",
+        github_delivery_id="delivery-82",
+        queued_at="2026-05-07T12:00:00Z",
+        updated_at="2026-05-07T12:10:00Z",
+        claimed_at="2026-05-07T12:01:00Z",
+        claimed_by_host="Chris-Studio",
+        started_at="2026-05-07T12:02:00Z",
+        result_pr_url=result_pr_url,
+    )
+
+
 class PreviewPrFeedbackWorkflowTests(unittest.TestCase):
+    def test_ready_feedback_notifies_issue_author_and_requests_review(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            request = _every_code_request(
+                result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/88"
+            )
+            store.write_every_code_work_request_record(request)
+
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                    side_effect=[None, None],
+                ) as find_comment,
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                    side_effect=[
+                        {
+                            "id": 123,
+                            "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/88#issuecomment-123",
+                        },
+                        {
+                            "id": 456,
+                            "html_url": "https://github.com/cbusillo/sellyouroutboard/issues/82#issuecomment-456",
+                        },
+                    ],
+                ) as create_comment,
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.github_api_request",
+                    side_effect=[
+                        {"user": {"login": "code-agent"}, "head": {"ref": "feature/preview"}},
+                        {"user": {"login": "Mbanks89"}},
+                        {"users": []},
+                        {"requested_reviewers": [{"login": "Mbanks89"}]},
+                    ],
+                ) as github_request,
+            ):
+                record = build_preview_pr_feedback_record(
+                    control_plane_root=Path("."),
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-preview",
+                    source="preview-control-plane",
+                    requested_at="2026-05-07T12:20:00Z",
+                    repository="cbusillo/sellyouroutboard",
+                    anchor_repo="sellyouroutboard",
+                    anchor_pr_number=88,
+                    anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/88",
+                    status="ready",
+                    preview_url="https://pr-88.sellyouroutboard.dev",
+                    every_code_record_store=store,
+                )
+
+        self.assertEqual(record.delivery_status, "delivered")
+        self.assertEqual(record.delivery_action, "created_comment")
+        self.assertEqual(find_comment.call_count, 2)
+        create_comment.assert_any_call(
+            owner="cbusillo",
+            repo="sellyouroutboard",
+            issue_number=88,
+            token="github-token",
+            body=record.comment_markdown,
+        )
+        source_issue_call = create_comment.call_args_list[1]
+        self.assertEqual(source_issue_call.kwargs["issue_number"], 82)
+        self.assertIn("@Mbanks89", source_issue_call.kwargs["body"])
+        self.assertIn("https://pr-88.sellyouroutboard.dev", source_issue_call.kwargs["body"])
+        self.assertIn("requested you as a reviewer", source_issue_call.kwargs["body"])
+        self.assertEqual(github_request.call_args_list[3].kwargs["method"], "POST")
+        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"reviewers": ["Mbanks89"]})
+
+    def test_ready_feedback_updates_issue_comment_and_skips_pr_author_review(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            request = _every_code_request()
+            store.write_every_code_work_request_record(request)
+
+            with (
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.resolve_launchplane_github_token",
+                    return_value="github-token",
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                    side_effect=[
+                        {"id": 123, "body": "<!-- verireel-preview-control -->\nold"},
+                        {
+                            "id": 456,
+                            "body": "<!-- launchplane-every-code-preview-ready:cbusillo/sellyouroutboard#88 -->\nold",
+                        },
+                    ],
+                ),
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.update_github_issue_comment",
+                    return_value={
+                        "id": 123,
+                        "html_url": "https://github.com/cbusillo/sellyouroutboard/pull/88#issuecomment-123",
+                    },
+                ) as update_comment,
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.create_github_issue_comment"
+                ) as create_comment,
+                patch(
+                    "control_plane.workflows.preview_pr_feedback.github_api_request",
+                    side_effect=[
+                        {
+                            "user": {"login": "Mbanks89"},
+                            "head": {"ref": every_code_worktree_branch(request)},
+                        },
+                        {"user": {"login": "Mbanks89"}},
+                    ],
+                ) as github_request,
+            ):
+                record = build_preview_pr_feedback_record(
+                    control_plane_root=Path("."),
+                    product="sellyouroutboard",
+                    context="sellyouroutboard-preview",
+                    source="preview-control-plane",
+                    requested_at="2026-05-07T12:20:00Z",
+                    repository="cbusillo/sellyouroutboard",
+                    anchor_repo="sellyouroutboard",
+                    anchor_pr_number=88,
+                    anchor_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/88",
+                    status="ready",
+                    preview_url="https://pr-88.sellyouroutboard.dev",
+                    every_code_record_store=store,
+                )
+
+        self.assertEqual(record.delivery_status, "delivered")
+        create_comment.assert_not_called()
+        self.assertEqual(update_comment.call_count, 2)
+        self.assertEqual(update_comment.call_args_list[1].kwargs["comment_id"], 456)
+        self.assertIn("skipped because you opened the pull request", update_comment.call_args_list[1].kwargs["body"])
+        self.assertEqual(github_request.call_count, 2)
+
     def test_pending_feedback_renders_neutral_waiting_comment(self) -> None:
         with (
             patch(
