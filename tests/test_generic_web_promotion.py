@@ -284,6 +284,128 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         promotion = next(iter(store.promotions.values()))
         self.assertEqual(promotion.artifact_identity.artifact_id, expected_artifact_id)
 
+    def test_execute_prod_promotion_creates_github_release(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+        github_requests: list[tuple[str, str, dict[str, object] | None]] = []
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            store.write_deployment_record(_deployment_record())
+            return _deploy_result()
+
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ) -> object:
+            github_requests.append((method, path, body))
+            self.assertEqual(token, "release-token")
+            if path.endswith("/git/ref/tags/v0.3.0"):
+                raise click.ClickException("GitHub API request failed: HTTP Error 404: Not Found")
+            if path.endswith("/releases/tags/v0.3.0"):
+                raise click.ClickException("GitHub API request failed: HTTP Error 404: Not Found")
+            if method == "POST" and path.endswith("/releases"):
+                return {"html_url": "https://github.com/cbusillo/sellyouroutboard/releases/tag/v0.3.0"}
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.resolve_launchplane_github_token",
+                return_value="release-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.github_api_request",
+                side_effect=fake_github_api_request,
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(release_tag="v0.3.0"),
+            )
+
+        self.assertEqual(result.promotion_status, "pass")
+        self.assertEqual(result.release_status, "pass")
+        self.assertEqual(result.release_tag, "v0.3.0")
+        self.assertEqual(
+            result.release_url,
+            "https://github.com/cbusillo/sellyouroutboard/releases/tag/v0.3.0",
+        )
+        self.assertEqual(
+            github_requests[-1],
+            (
+                "POST",
+                "/repos/cbusillo/sellyouroutboard/releases",
+                {
+                    "tag_name": "v0.3.0",
+                    "target_commitish": "abc123",
+                    "name": "v0.3.0",
+                    "body": "\n".join(
+                        (
+                            "Promoted sellyouroutboard to prod.",
+                            "",
+                            "- Artifact: `ghcr.io/cbusillo/sellyouroutboard@sha256:abc123`",
+                            "- Source git ref: `abc123`",
+                            f"- Promotion record: `{result.promotion_record_id}`",
+                            "- Deployment record: `deployment-syo-prod`",
+                            "- Inventory record: `sellyouroutboard-testing-prod`",
+                        )
+                    ),
+                    "draft": False,
+                    "prerelease": False,
+                },
+            ),
+        )
+
+    def test_execute_prod_promotion_rejects_release_tag_mismatch(self) -> None:
+        store = _GenericWebPromotionStore(_profile())
+        store.write_environment_inventory(_testing_inventory())
+
+        def fake_deploy(**kwargs: object) -> GenericWebDeployResult:
+            store.write_deployment_record(_deployment_record())
+            return _deploy_result()
+
+        def fake_github_api_request(
+            *, path: str, token: str, method: str = "GET", body: dict[str, object] | None = None
+        ) -> object:
+            if path.endswith("/git/ref/tags/v0.3.0"):
+                return {"object": {"type": "commit", "sha": "different"}}
+            raise AssertionError(path)
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_promotion.execute_generic_web_deploy",
+                side_effect=fake_deploy,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.resolve_launchplane_github_token",
+                return_value="release-token",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.github_api_request",
+                side_effect=fake_github_api_request,
+            ),
+        ):
+            result = execute_generic_web_prod_promotion(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=_request(release_tag="v0.3.0"),
+            )
+
+        self.assertEqual(result.promotion_status, "pass")
+        self.assertEqual(result.release_status, "fail")
+        self.assertIn("not promoted revision", result.error_message)
+
     def test_dry_run_returns_pending_evidence_without_mutation(self) -> None:
         store = _GenericWebPromotionStore(_profile())
         store.write_environment_inventory(_testing_inventory())

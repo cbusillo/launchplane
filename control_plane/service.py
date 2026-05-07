@@ -6092,6 +6092,9 @@ def create_launchplane_service_app(
                     "source_health_status": driver_result.source_health_status,
                     "destination_health_status": driver_result.destination_health_status,
                     "backup_status": driver_result.backup_status,
+                    "release_status": driver_result.release_status,
+                    "release_tag": driver_result.release_tag,
+                    "release_url": driver_result.release_url,
                     "dry_run": driver_result.dry_run,
                 }
             elif path == _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path:

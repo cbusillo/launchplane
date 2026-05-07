@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import click
@@ -33,6 +34,10 @@ from control_plane.workflows.generic_web_deploy import (
     resolve_generic_web_profile_lane,
 )
 from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.launchplane import (
+    github_api_request,
+    resolve_launchplane_github_token,
+)
 from control_plane.workflows.promote import generate_promotion_record_id
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -70,6 +75,7 @@ class GenericWebProdPromotionRequest(BaseModel):
     health_timeout_seconds: int = Field(default=DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS, ge=1)
     dry_run: bool = False
     no_cache: bool = False
+    release_tag: str = ""
 
     @model_validator(mode="after")
     def _validate_request(self) -> "GenericWebProdPromotionRequest":
@@ -79,6 +85,7 @@ class GenericWebProdPromotionRequest(BaseModel):
         self.from_instance = self.from_instance.strip().lower()
         self.to_instance = self.to_instance.strip().lower()
         self.backup_record_id = self.backup_record_id.strip()
+        self.release_tag = self.release_tag.strip()
         if not self.product:
             raise ValueError("generic web prod promotion requires product")
         if not self.artifact_id:
@@ -115,6 +122,9 @@ class GenericWebProdPromotionResult(BaseModel):
     backup_status: ReleaseStatus = "skipped"
     source_health_status: ReleaseStatus = "skipped"
     destination_health_status: ReleaseStatus = "skipped"
+    release_status: ReleaseStatus = "skipped"
+    release_tag: str = ""
+    release_url: str = ""
     target_name: str = ""
     target_type: DokployTargetType | Literal[""] = ""
     target_id: str = ""
@@ -212,6 +222,8 @@ def execute_generic_web_prod_promotion(
             backup_status=backup_gate.status,
             source_health_status=source_health.status,
             destination_health_status=destination_health.status,
+            release_status="pending" if request.release_tag else "skipped",
+            release_tag=request.release_tag,
             dry_run=True,
         )
 
@@ -327,7 +339,7 @@ def execute_generic_web_prod_promotion(
         )
         record_store.write_environment_inventory(inventory)
         inventory_record_id = f"{inventory.context}-{inventory.instance}"
-    return _result_from_record(
+    final_result = _result_from_record(
         request=request,
         record=final_record,
         deployment_record=deployment_record,
@@ -335,6 +347,33 @@ def execute_generic_web_prod_promotion(
         target_id=deploy_result.target_id,
         dry_run=False,
         error_message=deploy_result.error_message,
+    )
+    if final_result.promotion_status != "pass" or not request.release_tag:
+        return final_result
+    try:
+        release_url = _create_or_verify_github_release(
+            control_plane_root=control_plane_root,
+            profile=profile,
+            context=destination_lane.context,
+            request=request,
+            promotion_record_id=promotion_record_id,
+            deployment_record_id=deploy_result.deployment_record_id,
+            inventory_record_id=inventory_record_id,
+        )
+    except click.ClickException as error:
+        return final_result.model_copy(
+            update={
+                "release_status": "fail",
+                "release_tag": request.release_tag,
+                "error_message": str(error),
+            }
+        )
+    return final_result.model_copy(
+        update={
+            "release_status": "pass",
+            "release_tag": request.release_tag,
+            "release_url": release_url,
+        }
     )
 
 
@@ -578,6 +617,185 @@ def _fallback_target_name(
     return f"{request.product}-{lane.instance}"
 
 
+def _create_or_verify_github_release(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    context: str,
+    request: GenericWebProdPromotionRequest,
+    promotion_record_id: str,
+    deployment_record_id: str,
+    inventory_record_id: str,
+) -> str:
+    owner, repo = _repository_parts(profile.repository)
+    token = resolve_launchplane_github_token(
+        control_plane_root=control_plane_root,
+        context_name=context,
+    )
+    if not token:
+        raise click.ClickException(
+            f"Generic web prod promotion requires GitHub token for context '{context}' to create release '{request.release_tag}'."
+        )
+    tag_target_sha = _github_tag_target_sha(
+        owner=owner,
+        repo=repo,
+        release_tag=request.release_tag,
+        token=token,
+    )
+    if tag_target_sha and not _revisions_match(tag_target_sha, request.source_git_ref):
+        raise click.ClickException(
+            f"GitHub tag '{request.release_tag}' points at '{tag_target_sha}', not promoted revision '{request.source_git_ref}'."
+        )
+    existing_release = _github_release_for_tag(
+        owner=owner,
+        repo=repo,
+        release_tag=request.release_tag,
+        token=token,
+    )
+    if existing_release is not None:
+        return _release_html_url(existing_release)
+
+    release_payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/releases",
+        token=token,
+        method="POST",
+        body={
+            "tag_name": request.release_tag,
+            "target_commitish": request.source_git_ref,
+            "name": request.release_tag,
+            "body": _github_release_body(
+                request=request,
+                promotion_record_id=promotion_record_id,
+                deployment_record_id=deployment_record_id,
+                inventory_record_id=inventory_record_id,
+            ),
+            "draft": False,
+            "prerelease": False,
+        },
+    )
+    if not isinstance(release_payload, dict):
+        raise click.ClickException(
+            f"GitHub release create response for {owner}/{repo} {request.release_tag} must be an object."
+        )
+    return _release_html_url(release_payload)
+
+
+def _repository_parts(repository: str) -> tuple[str, str]:
+    owner, separator, repo = repository.strip().partition("/")
+    if not owner or separator != "/" or not repo:
+        raise click.ClickException(
+            f"Generic web prod promotion requires product repository in OWNER/REPO form, got {repository!r}."
+        )
+    return owner, repo
+
+
+def _github_release_for_tag(
+    *, owner: str, repo: str, release_tag: str, token: str
+) -> dict[str, object] | None:
+    try:
+        payload = github_api_request(
+            path=f"/repos/{owner}/{repo}/releases/tags/{quote(release_tag, safe='')}",
+            token=token,
+        )
+    except click.ClickException as error:
+        if _github_not_found(error):
+            return None
+        raise
+    if not isinstance(payload, dict):
+        raise click.ClickException(
+            f"GitHub release lookup response for {owner}/{repo} {release_tag} must be an object."
+        )
+    return payload
+
+
+def _github_tag_target_sha(*, owner: str, repo: str, release_tag: str, token: str) -> str:
+    try:
+        payload = github_api_request(
+            path=f"/repos/{owner}/{repo}/git/ref/tags/{quote(release_tag, safe='')}",
+            token=token,
+        )
+    except click.ClickException as error:
+        if _github_not_found(error):
+            return ""
+        raise
+    if not isinstance(payload, dict):
+        raise click.ClickException(
+            f"GitHub tag lookup response for {owner}/{repo} {release_tag} must be an object."
+        )
+    target = _github_ref_object_sha(payload)
+    if _github_ref_object_type(payload) != "tag":
+        return target
+    annotated_payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/git/tags/{quote(target, safe='')}",
+        token=token,
+    )
+    if not isinstance(annotated_payload, dict):
+        raise click.ClickException(
+            f"GitHub annotated tag response for {owner}/{repo} {release_tag} must be an object."
+        )
+    return _github_ref_object_sha(annotated_payload)
+
+
+def _github_ref_object_sha(payload: dict[str, object]) -> str:
+    obj = payload.get("object")
+    if not isinstance(obj, dict):
+        raise click.ClickException("GitHub tag response is missing object data.")
+    sha = obj.get("sha")
+    if not isinstance(sha, str) or not sha.strip():
+        raise click.ClickException("GitHub tag response is missing object sha.")
+    return sha.strip()
+
+
+def _github_ref_object_type(payload: dict[str, object]) -> str:
+    obj = payload.get("object")
+    if not isinstance(obj, dict):
+        raise click.ClickException("GitHub tag response is missing object data.")
+    object_type = obj.get("type")
+    return object_type.strip() if isinstance(object_type, str) else ""
+
+
+def _github_not_found(error: click.ClickException) -> bool:
+    message = str(error)
+    return "HTTP Error 404" in message or "404: Not Found" in message
+
+
+def _revisions_match(left: str, right: str) -> bool:
+    normalized_left = left.strip()
+    normalized_right = right.strip()
+    if not normalized_left or not normalized_right:
+        return False
+    return (
+        normalized_left == normalized_right
+        or (len(normalized_left) >= 7 and normalized_right.startswith(normalized_left))
+        or (len(normalized_right) >= 7 and normalized_left.startswith(normalized_right))
+    )
+
+
+def _release_html_url(payload: dict[str, object]) -> str:
+    html_url = payload.get("html_url")
+    return html_url.strip() if isinstance(html_url, str) else ""
+
+
+def _github_release_body(
+    *,
+    request: GenericWebProdPromotionRequest,
+    promotion_record_id: str,
+    deployment_record_id: str,
+    inventory_record_id: str,
+) -> str:
+    return "\n".join(
+        (
+            f"Promoted {request.product} to {request.to_instance}.",
+            "",
+            f"- Artifact: `{request.artifact_id}`",
+            f"- Source git ref: `{request.source_git_ref}`",
+            f"- Promotion record: `{promotion_record_id}`",
+            f"- Deployment record: `{deployment_record_id}`",
+            f"- Inventory record: `{inventory_record_id}`",
+        )
+    )
+
+
 def _result_from_record(
     *,
     request: GenericWebProdPromotionRequest,
@@ -606,6 +824,7 @@ def _result_from_record(
         backup_status=record.backup_gate.status,
         source_health_status=record.source_health.status,
         destination_health_status=record.destination_health.status,
+        release_tag=request.release_tag,
         target_name=record.deploy.target_name,
         target_type=record.deploy.target_type,
         target_id=target_id,
