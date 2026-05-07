@@ -11,7 +11,6 @@ import {
   LogOut,
   Loader2,
   Moon,
-  PanelsTopLeft,
   Play,
   RefreshCw,
   ShieldAlert,
@@ -35,15 +34,16 @@ import {
   readDriverView,
 } from "./api";
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
-import { EveryCodeQueue } from "./EveryCodeQueue";
 import { formatTime, labelForStatus } from "./format";
 import { KeyValue, MetricTile, PanelHead } from "./panel-ui";
+import { ProductInventoryCockpit } from "./ProductInventoryCockpit";
 import {
   ProductConfigPanel,
   runtimeScopeForTarget,
   secretScopeForTarget,
 } from "./ProductConfigPanel";
 import { StatusIcon, StatusPill, StateBlock, SkeletonRows } from "./status-ui";
+import { freshnessLabel, TrustBadge } from "./TrustBadge";
 import {
   choiceFromProductOverview,
   choiceKey,
@@ -72,11 +72,9 @@ import type {
   PreviewSummary,
   Safety,
   Status,
-  FreshnessStatus,
   WorkGraphQueueItem,
 } from "./types";
 import {
-  WorkGraphQueue,
   type WorkGraphFilter,
   type WorkGraphMode,
 } from "./WorkGraphQueue";
@@ -676,136 +674,6 @@ function Header({
         </button>
       </div>
     </header>
-  );
-}
-
-function ProductInventoryCockpit({
-  products,
-  selectedProduct,
-  workRequests,
-  workGraphItems,
-  workGraphHiddenCount,
-  workGraphError,
-  workGraphFilter,
-  workGraphMode,
-  loading,
-  onSelectProduct,
-  onWorkGraphFilterChange,
-  onWorkGraphModeChange,
-}: {
-  products: ProductSiteOverview[];
-  selectedProduct: ProductSiteOverview | null;
-  workRequests: EveryCodeWorkRequestRecord[];
-  workGraphItems: WorkGraphQueueItem[];
-  workGraphHiddenCount: number;
-  workGraphError: string;
-  workGraphFilter: WorkGraphFilter;
-  workGraphMode: WorkGraphMode;
-  loading: boolean;
-  onSelectProduct: (product: ProductSiteOverview) => void;
-  onWorkGraphFilterChange: (filter: WorkGraphFilter) => void;
-  onWorkGraphModeChange: (mode: WorkGraphMode) => void;
-}) {
-  const activeWork = workRequests.filter((request) =>
-    ["queued", "claimed", "running", "blocked"].includes(request.state),
-  );
-  const runningCount = workRequests.filter(
-    (request) => request.state === "claimed" || request.state === "running",
-  ).length;
-  const blockedCount = workRequests.filter(
-    (request) => request.state === "blocked",
-  ).length;
-  const queueStatus = blockedCount
-    ? "blocked"
-    : runningCount
-      ? "pending"
-      : activeWork.length
-        ? "pending"
-        : "pass";
-
-  return (
-    <section className="operator-cockpit" aria-busy={loading}>
-      <div className="cockpit-summary">
-        <PanelHead
-          eyebrow="product inventory"
-          title="Environment workbench"
-          right={<StatusPill status={queueStatus} />}
-        />
-        <div className="cockpit-metrics">
-          <MetricTile
-            label="Products"
-            value={String(products.length)}
-            status={products.length ? "pass" : "unknown"}
-          />
-          <MetricTile
-            label="Stable lanes"
-            value={String(
-              products.reduce(
-                (total, product) => total + product.environments.length,
-                0,
-              ),
-            )}
-            status={products.some((product) => product.environments.length) ? "pass" : "unknown"}
-          />
-          <MetricTile
-            label="Open work"
-            value={String(activeWork.length)}
-            status={queueStatus}
-          />
-        </div>
-      </div>
-      <div className="product-inventory-table" role="list">
-        {loading && !products.length ? <SkeletonRows /> : null}
-        {!loading && !products.length ? (
-          <StateBlock
-            icon={<PanelsTopLeft size={18} />}
-            title="No product environment inventory"
-          />
-        ) : null}
-        {products.map((product) => (
-          <button
-            className="product-inventory-row"
-            type="button"
-            key={product.product}
-            data-selected={selectedProduct?.product === product.product}
-            onClick={() => onSelectProduct(product)}
-          >
-            <span className="product-inventory-name">
-              <strong>{product.display_name || product.product}</strong>
-              <code>{product.repository || product.product}</code>
-            </span>
-            <span className="product-inventory-lanes">
-              {product.environments.map((environment) => (
-                <span
-                  className={`lane-chip lane-chip-${environment.environment}`}
-                  key={`${product.product}:${environment.environment}`}
-                  title={environment.context}
-                >
-                  {environment.environment}
-                </span>
-              ))}
-              {product.preview.enabled ? (
-                <span className="lane-chip lane-chip-preview">
-                  {product.preview.active_count} previews
-                </span>
-              ) : null}
-            </span>
-            <TrustBadge provenance={product.provenance} compact />
-          </button>
-        ))}
-      </div>
-      <WorkGraphQueue
-        items={workGraphItems}
-        hiddenCount={workGraphHiddenCount}
-        error={workGraphError}
-        filter={workGraphFilter}
-        mode={workGraphMode}
-        loading={loading}
-        onFilterChange={onWorkGraphFilterChange}
-        onModeChange={onWorkGraphModeChange}
-      />
-      <EveryCodeQueue requests={activeWork} loading={loading} />
-    </section>
   );
 }
 
@@ -1577,26 +1445,6 @@ function previewInventoryCapabilityId(driver: DriverDescriptor | null): string {
   );
 }
 
-function TrustBadge({
-  provenance,
-  compact = false,
-}: {
-  provenance: DataProvenance | null;
-  compact?: boolean;
-}) {
-  const status = provenance?.freshness_status ?? "missing";
-  return (
-    <span
-      className={`trust-badge trust-${status}${compact ? " trust-compact" : ""}`}
-      title={provenanceDetail(provenance)}
-      data-freshness={status}
-    >
-      <span>{freshnessLabel(status)}</span>
-      {!compact ? <em>{provenanceSubLabel(provenance)}</em> : null}
-    </span>
-  );
-}
-
 function previewInventoryProvenance(
   exposesPreviews: boolean,
   latestPreview: PreviewSummary | undefined,
@@ -1629,52 +1477,6 @@ function previewInventoryProvenance(
     };
   }
   return latestPreview.provenance;
-}
-
-function freshnessLabel(status: FreshnessStatus): string {
-  if (status === "verified") {
-    return "verified";
-  }
-  if (status === "recorded") {
-    return "recorded";
-  }
-  if (status === "stale") {
-    return "stale";
-  }
-  if (status === "unsupported") {
-    return "unsupported";
-  }
-  return "missing";
-}
-
-function provenanceSubLabel(provenance: DataProvenance | null): string {
-  if (!provenance) {
-    return "no evidence";
-  }
-  if (provenance.freshness_status === "unsupported") {
-    return provenance.source_kind;
-  }
-  if (provenance.refreshed_at) {
-    return formatTime(provenance.refreshed_at);
-  }
-  if (provenance.recorded_at) {
-    return formatTime(provenance.recorded_at);
-  }
-  return provenance.source_record_id ? "recorded" : "no evidence";
-}
-
-function provenanceDetail(provenance: DataProvenance | null): string {
-  if (!provenance) {
-    return "Launchplane has not recorded provenance for this surface.";
-  }
-  const parts = [provenance.detail];
-  if (provenance.source_record_id) {
-    parts.push(`source: ${provenance.source_record_id}`);
-  }
-  if (provenance.stale_after) {
-    parts.push(`stale after: ${formatTime(provenance.stale_after)}`);
-  }
-  return parts.filter(Boolean).join(" | ");
 }
 
 function ActionList({
