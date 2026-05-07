@@ -565,9 +565,6 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
 
         self.assertIn("Requested Launchplane preview", summary)
-        expected_record = _queued_record().model_copy(
-            update={"repository": "cbusillo/sellyouroutboard"}
-        )
         self.assertIn(
             (
                 "gh",
