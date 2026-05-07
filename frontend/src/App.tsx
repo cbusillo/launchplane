@@ -33,8 +33,6 @@ import {
   logout,
   readAuthSession,
   readDriverView,
-  readWorkGraphSnapshot,
-  rankWorkGraphSnapshot,
 } from "./api";
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { EveryCodeQueue } from "./EveryCodeQueue";
@@ -46,6 +44,7 @@ import {
   secretScopeForTarget,
 } from "./ProductConfigPanel";
 import { StatusIcon, StatusPill, StateBlock, SkeletonRows } from "./status-ui";
+import { useWorkGraphQueue } from "./useWorkGraphQueue";
 import type {
   AuthIdentity,
   DataProvenance,
@@ -370,9 +369,13 @@ export function App() {
   const [workRequests, setWorkRequests] = useState<
     EveryCodeWorkRequestRecord[]
   >([]);
-  const [workGraphItems, setWorkGraphItems] = useState<WorkGraphQueueItem[]>([]);
-  const [workGraphHiddenCount, setWorkGraphHiddenCount] = useState(0);
-  const [workGraphError, setWorkGraphError] = useState("");
+  const {
+    workGraphItems,
+    workGraphHiddenCount,
+    workGraphError,
+    refreshWorkGraph,
+    resetWorkGraph,
+  } = useWorkGraphQueue();
   const [workGraphFilter, setWorkGraphFilter] =
     useState<WorkGraphFilter>("all");
   const [workGraphMode, setWorkGraphMode] = useState<WorkGraphMode>("all");
@@ -434,9 +437,7 @@ export function App() {
       setProductProfiles([]);
       setProductOverviews([]);
       setWorkRequests([]);
-      setWorkGraphItems([]);
-      setWorkGraphHiddenCount(0);
-      setWorkGraphError("");
+      resetWorkGraph();
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
@@ -494,40 +495,7 @@ export function App() {
           setPreviewView(previewPayload?.view ?? null);
           setProductOverviews(productsPayload.products);
           setWorkRequests(workRequestsPayload.requests);
-          const workGraphSnapshotPayload = await readWorkGraphSnapshot();
-          if (controller.signal.aborted) {
-            return;
-          }
-          const workGraphSnapshot = workGraphSnapshotPayload.snapshot;
-          if (!workGraphSnapshot.issues.length) {
-            setWorkGraphItems([]);
-            setWorkGraphHiddenCount(0);
-            setWorkGraphError("");
-            return;
-          }
-          try {
-            const workGraphPayload = await rankWorkGraphSnapshot(
-              workGraphSnapshot,
-              12,
-            );
-            if (controller.signal.aborted) {
-              return;
-            }
-            setWorkGraphItems(workGraphPayload.result.queue.items);
-            setWorkGraphHiddenCount(workGraphPayload.result.queue.hidden_count);
-            setWorkGraphError("");
-          } catch (apiError) {
-            if (controller.signal.aborted) {
-              return;
-            }
-            setWorkGraphItems([]);
-            setWorkGraphHiddenCount(0);
-            setWorkGraphError(
-              apiError instanceof Error
-                ? apiError.message
-                : "Work graph ranking failed.",
-            );
-          }
+          await refreshWorkGraph(controller.signal);
         },
       )
       .catch((apiError: unknown) => {
@@ -550,7 +518,7 @@ export function App() {
       });
 
     return () => controller.abort();
-  }, [authStatus, selected, refreshKey]);
+  }, [authStatus, selected, refreshKey, refreshWorkGraph, resetWorkGraph]);
 
   const choices = useMemo(() => {
     const driverChoices: DriverChoice[] = drivers.flatMap((driver) => {
@@ -667,9 +635,7 @@ export function App() {
       setProductProfiles([]);
       setProductOverviews([]);
       setWorkRequests([]);
-      setWorkGraphItems([]);
-      setWorkGraphHiddenCount(0);
-      setWorkGraphError("");
+      resetWorkGraph();
       setProdView(null);
       setTestingView(null);
       setPreviewView(null);
