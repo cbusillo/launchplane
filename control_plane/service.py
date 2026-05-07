@@ -93,12 +93,6 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
-from control_plane.contracts.work_graph_read_model import (
-    WorkGraphPlanningIssueFacts,
-    WorkGraphSnapshot,
-    build_work_graph_queue,
-    build_work_graph_snapshot_from_records,
-)
 from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
@@ -136,6 +130,12 @@ from control_plane.tracked_target_logs import build_tracked_target_logs_payload
 from control_plane.work_graph_github_projects import (
     build_github_project_planning_facts,
     load_github_project_planning_facts_config_from_env,
+)
+from control_plane.work_graph_service import (
+    WorkGraphPlanningFactsProvider,
+    WorkGraphRankEnvelope,
+    build_work_graph_rank_result,
+    build_work_graph_snapshot_service_payload,
 )
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
@@ -255,7 +255,6 @@ _GITHUB_ISSUE_REFERENCE_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EVERY_CODE_TRIGGER_LABEL = "every-code"
-_WorkGraphPlanningFactsProvider = Callable[[], tuple[WorkGraphPlanningIssueFacts, ...]]
 
 
 @dataclass(frozen=True)
@@ -1305,14 +1304,6 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         if not self.request_id.strip():
             raise ValueError("Every Code PR feedback status requires request_id")
         return self
-
-
-class WorkGraphRankEnvelope(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    schema_version: int = Field(default=1, ge=1)
-    snapshot: WorkGraphSnapshot
-    limit: int = Field(default=25, ge=1, le=100)
 
 
 class AuthzPolicyGitHubActionsGrant(BaseModel):
@@ -4382,7 +4373,7 @@ def create_launchplane_service_app(
     github_oauth_config: GitHubOAuthConfig | None = None,
     github_oauth_client: GitHubOAuthClient | None = None,
     human_session_store: HumanSessionStore | None = None,
-    work_graph_planning_facts_provider: _WorkGraphPlanningFactsProvider | None = None,
+    work_graph_planning_facts_provider: WorkGraphPlanningFactsProvider | None = None,
 ) -> _WsgiApp:
     resolved_root = control_plane_root_path or control_plane_root()
     ui_static_root = resolved_root / "control_plane" / "ui_static"
@@ -5156,23 +5147,12 @@ def create_launchplane_service_app(
                             context=requested_context,
                         )
 
-                    work_requests = _every_code_work_request_store(
-                        record_store
-                    ).list_every_code_work_request_records(limit=100)
-                    product_overviews = build_product_site_overviews(
-                        record_store=record_store,
-                        action_allowed=work_graph_product_action_allowed,
-                    )
-                    planning_issue_facts = (
-                        work_graph_planning_facts_provider()
-                        if work_graph_planning_facts_provider is not None
-                        else ()
-                    )
-                    snapshot = build_work_graph_snapshot_from_records(
+                    work_graph_payload = build_work_graph_snapshot_service_payload(
                         generated_at=_utc_now_timestamp(),
-                        product_overviews=product_overviews,
-                        work_requests=work_requests,
-                        planning_issue_facts=planning_issue_facts,
+                        product_store=record_store,
+                        work_request_store=_every_code_work_request_store(record_store),
+                        action_allowed=work_graph_product_action_allowed,
+                        planning_facts_provider=work_graph_planning_facts_provider,
                     )
                     return _json_response(
                         start_response=start_response,
@@ -5180,12 +5160,7 @@ def create_launchplane_service_app(
                         payload={
                             "status": "ok",
                             "trace_id": request_trace_id,
-                            "snapshot": snapshot.model_dump(mode="json"),
-                            "source": {
-                                "product_count": len(product_overviews),
-                                "work_request_count": len(work_requests),
-                                "planning_fact_count": len(planning_issue_facts),
-                            },
+                            **work_graph_payload,
                         },
                     )
                 if action == "product_profile.read":
@@ -5698,12 +5673,7 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                queue = build_work_graph_queue(
-                    rank_request.snapshot,
-                    limit=rank_request.limit,
-                )
-                result = {"item_count": len(queue.items), "hidden_count": queue.hidden_count}
-                driver_result = {"queue": queue.model_dump(mode="json")}
+                result, driver_result = build_work_graph_rank_result(rank_request)
             elif path == "/v1/evidence/deployments":
                 deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
