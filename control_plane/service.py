@@ -30,6 +30,7 @@ from control_plane import product_context_cutover as control_plane_product_conte
 from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
+from control_plane import runtime_key_safety_service as control_plane_runtime_key_safety_service
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -86,10 +87,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
-from control_plane.contracts.runtime_key_safety_policy import (
-    RuntimeKeySafetyPolicyRecord,
-    RuntimeSecretSafetyRule,
-)
+from control_plane.contracts.runtime_key_safety_policy import RuntimeSecretSafetyRule
 from control_plane.drivers.registry import (
     build_driver_context_view,
     list_driver_descriptors,
@@ -3716,85 +3714,6 @@ def _write_github_actions_authz_policy_grant(
     return updated_policy, record, changed, diff, record.audit
 
 
-def _summarize_runtime_key_safety_policy_record(
-    record: RuntimeKeySafetyPolicyRecord,
-) -> dict[str, object]:
-    return {
-        "record_id": record.record_id,
-        "status": record.status,
-        "source": record.source,
-        "updated_at": record.updated_at,
-        "policy_sha256": record.policy_sha256,
-        "rule_count": len(record.rules),
-        "binding_keys": [rule.binding_key for rule in record.rules],
-    }
-
-
-def _write_runtime_key_safety_policy(
-    *,
-    record_store: PostgresRecordStore,
-    request: RuntimeKeySafetyPolicyApplyEnvelope,
-) -> tuple[RuntimeKeySafetyPolicyRecord, bool]:
-    existing_records = record_store.list_runtime_key_safety_policy_records(status="active", limit=1)
-    existing_record = existing_records[0] if existing_records else None
-    rules = _merged_runtime_key_safety_rules(
-        existing_record.rules if existing_record is not None else (), request.rules
-    )
-    updated_at = _now_timestamp()
-    pending_record = RuntimeKeySafetyPolicyRecord(
-        record_id="runtime-key-safety-policy-pending",
-        status="active",
-        source=request.source_label,
-        updated_at=updated_at,
-        rules=rules,
-    )
-    if (
-        existing_record is not None
-        and existing_record.policy_sha256 == pending_record.policy_sha256
-    ):
-        return existing_record, False
-    record = pending_record.model_copy(
-        update={
-            "record_id": "runtime-key-safety-policy-"
-            f"{_record_slug(updated_at)}-{pending_record.policy_sha256[:12]}",
-        }
-    )
-    record_store.write_runtime_key_safety_policy_record(record)
-    return record, True
-
-
-def _merged_runtime_key_safety_rules(
-    existing_rules: tuple[RuntimeSecretSafetyRule, ...],
-    requested_rules: tuple[RuntimeSecretSafetyRule, ...],
-) -> tuple[RuntimeSecretSafetyRule, ...]:
-    rules_by_binding_key = {rule.binding_key: rule for rule in existing_rules}
-    for requested_rule in requested_rules:
-        existing_rule = rules_by_binding_key.get(requested_rule.binding_key)
-        if existing_rule is None or existing_rule.secret_class != requested_rule.secret_class:
-            rules_by_binding_key[requested_rule.binding_key] = requested_rule
-            continue
-        rules_by_binding_key[requested_rule.binding_key] = requested_rule.model_copy(
-            update={
-                "allowed_contexts": _merged_runtime_key_safety_scope_values(
-                    existing_rule.allowed_contexts, requested_rule.allowed_contexts
-                ),
-                "allowed_instances": _merged_runtime_key_safety_scope_values(
-                    existing_rule.allowed_instances, requested_rule.allowed_instances
-                ),
-                "description": requested_rule.description or existing_rule.description,
-            }
-        )
-    return tuple(rules_by_binding_key[key] for key in sorted(rules_by_binding_key))
-
-
-def _merged_runtime_key_safety_scope_values(
-    existing_values: tuple[str, ...], requested_values: tuple[str, ...]
-) -> tuple[str, ...]:
-    if not existing_values or not requested_values:
-        return ()
-    return tuple(sorted({*existing_values, *requested_values}))
-
-
 def _request_launchplane_self_deploy(
     *,
     control_plane_root_path: Path,
@@ -5929,16 +5848,22 @@ def create_launchplane_service_app(
                 )
                 if idempotent_response is not None:
                     return idempotent_response
-                runtime_policy_record, changed = _write_runtime_key_safety_policy(
+                (
+                    runtime_policy_record,
+                    changed,
+                ) = control_plane_runtime_key_safety_service.write_runtime_key_safety_policy(
                     record_store=record_store,
-                    request=runtime_policy_request,
+                    rules=runtime_policy_request.rules,
+                    source_label=runtime_policy_request.source_label,
+                    now_timestamp=_now_timestamp,
+                    record_slug=_record_slug,
                 )
                 result = {
                     "runtime_key_safety_policy_record_id": runtime_policy_record.record_id,
                     "runtime_key_safety_policy_changed": str(changed).lower(),
                 }
                 driver_result = {
-                    "runtime_key_safety_policy": _summarize_runtime_key_safety_policy_record(
+                    "runtime_key_safety_policy": control_plane_runtime_key_safety_service.summarize_runtime_key_safety_policy_record(
                         runtime_policy_record
                     ),
                     "changed": changed,
@@ -7626,9 +7551,7 @@ def create_launchplane_service_app(
                     run_url=preview_pr_feedback_request.run_url,
                     failure_summary=preview_pr_feedback_request.failure_summary,
                     every_code_record_store=(
-                        record_store
-                        if _supports_every_code_work_requests(record_store)
-                        else None
+                        record_store if _supports_every_code_work_requests(record_store) else None
                     ),
                 )
                 preview_pr_feedback_id = _write_preview_pr_feedback_if_supported(
