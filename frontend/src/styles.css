@@ -598,6 +598,7 @@ p {
 }
 
 .product-environment-pill {
+  appearance: none;
   display: grid;
   min-height: 86px;
   align-content: space-between;
@@ -605,7 +606,33 @@ p {
   border: 1px solid var(--hair);
   border-radius: 6px;
   background: var(--bg-2);
+  color: inherit;
+  font: inherit;
   padding: 10px;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background 140ms ease,
+    border-color 140ms ease,
+    box-shadow 140ms ease,
+    transform 140ms ease;
+}
+
+.product-environment-pill:hover,
+.product-environment-pill:focus-visible {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 7%, var(--bg-2));
+  outline: 0;
+}
+
+.product-environment-pill:focus-visible {
+  box-shadow: 0 0 0 3px color-mix(in oklab, var(--accent) 24%, transparent);
+}
+
+.product-environment-pill[data-selected="true"] {
+  border-color: var(--accent);
+  background: color-mix(in oklab, var(--accent) 10%, var(--bg-2));
+  box-shadow: inset 0 0 0 1px color-mix(in oklab, var(--accent) 34%, transparent);
 }
 
 .product-environment-pill[data-environment="prod"] {
@@ -626,6 +653,91 @@ p {
   color: var(--fg-muted);
   font-size: 11px;
   font-weight: 600;
+}
+
+.environment-detail-strip {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.9fr) minmax(0, 1.45fr);
+  gap: 1px;
+  margin: 0 16px 16px;
+  overflow: hidden;
+  border: 1px solid var(--hair);
+  border-radius: 6px;
+  background: var(--hair);
+}
+
+.environment-detail-strip[data-environment="prod"] {
+  border-color: color-mix(in oklab, var(--lane-prod) 36%, var(--hair));
+}
+
+.environment-detail-strip[data-environment="testing"] {
+  border-color: color-mix(in oklab, var(--lane-testing) 36%, var(--hair));
+}
+
+.environment-detail-identity,
+.environment-detail-facts,
+.environment-action-strip {
+  min-width: 0;
+  background: var(--panel);
+  padding: 12px;
+}
+
+.environment-detail-identity {
+  display: grid;
+  align-content: start;
+  gap: 8px;
+}
+
+.environment-detail-identity code,
+.environment-detail-identity a,
+.environment-detail-facts code,
+.environment-action-chip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.environment-detail-identity a {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 6px;
+  color: var(--accent);
+  text-decoration: none;
+}
+
+.environment-detail-identity a:hover {
+  text-decoration: underline;
+}
+
+.environment-detail-facts {
+  display: grid;
+  grid-template-columns: minmax(0, 1.25fr) repeat(2, minmax(120px, 0.65fr));
+  gap: 10px;
+}
+
+.environment-action-strip {
+  grid-column: 1 / -1;
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+  border-top: 1px solid var(--hair);
+}
+
+.environment-action-chip {
+  min-height: 34px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-2);
+  color: var(--fg-muted);
+  padding: 8px 10px;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.environment-action-chip[data-enabled="true"] {
+  border-color: color-mix(in oklab, var(--status-pass) 34%, var(--hair-soft));
+  color: var(--fg-strong);
 }
 
 .overview-warning-list {
@@ -1857,6 +1969,8 @@ p {
   .operator-cockpit,
   .lane-grid,
   .product-overview-grid,
+  .environment-detail-strip,
+  .environment-detail-facts,
   .work-grid,
   .work-grid-evidence,
   .config-status-environment,
@@ -1870,6 +1984,10 @@ p {
   }
 
   .product-environment-strip {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .environment-action-strip {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -1923,6 +2041,14 @@ p {
   }
 
   .product-environment-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .environment-detail-strip {
+    margin: 0 12px 12px;
+  }
+
+  .environment-action-strip {
     grid-template-columns: minmax(0, 1fr);
   }
 
