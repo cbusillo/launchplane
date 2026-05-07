@@ -1439,6 +1439,100 @@ class LaunchplaneServiceTests(unittest.TestCase):
             "https://github.com/cbusillo/code/pull/71",
         )
 
+    def test_every_code_pull_request_close_matches_all_linked_issue_urls(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.read"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        pr_payload = _every_code_github_pull_request_closed_payload(
+            pr_number=71,
+            body="Closes #64, closes #65",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            for issue_number in (64, 65):
+                issue_payload = _every_code_github_issue_labeled_payload(issue_number=issue_number)
+                _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/every-code/github-webhook",
+                    payload=issue_payload,
+                    authorization="",
+                    headers={
+                        "X-GitHub-Event": "issues",
+                        "X-GitHub-Delivery": f"delivery-multi-close-{issue_number}",
+                        "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                    },
+                )
+
+            close_status, close_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=pr_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "pull_request",
+                    "X-GitHub-Delivery": "delivery-multi-close-pr",
+                    "X-Hub-Signature-256": _github_webhook_signature(pr_payload, secret),
+                },
+            )
+            list_status, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests",
+                authorization="Bearer dev-worker-token",
+            )
+
+        self.assertEqual(close_status, 202)
+        self.assertEqual(close_payload["result"]["closed_count"], 2)
+        closed_requests = close_payload["result"]["requests"]
+        self.assertEqual({request["issue_number"] for request in closed_requests}, {64, 65})
+        self.assertTrue(all(request["state"] == "done" for request in closed_requests))
+        self.assertTrue(
+            all(
+                request["claimed_by_host"] == "github-pull-request-close"
+                for request in closed_requests
+            )
+        )
+        self.assertEqual(list_status, 200)
+        self.assertEqual(
+            {request["state"] for request in list_payload["requests"]},
+            {"done"},
+        )
+
     def test_every_code_pull_request_close_does_not_match_issue_by_pr_number(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -2531,6 +2625,42 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 401)
         self.assertEqual(payload["error"]["code"], "authentication_required")
+
+    def test_every_code_worker_reads_reject_negative_offsets(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            work_status, work_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/work-requests",
+                query_string="offset=-1",
+                authorization="Bearer worker-token",
+            )
+            feedback_status, feedback_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/pr-feedback",
+                query_string="offset=-1",
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(work_status, 400)
+        self.assertEqual(work_payload["error"]["code"], "invalid_payload")
+        self.assertIn("offset must be non-negative", work_payload["error"]["message"])
+        self.assertEqual(feedback_status, 400)
+        self.assertEqual(feedback_payload["error"]["code"], "invalid_payload")
+        self.assertIn("offset must be non-negative", feedback_payload["error"]["message"])
 
     def test_every_code_work_request_create_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

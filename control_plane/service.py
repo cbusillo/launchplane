@@ -2177,69 +2177,35 @@ def _handle_every_code_pull_request_webhook(
     merged = bool(pull_request_payload.get("merged")) if pull_request_payload else False
     closed_at = _github_webhook_string(pull_request_payload, "closed_at") or _utc_now_timestamp()
     every_code_store = _every_code_work_request_store(record_store)
-    matched_record = _find_every_code_work_request_for_pull_request(
+    candidate_records: dict[str, EveryCodeWorkRequestRecord] = {}
+    repository_records = tuple(
+        _iter_every_code_work_request_records(every_code_store, repository=repository)
+    )
+    for record in repository_records:
+        if record.result_pr_url.strip() == pr_url:
+            candidate_records[record.request_id] = record
+
+    feedback_record = _find_every_code_pr_feedback_for_pull_request(
         every_code_store,
         repository=repository,
         pr_url=pr_url,
     )
-    updated_record: EveryCodeWorkRequestRecord | None = None
-    if matched_record is not None:
-        closed_record = close_every_code_work_request_for_pull_request(
-            matched_record,
-            pr_url=pr_url,
-            merged=merged,
-            closed_at=closed_at,
+    if feedback_record is not None:
+        feedback_request_record = every_code_store.read_every_code_work_request_record(
+            feedback_record.request_id
         )
-        if closed_record is not None:
-            every_code_store.write_every_code_work_request_record(closed_record)
-            updated_record = closed_record
+        candidate_records[feedback_request_record.request_id] = feedback_request_record
 
-    if updated_record is None and matched_record is None:
-        feedback_record = _find_every_code_pr_feedback_for_pull_request(
-            every_code_store,
+    for record in repository_records:
+        if _every_code_issue_url_matches_pull_request(
+            issue_url=record.issue_url,
             repository=repository,
             pr_url=pr_url,
-        )
-        if feedback_record is not None:
-            matched_record = every_code_store.read_every_code_work_request_record(
-                feedback_record.request_id
-            )
-            closed_record = close_every_code_work_request_for_pull_request(
-                matched_record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is not None:
-                every_code_store.write_every_code_work_request_record(closed_record)
-                updated_record = closed_record
-
-    if updated_record is None and matched_record is None:
-        for record in _iter_every_code_work_request_records(
-            every_code_store,
-            repository=repository,
+            linked_issue_numbers=linked_issue_numbers,
         ):
-            if not _every_code_issue_url_matches_pull_request(
-                issue_url=record.issue_url,
-                repository=repository,
-                pr_url=pr_url,
-                linked_issue_numbers=linked_issue_numbers,
-            ):
-                continue
-            matched_record = record
-            closed_record = close_every_code_work_request_for_pull_request(
-                record,
-                pr_url=pr_url,
-                merged=merged,
-                closed_at=closed_at,
-            )
-            if closed_record is None:
-                break
-            every_code_store.write_every_code_work_request_record(closed_record)
-            updated_record = closed_record
-            break
+            candidate_records[record.request_id] = record
 
-    if matched_record is None:
+    if not candidate_records:
         return _json_response(
             start_response=start_response,
             status_code=202,
@@ -2251,7 +2217,24 @@ def _handle_every_code_pull_request_webhook(
                 "github_delivery_id": delivery_id,
             },
         )
-    if updated_record is None:
+
+    updated_records: list[EveryCodeWorkRequestRecord] = []
+    terminal_records: list[EveryCodeWorkRequestRecord] = []
+    for record in candidate_records.values():
+        closed_record = close_every_code_work_request_for_pull_request(
+            record,
+            pr_url=pr_url,
+            merged=merged,
+            closed_at=closed_at,
+        )
+        if closed_record is None:
+            terminal_records.append(record)
+            continue
+        every_code_store.write_every_code_work_request_record(closed_record)
+        updated_records.append(closed_record)
+
+    if not updated_records:
+        terminal_record = terminal_records[0]
         return _json_response(
             start_response=start_response,
             status_code=202,
@@ -2261,17 +2244,26 @@ def _handle_every_code_pull_request_webhook(
                 "skipped": True,
                 "reason": "linked_every_code_request_already_terminal",
                 "result": {
-                    "request_id": matched_record.request_id,
-                    "state": matched_record.state,
+                    "request_id": terminal_record.request_id,
+                    "state": terminal_record.state,
                 },
                 "github_delivery_id": delivery_id,
             },
         )
 
+    updated_record = updated_records[0]
     accepted_payload = _accepted_payload(
         trace_id=trace_id,
-        result={"request_id": updated_record.request_id, "state": updated_record.state},
-        driver_result={"request": updated_record.model_dump(mode="json")},
+        result={
+            "request_id": updated_record.request_id,
+            "state": updated_record.state,
+            "closed_count": len(updated_records),
+        },
+        driver_result={
+            "request": updated_record.model_dump(mode="json"),
+            "closed_count": len(updated_records),
+            "requests": [record.model_dump(mode="json") for record in updated_records],
+        },
     )
     accepted_payload["github_delivery_id"] = delivery_id
     return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
@@ -2328,21 +2320,6 @@ def _github_issue_numbers_referenced_by_pull_request(
                 ) or issue_reference_match.group("number")
                 issue_numbers.add(int(issue_number))
     return frozenset(issue_numbers)
-
-
-def _find_every_code_work_request_for_pull_request(
-    every_code_store: _EveryCodeWorkRequestStore,
-    *,
-    repository: str,
-    pr_url: str,
-) -> EveryCodeWorkRequestRecord | None:
-    for record in _iter_every_code_work_request_records(
-        every_code_store,
-        repository=repository,
-    ):
-        if record.result_pr_url.strip() == pr_url:
-            return record
-    return None
 
 
 def _find_every_code_pr_feedback_for_pull_request(
@@ -2450,10 +2427,16 @@ def _handle_every_code_pr_feedback_webhook(
         )
 
     every_code_store = _every_code_work_request_store(record_store)
-    matched_record = _find_every_code_work_request_for_pull_request(
-        every_code_store,
-        repository=repository,
-        pr_url=pr_url,
+    matched_record = next(
+        (
+            record
+            for record in _iter_every_code_work_request_records(
+                every_code_store,
+                repository=repository,
+            )
+            if record.result_pr_url.strip() == pr_url
+        ),
+        None,
     )
     if matched_record is None:
         pull_request_payload = _github_webhook_mapping(payload, "pull_request")
@@ -2947,6 +2930,13 @@ def _every_code_worker_token_authorized(
     return secrets.compare_digest(provided_token, expected_token)
 
 
+def _every_code_pagination_value(query: dict[str, list[str]], *, key: str, default: int) -> int:
+    value = int(str((query.get(key) or [str(default)])[0] or str(default)))
+    if value < 0:
+        raise ValueError(f"Every Code pagination {key} must be non-negative")
+    return value
+
+
 def _every_code_read_payload(
     *,
     record_store: object,
@@ -2961,8 +2951,8 @@ def _every_code_read_payload(
         status_filter = str((query.get("status") or [""])[0] or "").strip()
         pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
         pr_number_filter = int(pr_number_value) if pr_number_value else None
-        limit = int(str((query.get("limit") or ["50"])[0] or "50"))
-        offset = int(str((query.get("offset") or ["0"])[0] or "0"))
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        offset = _every_code_pagination_value(query, key="offset", default=0)
         feedback_records = every_code_store.list_every_code_pr_feedback_records(
             request_id=request_id_filter,
             repository=repository_filter,
@@ -2982,8 +2972,8 @@ def _every_code_read_payload(
         return {"request": record.model_dump(mode="json")}
     state_filter = str((query.get("state") or [""])[0] or "").strip()
     repository_filter = str((query.get("repository") or [""])[0] or "").strip()
-    limit = int(str((query.get("limit") or ["50"])[0] or "50"))
-    offset = int(str((query.get("offset") or ["0"])[0] or "0"))
+    limit = _every_code_pagination_value(query, key="limit", default=50)
+    offset = _every_code_pagination_value(query, key="offset", default=0)
     work_request_records = every_code_store.list_every_code_work_request_records(
         state=state_filter,
         repository=repository_filter,
@@ -4429,13 +4419,27 @@ def create_launchplane_service_app(
                 )
         if _every_code_worker_token_authorized(environ=environ, method=method, path=path):
             if method == "GET":
-                return _handle_every_code_work_request_read(
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                    record_store=record_store,
-                    path=path,
-                    query=query,
-                )
+                try:
+                    return _handle_every_code_work_request_read(
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                        record_store=record_store,
+                        path=path,
+                        query=query,
+                    )
+                except ValueError as error:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "invalid_payload",
+                                "message": str(error),
+                            },
+                        },
+                    )
             payload = _read_json_request(environ)
             try:
                 return _handle_every_code_worker_write(

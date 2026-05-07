@@ -267,6 +267,30 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertIn("Error: Launchplane API request failed", result.output)
         self.assertNotIn("Traceback", result.output)
 
+    def test_cli_rerun_issue_reports_invalid_service_input_without_traceback(self) -> None:
+        runner = CliRunner()
+
+        with patch.dict(os.environ, {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-token"}):
+            result = runner.invoke(
+                main,
+                [
+                    "every-code",
+                    "rerun-issue",
+                    "--service-url",
+                    "http://127.0.0.1:1",
+                    "--repository",
+                    " ",
+                    "--issue-number",
+                    "278",
+                    "--actor",
+                    "ops",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("Error: Every Code work request id requires", result.output)
+        self.assertNotIn("Traceback", result.output)
+
 
 if __name__ == "__main__":
     unittest.main()
