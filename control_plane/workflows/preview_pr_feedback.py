@@ -1,9 +1,15 @@
 from pathlib import Path
+import re
 from typing import Protocol
+from urllib.parse import quote_plus
 
 import click
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
+from control_plane.contracts.every_code_pr_feedback_record import (
+    EveryCodePrFeedbackRecord,
+    build_every_code_pr_feedback_id,
+)
 from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackDeliveryStatus,
     PreviewPrFeedbackRecord,
@@ -23,6 +29,19 @@ from control_plane.workflows.launchplane import (
 
 DEFAULT_PREVIEW_FEEDBACK_MARKER = "<!-- verireel-preview-control -->"
 DEFAULT_EVERY_CODE_PREVIEW_READY_MARKER_PREFIX = "<!-- launchplane-every-code-preview-ready"
+DEFAULT_EVERY_CODE_READY_TO_MERGE_MARKER_PREFIX = "<!-- launchplane-every-code-ready-to-merge"
+EVERY_CODE_PREVIEW_READY_LABEL = "preview-ready"
+EVERY_CODE_PREVIEW_APPROVED_LABEL = "preview-approved"
+EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL = "preview-changes-requested"
+EVERY_CODE_READY_TO_MERGE_LABEL = "ready-to-merge"
+_PREVIEW_COMMAND_PATTERN = re.compile(
+    r"^\s*/preview\s+(?P<command>ok|approve|changes)\b(?P<body>.*)$",
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+class EveryCodePreviewValidationResult(dict[str, object]):
+    pass
 
 
 class EveryCodeWorkRequestReadStore(Protocol):
@@ -34,6 +53,21 @@ class EveryCodeWorkRequestReadStore(Protocol):
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]: ...
+
+
+class EveryCodePreviewValidationStore(EveryCodeWorkRequestReadStore, Protocol):
+    def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object: ...
+
+    def list_every_code_pr_feedback_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
 
 def _comment_url(payload: dict[str, object]) -> str:
@@ -84,32 +118,104 @@ def _every_code_preview_ready_marker(*, repository: str, pr_number: int) -> str:
     return f"{DEFAULT_EVERY_CODE_PREVIEW_READY_MARKER_PREFIX}:{repository}#{pr_number} -->"
 
 
+def _every_code_ready_to_merge_marker(*, repository: str, pr_number: int) -> str:
+    return f"{DEFAULT_EVERY_CODE_READY_TO_MERGE_MARKER_PREFIX}:{repository}#{pr_number} -->"
+
+
+def _github_search_url(query: str) -> str:
+    return f"https://github.com/issues?q={quote_plus(query)}"
+
+
+def _github_pulls_url(query: str) -> str:
+    return f"https://github.com/pulls?q={quote_plus(query)}"
+
+
+def _preview_validation_queue_url(*, issue_author: str) -> str:
+    return _github_search_url(
+        f"is:open is:issue author:{issue_author} label:{EVERY_CODE_PREVIEW_READY_LABEL}"
+    )
+
+
+def _merge_queue_url(*, merge_owner: str) -> str:
+    return _github_pulls_url(
+        f"is:open is:pr assignee:{merge_owner} label:{EVERY_CODE_READY_TO_MERGE_LABEL}"
+    )
+
+
+def _render_preview_checklist(record: EveryCodeWorkRequestRecord) -> list[str]:
+    title = record.issue_title.strip()
+    checklist = []
+    if title:
+        checklist.append(f"Confirm the preview resolves: {title}")
+    else:
+        checklist.append("Confirm the preview resolves the issue you opened.")
+    checklist.extend(
+        [
+            "Try the affected workflow in the preview, not only the page load.",
+            "Look for obvious regressions around the changed area.",
+        ]
+    )
+    return checklist
+
+
 def _render_every_code_preview_ready_issue_comment(
     *,
     marker: str,
     issue_author: str,
+    record: EveryCodeWorkRequestRecord,
     pr_number: int,
     anchor_pr_url: str,
     preview_url: str,
-    reviewer_action: str,
+    merge_owner: str,
 ) -> str:
     lines = [
         marker,
-        f"@{issue_author} your Every Code preview is ready for PR #{pr_number}.",
+        f"@{issue_author} your Every Code preview is ready.",
         "",
         f"- Preview URL: {preview_url}",
         f"- Pull request: {anchor_pr_url}",
+        "",
+        "Please check:",
     ]
-    if reviewer_action == "requested":
-        lines.append("- Review request: requested you as a reviewer on the pull request.")
-    elif reviewer_action == "already_requested":
-        lines.append("- Review request: you were already requested as a reviewer.")
-    elif reviewer_action == "skipped_pr_author":
-        lines.append("- Review request: skipped because you opened the pull request.")
-    elif reviewer_action.startswith("failed"):
-        lines.append(
-            "- Review request: GitHub did not accept the automatic reviewer request; "
-            "this comment is the fallback notification."
+    lines.extend(f"- {item}" for item in _render_preview_checklist(record))
+    lines.extend(
+        [
+            "",
+            "When it looks right, comment `/preview ok` on this issue.",
+            "If it needs changes, comment `/preview changes <what needs to change>`.",
+            "",
+            f"Your preview queue: {_preview_validation_queue_url(issue_author=issue_author)}",
+        ]
+    )
+    if merge_owner:
+        lines.append(f"Merge queue: {_merge_queue_url(merge_owner=merge_owner)}")
+    return "\n".join(lines)
+
+
+def _render_every_code_ready_to_merge_pr_comment(
+    *,
+    marker: str,
+    merge_owner: str,
+    issue_author: str,
+    issue_url: str,
+    preview_url: str,
+) -> str:
+    mention = f"@{merge_owner} " if merge_owner else ""
+    lines = [
+        marker,
+        f"{mention}the issue author approved the preview.",
+        "",
+        f"- Approved by: @{issue_author}",
+        f"- Source issue: {issue_url}",
+    ]
+    if preview_url.strip():
+        lines.append(f"- Preview URL: {preview_url.strip()}")
+    if merge_owner:
+        lines.extend(
+            [
+                "",
+                f"Merge queue: {_merge_queue_url(merge_owner=merge_owner)}",
+            ]
         )
     return "\n".join(lines)
 
@@ -155,42 +261,71 @@ def _github_pull_request_author_and_head_branch(
     return pr_author, reference.strip() if isinstance(reference, str) else ""
 
 
-def _github_requested_reviewer_logins(
-    *, owner: str, repo: str, pr_number: int, token: str
-) -> frozenset[str]:
+def _github_repository_user_owner_login(*, owner: str, repo: str, token: str) -> str:
     payload = github_api_request(
-        path=f"/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+        path=f"/repos/{owner}/{repo}",
         token=token,
     )
     if not isinstance(payload, dict):
         raise click.ClickException(
-            f"GitHub requested reviewers response for {owner}/{repo}#{pr_number} must be an object."
+            f"GitHub repository response for {owner}/{repo} must be an object."
         )
-    users = payload.get("users")
-    if not isinstance(users, list):
-        return frozenset()
-    logins: set[str] = set()
-    for item in users:
-        if not isinstance(item, dict):
-            continue
-        login = item.get("login")
-        if isinstance(login, str) and login.strip():
-            logins.add(login.strip().casefold())
-    return frozenset(logins)
+    owner_payload = payload.get("owner")
+    if not isinstance(owner_payload, dict):
+        return ""
+    owner_type = owner_payload.get("type")
+    login = owner_payload.get("login")
+    if owner_type != "User" or not isinstance(login, str):
+        return ""
+    return login.strip()
 
 
-def _request_github_pull_request_reviewer(
-    *, owner: str, repo: str, pr_number: int, reviewer: str, token: str
+def _github_add_labels(
+    *, owner: str, repo: str, issue_number: int, labels: list[str], token: str
 ) -> None:
+    if not labels:
+        return
     payload = github_api_request(
-        path=f"/repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+        path=f"/repos/{owner}/{repo}/issues/{issue_number}/labels",
         token=token,
         method="POST",
-        body={"reviewers": [reviewer]},
+        body={"labels": labels},
+    )
+    if not isinstance(payload, list):
+        raise click.ClickException(
+            f"GitHub label response for {owner}/{repo}#{issue_number} must be a list."
+        )
+
+
+def _github_remove_label(
+    *, owner: str, repo: str, issue_number: int, label: str, token: str
+) -> None:
+    if not label.strip():
+        return
+    try:
+        github_api_request(
+            path=f"/repos/{owner}/{repo}/issues/{issue_number}/labels/{label}",
+            token=token,
+            method="DELETE",
+        )
+    except click.ClickException:
+        return
+
+
+def _github_assign_user(
+    *, owner: str, repo: str, issue_number: int, assignee: str, token: str
+) -> None:
+    if not assignee.strip():
+        return
+    payload = github_api_request(
+        path=f"/repos/{owner}/{repo}/issues/{issue_number}/assignees",
+        token=token,
+        method="POST",
+        body={"assignees": [assignee]},
     )
     if not isinstance(payload, dict):
         raise click.ClickException(
-            f"GitHub reviewer request response for {owner}/{repo}#{pr_number} must be an object."
+            f"GitHub assignee response for {owner}/{repo}#{issue_number} must be an object."
         )
 
 
@@ -207,7 +342,7 @@ def _notify_every_code_preview_ready_source_issue(
 ) -> str:
     if not preview_url.strip():
         return "skipped_no_preview_url"
-    pr_author, pr_head_branch = _github_pull_request_author_and_head_branch(
+    _pr_author, pr_head_branch = _github_pull_request_author_and_head_branch(
         owner=owner,
         repo=repo,
         pr_number=pr_number,
@@ -231,38 +366,38 @@ def _notify_every_code_preview_ready_source_issue(
     if not issue_author:
         return "skipped_no_issue_author"
 
-    reviewer_action = "requested"
-    if pr_author.casefold() == issue_author.casefold():
-        reviewer_action = "skipped_pr_author"
-    else:
-        requested_reviewers = _github_requested_reviewer_logins(
-            owner=owner,
-            repo=repo,
-            pr_number=pr_number,
-            token=token,
-        )
-        if issue_author.casefold() in requested_reviewers:
-            reviewer_action = "already_requested"
-        else:
-            try:
-                _request_github_pull_request_reviewer(
-                    owner=owner,
-                    repo=repo,
-                    pr_number=pr_number,
-                    reviewer=issue_author,
-                    token=token,
-                )
-            except click.ClickException:
-                reviewer_action = "failed"
+    merge_owner = _github_repository_user_owner_login(owner=owner, repo=repo, token=token)
+    _github_add_labels(
+        owner=owner,
+        repo=repo,
+        issue_number=record.issue_number,
+        labels=[EVERY_CODE_PREVIEW_READY_LABEL],
+        token=token,
+    )
+    _github_remove_label(
+        owner=owner,
+        repo=repo,
+        issue_number=record.issue_number,
+        label=EVERY_CODE_PREVIEW_APPROVED_LABEL,
+        token=token,
+    )
+    _github_remove_label(
+        owner=owner,
+        repo=repo,
+        issue_number=record.issue_number,
+        label=EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL,
+        token=token,
+    )
 
     marker = _every_code_preview_ready_marker(repository=repository, pr_number=pr_number)
     comment_markdown = _render_every_code_preview_ready_issue_comment(
         marker=marker,
         issue_author=issue_author,
+        record=record,
         pr_number=pr_number,
         anchor_pr_url=anchor_pr_url,
         preview_url=preview_url.strip(),
-        reviewer_action=reviewer_action,
+        merge_owner=merge_owner,
     )
     existing_comment = find_github_issue_comment_by_marker(
         owner=owner,
@@ -284,7 +419,7 @@ def _notify_every_code_preview_ready_source_issue(
             token=token,
             body=comment_markdown,
         )
-        return f"updated_source_issue_comment:{reviewer_action}"
+        return "updated_source_issue_comment"
     create_github_issue_comment(
         owner=owner,
         repo=repo,
@@ -292,7 +427,262 @@ def _notify_every_code_preview_ready_source_issue(
         token=token,
         body=comment_markdown,
     )
-    return f"created_source_issue_comment:{reviewer_action}"
+    return "created_source_issue_comment"
+
+
+def _parse_preview_validation_command(body: str) -> tuple[str, str] | None:
+    match = _PREVIEW_COMMAND_PATTERN.match(body)
+    if match is None:
+        return None
+    command = match.group("command").strip().casefold()
+    details = match.group("body").strip()
+    if command == "approve":
+        command = "ok"
+    return command, details
+
+
+def _find_every_code_work_request_for_source_issue(
+    *,
+    record_store: EveryCodeWorkRequestReadStore,
+    repository: str,
+    issue_number: int,
+) -> EveryCodeWorkRequestRecord | None:
+    for state in ("running", "done"):
+        for record in record_store.list_every_code_work_request_records(
+            state=state,
+            repository=repository,
+            limit=100,
+        ):
+            if record.issue_number == issue_number and record.result_pr_url.strip():
+                return record
+    return None
+
+
+def _preview_command_feedback_body(*, details: str, issue_url: str) -> str:
+    return "\n".join(
+        [
+            "The source issue author requested preview changes.",
+            "",
+            details.strip(),
+            "",
+            f"Source issue: {issue_url}",
+        ]
+    ).strip()
+
+
+def handle_every_code_preview_validation_comment(
+    *,
+    record_store: EveryCodePreviewValidationStore,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    issue_url: str,
+    issue_author: str,
+    actor: str,
+    comment_body: str,
+    comment_id: str,
+    comment_node_id: str,
+    comment_url: str,
+    delivery_id: str,
+    token: str,
+    received_at: str,
+) -> EveryCodePreviewValidationResult:
+    parsed_command = _parse_preview_validation_command(comment_body)
+    if parsed_command is None:
+        return EveryCodePreviewValidationResult(handled=False, reason="not_preview_command")
+    command, details = parsed_command
+    if actor.casefold() != issue_author.casefold():
+        return EveryCodePreviewValidationResult(
+            handled=True,
+            skipped=True,
+            reason="actor_not_issue_author",
+            command=command,
+        )
+    repository = f"{owner}/{repo}"
+    record = _find_every_code_work_request_for_source_issue(
+        record_store=record_store,
+        repository=repository,
+        issue_number=issue_number,
+    )
+    if record is None:
+        return EveryCodePreviewValidationResult(
+            handled=True,
+            skipped=True,
+            reason="linked_every_code_request_not_found",
+            command=command,
+        )
+    pr_reference = github_pull_request_reference(record.result_pr_url)
+    if pr_reference is None:
+        return EveryCodePreviewValidationResult(
+            handled=True,
+            skipped=True,
+            reason="linked_every_code_pull_request_invalid",
+            command=command,
+            request_id=record.request_id,
+        )
+    pr_number = pr_reference["pr_number"]
+    pr_url = record.result_pr_url.strip()
+
+    if command == "changes":
+        if not details.strip():
+            return EveryCodePreviewValidationResult(
+                handled=True,
+                skipped=True,
+                reason="changes_details_required",
+                command=command,
+                request_id=record.request_id,
+            )
+        _github_add_labels(
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number,
+            labels=[EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL],
+            token=token,
+        )
+        _github_remove_label(
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number,
+            label=EVERY_CODE_PREVIEW_READY_LABEL,
+            token=token,
+        )
+        _github_remove_label(
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number,
+            label=EVERY_CODE_PREVIEW_APPROVED_LABEL,
+            token=token,
+        )
+        _github_remove_label(
+            owner=owner,
+            repo=repo,
+            issue_number=pr_number,
+            label=EVERY_CODE_READY_TO_MERGE_LABEL,
+            token=token,
+        )
+        feedback_id = build_every_code_pr_feedback_id(
+            repository=repository,
+            pr_number=pr_number,
+            github_delivery_id=delivery_id,
+            github_node_id=comment_node_id,
+            github_id=comment_id,
+        )
+        for existing_feedback in record_store.list_every_code_pr_feedback_records(
+            request_id=record.request_id,
+            repository=repository,
+            pr_number=pr_number,
+            limit=100,
+        ):
+            if existing_feedback.feedback_id == feedback_id:
+                return EveryCodePreviewValidationResult(
+                    handled=True,
+                    deduped=True,
+                    command=command,
+                    request_id=record.request_id,
+                    feedback_id=existing_feedback.feedback_id,
+                )
+        feedback_record = EveryCodePrFeedbackRecord(
+            feedback_id=feedback_id,
+            request_id=record.request_id,
+            repository=repository,
+            pr_number=pr_number,
+            pr_url=pr_url,
+            feedback_kind="issue_comment",
+            github_delivery_id=delivery_id,
+            github_node_id=comment_node_id,
+            github_id=comment_id,
+            actor=actor,
+            author_association="SOURCE_ISSUE_AUTHOR",
+            body=_preview_command_feedback_body(details=details, issue_url=issue_url),
+            html_url=comment_url,
+            received_at=received_at,
+        )
+        record_store.write_every_code_pr_feedback_record(feedback_record)
+        return EveryCodePreviewValidationResult(
+            handled=True,
+            command=command,
+            request_id=record.request_id,
+            feedback_id=feedback_record.feedback_id,
+            status=feedback_record.status,
+        )
+
+    _github_add_labels(
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
+        labels=[EVERY_CODE_PREVIEW_APPROVED_LABEL],
+        token=token,
+    )
+    _github_remove_label(
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
+        label=EVERY_CODE_PREVIEW_READY_LABEL,
+        token=token,
+    )
+    _github_remove_label(
+        owner=owner,
+        repo=repo,
+        issue_number=issue_number,
+        label=EVERY_CODE_PREVIEW_CHANGES_REQUESTED_LABEL,
+        token=token,
+    )
+    _github_add_labels(
+        owner=owner,
+        repo=repo,
+        issue_number=pr_number,
+        labels=[EVERY_CODE_READY_TO_MERGE_LABEL],
+        token=token,
+    )
+    merge_owner = _github_repository_user_owner_login(owner=owner, repo=repo, token=token)
+    if merge_owner:
+        _github_assign_user(
+            owner=owner,
+            repo=repo,
+            issue_number=pr_number,
+            assignee=merge_owner,
+            token=token,
+        )
+    marker = _every_code_ready_to_merge_marker(repository=repository, pr_number=pr_number)
+    comment_markdown = _render_every_code_ready_to_merge_pr_comment(
+        marker=marker,
+        merge_owner=merge_owner,
+        issue_author=issue_author,
+        issue_url=issue_url,
+        preview_url="",
+    )
+    existing_comment = find_github_issue_comment_by_marker(
+        owner=owner,
+        repo=repo,
+        issue_number=pr_number,
+        token=token,
+        marker=marker,
+    )
+    if existing_comment is not None:
+        existing_comment_id = existing_comment.get("id")
+        if isinstance(existing_comment_id, int):
+            update_github_issue_comment(
+                owner=owner,
+                repo=repo,
+                comment_id=existing_comment_id,
+                token=token,
+                body=comment_markdown,
+            )
+    else:
+        create_github_issue_comment(
+            owner=owner,
+            repo=repo,
+            issue_number=pr_number,
+            token=token,
+            body=comment_markdown,
+        )
+    return EveryCodePreviewValidationResult(
+        handled=True,
+        command=command,
+        request_id=record.request_id,
+        pr_number=pr_number,
+        merge_owner=merge_owner,
+    )
 
 
 def _render_preview_pr_feedback_markdown(

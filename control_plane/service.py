@@ -177,8 +177,14 @@ from control_plane.workflows.preview_lifecycle_cleanup import (
 from control_plane.workflows.preview_pr_feedback import (
     DEFAULT_PREVIEW_FEEDBACK_MARKER,
     build_preview_pr_feedback_record,
+    handle_every_code_preview_validation_comment,
 )
-from control_plane.workflows.launchplane import find_preview_record, verify_github_webhook_signature
+from control_plane.workflows.launchplane import (
+    find_preview_record,
+    launchplane_anchor_repo_context,
+    resolve_launchplane_github_token,
+    verify_github_webhook_signature,
+)
 from control_plane.workflows.odoo_artifact_publish import (
     OdooArtifactPublishEvidenceRequest,
     OdooArtifactPublishInputsRequest,
@@ -1951,6 +1957,7 @@ def _handle_every_code_github_webhook(
     start_response: _StartResponse,
     trace_id: str,
     record_store: object,
+    control_plane_root_path: Path,
 ) -> list[bytes]:
     secret = os.environ.get(_EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY, "").strip()
     if not secret:
@@ -2005,6 +2012,17 @@ def _handle_every_code_github_webhook(
 
     payload = _decode_json_request_body(body_bytes)
     event_name = _github_webhook_header(environ, "X-GitHub-Event")
+    if event_name == "issue_comment":
+        preview_validation_response = _handle_every_code_preview_validation_webhook(
+            start_response=start_response,
+            trace_id=trace_id,
+            delivery_id=delivery_id,
+            payload=payload,
+            record_store=record_store,
+            control_plane_root_path=control_plane_root_path,
+        )
+        if preview_validation_response is not None:
+            return preview_validation_response
     if event_name in {"issue_comment", "pull_request_review", "pull_request_review_comment"}:
         return _handle_every_code_pr_feedback_webhook(
             start_response=start_response,
@@ -2328,6 +2346,92 @@ def _every_code_issue_url_matches_pull_request(
         normalized_issue_url == f"https://github.com/{normalized_repository}/issues/{issue_number}"
         for issue_number in linked_issue_numbers
     )
+
+
+def _handle_every_code_preview_validation_webhook(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    delivery_id: str,
+    payload: dict[str, object],
+    record_store: object,
+    control_plane_root_path: Path,
+) -> list[bytes] | None:
+    if payload.get("action") != "created":
+        return None
+    issue_payload = _github_webhook_mapping(payload, "issue")
+    if issue_payload is None or isinstance(issue_payload.get("pull_request"), dict):
+        return None
+    repository_payload = _github_webhook_mapping(payload, "repository")
+    repository = _github_webhook_string(repository_payload, "full_name")
+    if "/" not in repository:
+        return None
+    owner, repo = repository.split("/", 1)
+    issue_number_value = issue_payload.get("number")
+    if not isinstance(issue_number_value, int):
+        return None
+    issue_author_payload = _github_webhook_mapping(issue_payload, "user")
+    issue_author = _github_webhook_string(issue_author_payload, "login")
+    comment_payload = _github_webhook_mapping(payload, "comment")
+    if comment_payload is None:
+        return None
+    comment_body = _github_webhook_string(comment_payload, "body")
+    if not comment_body.strip().lower().startswith("/preview"):
+        return None
+    every_code_store = _every_code_work_request_store(record_store)
+    context_name = launchplane_anchor_repo_context(repo=repo)
+    if not context_name:
+        context_name = f"{repo}-preview"
+    try:
+        token = resolve_launchplane_github_token(
+            control_plane_root=control_plane_root_path,
+            context_name=context_name,
+        )
+        result = handle_every_code_preview_validation_comment(
+            record_store=every_code_store,
+            owner=owner,
+            repo=repo,
+            issue_number=issue_number_value,
+            issue_url=_github_webhook_string(issue_payload, "html_url"),
+            issue_author=issue_author,
+            actor=_github_webhook_string(_github_webhook_mapping(payload, "sender"), "login"),
+            comment_body=comment_body,
+            comment_id=str(comment_payload.get("id") or ""),
+            comment_node_id=_github_webhook_string(comment_payload, "node_id"),
+            comment_url=_github_webhook_string(comment_payload, "html_url"),
+            delivery_id=delivery_id,
+            token=token,
+            received_at=_utc_now_timestamp(),
+        )
+    except click.ClickException as exc:
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "preview_validation_failed",
+                "message": str(exc),
+                "github_delivery_id": delivery_id,
+            },
+        )
+    if not bool(result.get("handled")):
+        return None
+    accepted_payload = _accepted_payload(
+        trace_id=trace_id,
+        result={"preview_validation": {key: value for key, value in result.items() if key != "handled"}},
+        driver_result={"preview_validation": dict(result)},
+    )
+    if bool(result.get("skipped")):
+        accepted_payload["skipped"] = True
+        reason = result.get("reason")
+        if isinstance(reason, str):
+            accepted_payload["reason"] = reason
+    if bool(result.get("deduped")):
+        accepted_payload["deduped"] = True
+    accepted_payload["github_delivery_id"] = delivery_id
+    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
 
 
 def _github_issue_numbers_referenced_by_pull_request(
@@ -4364,6 +4468,7 @@ def create_launchplane_service_app(
                     start_response=start_response,
                     trace_id=request_trace_id,
                     record_store=record_store,
+                    control_plane_root_path=resolved_root,
                 )
             except ValueError:
                 return _json_response(
