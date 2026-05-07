@@ -26,6 +26,7 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
+from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import secrets as control_plane_secrets
 from control_plane.contracts.authz_policy_record import (
@@ -77,12 +78,6 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.product_onboarding_manifest import ProductOnboardingManifest
-from control_plane.contracts.product_environment_read_model import (
-    build_product_activity_read_model,
-    build_product_environment_detail,
-    build_product_site_overview,
-    build_product_site_overviews,
-)
 from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
@@ -5293,15 +5288,17 @@ def create_launchplane_service_app(
                             },
                         )
                     driver_id_filter = str((query.get("driver_id") or [""])[0] or "").strip()
-                    profiles = record_store.list_product_profile_records(driver_id=driver_id_filter)
+                    product_profile_payload = control_plane_product_read_service.build_product_profile_list_service_payload(
+                        record_store=record_store,
+                        driver_id=driver_id_filter,
+                    )
                     return _json_response(
                         start_response=start_response,
                         status_code=200,
                         payload={
                             "status": "ok",
                             "trace_id": request_trace_id,
-                            "driver_id": driver_id_filter,
-                            "profiles": [profile.model_dump(mode="json") for profile in profiles],
+                            **product_profile_payload,
                         },
                     )
                 if action == "product_environment.read":
@@ -5316,48 +5313,18 @@ def create_launchplane_service_app(
                             context=requested_context,
                         )
 
-                    if params.get("activity") == "true":
-                        activity = build_product_activity_read_model(
+                    if control_plane_product_read_service.is_product_environment_detail_request(
+                        params
+                    ):
+                        product_read_result = control_plane_product_read_service.build_product_environment_read_service_result(
                             record_store=record_store,
-                            product=params["product"],
-                        )
-                        if not product_action_allowed(
-                            "product_environment.read",
-                            activity.product,
-                            "launchplane",
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read the requested product activity.",
-                                    },
-                                },
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "activity": activity.model_dump(mode="json"),
-                            },
-                        )
-                    if "environment" in params:
-                        detail = build_product_environment_detail(
-                            record_store=record_store,
-                            product=params["product"],
-                            environment=params["environment"],
+                            params=params,
                             action_allowed=product_action_allowed,
                         )
                         if not product_action_allowed(
                             "product_environment.read",
-                            detail.product,
-                            detail.context,
+                            product_read_result.authorization_product,
+                            product_read_result.authorization_context,
                         ):
                             return _json_response(
                                 start_response=start_response,
@@ -5367,9 +5334,7 @@ def create_launchplane_service_app(
                                     "trace_id": request_trace_id,
                                     "error": {
                                         "code": "authorization_denied",
-                                        "message": (
-                                            "Workflow cannot read the requested product environment."
-                                        ),
+                                        "message": product_read_result.denial_message,
                                     },
                                 },
                             )
@@ -5379,39 +5344,7 @@ def create_launchplane_service_app(
                             payload={
                                 "status": "ok",
                                 "trace_id": request_trace_id,
-                                "environment": detail.model_dump(mode="json"),
-                            },
-                        )
-                    if "product" in params:
-                        overview = build_product_site_overview(
-                            record_store=record_store,
-                            product=params["product"],
-                            action_allowed=product_action_allowed,
-                        )
-                        if not product_action_allowed(
-                            "product_environment.read",
-                            overview.product,
-                            "launchplane",
-                        ):
-                            return _json_response(
-                                start_response=start_response,
-                                status_code=403,
-                                payload={
-                                    "status": "rejected",
-                                    "trace_id": request_trace_id,
-                                    "error": {
-                                        "code": "authorization_denied",
-                                        "message": "Workflow cannot read the requested product overview.",
-                                    },
-                                },
-                            )
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=200,
-                            payload={
-                                "status": "ok",
-                                "trace_id": request_trace_id,
-                                "product": overview.model_dump(mode="json"),
+                                **product_read_result.payload,
                             },
                         )
                     if not product_action_allowed(
@@ -5431,7 +5364,7 @@ def create_launchplane_service_app(
                                 },
                             },
                         )
-                    overviews = build_product_site_overviews(
+                    product_list_payload = control_plane_product_read_service.build_product_environment_list_service_payload(
                         record_store=record_store,
                         action_allowed=product_action_allowed,
                     )
@@ -5441,9 +5374,7 @@ def create_launchplane_service_app(
                         payload={
                             "status": "ok",
                             "trace_id": request_trace_id,
-                            "products": [
-                                overview.model_dump(mode="json") for overview in overviews
-                            ],
+                            **product_list_payload,
                         },
                     )
                 context_name = params["context"]
