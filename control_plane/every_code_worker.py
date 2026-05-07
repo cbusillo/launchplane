@@ -1615,10 +1615,18 @@ def request_ready_every_code_pr_preview_labels(
     limit: int = 50,
     runner: Runner | None = None,
 ) -> EveryCodePreviewGateResult:
-    records = record_store.list_every_code_work_request_records(
-        state="done",
-        repository=repository.strip(),
-        limit=limit,
+    normalized_repository = repository.strip()
+    records = (
+        *record_store.list_every_code_work_request_records(
+            state="running",
+            repository=normalized_repository,
+            limit=limit,
+        ),
+        *record_store.list_every_code_work_request_records(
+            state="done",
+            repository=normalized_repository,
+            limit=limit,
+        ),
     )
     if not records:
         return EveryCodePreviewGateResult()
@@ -1630,7 +1638,7 @@ def request_ready_every_code_pr_preview_labels(
     blocked = 0
     skipped = 0
     for record in records:
-        result_pr_url = record.result_pr_url.strip()
+        result_pr_url = _every_code_preview_pr_url_for_record(record, runner=run)
         if not result_pr_url:
             skipped += 1
             continue
@@ -1706,6 +1714,54 @@ def every_code_pr_preview_readiness(
     if all(str(item.get("conclusion") or "").upper() == "SUCCESS" for item in relevant_checks):
         return "ready"
     return "blocked"
+
+
+def _every_code_preview_pr_url_for_record(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    runner: Runner,
+) -> str:
+    result_pr_url = record.result_pr_url.strip()
+    if result_pr_url:
+        return result_pr_url
+    if record.state != "running":
+        return ""
+    branch = every_code_worktree_branch(record)
+    try:
+        result = runner(
+            (
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                record.repository.strip(),
+                "--state",
+                "open",
+                "--head",
+                branch,
+                "--json",
+                "url",
+                "--limit",
+                "1",
+            )
+        )
+    except OSError:
+        return ""
+    if result.returncode != 0:
+        return ""
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return ""
+    if not isinstance(payload, list) or not payload:
+        return ""
+    first = payload[0]
+    if not isinstance(first, dict):
+        return ""
+    url = first.get("url")
+    if not isinstance(url, str):
+        return ""
+    return url.strip()
 
 
 def _github_pr_view_payload(
