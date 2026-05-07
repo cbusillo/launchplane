@@ -14,6 +14,8 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_preview_gate_record import build_every_code_preview_gate_id
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.every_code_work_request import requeue_every_code_work_request
 from control_plane.every_code_worker import (
@@ -99,6 +101,34 @@ def _done_record(*, repository: str, result_pr_url: str) -> EveryCodeWorkRequest
             "started_at": "2026-05-05T22:02:00Z",
             "finished_at": "2026-05-05T22:03:00Z",
         }
+    )
+
+
+def _preview_gate_record(
+    *, status: str = "pending", head_sha: str = "abcdef1234567890"
+) -> EveryCodePreviewGateRecord:
+    return EveryCodePreviewGateRecord(
+        gate_id=build_every_code_preview_gate_id(
+            repository="cbusillo/sellyouroutboard",
+            pr_number=86,
+            head_sha=head_sha,
+        ),
+        request_id="every-code-cbusillo-code-123-test",
+        repository="cbusillo/sellyouroutboard",
+        issue_number=123,
+        issue_url="https://github.com/cbusillo/sellyouroutboard/issues/123",
+        issue_author="Mbanks89",
+        pr_number=86,
+        pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+        head_sha=head_sha,
+        status=status,  # type: ignore[arg-type]
+        created_at="2026-05-06T20:00:00Z",
+        updated_at="2026-05-06T20:00:00Z",
+        ready_at="2026-05-06T20:01:00Z" if status == "ready" else "",
+        labeled_at="2026-05-06T20:02:00Z" if status == "labeled" else "",
+        blocked_at="2026-05-06T20:03:00Z" if status == "blocked" else "",
+        cancelled_at="2026-05-06T20:04:00Z" if status == "cancelled" else "",
+        last_checked_at="2026-05-06T20:00:00Z",
     )
 
 
@@ -206,6 +236,20 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
         if self.headers.get("Authorization") != f"Bearer {self.token}":
             self._write_json(401, {"status": "rejected"})
             return
+        if self.path.startswith("/v1/every-code/preview-gates"):
+            query = parse_qs(urlparse(self.path).query)
+            gate_records = self.store.list_every_code_preview_gate_records(
+                status=str((query.get("status") or [""])[0]),
+                limit=10,
+            )
+            self._write_json(
+                200,
+                {
+                    "status": "ok",
+                    "gates": [record.model_dump(mode="json") for record in gate_records],
+                },
+            )
+            return
         if self.path.startswith("/v1/every-code/pr-feedback"):
             query = parse_qs(urlparse(self.path).query)
             feedback_records = self.store.list_every_code_pr_feedback_records(
@@ -242,6 +286,18 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
             return
         content_length = int(self.headers.get("Content-Length", "0"))
         payload = json.loads(self.rfile.read(content_length).decode("utf-8"))
+        if self.path == "/v1/every-code/preview-gates":
+            gate_record = EveryCodePreviewGateRecord.model_validate(payload)
+            self.store.write_every_code_preview_gate_record(gate_record)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "records": {"gate_id": gate_record.gate_id, "status": gate_record.status},
+                    "result": {"gate": gate_record.model_dump(mode="json")},
+                },
+            )
+            return
         if self.path == "/v1/every-code/pr-feedback/status":
             feedback_records = self.store.list_every_code_pr_feedback_records(
                 request_id=str(payload["request_id"]),
@@ -444,6 +500,39 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(feedback_records[0].feedback_id, _feedback_record().feedback_id)
         self.assertEqual(listed_after_update[0].status, "applied")
 
+    def test_api_store_lists_and_writes_preview_gates_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            _EveryCodeApiHandler.store.write_every_code_preview_gate_record(_preview_gate_record())
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                gate_records = store.list_every_code_preview_gate_records(status="pending")
+                blocked_record = gate_records[0].model_copy(
+                    update={
+                        "status": "blocked",
+                        "updated_at": "2026-05-06T20:05:00Z",
+                        "blocked_at": "2026-05-06T20:05:00Z",
+                    }
+                )
+                store.write_every_code_preview_gate_record(blocked_record)
+                listed_after_update = store.list_every_code_preview_gate_records(status="blocked")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(len(gate_records), 1)
+        self.assertEqual(gate_records[0].gate_id, _preview_gate_record().gate_id)
+        self.assertEqual(listed_after_update[0].status, "blocked")
+
     def test_api_store_reruns_terminal_request_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -626,6 +715,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
             runner = _Runner(
                 pr_view_payload={
                     "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
                     "labels": [],
                     "statusCheckRollup": [
                         {"name": "static_checks", "status": "COMPLETED", "conclusion": "SUCCESS"},
@@ -638,8 +728,15 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 runner=runner,
             )
+            gate_records = store.list_every_code_preview_gate_records(
+                request_id="every-code-cbusillo-code-123-test",
+                pr_number=86,
+            )
 
         self.assertEqual(result.labeled, 1)
+        self.assertEqual(len(gate_records), 1)
+        self.assertEqual(gate_records[0].status, "labeled")
+        self.assertEqual(gate_records[0].head_sha, "abcdef1234567890")
         self.assertIn(
             (
                 "gh",
@@ -666,6 +763,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
             runner = _Runner(
                 pr_view_payload={
                     "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
                     "labels": [],
                     "statusCheckRollup": [
                         {"name": "static_checks", "status": "IN_PROGRESS", "conclusion": ""},
@@ -677,8 +775,45 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 runner=runner,
             )
+            gate_records = store.list_every_code_preview_gate_records(status="pending")
 
         self.assertEqual(result.pending, 1)
+        self.assertEqual(len(gate_records), 1)
+        self.assertIn("static_checks", gate_records[0].pending_reason)
+        self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
+    def test_preview_gate_blocks_stale_pending_checks_after_timeout(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            store.write_every_code_preview_gate_record(_preview_gate_record())
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "IN_PROGRESS", "conclusion": ""},
+                    ],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                gate_timeout_seconds=1,
+                runner=runner,
+            )
+            gate_records = store.list_every_code_preview_gate_records(status="blocked")
+
+        self.assertEqual(result.blocked, 1)
+        self.assertEqual(result.pending, 0)
+        self.assertEqual(len(gate_records), 1)
+        self.assertIn("Timed out", gate_records[0].blocked_reason)
         self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
 
     def test_preview_gate_blocks_failed_checks(self) -> None:
@@ -693,6 +828,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
             runner = _Runner(
                 pr_view_payload={
                     "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
                     "labels": [],
                     "statusCheckRollup": [
                         {"name": "static_checks", "status": "COMPLETED", "conclusion": "FAILURE"},
@@ -704,9 +840,109 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 record_store=store,
                 runner=runner,
             )
+            gate_records = store.list_every_code_preview_gate_records(status="blocked")
 
         self.assertEqual(result.blocked, 1)
+        self.assertEqual(len(gate_records), 1)
+        self.assertIn("static_checks", gate_records[0].blocked_reason)
         self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
+    def test_preview_gate_resets_when_pull_request_head_changes(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            store.write_every_code_preview_gate_record(
+                _preview_gate_record(head_sha="oldsha1234567890")
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "newsha1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "IN_PROGRESS", "conclusion": ""},
+                    ],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+            all_gates = store.list_every_code_preview_gate_records(pr_number=86)
+            pending_gates = store.list_every_code_preview_gate_records(status="pending")
+            cancelled_gates = store.list_every_code_preview_gate_records(status="cancelled")
+
+        self.assertEqual(result.pending, 1)
+        self.assertEqual(result.reset, 1)
+        self.assertEqual(len(all_gates), 2)
+        self.assertEqual(pending_gates[0].head_sha, "newsha1234567890")
+        self.assertEqual(cancelled_gates[0].head_sha, "oldsha1234567890")
+
+    def test_preview_gate_cancels_closed_pull_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "CLOSED",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+            gate_records = store.list_every_code_preview_gate_records(status="cancelled")
+
+        self.assertEqual(result.cancelled, 1)
+        self.assertEqual(len(gate_records), 1)
+        self.assertIn("no longer open", gate_records[0].blocked_reason)
+
+    def test_preview_gate_cancels_when_source_issue_closed(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                ).model_copy(update={"result_summary": "Source issue closed by Mbanks89."})
+            )
+            store.write_every_code_preview_gate_record(_preview_gate_record())
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    ],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+            gate_records = store.list_every_code_preview_gate_records(status="cancelled")
+
+        self.assertEqual(result.cancelled, 1)
+        self.assertEqual(len(gate_records), 1)
+        self.assertIn("Source issue closed", gate_records[0].blocked_reason)
+        self.assertFalse(runner.calls)
 
     def test_preview_gate_skips_pull_request_with_preview_label(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1938,7 +2174,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
-        self.assertEqual(payload["skipped"], 1)
+        self.assertEqual(payload["checked"], 1)
+        self.assertEqual(payload["blocked"], 1)
 
 
 if __name__ == "__main__":

@@ -14,6 +14,7 @@ from control_plane.contracts.artifact_identity import (
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
@@ -70,6 +71,49 @@ def _health_pass() -> HealthcheckEvidence:
 
 
 class FilesystemRecordStoreTests(unittest.TestCase):
+    def test_write_and_list_every_code_preview_gate_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = EveryCodePreviewGateRecord(
+                gate_id="every-code-preview-gate-cbusillo-code-26-oldsha",
+                request_id="every-code-cbusillo-code-123-test",
+                repository="cbusillo/code",
+                issue_number=123,
+                issue_url="https://github.com/cbusillo/code/issues/123",
+                issue_author="octocat",
+                pr_number=26,
+                pr_url="https://github.com/cbusillo/code/pull/26",
+                head_sha="oldsha",
+                status="pending",
+                created_at="2026-05-06T17:00:00Z",
+                updated_at="2026-05-06T17:00:00Z",
+            )
+            newer_record = older_record.model_copy(
+                update={
+                    "gate_id": "every-code-preview-gate-cbusillo-code-26-newsha",
+                    "head_sha": "newsha",
+                    "status": "blocked",
+                    "updated_at": "2026-05-06T18:00:00Z",
+                    "blocked_at": "2026-05-06T18:00:00Z",
+                }
+            )
+
+            written_path = store.write_every_code_preview_gate_record(older_record)
+            store.write_every_code_preview_gate_record(newer_record)
+            listed_records = store.list_every_code_preview_gate_records(
+                request_id="every-code-cbusillo-code-123-test",
+                pr_number=26,
+            )
+            blocked_records = store.list_every_code_preview_gate_records(status="blocked")
+            self.assertTrue(written_path.exists())
+
+        self.assertEqual(
+            [record.gate_id for record in listed_records],
+            [newer_record.gate_id, older_record.gate_id],
+        )
+        self.assertEqual([record.gate_id for record in blocked_records], [newer_record.gate_id])
+
     def test_write_and_list_every_code_pr_feedback_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name)

@@ -21,6 +21,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
@@ -1342,6 +1343,46 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(listed_records[0].delivery_status, "delivered")
         self.assertEqual(listed_records[0].comment_id, 456)
 
+    def test_every_code_preview_gate_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_every_code_preview_gate_record(
+                EveryCodePreviewGateRecord(
+                    gate_id="every-code-preview-gate-cbusillo-code-26-abcdef",
+                    request_id="every-code-cbusillo-code-123-test",
+                    repository="cbusillo/code",
+                    issue_number=123,
+                    issue_url="https://github.com/cbusillo/code/issues/123",
+                    issue_author="octocat",
+                    pr_number=26,
+                    pr_url="https://github.com/cbusillo/code/pull/26",
+                    head_sha="abcdef1234567890",
+                    status="blocked",
+                    created_at="2026-05-06T17:00:00Z",
+                    updated_at="2026-05-06T18:00:00Z",
+                    blocked_at="2026-05-06T18:00:00Z",
+                    blocked_reason="Checks did not pass: static_checks",
+                )
+            )
+            listed_records = store.list_every_code_preview_gate_records(
+                request_id="every-code-cbusillo-code-123-test",
+                status="blocked",
+            )
+            store.close()
+
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(
+            listed_records[0].gate_id,
+            "every-code-preview-gate-cbusillo-code-26-abcdef",
+        )
+        self.assertEqual(listed_records[0].head_sha, "abcdef1234567890")
+        self.assertEqual(listed_records[0].blocked_reason, "Checks did not pass: static_checks")
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1749,6 +1790,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_lifecycle_cleanups": 1,
                     "preview_lifecycle_plans": 1,
                     "preview_pr_feedback": 1,
+                    "every_code_preview_gates": 0,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
                 },

@@ -9,6 +9,7 @@ from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRe
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
@@ -200,6 +201,37 @@ class FilesystemRecordStore:
 
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> Path:
         return self._write_model("launchplane_every_code_pr_feedback", record.feedback_id, record)
+
+    def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> Path:
+        return self._write_model("launchplane_every_code_preview_gates", record.gate_id, record)
+
+    def list_every_code_preview_gate_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePreviewGateRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                EveryCodePreviewGateRecord,
+                "launchplane_every_code_preview_gates",
+            )
+            if (not request_id or record.request_id == request_id)
+            and (not repository or record.repository == repository)
+            and (pr_number is None or record.pr_number == pr_number)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.gate_id), reverse=True)
+        if offset > 0:
+            records = records[offset:]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def list_every_code_pr_feedback_records(
         self,
