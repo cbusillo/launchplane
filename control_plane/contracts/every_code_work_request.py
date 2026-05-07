@@ -235,6 +235,10 @@ def close_every_code_work_request_for_pull_request(
         "result_summary": summary,
         "error_message": error_message,
     }
+    if not record.claimed_at.strip():
+        updates["claimed_at"] = closed_at
+    if not record.claimed_by_host.strip():
+        updates["claimed_by_host"] = "github-pull-request-close"
     if not record.started_at.strip():
         updates["started_at"] = closed_at
     return record.model_copy(update=updates)

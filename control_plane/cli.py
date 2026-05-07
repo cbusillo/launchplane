@@ -9782,7 +9782,7 @@ def every_code_rerun_issue(
                 "detail": "Requeued terminal Every Code work request for this issue.",
                 "request": request.model_dump(mode="json"),
             }
-        except EveryCodeWorkerApiError as error:
+        except (EveryCodeWorkerApiError, ValueError) as error:
             raise click.ClickException(str(error)) from error
         finally:
             _close_store(record_store)
