@@ -412,6 +412,24 @@ class EveryCodePrFeedbackApplyResult:
         }
 
 
+@dataclass(frozen=True)
+class EveryCodePreviewGateResult:
+    checked: int = 0
+    labeled: int = 0
+    pending: int = 0
+    blocked: int = 0
+    skipped: int = 0
+
+    def as_payload(self) -> dict[str, object]:
+        return {
+            "checked": self.checked,
+            "labeled": self.labeled,
+            "pending": self.pending,
+            "blocked": self.blocked,
+            "skipped": self.skipped,
+        }
+
+
 def every_code_tmux_session_name(request_id: str) -> str:
     normalized = re.sub(r"[^A-Za-z0-9_.:-]+", "-", request_id.strip()).strip("-._:")
     return f"every-code-{normalized or 'request'}"[:80]
@@ -1042,6 +1060,11 @@ def run_every_code_worker_loop(
             tmux_binary=tmux_binary,
             runner=runner,
         )
+        request_ready_every_code_pr_preview_labels(
+            record_store=record_store,
+            repository=repository,
+            runner=runner,
+        )
         last_result = run_every_code_worker_once(
             record_store=record_store,
             host=host,
@@ -1537,20 +1560,14 @@ def finish_every_code_work_request(
 ) -> EveryCodeWorkerFinishResult:
     record = record_store.read_every_code_work_request_record(request_id.strip())
     if record.state in TERMINAL_EVERY_CODE_STATES:
-        preview_label_summary = ""
         terminal_pr_url = result_pr_url.strip() or record.result_pr_url
-        if record.state == "done" and exit_code == 0 and terminal_pr_url:
-            preview_label_summary = request_every_code_pr_preview_label(
-                result_pr_url=terminal_pr_url,
-                runner=runner,
-            )
+        del runner
         detail_parts = [
             part
             for part in (
                 record.result_summary
                 or record.error_message
                 or "Every Code request is already terminal.",
-                preview_label_summary,
             )
             if part
         ]
@@ -1563,14 +1580,8 @@ def finish_every_code_work_request(
             result_pr_url=terminal_pr_url,
         )
     succeeded = exit_code == 0
-    preview_label_summary = ""
-    if succeeded and result_pr_url.strip():
-        preview_label_summary = request_every_code_pr_preview_label(
-            result_pr_url=result_pr_url,
-            runner=runner,
-        )
-    summary_parts = [part for part in (result_summary.strip(), preview_label_summary) if part]
-    summary = "; ".join(summary_parts) or (
+    del runner
+    summary = result_summary.strip() or (
         "Every Code session completed successfully."
         if succeeded
         else f"Every Code session exited with status {exit_code}."
@@ -1595,6 +1606,149 @@ def finish_every_code_work_request(
         issue_number=updated_record.issue_number,
         result_pr_url=updated_record.result_pr_url,
     )
+
+
+def request_ready_every_code_pr_preview_labels(
+    *,
+    record_store: EveryCodeWorkerStore,
+    repository: str = "",
+    limit: int = 50,
+    runner: Runner | None = None,
+) -> EveryCodePreviewGateResult:
+    records = record_store.list_every_code_work_request_records(
+        state="done",
+        repository=repository.strip(),
+        limit=limit,
+    )
+    if not records:
+        return EveryCodePreviewGateResult()
+
+    run = runner or _run_subprocess
+    checked = 0
+    labeled = 0
+    pending = 0
+    blocked = 0
+    skipped = 0
+    for record in records:
+        result_pr_url = record.result_pr_url.strip()
+        if not result_pr_url:
+            skipped += 1
+            continue
+        readiness = every_code_pr_preview_readiness(
+            result_pr_url=result_pr_url,
+            runner=run,
+        )
+        if readiness == "ready":
+            checked += 1
+            summary = request_every_code_pr_preview_label(
+                result_pr_url=result_pr_url,
+                runner=run,
+            )
+            if summary.startswith("Requested Launchplane preview"):
+                labeled += 1
+            elif summary:
+                blocked += 1
+            else:
+                skipped += 1
+        elif readiness == "pending":
+            checked += 1
+            pending += 1
+        elif readiness == "blocked":
+            checked += 1
+            blocked += 1
+        else:
+            skipped += 1
+    return EveryCodePreviewGateResult(
+        checked=checked,
+        labeled=labeled,
+        pending=pending,
+        blocked=blocked,
+        skipped=skipped,
+    )
+
+
+def every_code_pr_preview_readiness(
+    *,
+    result_pr_url: str,
+    runner: Runner | None = None,
+) -> Literal["ready", "pending", "blocked", "skipped"]:
+    reference = github_pull_request_reference(pr_url=result_pr_url.strip())
+    if reference is None:
+        return "skipped"
+    preview_label = launchplane_anchor_repo_preview_label(repo=reference["repo"])
+    if not preview_label:
+        return "skipped"
+    payload = _github_pr_view_payload(
+        owner=reference["owner"],
+        repo=reference["repo"],
+        pr_number=reference["pr_number"],
+        runner=runner or _run_subprocess,
+    )
+    if payload is None:
+        return "blocked"
+    if str(payload.get("state") or "").upper() != "OPEN":
+        return "skipped"
+    if _github_pr_payload_has_label(payload, preview_label):
+        return "skipped"
+    check_rollup = payload.get("statusCheckRollup")
+    if not isinstance(check_rollup, list):
+        return "pending"
+    relevant_checks = [
+        item
+        for item in check_rollup
+        if isinstance(item, dict)
+        and str(item.get("conclusion") or "").upper() != "SKIPPED"
+    ]
+    if not relevant_checks:
+        return "ready"
+    if any(str(item.get("status") or "").upper() != "COMPLETED" for item in relevant_checks):
+        return "pending"
+    if all(str(item.get("conclusion") or "").upper() == "SUCCESS" for item in relevant_checks):
+        return "ready"
+    return "blocked"
+
+
+def _github_pr_view_payload(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    runner: Runner,
+) -> dict[str, object] | None:
+    try:
+        result = runner(
+            (
+                "gh",
+                "pr",
+                "view",
+                str(pr_number),
+                "--repo",
+                f"{owner}/{repo}",
+                "--json",
+                "state,labels,statusCheckRollup",
+            )
+        )
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _github_pr_payload_has_label(payload: dict[str, object], label_name: str) -> bool:
+    labels = payload.get("labels")
+    if not isinstance(labels, list):
+        return False
+    for label in labels:
+        if isinstance(label, dict) and label.get("name") == label_name:
+            return True
+    return False
 
 
 def request_every_code_pr_preview_label(

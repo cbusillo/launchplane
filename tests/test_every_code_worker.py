@@ -31,6 +31,7 @@ from control_plane.every_code_worker import (
     every_code_worker_daemon_status,
     finish_every_code_work_request,
     prepare_every_code_checkout,
+    request_ready_every_code_pr_preview_labels,
     request_every_code_pr_preview_label,
     run_every_code_worker_loop,
     run_every_code_worker_once,
@@ -86,11 +87,32 @@ def _feedback_record(*, status: str = "pending") -> EveryCodePrFeedbackRecord:
     )
 
 
+def _done_record(*, repository: str, result_pr_url: str) -> EveryCodeWorkRequestRecord:
+    return _queued_record().model_copy(
+        update={
+            "state": "done",
+            "repository": repository,
+            "result_pr_url": result_pr_url,
+            "claimed_at": "2026-05-05T22:01:00Z",
+            "claimed_by_host": "Chris-Studio",
+            "started_at": "2026-05-05T22:02:00Z",
+            "finished_at": "2026-05-05T22:03:00Z",
+        }
+    )
+
+
 class _Runner:
-    def __init__(self, *, fail_issue_comment: bool = False, existing_branch: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        fail_issue_comment: bool = False,
+        existing_branch: bool = False,
+        pr_view_payload: dict[str, object] | None = None,
+    ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.fail_issue_comment = fail_issue_comment
         self.existing_branch = existing_branch
+        self.pr_view_payload = pr_view_payload
 
     def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
@@ -122,6 +144,8 @@ class _Runner:
             if self.fail_issue_comment:
                 return subprocess.CompletedProcess(args, 1, "", "rate limited")
             return subprocess.CompletedProcess(args, 0, "", "")
+        if args[:3] == ("gh", "pr", "view") and self.pr_view_payload is not None:
+            return subprocess.CompletedProcess(args, 0, json.dumps(self.pr_view_payload), "")
         if args[1] == "display-message":
             return subprocess.CompletedProcess(args, 0, "4242\n", "")
         if args[1] == "has-session":
@@ -585,6 +609,125 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(summary, "")
         self.assertEqual(runner.calls, [])
 
+    def test_preview_gate_labels_done_pull_request_after_checks_pass(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                        {"name": "preview", "status": "COMPLETED", "conclusion": "SKIPPED"},
+                    ],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.labeled, 1)
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "edit",
+                "86",
+                "--repo",
+                "cbusillo/sellyouroutboard",
+                "--add-label",
+                "preview",
+            ),
+            runner.calls,
+        )
+
+    def test_preview_gate_waits_for_incomplete_checks(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "IN_PROGRESS", "conclusion": ""},
+                    ],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.pending, 1)
+        self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
+    def test_preview_gate_blocks_failed_checks(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "COMPLETED", "conclusion": "FAILURE"},
+                    ],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.blocked, 1)
+        self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
+    def test_preview_gate_skips_pull_request_with_preview_label(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [{"name": "preview"}],
+                    "statusCheckRollup": [],
+                }
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.skipped, 1)
+        self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
     def test_prepare_checkout_creates_worker_owned_worktree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -1040,7 +1183,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
         self.assertEqual(record.error_message, "")
 
-    def test_finish_requests_preview_label_for_eligible_pr(self) -> None:
+    def test_finish_defers_preview_label_until_gate_passes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "tenant-opw"
@@ -1070,8 +1213,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
             )
 
         self.assertEqual(result.status, "done")
-        self.assertIn("Requested Launchplane preview", record.result_summary)
-        self.assertTrue(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+        self.assertNotIn("Requested Launchplane preview", record.result_summary)
+        self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
 
     def test_finish_marks_failed_session_blocked(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1138,7 +1281,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.status, "done")
         self.assertEqual(result.detail, "Linked pull request merged.")
 
-    def test_finish_retries_preview_label_for_terminal_done_request(self) -> None:
+    def test_finish_does_not_retry_preview_label_for_terminal_done_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
             checkout_root = temporary_root / "Developer" / "sellyouroutboard"
@@ -1182,20 +1325,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
             result.result_pr_url,
             "https://github.com/cbusillo/sellyouroutboard/pull/71",
         )
-        self.assertIn("Requested Launchplane preview", result.detail)
-        self.assertIn(
-            (
-                "gh",
-                "pr",
-                "edit",
-                "71",
-                "--repo",
-                "cbusillo/sellyouroutboard",
-                "--add-label",
-                "preview",
-            ),
-            runner.calls,
-        )
+        self.assertEqual(result.detail, "Every Code opened PR #71.")
+        self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
 
     def test_run_once_marks_missing_checkout_blocked(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1570,6 +1701,33 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "done")
+
+    def test_cli_reconcile_previews_reports_gate_summary(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/code",
+                    result_pr_url="https://github.com/cbusillo/code/pull/99",
+                )
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "every-code",
+                    "reconcile-previews",
+                    "--state-dir",
+                    str(temporary_root / "state"),
+                    "--repository",
+                    "cbusillo/code",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["skipped"], 1)
 
 
 if __name__ == "__main__":
