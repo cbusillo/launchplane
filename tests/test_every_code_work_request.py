@@ -179,6 +179,9 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
         self.assertIsNotNone(done_record)
         assert done_record is not None
         self.assertEqual(done_record.state, "done")
+        self.assertEqual(done_record.claimed_at, "2026-05-05T22:05:00Z")
+        self.assertEqual(done_record.claimed_by_host, "github-pull-request-close")
+        self.assertEqual(done_record.started_at, "2026-05-05T22:05:00Z")
         self.assertEqual(done_record.finished_at, "2026-05-05T22:05:00Z")
         self.assertEqual(done_record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
         self.assertEqual(

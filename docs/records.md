@@ -578,6 +578,12 @@ state/
   same label to the same issue returns the existing request; a fresh retry model
   should use a new trigger label or explicit retry record rather than mutating a
   terminal request in place.
+- The same webhook ingress accepts signed pull-request `closed` deliveries to
+  terminalize linked Every Code requests. The close handler matches records by a
+  stored result PR URL, by recorded PR feedback, or by GitHub closing references
+  to linked issues. A single pull request can close multiple Every Code requests;
+  queued matches are terminalized with service-owned claim metadata so terminal
+  records still satisfy the work-request contract.
 
 ## Inventory
 
