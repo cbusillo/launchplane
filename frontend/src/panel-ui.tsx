@@ -38,3 +38,29 @@ export function MetricTile({
     </div>
   );
 }
+
+export function KeyValue({
+  label,
+  value,
+  mono = false,
+  muted = false,
+  status,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  muted?: boolean;
+  status?: Status | string;
+}) {
+  return (
+    <div className="kv-row">
+      <span>{label}</span>
+      <strong
+        className={`${mono ? "mono" : ""} ${muted ? "muted" : ""}`}
+        data-status={status}
+      >
+        {value || "unknown"}
+      </strong>
+    </div>
+  );
+}
