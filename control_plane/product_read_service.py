@@ -7,6 +7,7 @@ from control_plane.contracts.product_environment_read_model import (
     ActionAllowed,
     ProductReadModelStore,
     build_product_activity_read_model,
+    build_product_environment_config_status,
     build_product_environment_detail,
     build_product_site_overview,
     build_product_site_overviews,
@@ -22,7 +23,7 @@ class ProductEnvironmentReadServiceResult:
 
 
 def is_product_environment_detail_request(params: Mapping[str, str]) -> bool:
-    return any(key in params for key in ("activity", "environment", "product"))
+    return any(key in params for key in ("activity", "config_status", "environment", "product"))
 
 
 def build_product_profile_list_service_payload(
@@ -51,6 +52,19 @@ def build_product_environment_read_service_result(
             authorization_product=activity.product,
             authorization_context="launchplane",
             denial_message="Workflow cannot read the requested product activity.",
+        )
+
+    if params.get("config_status") == "true":
+        config_status = build_product_environment_config_status(
+            record_store=record_store,
+            product=params["product"],
+            environment=params["environment"],
+        )
+        return ProductEnvironmentReadServiceResult(
+            payload={"config_status": config_status.model_dump(mode="json")},
+            authorization_product=config_status.product,
+            authorization_context=config_status.context,
+            denial_message="Workflow cannot read the requested product environment config status.",
         )
 
     if "environment" in params:

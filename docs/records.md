@@ -138,6 +138,14 @@ template lane, required template env keys, copied or omitted settings, preview
 URL/domain env keys, required provider fields, and the declared data transport
 mode so readiness can fail before Launchplane mutates a provider.
 
+Product profiles may also declare expected config requirements for stable lanes:
+runtime-environment key names and managed secret binding keys by context and
+instance. These requirements are declarative intent for operator readiness
+views. Actual configured, missing, disabled, stale, or unsupported status is
+derived from runtime-environment records, managed secret binding records, driver
+support, and trust metadata; expected config requirements do not store runtime
+values, managed secret IDs, secret plaintext, or ciphertext.
+
 The product key is the durable workspace identity. For example,
 `sellyouroutboard` is the SellYourOutboard product workspace; `testing`, `prod`,
 and the preview inventory all appear under that workspace in the operator UI.

@@ -66,6 +66,7 @@ def build_product_profile_record(
         ),
         preview=ProductPreviewProfile.model_validate(manifest.preview.model_dump(mode="json")),
         promotion_workflow=manifest.promotion_workflow,
+        expected_config=manifest.product_expected_config_profile(),
         updated_at=updated_at,
         source=manifest.source_label,
     )

@@ -1714,6 +1714,17 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "product_environment.read", {"product": segments[2]}
     if len(segments) == 5 and segments[:2] == ["v1", "products"] and segments[3] == "environments":
         return "product_environment.read", {"product": segments[2], "environment": segments[4]}
+    if (
+        len(segments) == 6
+        and segments[:2] == ["v1", "products"]
+        and segments[3] == "environments"
+        and segments[5] == "config-status"
+    ):
+        return "product_environment.read", {
+            "product": segments[2],
+            "environment": segments[4],
+            "config_status": "true",
+        }
     return None
 
 
