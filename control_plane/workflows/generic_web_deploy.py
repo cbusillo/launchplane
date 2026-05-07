@@ -10,6 +10,7 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetType
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -17,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
 from control_plane.contracts.promotion_record import HealthcheckEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
+from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.ship import (
     build_deployment_record,
     generate_deployment_record_id,
@@ -28,6 +30,8 @@ class GenericWebDeployStore(Protocol):
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def write_deployment_record(self, record: DeploymentRecord) -> object: ...
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
 
 class GenericWebDeployRequest(BaseModel):
@@ -305,15 +309,20 @@ def execute_generic_web_deploy(
         )
 
     finished_at = utc_now_timestamp()
-    record_store.write_deployment_record(
-        build_deployment_record(
-            request=ship_request,
-            record_id=record_id,
-            deployment_id="control-plane-dokploy",
-            deployment_status="pass",
-            started_at=started_at,
-            finished_at=finished_at,
-            resolved_target=resolved_target,
+    deployment_record = build_deployment_record(
+        request=ship_request,
+        record_id=record_id,
+        deployment_id="control-plane-dokploy",
+        deployment_status="pass",
+        started_at=started_at,
+        finished_at=finished_at,
+        resolved_target=resolved_target,
+    )
+    record_store.write_deployment_record(deployment_record)
+    record_store.write_environment_inventory(
+        build_environment_inventory(
+            deployment_record=deployment_record,
+            updated_at=finished_at,
         )
     )
     return GenericWebDeployResult(
