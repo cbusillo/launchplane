@@ -1075,6 +1075,145 @@ p {
   display: grid;
 }
 
+.config-status-panel {
+  display: grid;
+}
+
+.config-status-environment {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.42fr) minmax(0, 1fr) minmax(0, 1fr);
+  min-width: 0;
+  border-top: 1px solid var(--hair-soft);
+}
+
+.config-status-environment:first-of-type {
+  border-top: 0;
+}
+
+.config-status-environment[data-environment="prod"] {
+  border-left: 3px solid var(--lane-prod);
+}
+
+.config-status-environment[data-environment="testing"] {
+  border-left: 3px solid var(--lane-testing);
+}
+
+.config-status-environment-head,
+.config-status-group {
+  min-width: 0;
+  border-left: 1px solid var(--hair-soft);
+  padding: 12px 14px;
+}
+
+.config-status-environment-head {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  border-left: 0;
+}
+
+.config-status-environment-head div,
+.config-status-group {
+  display: grid;
+  gap: 8px;
+}
+
+.config-status-environment-head strong {
+  color: var(--fg-strong);
+  text-transform: capitalize;
+}
+
+.config-status-environment-head code,
+.config-status-row code,
+.config-status-row strong,
+.config-status-row span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-status-environment-head code {
+  color: var(--fg-faint);
+}
+
+.config-status-group-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 24px;
+  color: var(--fg-muted);
+  font-weight: 650;
+}
+
+.config-status-list {
+  display: grid;
+  gap: 6px;
+}
+
+.config-status-row {
+  display: grid;
+  grid-template-columns: max-content minmax(120px, 0.75fr) minmax(0, 1fr) minmax(90px, auto);
+  gap: 9px;
+  align-items: center;
+  min-height: 34px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: var(--bg-0);
+  padding: 6px 8px;
+}
+
+.config-status-row > div {
+  display: grid;
+  min-width: 0;
+  gap: 1px;
+}
+
+.config-status-row strong {
+  color: var(--fg);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.config-status-row span {
+  color: var(--fg-faint);
+  font-size: 11px;
+}
+
+.config-status-row > span:last-child {
+  text-align: right;
+}
+
+.config-status-alert {
+  display: grid;
+  grid-template-columns: minmax(180px, 0.36fr) minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  border-top: 1px solid color-mix(in oklab, var(--status-warn) 52%, var(--hair));
+  color: var(--status-warn);
+  padding: 10px 14px;
+}
+
+.config-status-alert code {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--fg-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.config-status-skeleton {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px;
+}
+
+.config-status-skeleton span {
+  height: 34px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, var(--bg-2), var(--bg-3), var(--bg-2));
+}
+
 .config-target-grid,
 .config-edit-grid {
   display: grid;
@@ -1720,8 +1859,14 @@ p {
   .product-overview-grid,
   .work-grid,
   .work-grid-evidence,
+  .config-status-environment,
   .config-edit-grid {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  .config-status-group {
+    border-top: 1px solid var(--hair-soft);
+    border-left: 0;
   }
 
   .product-environment-strip {
@@ -1798,6 +1943,8 @@ p {
   .preview-row,
   .secret-row,
   .evidence-row,
+  .config-status-row,
+  .config-status-alert,
   .config-target-grid,
   .config-row-runtime,
   .config-row-secret,
@@ -1819,7 +1966,8 @@ p {
   }
 
   .preview-row .status-pill,
-  .secret-row .status-pill {
+  .secret-row .status-pill,
+  .config-status-row .status-pill {
     width: max-content;
   }
 

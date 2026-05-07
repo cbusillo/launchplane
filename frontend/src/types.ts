@@ -454,6 +454,56 @@ export interface ProductSiteOverview {
   available_actions: ProductActionAvailability[];
 }
 
+export type ProductConfigItemStatus =
+  | "configured"
+  | "missing"
+  | "disabled"
+  | "unvalidated"
+  | "stale"
+  | "unsupported";
+
+export interface ProductRuntimeConfigStatusItem {
+  key: string;
+  status: ProductConfigItemStatus;
+  context: string;
+  instance: string;
+  source_label: string;
+  updated_at: string;
+  trust_state: FreshnessStatus;
+}
+
+export interface ProductManagedSecretConfigStatusItem {
+  binding_key: string;
+  status: ProductConfigItemStatus;
+  integration: string;
+  context: string;
+  instance: string;
+  updated_at: string;
+  trust_state: FreshnessStatus | "disabled";
+}
+
+export interface ProductEnvironmentConfigStatus {
+  schema_version: number;
+  product: string;
+  display_name: string;
+  repository: string;
+  driver_id: string;
+  base_driver_id: string;
+  environment: string;
+  context: string;
+  runtime_settings: ProductRuntimeConfigStatusItem[];
+  managed_secrets: ProductManagedSecretConfigStatusItem[];
+  warnings: string[];
+  trust_state: FreshnessStatus;
+  provenance: DataProvenance;
+}
+
+export interface ProductEnvironmentConfigStatusPayload {
+  status: "ok";
+  trace_id: string;
+  config_status: ProductEnvironmentConfigStatus;
+}
+
 export interface ProductListPayload {
   status: "ok";
   trace_id: string;
