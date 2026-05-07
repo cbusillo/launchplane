@@ -49,6 +49,9 @@ from control_plane.contracts.every_code_work_request import (
     close_every_code_work_request_for_pull_request,
     requeue_every_code_work_request,
 )
+from control_plane.contracts.every_code_preview_gate_record import (
+    EveryCodePreviewGateRecord,
+)
 from control_plane.contracts.every_code_pr_feedback_record import (
     EveryCodePrFeedbackKind,
     EveryCodePrFeedbackRecord,
@@ -1301,6 +1304,10 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         return self
 
 
+class EveryCodePreviewGateEnvelope(EveryCodePreviewGateRecord):
+    pass
+
+
 class RuntimeKeySafetyPolicyApplyEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1683,6 +1690,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "every_code_work_request.read", {}
     if len(segments) == 3 and segments == ["v1", "every-code", "pr-feedback"]:
         return "every_code_pr_feedback.read", {}
+    if len(segments) == 3 and segments == ["v1", "every-code", "preview-gates"]:
+        return "every_code_preview_gate.read", {}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {"request_id": segments[3]}
     if len(segments) == 2 and segments == ["v1", "drivers"]:
@@ -1803,6 +1812,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
         "/v1/every-code/pr-feedback/status",
+        "/v1/every-code/preview-gates",
         "/v1/work-graph/rank",
         "/v1/evidence/deployments",
         "/v1/evidence/backup-gates",
@@ -1875,6 +1885,19 @@ class _EveryCodeWorkRequestStore(Protocol):
         offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
+    def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> object: ...
+
+    def list_every_code_preview_gate_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
+
 
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
@@ -1885,6 +1908,8 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
         "claim_every_code_work_request_record",
         "write_every_code_pr_feedback_record",
         "list_every_code_pr_feedback_records",
+        "write_every_code_preview_gate_record",
+        "list_every_code_preview_gate_records",
     )
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
@@ -2925,6 +2950,8 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         return True
     if method == "GET" and path == "/v1/every-code/pr-feedback":
         return True
+    if method == "GET" and path == "/v1/every-code/preview-gates":
+        return True
     if method == "GET" and path.startswith("/v1/every-code/work-requests/"):
         return True
     return method == "POST" and path in {
@@ -2932,6 +2959,7 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
         "/v1/every-code/pr-feedback/status",
+        "/v1/every-code/preview-gates",
     }
 
 
@@ -2987,6 +3015,28 @@ def _every_code_read_payload(
             "status_filter": status_filter,
             "feedback": [record.model_dump(mode="json") for record in feedback_records],
         }
+    if path == "/v1/every-code/preview-gates":
+        request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
+        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
+        status_filter = str((query.get("status") or [""])[0] or "").strip()
+        pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
+        pr_number_filter = int(pr_number_value) if pr_number_value else None
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        offset = _every_code_pagination_value(query, key="offset", default=0)
+        gate_records = every_code_store.list_every_code_preview_gate_records(
+            request_id=request_id_filter,
+            repository=repository_filter,
+            pr_number=pr_number_filter,
+            status=status_filter,
+            limit=limit,
+            offset=offset,
+        )
+        return {
+            "request_id": request_id_filter,
+            "repository": repository_filter,
+            "status_filter": status_filter,
+            "gates": [record.model_dump(mode="json") for record in gate_records],
+        }
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         record = every_code_store.read_every_code_work_request_record(segments[3])
         return {"request": record.model_dump(mode="json")}
@@ -3035,6 +3085,22 @@ def _handle_every_code_worker_write(
     payload: dict[str, object],
 ) -> list[bytes]:
     every_code_store = _every_code_work_request_store(record_store)
+    if path == "/v1/every-code/preview-gates":
+        gate_record = EveryCodePreviewGateEnvelope.model_validate(payload)
+        every_code_store.write_every_code_preview_gate_record(gate_record)
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload=_accepted_payload(
+                trace_id=trace_id,
+                result={
+                    "gate_id": gate_record.gate_id,
+                    "request_id": gate_record.request_id,
+                    "status": gate_record.status,
+                },
+                driver_result={"gate": gate_record.model_dump(mode="json")},
+            ),
+        )
     if path == "/v1/every-code/pr-feedback/status":
         feedback_status_request = EveryCodePrFeedbackStatusEnvelope.model_validate(payload)
         feedback_matches = every_code_store.list_every_code_pr_feedback_records(

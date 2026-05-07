@@ -28,6 +28,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestRecord,
     claim_every_code_work_request,
@@ -492,6 +493,38 @@ class LaunchplaneEveryCodePrFeedbackRow(Base):
     actor: Mapped[str] = mapped_column(String, nullable=False)
     received_at: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneEveryCodePreviewGateRow(Base):
+    __tablename__ = "launchplane_every_code_preview_gates"
+    __table_args__ = (
+        Index(
+            "launchplane_every_code_preview_gates_request_idx",
+            "request_id",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_every_code_preview_gates_pr_idx",
+            "repository",
+            "pr_number",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_every_code_preview_gates_status_idx",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    gate_id: Mapped[str] = mapped_column(String, primary_key=True)
+    request_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    issue_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    pr_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    head_sha: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1317,6 +1350,52 @@ class PostgresRecordStore(HumanSessionStore):
                 status=record.status,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> None:
+        self._write_row(
+            LaunchplaneEveryCodePreviewGateRow(
+                gate_id=record.gate_id,
+                request_id=record.request_id,
+                repository=record.repository,
+                issue_number=record.issue_number,
+                pr_number=record.pr_number,
+                head_sha=record.head_sha,
+                status=record.status,
+                updated_at=record.updated_at,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_every_code_preview_gate_records(
+        self,
+        *,
+        request_id: str = "",
+        repository: str = "",
+        pr_number: int | None = None,
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[EveryCodePreviewGateRecord, ...]:
+        filters: list[object] = []
+        if request_id:
+            filters.append(LaunchplaneEveryCodePreviewGateRow.request_id == request_id)
+        if repository:
+            filters.append(LaunchplaneEveryCodePreviewGateRow.repository == repository)
+        if pr_number is not None:
+            filters.append(LaunchplaneEveryCodePreviewGateRow.pr_number == pr_number)
+        if status:
+            filters.append(LaunchplaneEveryCodePreviewGateRow.status == status)
+        return self._list_models(
+            model_type=EveryCodePreviewGateRecord,
+            orm_model=LaunchplaneEveryCodePreviewGateRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneEveryCodePreviewGateRow.updated_at.desc(),
+                LaunchplaneEveryCodePreviewGateRow.gate_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
         )
 
     def list_every_code_pr_feedback_records(
@@ -2166,6 +2245,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_lifecycle_cleanups": 0,
             "preview_lifecycle_plans": 0,
             "preview_pr_feedback": 0,
+            "every_code_preview_gates": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
         }
@@ -2222,6 +2302,10 @@ class PostgresRecordStore(HumanSessionStore):
             for pr_feedback_record in filesystem_store.list_preview_pr_feedback_records():
                 self.write_preview_pr_feedback_record(pr_feedback_record)
                 counts["preview_pr_feedback"] += 1
+        if hasattr(filesystem_store, "list_every_code_preview_gate_records"):
+            for gate_record in filesystem_store.list_every_code_preview_gate_records():
+                self.write_every_code_preview_gate_record(gate_record)
+                counts["every_code_preview_gates"] += 1
         for release_tuple_record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1
