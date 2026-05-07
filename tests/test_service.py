@@ -7705,6 +7705,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "schema_version": 1,
                     "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Grant product profile read for SYO promotion diagnostics.",
+                    "related_issue": "cbusillo/launchplane#83",
                     "grant": {
                         "repository": "cbusillo/launchplane",
                         "workflow_refs": [
@@ -7741,6 +7744,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "schema_version": 1,
                     "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Grant product profile read for SYO promotion diagnostics.",
+                    "related_issue": "cbusillo/launchplane#83",
                     "grant": {
                         "repository": "cbusillo/launchplane",
                         "workflow_refs": [
@@ -7759,6 +7765,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["records"]["authz_policy_record_id"], active_policy.record_id)
         self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["audit"]["related_issue"], "cbusillo/launchplane#83")
+        self.assertEqual(
+            active_policy.audit["reason"],
+            "Grant product profile read for SYO promotion diagnostics.",
+        )
+        self.assertIn("workflow_refs", json.dumps(active_policy.audit, sort_keys=True))
+        actions_operator = active_policy.audit["operator"]
+        self.assertIsInstance(actions_operator, dict)
+        assert isinstance(actions_operator, dict)
+        self.assertEqual(actions_operator["type"], "github_actions")
         self.assertNotIn("workflow_refs", json.dumps(payload, sort_keys=True))
         self.assertEqual(profile_status_code, 200)
         self.assertEqual(profile_payload["profile"]["product"], "sellyouroutboard")
@@ -7767,6 +7784,220 @@ class LaunchplaneServiceTests(unittest.TestCase):
             repeat_payload["records"]["authz_policy_record_id"], active_policy.record_id
         )
         self.assertEqual(repeat_payload["result"]["changed"], False)
+
+    def test_authz_policy_grant_endpoint_dry_run_does_not_write_or_reload(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "reason": "Inspect whether product profile read grant is needed.",
+                    "related_issue": "cbusillo/launchplane#83",
+                    "grant": {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.read"],
+                        "source_label": "test:dry-run-grant",
+                    },
+                },
+                headers={"Idempotency-Key": "authz-grant:dry-run"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_records = store.list_authz_policy_records(status="active")
+                dry_run_idempotency_record = store.read_idempotency_record(
+                    scope=(
+                        "cbusillo/launchplane|"
+                        "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main|"
+                        "repo:every/verireel:pull_request"
+                    ),
+                    route_path="/v1/authz-policies/github-actions/grants",
+                    idempotency_key="authz-grant:dry-run",
+                )
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(
+                        _product_profile_payload_with_prod()
+                    )
+                )
+            finally:
+                store.close()
+            profile_status_code, profile_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard",
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry_run")
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(payload["result"]["diff"]["new_github_actions_rule_count"], 2)
+        self.assertEqual(payload["result"]["audit"]["mode"], "dry_run")
+        self.assertNotIn("requested_grant", payload["result"]["audit"])
+        self.assertEqual(
+            payload["result"]["audit"]["requested_grant_summary"]["workflow_ref_count"],
+            1,
+        )
+        self.assertEqual(len(active_records), 1)
+        self.assertIsNone(dry_run_idempotency_record)
+        self.assertEqual(profile_status_code, 403)
+        self.assertEqual(profile_payload["error"]["code"], "authorization_denied")
+
+    def test_authz_policy_grant_endpoint_allows_admin_human_session(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow product profile reads for operator diagnostics.",
+                    "related_issue": "cbusillo/launchplane#83",
+                    "grant": {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.read"],
+                        "source_label": "test:human-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-grant:human-admin",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(payload["result"]["audit"]["operator"]["type"], "github_human")
+        self.assertEqual(payload["result"]["audit"]["operator"]["login"], "alice")
+        human_operator = active_policy.audit["operator"]
+        self.assertIsInstance(human_operator, dict)
+        assert isinstance(human_operator, dict)
+        self.assertEqual(human_operator["type"], "github_human")
+
+    def test_authz_policy_grant_endpoint_apply_requires_reason(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "actions": ["launchplane_service_deploy.execute"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-actions/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "grant": {
+                        "repository": "cbusillo/launchplane",
+                        "actions": ["product_profile.read"],
+                    },
+                },
+                headers={"Idempotency-Key": "authz-grant:no-reason"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_authz_policy_grant_endpoint_rejects_without_self_deploy_permission(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -7805,6 +8036,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 payload={
                     "schema_version": 1,
                     "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Attempt unauthorized grant.",
                     "grant": {
                         "repository": "cbusillo/launchplane",
                         "actions": ["product_profile.read"],
