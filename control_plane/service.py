@@ -27,6 +27,7 @@ from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane import product_context_audit as control_plane_product_context_audit
 from control_plane import product_context_cutover as control_plane_product_context_cutover
+from control_plane import product_onboarding_service as control_plane_product_onboarding_service
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import secrets as control_plane_secrets
@@ -6081,54 +6082,11 @@ def create_launchplane_service_app(
                     record_store=record_store,
                     manifest=onboarding_request.manifest,
                 )
-                result = {
-                    "product_profile": onboarding_result.product_profile.product,
-                    "dokploy_target_count": len(onboarding_result.dokploy_targets),
-                    "dokploy_target_id_count": len(onboarding_result.dokploy_target_ids),
-                    "runtime_environment_record_count": len(onboarding_result.runtime_environments),
-                    "secret_binding_count": len(onboarding_result.secret_bindings),
-                }
-                driver_result = {
-                    "product": onboarding_result.product,
-                    "product_profile": onboarding_result.product_profile.model_dump(mode="json"),
-                    "dokploy_targets": [
-                        record.model_dump(mode="json")
-                        for record in onboarding_result.dokploy_targets
-                    ],
-                    "dokploy_target_ids": [
-                        {
-                            "context": record.context,
-                            "instance": record.instance,
-                            "target_id_recorded": bool(record.target_id.strip()),
-                            "updated_at": record.updated_at,
-                            "source_label": record.source_label,
-                        }
-                        for record in onboarding_result.dokploy_target_ids
-                    ],
-                    "runtime_environment_records": [
-                        {
-                            "scope": record.scope,
-                            "context": record.context,
-                            "instance": record.instance,
-                            "env_keys": sorted(record.env),
-                            "updated_at": record.updated_at,
-                            "source_label": record.source_label,
-                        }
-                        for record in onboarding_result.runtime_environments
-                    ],
-                    "secret_bindings": [
-                        {
-                            "binding_id": binding.binding_id,
-                            "integration": binding.integration,
-                            "binding_key": binding.binding_key,
-                            "context": binding.context,
-                            "instance": binding.instance,
-                            "status": binding.status,
-                            "updated_at": binding.updated_at,
-                        }
-                        for binding in onboarding_result.secret_bindings
-                    ],
-                }
+                result, driver_result = (
+                    control_plane_product_onboarding_service.build_product_onboarding_service_result(
+                        onboarding_result
+                    )
+                )
             elif path == "/v1/drivers/launchplane/self-deploy":
                 self_deploy_request = LaunchplaneSelfDeployEnvelope.model_validate(payload)
                 if not authz_policy.allows(
