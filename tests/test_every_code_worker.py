@@ -108,11 +108,13 @@ class _Runner:
         fail_issue_comment: bool = False,
         existing_branch: bool = False,
         pr_view_payload: dict[str, object] | None = None,
+        pr_list_payload: list[dict[str, object]] | None = None,
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.fail_issue_comment = fail_issue_comment
         self.existing_branch = existing_branch
         self.pr_view_payload = pr_view_payload
+        self.pr_list_payload = pr_list_payload
 
     def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
@@ -146,6 +148,8 @@ class _Runner:
             return subprocess.CompletedProcess(args, 0, "", "")
         if args[:3] == ("gh", "pr", "view") and self.pr_view_payload is not None:
             return subprocess.CompletedProcess(args, 0, json.dumps(self.pr_view_payload), "")
+        if args[:3] == ("gh", "pr", "list") and self.pr_list_payload is not None:
+            return subprocess.CompletedProcess(args, 0, json.dumps(self.pr_list_payload), "")
         if args[1] == "display-message":
             return subprocess.CompletedProcess(args, 0, "4242\n", "")
         if args[1] == "has-session":
@@ -727,6 +731,57 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertEqual(result.skipped, 1)
         self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
+    def test_preview_gate_discovers_running_request_pull_request_by_branch(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            running_record = _queued_record().model_copy(
+                update={
+                    "state": "running",
+                    "repository": "cbusillo/sellyouroutboard",
+                    "claimed_at": "2026-05-05T22:01:00Z",
+                    "claimed_by_host": "Chris-Studio",
+                    "started_at": "2026-05-05T22:02:00Z",
+                }
+            )
+            store.write_every_code_work_request_record(
+                running_record
+            )
+            runner = _Runner(
+                pr_list_payload=[{"url": "https://github.com/cbusillo/sellyouroutboard/pull/86"}],
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {"name": "static_checks", "status": "COMPLETED", "conclusion": "SUCCESS"},
+                    ],
+                },
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.labeled, 1)
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "list",
+                "--repo",
+                "cbusillo/sellyouroutboard",
+                "--state",
+                "open",
+                "--head",
+                every_code_worktree_branch(running_record),
+                "--json",
+                "url",
+                "--limit",
+                "1",
+            ),
+            runner.calls,
+        )
 
     def test_prepare_checkout_creates_worker_owned_worktree(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
