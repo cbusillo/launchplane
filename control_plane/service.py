@@ -131,9 +131,11 @@ from control_plane.work_graph_github_projects import (
 )
 from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
-    WorkGraphRankEnvelope,
-    build_work_graph_rank_result,
-    build_work_graph_snapshot_service_payload,
+)
+from control_plane.work_graph_http import (
+    handle_work_graph_snapshot_read,
+    rank_work_graph_snapshot,
+    work_graph_rank_denied_response,
 )
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
@@ -4963,50 +4965,16 @@ def create_launchplane_service_app(
                         query=query,
                     )
                 if action == "work_graph.rank":
-                    if not authz_policy.allows(
+                    return handle_work_graph_snapshot_read(
+                        authz_policy=authz_policy,
                         identity=identity,
-                        action=action,
-                        product="launchplane",
-                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                    ):
-                        return _json_response(
-                            start_response=start_response,
-                            status_code=403,
-                            payload={
-                                "status": "rejected",
-                                "trace_id": request_trace_id,
-                                "error": {
-                                    "code": "authorization_denied",
-                                    "message": "Workflow cannot read the Launchplane work graph snapshot.",
-                                },
-                            },
-                        )
-
-                    def work_graph_product_action_allowed(
-                        requested_action: str, requested_product: str, requested_context: str
-                    ) -> bool:
-                        return authz_policy.allows(
-                            identity=identity,
-                            action=requested_action,
-                            product=requested_product,
-                            context=requested_context,
-                        )
-
-                    work_graph_payload = build_work_graph_snapshot_service_payload(
-                        generated_at=_utc_now_timestamp(),
+                        trace_id=request_trace_id,
                         product_store=record_store,
                         work_request_store=_every_code_work_request_store(record_store),
-                        action_allowed=work_graph_product_action_allowed,
                         planning_facts_provider=work_graph_planning_facts_provider,
-                    )
-                    return _json_response(
+                        utc_now=_utc_now_timestamp,
+                        json_response=_json_response,
                         start_response=start_response,
-                        status_code=200,
-                        payload={
-                            "status": "ok",
-                            "trace_id": request_trace_id,
-                            **work_graph_payload,
-                        },
                     )
                 if action == "product_profile.read":
                     if "product" in params:
@@ -5435,26 +5403,19 @@ def create_launchplane_service_app(
                     payload=payload,
                 )
             elif path == "/v1/work-graph/rank":
-                rank_request = WorkGraphRankEnvelope.model_validate(payload)
-                if not authz_policy.allows(
+                work_graph_rank_result = rank_work_graph_snapshot(
+                    authz_policy=authz_policy,
                     identity=identity,
-                    action="work_graph.rank",
-                    product="launchplane",
-                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
-                ):
-                    return _json_response(
+                    payload=payload,
+                )
+                if work_graph_rank_result is None:
+                    return work_graph_rank_denied_response(
+                        trace_id=request_trace_id,
+                        json_response=_json_response,
                         start_response=start_response,
-                        status_code=403,
-                        payload={
-                            "status": "rejected",
-                            "trace_id": request_trace_id,
-                            "error": {
-                                "code": "authorization_denied",
-                                "message": "Workflow cannot rank Launchplane work graph snapshots.",
-                            },
-                        },
                     )
-                result, driver_result = build_work_graph_rank_result(rank_request)
+                result = work_graph_rank_result.result
+                driver_result = work_graph_rank_result.driver_result
             elif path == "/v1/evidence/deployments":
                 deployment_request = DeploymentEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(
