@@ -484,6 +484,7 @@ class EveryCodePreviewGateResult:
     skipped: int = 0
     cancelled: int = 0
     reset: int = 0
+    reviewer_backfilled: int = 0
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -494,6 +495,7 @@ class EveryCodePreviewGateResult:
             "skipped": self.skipped,
             "cancelled": self.cancelled,
             "reset": self.reset,
+            "reviewer_backfilled": self.reviewer_backfilled,
         }
 
 
@@ -1746,6 +1748,7 @@ def request_ready_every_code_pr_preview_labels(
     skipped = 0
     cancelled = 0
     reset = 0
+    reviewer_backfilled = 0
     for record in records:
         if _every_code_work_request_closed_before_preview(record):
             cancelled += _cancel_every_code_preview_gates_for_record(
@@ -1897,6 +1900,17 @@ def request_ready_every_code_pr_preview_labels(
             )
             cancelled += 1
         else:
+            if readiness == "skipped" and _github_pr_payload_has_label(
+                payload,
+                launchplane_anchor_repo_preview_label(repo=reference["repo"]),
+            ):
+                reviewer_backfilled += _backfill_every_code_preview_reviewer(
+                    record=record,
+                    owner=reference["owner"],
+                    repo=reference["repo"],
+                    pr_number=reference["pr_number"],
+                    runner=run,
+                )
             skipped += 1
     return EveryCodePreviewGateResult(
         checked=checked,
@@ -1906,6 +1920,7 @@ def request_ready_every_code_pr_preview_labels(
         skipped=skipped,
         cancelled=cancelled,
         reset=reset,
+        reviewer_backfilled=reviewer_backfilled,
     )
 
 
@@ -1975,6 +1990,157 @@ def _parse_utc_timestamp(timestamp: str) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=UTC)
     return parsed.astimezone(UTC)
+
+
+def _backfill_every_code_preview_reviewer(
+    *,
+    record: EveryCodeWorkRequestRecord,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    runner: Runner,
+) -> int:
+    issue_author = _github_issue_author_login(
+        owner=owner,
+        repo=repo,
+        issue_number=record.issue_number,
+        runner=runner,
+    )
+    if not issue_author:
+        return 0
+    pr_author = _github_pr_author_login(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        runner=runner,
+    )
+    if pr_author.casefold() == issue_author.casefold():
+        return 0
+    requested_reviewers = _github_requested_reviewer_logins(
+        owner=owner,
+        repo=repo,
+        pr_number=pr_number,
+        runner=runner,
+    )
+    if issue_author.casefold() in requested_reviewers:
+        return 0
+    return int(
+        _request_github_pull_request_reviewer(
+            owner=owner,
+            repo=repo,
+            pr_number=pr_number,
+            reviewer=issue_author,
+            runner=runner,
+        )
+    )
+
+
+def _github_issue_author_login(
+    *,
+    owner: str,
+    repo: str,
+    issue_number: int,
+    runner: Runner,
+) -> str:
+    payload = _gh_api_payload(
+        runner=runner,
+        path=f"repos/{owner}/{repo}/issues/{issue_number}",
+    )
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        return ""
+    login = user.get("login")
+    return login.strip() if isinstance(login, str) else ""
+
+
+def _github_pr_author_login(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    runner: Runner,
+) -> str:
+    payload = _gh_api_payload(
+        runner=runner,
+        path=f"repos/{owner}/{repo}/pulls/{pr_number}",
+    )
+    user = payload.get("user")
+    if not isinstance(user, dict):
+        return ""
+    login = user.get("login")
+    return login.strip() if isinstance(login, str) else ""
+
+
+def _github_requested_reviewer_logins(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    runner: Runner,
+) -> frozenset[str]:
+    payload = _gh_api_payload(
+        runner=runner,
+        path=f"repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+    )
+    users = payload.get("users")
+    if not isinstance(users, list):
+        return frozenset()
+    logins: set[str] = set()
+    for item in users:
+        if not isinstance(item, dict):
+            continue
+        login = item.get("login")
+        if isinstance(login, str) and login.strip():
+            logins.add(login.strip().casefold())
+    return frozenset(logins)
+
+
+def _request_github_pull_request_reviewer(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    reviewer: str,
+    runner: Runner,
+) -> bool:
+    result = _run_gh_api(
+        runner=runner,
+        args=(
+            "gh",
+            "api",
+            f"repos/{owner}/{repo}/pulls/{pr_number}/requested_reviewers",
+            "--method",
+            "POST",
+            "--field",
+            f"reviewers[]={reviewer}",
+        ),
+    )
+    return result is not None
+
+
+def _gh_api_payload(*, runner: Runner, path: str) -> dict[str, object]:
+    result = _run_gh_api(runner=runner, args=("gh", "api", path))
+    if result is None:
+        return {}
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return {}
+    return payload if isinstance(payload, dict) else {}
+
+
+def _run_gh_api(
+    *,
+    runner: Runner,
+    args: Sequence[str],
+) -> subprocess.CompletedProcess[str] | None:
+    try:
+        result = runner(args)
+    except OSError:
+        return None
+    if result.returncode != 0:
+        return None
+    return result
 
 
 def _reconcile_every_code_preview_gate_record(
