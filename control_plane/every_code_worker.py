@@ -11,7 +11,7 @@ import shlex
 import signal
 import subprocess
 import time
-from typing import Callable, Literal, Protocol, Sequence
+from typing import Callable, Literal, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
@@ -1258,22 +1258,94 @@ def close_terminal_every_code_sessions(
             session_name=session_name,
             runner=run,
         )
+        worktree_processes_closed = _terminate_every_code_worktree_processes(
+            session_state=session_state,
+            runner=run,
+        ) > 0
         if existing_session is False:
             path.unlink(missing_ok=True)
+            closed += 1 if worktree_processes_closed else 0
             continue
         if existing_session is None:
+            closed += 1 if worktree_processes_closed else 0
             continue
-        pane_pid = _tmux_pane_pid(
+        if _terminate_every_code_tmux_session(
             tmux_binary=tmux_binary,
             session_name=session_name,
             runner=run,
-        )
-        if pane_pid is None:
+        ):
+            path.unlink(missing_ok=True)
+            closed += 1
             continue
+        if worktree_processes_closed:
+            closed += 1
+    return closed
+
+
+def _terminate_every_code_tmux_session(
+    *,
+    tmux_binary: str,
+    session_name: str,
+    runner: Runner,
+) -> bool:
+    closed = False
+    pane_pid = _tmux_pane_pid(
+        tmux_binary=tmux_binary,
+        session_name=session_name,
+        runner=runner,
+    )
+    if pane_pid is not None:
         try:
             os.killpg(pane_pid, signal.SIGTERM)
+            closed = True
         except ProcessLookupError:
-            path.unlink(missing_ok=True)
+            closed = True
+        except OSError:
+            pass
+    try:
+        result = runner((tmux_binary, "kill-session", "-t", session_name))
+    except OSError:
+        return closed
+    return closed or result.returncode in {0, 1}
+
+
+def _terminate_every_code_worktree_processes(
+    *,
+    session_state: Mapping[str, object],
+    runner: Runner,
+) -> int:
+    launch_root_value = session_state.get("launch_root")
+    if not isinstance(launch_root_value, str) or not launch_root_value.strip():
+        return 0
+    launch_root = Path(launch_root_value).expanduser()
+    if not launch_root.is_dir():
+        return 0
+    try:
+        result = runner(("lsof", "-t", "+D", str(launch_root)))
+    except OSError:
+        return 0
+    if result.returncode not in {0, 1}:
+        return 0
+    process_groups: set[int] = set()
+    for line in result.stdout.splitlines():
+        try:
+            pid = int(line.strip())
+        except ValueError:
+            continue
+        if pid <= 0 or pid == os.getpid():
+            continue
+        try:
+            process_groups.add(os.getpgid(pid))
+        except ProcessLookupError:
+            continue
+        except OSError:
+            process_groups.add(pid)
+
+    closed = 0
+    for process_group in sorted(process_groups):
+        try:
+            os.killpg(process_group, signal.SIGTERM)
+        except ProcessLookupError:
             continue
         except OSError:
             continue
@@ -1688,19 +1760,27 @@ def finish_every_code_work_request(
             result_pr_url=terminal_pr_url,
         )
     succeeded = exit_code == 0
-    del runner
+    run = runner or _run_subprocess
+    resolved_pr_url = result_pr_url.strip()
+    if succeeded and not resolved_pr_url:
+        resolved_pr_url = _every_code_preview_pr_url_for_record(record, runner=run)
     summary = result_summary.strip() or (
         "Every Code session completed successfully."
         if succeeded
         else f"Every Code session exited with status {exit_code}."
     )
+    if succeeded and not resolved_pr_url:
+        succeeded = False
+        summary = (
+            "Every Code session exited successfully but did not open a pull request."
+        )
     updated_record = apply_every_code_work_request_status(
         record,
         EveryCodeWorkRequestStatusUpdate(
             state="done" if succeeded else "blocked",
             host=host.strip(),
             updated_at=utc_now_timestamp(),
-            result_pr_url=result_pr_url.strip(),
+            result_pr_url=resolved_pr_url,
             result_summary=summary,
             error_message="" if succeeded else summary,
         ),

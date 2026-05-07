@@ -232,6 +232,16 @@ class _GoneSessionRunner(_Runner):
         return super().__call__(args)
 
 
+class _GoneSessionWithWorktreeProcessRunner(_GoneSessionRunner):
+    def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+        self.calls.append(tuple(args))
+        if args[0] == "lsof":
+            return subprocess.CompletedProcess(args, 0, "9001\n9002\n", "")
+        if args[1] == "has-session":
+            return subprocess.CompletedProcess(args, 1, "", "no session")
+        return super().__call__(args)
+
+
 class _Process:
     def __init__(self, pid: int) -> None:
         self.pid = pid
@@ -1672,7 +1682,116 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(closed, 1)
         killpg.assert_called_once_with(4242, signal.SIGTERM)
         self.assertEqual(runner.calls[0][1], "has-session")
-        self.assertEqual(runner.calls[1][1], "display-message")
+        self.assertEqual(runner.calls[1][0], "lsof")
+        self.assertEqual(runner.calls[2][1], "display-message")
+        self.assertEqual(runner.calls[3][1], "kill-session")
+
+    def test_terminal_request_kills_worktree_processes_when_tmux_is_gone(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "done",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "result_summary": "Linked pull request merged.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            state_path = every_code_session_state_path(
+                state_dir=temporary_root / "state",
+                request_id="every-code-cbusillo-code-123-test",
+            )
+            runner = _GoneSessionWithWorktreeProcessRunner()
+
+            with patch(
+                "control_plane.every_code_worker.os.getpgid",
+                side_effect=lambda pid: 7000 if pid in {9001, 9002} else pid,
+            ):
+                with patch("control_plane.every_code_worker.os.killpg") as killpg:
+                    closed = close_terminal_every_code_sessions(
+                        record_store=store,
+                        host="Chris-Studio",
+                        state_dir=temporary_root / "state",
+                        runner=runner,
+                    )
+
+        self.assertEqual(closed, 1)
+        killpg.assert_called_once_with(7000, signal.SIGTERM)
+        self.assertFalse(state_path.exists())
+        lsof_call = next(call for call in runner.calls if call[0] == "lsof")
+        self.assertEqual(lsof_call[1:3], ("-t", "+D"))
+
+    def test_terminal_request_unlinks_state_when_pane_pid_is_missing(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            ).model_copy(
+                update={
+                    "state": "blocked",
+                    "finished_at": "2026-05-06T00:02:00Z",
+                    "updated_at": "2026-05-06T00:02:00Z",
+                    "error_message": "Session ended without a PR.",
+                }
+            )
+            store.write_every_code_work_request_record(record)
+            state_path = every_code_session_state_path(
+                state_dir=temporary_root / "state",
+                request_id="every-code-cbusillo-code-123-test",
+            )
+
+            class _MissingPanePidRunner(_ExistingSessionRunner):
+                def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
+                    self.calls.append(tuple(args))
+                    if args[0] == "lsof":
+                        return subprocess.CompletedProcess(args, 1, "", "")
+                    if args[1] == "has-session":
+                        return subprocess.CompletedProcess(args, 0, "", "")
+                    if args[1] == "display-message":
+                        return subprocess.CompletedProcess(args, 1, "", "no pane")
+                    if args[1] == "kill-session":
+                        return subprocess.CompletedProcess(args, 0, "", "")
+                    return subprocess.CompletedProcess(args, 0, "", "")
+
+            runner = _MissingPanePidRunner()
+
+            closed = close_terminal_every_code_sessions(
+                record_store=store,
+                host="Chris-Studio",
+                state_dir=temporary_root / "state",
+                runner=runner,
+            )
+
+        self.assertEqual(closed, 1)
+        self.assertFalse(state_path.exists())
+        self.assertTrue(any(call[1] == "kill-session" for call in runner.calls))
 
     def test_terminal_request_claimed_by_other_host_is_ignored(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1769,6 +1888,68 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(record.state, "done")
         self.assertEqual(record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
         self.assertEqual(record.error_message, "")
+
+    def test_finish_discovers_open_pr_for_successful_exit_without_result_url(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+            runner = _Runner(
+                pr_list_payload=[{"url": "https://github.com/cbusillo/code/pull/99"}]
+            )
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-cbusillo-code-123-test",
+                host="Chris-Studio",
+                exit_code=0,
+                runner=runner,
+            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        self.assertEqual(result.status, "done")
+        self.assertEqual(record.state, "done")
+        self.assertEqual(record.result_pr_url, "https://github.com/cbusillo/code/pull/99")
+
+    def test_finish_blocks_successful_exit_without_pull_request(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            run_every_code_worker_once(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "state",
+                runner=_Runner(),
+            )
+
+            result = finish_every_code_work_request(
+                record_store=store,
+                request_id="every-code-cbusillo-code-123-test",
+                host="Chris-Studio",
+                exit_code=0,
+                runner=_Runner(pr_list_payload=[]),
+            )
+            record = store.read_every_code_work_request_record("every-code-cbusillo-code-123-test")
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(record.state, "blocked")
+        self.assertEqual(record.result_pr_url, "")
+        self.assertIn("did not open a pull request", record.error_message)
 
     def test_finish_defers_preview_label_until_gate_passes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -2282,6 +2463,8 @@ class EveryCodeWorkerTests(unittest.TestCase):
                     "Chris-Studio",
                     "--exit-code",
                     "0",
+                    "--result-pr-url",
+                    "https://github.com/cbusillo/code/pull/99",
                 ],
             )
 
