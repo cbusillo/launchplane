@@ -15,6 +15,47 @@ EVERY_CODE_WEBHOOK_EVENTS = (
 )
 EVERY_CODE_WEBHOOK_URL = "https://launchplane.shinycomputers.com/v1/every-code/github-webhook"
 
+
+@dataclass(frozen=True)
+class EveryCodeLabelDefinition:
+    name: str
+    color: str
+    description: str
+
+
+EVERY_CODE_LABEL_DEFINITIONS = (
+    EveryCodeLabelDefinition(
+        name="every-code",
+        color="FBCA04",
+        description="Ask Every Code to work this issue.",
+    ),
+    EveryCodeLabelDefinition(
+        name="preview",
+        color="0E8A16",
+        description="Launchplane preview automation is enabled for this PR.",
+    ),
+    EveryCodeLabelDefinition(
+        name="preview-ready",
+        color="1D76DB",
+        description="Every Code preview is ready for source issue validation.",
+    ),
+    EveryCodeLabelDefinition(
+        name="preview-approved",
+        color="0E8A16",
+        description="Every Code preview was approved by the source issue author.",
+    ),
+    EveryCodeLabelDefinition(
+        name="preview-changes-requested",
+        color="D93F0B",
+        description="Every Code preview needs source issue author changes.",
+    ),
+    EveryCodeLabelDefinition(
+        name="ready-to-merge",
+        color="5319E7",
+        description="Every Code PR is ready for repository owner merge review.",
+    ),
+)
+
 Runner = Callable[[Sequence[str], str | None], subprocess.CompletedProcess[str]]
 
 
@@ -25,12 +66,14 @@ class EveryCodeWebhookSyncResult:
     hook_id: int = 0
     events: tuple[str, ...] = EVERY_CODE_WEBHOOK_EVENTS
     error: str = ""
+    labels_synced: int = 0
 
     def as_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
             "repo": self.repo,
             "status": self.status,
             "events": list(self.events),
+            "labels_synced": self.labels_synced,
         }
         if self.hook_id:
             payload["hook_id"] = self.hook_id
@@ -130,13 +173,73 @@ def _sync_repo_webhook(
             ("gh", "api", "-X", "PATCH", f"repos/{repo}/hooks/{hook_id}", "--input", "-"),
             hook_payload,
         )
-        return EveryCodeWebhookSyncResult(repo=repo, status="updated", hook_id=hook_id)
+        labels_synced = _sync_repo_labels(repo=repo, runner=runner)
+        return EveryCodeWebhookSyncResult(
+            repo=repo,
+            status="updated",
+            hook_id=hook_id,
+            labels_synced=labels_synced,
+        )
     result = runner(
         ("gh", "api", "-X", "POST", f"repos/{repo}/hooks", "--input", "-"), hook_payload
     )
     created_hook = json.loads(result.stdout)
     hook_id = int(created_hook.get("id", 0)) if isinstance(created_hook, dict) else 0
-    return EveryCodeWebhookSyncResult(repo=repo, status="created", hook_id=hook_id)
+    labels_synced = _sync_repo_labels(repo=repo, runner=runner)
+    return EveryCodeWebhookSyncResult(
+        repo=repo,
+        status="created",
+        hook_id=hook_id,
+        labels_synced=labels_synced,
+    )
+
+
+def _sync_repo_labels(*, repo: str, runner: Runner) -> int:
+    existing_labels_payload = runner(
+        ("gh", "label", "list", "--repo", repo, "--json", "name"), None
+    ).stdout
+    existing_labels = json.loads(existing_labels_payload)
+    if not isinstance(existing_labels, list):
+        raise ValueError(f"GitHub labels response for {repo} must be a list")
+    existing_names = {
+        item.get("name")
+        for item in existing_labels
+        if isinstance(item, dict) and isinstance(item.get("name"), str)
+    }
+    for label in EVERY_CODE_LABEL_DEFINITIONS:
+        if label.name in existing_names:
+            runner(
+                (
+                    "gh",
+                    "label",
+                    "edit",
+                    label.name,
+                    "--repo",
+                    repo,
+                    "--color",
+                    label.color,
+                    "--description",
+                    label.description,
+                ),
+                None,
+            )
+        else:
+            runner(
+                (
+                    "gh",
+                    "label",
+                    "create",
+                    label.name,
+                    "--repo",
+                    repo,
+                    "--color",
+                    label.color,
+                    "--description",
+                    label.description,
+                ),
+                None,
+            )
+    return len(EVERY_CODE_LABEL_DEFINITIONS)
 
 
 def _find_webhook(hooks: list[object], *, webhook_url: str) -> dict[str, object] | None:
