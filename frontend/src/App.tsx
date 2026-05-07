@@ -43,7 +43,7 @@ import {
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { EveryCodeQueue } from "./EveryCodeQueue";
 import { formatTime, labelForStatus } from "./format";
-import { MetricTile, PanelHead } from "./panel-ui";
+import { KeyValue, MetricTile, PanelHead } from "./panel-ui";
 import { StatusIcon, StatusPill, StateBlock, SkeletonRows } from "./status-ui";
 import type {
   AuthIdentity,
@@ -3367,32 +3367,6 @@ function ActionReviewDialog({
           </button>
         </div>
       </section>
-    </div>
-  );
-}
-
-function KeyValue({
-  label,
-  value,
-  mono = false,
-  muted = false,
-  status,
-}: {
-  label: string;
-  value: string;
-  mono?: boolean;
-  muted?: boolean;
-  status?: Status | string;
-}) {
-  return (
-    <div className="kv-row">
-      <span>{label}</span>
-      <strong
-        className={`${mono ? "mono" : ""} ${muted ? "muted" : ""}`}
-        data-status={status}
-      >
-        {value || "unknown"}
-      </strong>
     </div>
   );
 }
