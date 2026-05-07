@@ -140,12 +140,14 @@ class _Runner:
         existing_branch: bool = False,
         pr_view_payload: dict[str, object] | None = None,
         pr_list_payload: list[dict[str, object]] | None = None,
+        gh_api_payloads: dict[str, dict[str, object]] | None = None,
     ) -> None:
         self.calls: list[tuple[str, ...]] = []
         self.fail_issue_comment = fail_issue_comment
         self.existing_branch = existing_branch
         self.pr_view_payload = pr_view_payload
         self.pr_list_payload = pr_list_payload
+        self.gh_api_payloads = gh_api_payloads or {}
 
     def __call__(self, args: Sequence[str]) -> subprocess.CompletedProcess[str]:
         self.calls.append(tuple(args))
@@ -181,6 +183,16 @@ class _Runner:
             return subprocess.CompletedProcess(args, 0, json.dumps(self.pr_view_payload), "")
         if args[:3] == ("gh", "pr", "list") and self.pr_list_payload is not None:
             return subprocess.CompletedProcess(args, 0, json.dumps(self.pr_list_payload), "")
+        if args[:2] == ("gh", "api"):
+            path = args[2]
+            if "--method" in args:
+                return subprocess.CompletedProcess(args, 0, json.dumps({"ok": True}), "")
+            return subprocess.CompletedProcess(
+                args,
+                0,
+                json.dumps(self.gh_api_payloads.get(path, {})),
+                "",
+            )
         if args[1] == "display-message":
             return subprocess.CompletedProcess(args, 0, "4242\n", "")
         if args[1] == "has-session":
@@ -968,6 +980,134 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertEqual(result.skipped, 1)
         self.assertFalse(any(call[:3] == ("gh", "pr", "edit") for call in runner.calls))
+
+    def test_preview_gate_backfills_reviewer_for_existing_preview_label(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [{"name": "preview"}],
+                    "statusCheckRollup": [],
+                },
+                gh_api_payloads={
+                    "repos/cbusillo/sellyouroutboard/issues/123": {"user": {"login": "Mbanks89"}},
+                    "repos/cbusillo/sellyouroutboard/pulls/86": {"user": {"login": "cbusillo"}},
+                    "repos/cbusillo/sellyouroutboard/pulls/86/requested_reviewers": {"users": []},
+                },
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.reviewer_backfilled, 1)
+        self.assertIn(
+            (
+                "gh",
+                "api",
+                "repos/cbusillo/sellyouroutboard/pulls/86/requested_reviewers",
+                "--method",
+                "POST",
+                "--field",
+                "reviewers[]=Mbanks89",
+            ),
+            runner.calls,
+        )
+
+    def test_preview_gate_skips_reviewer_backfill_when_already_requested(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [{"name": "preview"}],
+                    "statusCheckRollup": [],
+                },
+                gh_api_payloads={
+                    "repos/cbusillo/sellyouroutboard/issues/123": {"user": {"login": "Mbanks89"}},
+                    "repos/cbusillo/sellyouroutboard/pulls/86": {"user": {"login": "cbusillo"}},
+                    "repos/cbusillo/sellyouroutboard/pulls/86/requested_reviewers": {
+                        "users": [{"login": "Mbanks89"}]
+                    },
+                },
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.reviewer_backfilled, 0)
+        self.assertFalse(
+            any(
+                call[:4]
+                == (
+                    "gh",
+                    "api",
+                    "repos/cbusillo/sellyouroutboard/pulls/86/requested_reviewers",
+                    "--method",
+                )
+                for call in runner.calls
+            )
+        )
+
+    def test_preview_gate_skips_reviewer_backfill_for_pr_author(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "labels": [{"name": "preview"}],
+                    "statusCheckRollup": [],
+                },
+                gh_api_payloads={
+                    "repos/cbusillo/sellyouroutboard/issues/123": {"user": {"login": "Mbanks89"}},
+                    "repos/cbusillo/sellyouroutboard/pulls/86": {"user": {"login": "Mbanks89"}},
+                },
+            )
+
+            result = request_ready_every_code_pr_preview_labels(
+                record_store=store,
+                runner=runner,
+            )
+
+        self.assertEqual(result.skipped, 1)
+        self.assertEqual(result.reviewer_backfilled, 0)
+        self.assertFalse(
+            any(
+                call[:4]
+                == (
+                    "gh",
+                    "api",
+                    "repos/cbusillo/sellyouroutboard/pulls/86/requested_reviewers",
+                    "--method",
+                )
+                for call in runner.calls
+            )
+        )
 
     def test_preview_gate_discovers_running_request_pull_request_by_branch(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
