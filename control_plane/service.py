@@ -1156,6 +1156,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
     {
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
+        "/v1/authz-policies/github-actions/grants",
     }
 )
 _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
@@ -1368,6 +1369,9 @@ class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
 
     schema_version: int = Field(default=1, ge=1)
     product: str
+    mode: Literal["dry_run", "apply"] = "apply"
+    reason: str = ""
+    related_issue: str = ""
     grant: AuthzPolicyGitHubActionsGrant
 
     @model_validator(mode="after")
@@ -1375,6 +1379,10 @@ class AuthzPolicyGitHubActionsGrantEnvelope(BaseModel):
         if self.product.strip() != "launchplane":
             raise ValueError("Authz policy grant writes require product 'launchplane'.")
         self.product = "launchplane"
+        self.reason = self.reason.strip()
+        self.related_issue = self.related_issue.strip()
+        if self.mode == "apply" and not self.reason:
+            raise ValueError("Authz policy grant apply requires reason.")
         return self
 
 
@@ -2852,6 +2860,12 @@ def _should_store_idempotency_record(
 ) -> bool:
     if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
         return False
+    if (
+        path == "/v1/authz-policies/github-actions/grants"
+        and isinstance(driver_result, dict)
+        and driver_result.get("mode") == "dry_run"
+    ):
+        return False
     if driver_result is None:
         return True
     if _driver_result_contains_status(driver_result, "blocked"):
@@ -3460,19 +3474,131 @@ def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict
     }
 
 
-def _write_github_actions_authz_policy_grant(
+def _authz_policy_operator_payload(identity: LaunchplaneIdentity) -> dict[str, object]:
+    if isinstance(identity, GitHubHumanIdentity):
+        return {
+            "type": "github_human",
+            "login": identity.login,
+            "role": identity.role,
+        }
+    return {
+        "type": "github_actions",
+        "repository": identity.repository,
+        "workflow_ref": identity.workflow_ref,
+        "event_name": identity.event_name,
+        "ref": identity.ref,
+        "sha": identity.sha,
+    }
+
+
+def _authz_policy_grant_diff(
+    *, current_policy: LaunchplaneAuthzPolicy, grant: AuthzPolicyGitHubActionsGrant
+) -> dict[str, object]:
+    desired_rule = grant.to_policy_rule()
+    changed = not any(rule == desired_rule for rule in current_policy.github_actions)
+    return {
+        "changed": changed,
+        "previous_github_actions_rule_count": len(current_policy.github_actions),
+        "new_github_actions_rule_count": len(current_policy.github_actions) + int(changed),
+    }
+
+
+def _authz_policy_grant_audit_payload(
+    *,
+    request: AuthzPolicyGitHubActionsGrantEnvelope,
+    identity: LaunchplaneIdentity,
+    previous_record: LaunchplaneAuthzPolicyRecord,
+    new_record: LaunchplaneAuthzPolicyRecord | None,
+    changed: bool,
+    trace_id: str,
+) -> dict[str, object]:
+    return {
+        "mode": request.mode,
+        "reason": request.reason,
+        "related_issue": request.related_issue,
+        "operator": _authz_policy_operator_payload(identity),
+        "requested_grant": request.grant.to_policy_rule().model_dump(mode="json"),
+        "previous_policy_record_id": previous_record.record_id,
+        "previous_policy_sha256": previous_record.policy_sha256,
+        "new_policy_record_id": new_record.record_id
+        if new_record is not None
+        else previous_record.record_id,
+        "new_policy_sha256": new_record.policy_sha256
+        if new_record is not None
+        else previous_record.policy_sha256,
+        "changed": changed,
+        "trace_id": trace_id,
+        "updated_at": new_record.updated_at if new_record is not None else _now_timestamp(),
+    }
+
+
+def _authz_policy_grant_response_audit_payload(
+    audit: dict[str, object],
+) -> dict[str, object]:
+    response_audit = dict(audit)
+    requested_grant = response_audit.pop("requested_grant", None)
+    if isinstance(requested_grant, dict):
+        response_audit["requested_grant_summary"] = {
+            "repository": requested_grant.get("repository", ""),
+            "workflow_ref_count": len(requested_grant.get("workflow_refs") or ()),
+            "job_workflow_ref_count": len(requested_grant.get("job_workflow_refs") or ()),
+            "event_names": requested_grant.get("event_names") or (),
+            "products": requested_grant.get("products") or (),
+            "contexts": requested_grant.get("contexts") or (),
+            "actions": requested_grant.get("actions") or (),
+        }
+    return response_audit
+
+
+def _plan_github_actions_authz_policy_grant(
     *,
     record_store: PostgresRecordStore,
     grant: AuthzPolicyGitHubActionsGrant,
-) -> tuple[LaunchplaneAuthzPolicy, LaunchplaneAuthzPolicyRecord, bool]:
+) -> tuple[LaunchplaneAuthzPolicy, LaunchplaneAuthzPolicyRecord, dict[str, object]]:
     active_records = record_store.list_authz_policy_records(status="active", limit=1)
     if not active_records:
         raise ValueError("No active Launchplane authz policy record found.")
-    current_policy = active_records[0].policy
-    desired_rule = grant.to_policy_rule()
-    changed = not any(rule == desired_rule for rule in current_policy.github_actions)
+    current_record = active_records[0]
+    current_policy = current_record.policy
+    return (
+        current_policy,
+        current_record,
+        _authz_policy_grant_diff(
+            current_policy=current_policy,
+            grant=grant,
+        ),
+    )
+
+
+def _write_github_actions_authz_policy_grant(
+    *,
+    record_store: PostgresRecordStore,
+    request: AuthzPolicyGitHubActionsGrantEnvelope,
+    identity: LaunchplaneIdentity,
+    trace_id: str,
+) -> tuple[
+    LaunchplaneAuthzPolicy,
+    LaunchplaneAuthzPolicyRecord,
+    bool,
+    dict[str, object],
+    dict[str, object],
+]:
+    current_policy, current_record, diff = _plan_github_actions_authz_policy_grant(
+        record_store=record_store,
+        grant=request.grant,
+    )
+    changed = bool(diff["changed"])
+    desired_rule = request.grant.to_policy_rule()
     if not changed:
-        return current_policy, active_records[0], False
+        audit = _authz_policy_grant_audit_payload(
+            request=request,
+            identity=identity,
+            previous_record=current_record,
+            new_record=None,
+            changed=False,
+            trace_id=trace_id,
+        )
+        return current_policy, current_record, False, diff, audit
 
     updated_policy = current_policy.model_copy(
         update={"github_actions": current_policy.github_actions + (desired_rule,)}
@@ -3485,13 +3611,29 @@ def _write_github_actions_authz_policy_grant(
             policy_sha256=policy_sha256,
         ),
         status="active",
-        source=grant.source_label,
+        source=request.grant.source_label,
         updated_at=updated_at,
         policy_sha256=policy_sha256,
         policy=updated_policy,
+        audit=_authz_policy_grant_audit_payload(
+            request=request,
+            identity=identity,
+            previous_record=current_record,
+            new_record=None,
+            changed=True,
+            trace_id=trace_id,
+        ),
+    )
+    record.audit = _authz_policy_grant_audit_payload(
+        request=request,
+        identity=identity,
+        previous_record=current_record,
+        new_record=record,
+        changed=True,
+        trace_id=trace_id,
     )
     record_store.write_authz_policy_record(record)
-    return updated_policy, record, changed
+    return updated_policy, record, changed, diff, record.audit
 
 
 def _summarize_runtime_key_safety_policy_record(
@@ -5672,24 +5814,57 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
-                    idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
-                )
-                if idempotent_response is not None:
-                    return idempotent_response
-                try:
-                    updated_policy, authz_policy_record, changed = (
-                        _write_github_actions_authz_policy_grant(
-                            record_store=record_store,
-                            grant=authz_grant_request.grant,
-                        )
+                if authz_grant_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
                     )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    current_policy, current_record, diff = _plan_github_actions_authz_policy_grant(
+                        record_store=record_store,
+                        grant=authz_grant_request.grant,
+                    )
+                    audit = _authz_policy_grant_audit_payload(
+                        request=authz_grant_request,
+                        identity=identity,
+                        previous_record=current_record,
+                        new_record=None,
+                        changed=bool(diff["changed"]),
+                        trace_id=request_trace_id,
+                    )
+                    authz_policy_record = current_record
+                    changed = bool(diff["changed"])
+                    if authz_grant_request.mode == "apply":
+                        (
+                            updated_policy,
+                            authz_policy_record,
+                            changed,
+                            diff,
+                            audit,
+                        ) = _write_github_actions_authz_policy_grant(
+                            record_store=record_store,
+                            request=authz_grant_request,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                        )
+                    else:
+                        updated_policy = current_policy
+                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
+                            record_id=current_record.record_id,
+                            status=current_record.status,
+                            source=current_record.source,
+                            updated_at=current_record.updated_at,
+                            policy_sha256=current_record.policy_sha256,
+                            policy=current_record.policy,
+                            audit=audit,
+                        )
                 except ValueError:
                     return _json_response(
                         start_response=start_response,
@@ -5703,9 +5878,10 @@ def create_launchplane_service_app(
                             },
                         },
                     )
-                authz_policy = updated_policy
-                resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
-                resolved_authz_policy_source = "db"
+                if authz_grant_request.mode == "apply":
+                    authz_policy = updated_policy
+                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                    resolved_authz_policy_source = "db"
                 result = {
                     "authz_policy_record_id": authz_policy_record.record_id,
                     "authz_policy_changed": str(changed).lower(),
@@ -5713,6 +5889,9 @@ def create_launchplane_service_app(
                 driver_result = {
                     "authz_policy": _summarize_authz_policy_record(authz_policy_record),
                     "changed": changed,
+                    "mode": authz_grant_request.mode,
+                    "diff": diff,
+                    "audit": _authz_policy_grant_response_audit_payload(audit),
                 }
             elif path == "/v1/runtime-key-safety/policies/apply":
                 runtime_policy_request = RuntimeKeySafetyPolicyApplyEnvelope.model_validate(payload)

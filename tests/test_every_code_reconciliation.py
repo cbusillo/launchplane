@@ -20,6 +20,85 @@ from control_plane.storage.filesystem import FilesystemRecordStore
 
 
 class EveryCodeIssueReconciliationTests(unittest.TestCase):
+    def test_cli_authz_grant_workflow_posts_service_dry_run_request(self) -> None:
+        runner = CliRunner()
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"mode": "dry_run", "changed": True},
+            }
+
+        with (
+            patch.dict(os.environ, {"LAUNCHPLANE_SERVICE_TOKEN": "service-token"}),
+            patch("control_plane.cli._post_launchplane_service_json", side_effect=fake_post),
+        ):
+            result = runner.invoke(
+                main,
+                [
+                    "authz-policies",
+                    "grant-workflow",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--repository",
+                    "cbusillo/launchplane",
+                    "--workflow-ref",
+                    "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main",
+                    "--event-name",
+                    "workflow_dispatch",
+                    "--product",
+                    "sellyouroutboard",
+                    "--context",
+                    "launchplane",
+                    "--action",
+                    "product_profile.read",
+                    "--reason",
+                    "Inspect grant before apply.",
+                    "--related-issue",
+                    "cbusillo/launchplane#83",
+                    "--dry-run",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(captured_request["bearer_token"], "service-token")
+        self.assertEqual(captured_request["session_cookie"], "")
+        self.assertEqual(captured_request["path"], "/v1/authz-policies/github-actions/grants")
+        payload = captured_request["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["mode"], "dry_run")
+        self.assertEqual(payload["reason"], "Inspect grant before apply.")
+        grant = payload["grant"]
+        assert isinstance(grant, dict)
+        self.assertEqual(grant["repository"], "cbusillo/launchplane")
+        self.assertEqual(grant["actions"], ["product_profile.read"])
+        response_payload = json.loads(result.output)
+        self.assertEqual(response_payload["result"]["mode"], "dry_run")
+
+    def test_cli_authz_grant_workflow_requires_one_auth_source(self) -> None:
+        runner = CliRunner()
+
+        result = runner.invoke(
+            main,
+            [
+                "authz-policies",
+                "grant-workflow",
+                "--service-url",
+                "https://launchplane.example",
+                "--repository",
+                "cbusillo/launchplane",
+                "--product",
+                "launchplane",
+                "--action",
+                "product_profile.read",
+            ],
+        )
+
+        self.assertEqual(result.exit_code, 1)
+        self.assertIn("LAUNCHPLANE_SERVICE_TOKEN is required", result.output)
+
     def test_creates_queued_request_when_trigger_label_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             store = FilesystemRecordStore(state_dir=Path(tempdir))

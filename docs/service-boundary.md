@@ -94,9 +94,15 @@ Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
 and preview mutations as authenticated Launchplane routes. The authz policy
-grant route is reserved for Launchplane-owned deployment workflows, requires the
-`launchplane_service_deploy.execute` action, writes DB-backed GitHub Actions
-policy rules, and returns only record metadata and rule counts.
+grant route accepts GitHub Actions OIDC callers and authenticated admin human
+sessions, requires the `launchplane_service_deploy.execute` action, and remains
+the service-owned write/reload boundary for DB-backed GitHub Actions policy
+rules. Grant requests support `dry_run` and `apply` modes. Apply requests must
+include an audit reason, write a new active policy record only when the grant is
+not already present, and immediately refresh the in-process policy used by the
+current service worker. Responses return record metadata, rule counts, a compact
+diff, and redacted audit metadata rather than echoing workflow refs or the full
+policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a compatibility alias. Built assets live under `/ui/assets/...`, while

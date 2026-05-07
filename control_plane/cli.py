@@ -6199,6 +6199,59 @@ def _load_json_file(input_file: Path) -> dict[str, object]:
     return payload
 
 
+def _post_launchplane_service_json(
+    *,
+    service_url: str,
+    path: str,
+    payload: dict[str, object],
+    bearer_token: str = "",
+    session_cookie: str = "",
+    idempotency_key: str = "",
+) -> dict[str, object]:
+    if bool(bearer_token.strip()) == bool(session_cookie.strip()):
+        raise click.ClickException("Provide exactly one of bearer token or session cookie.")
+    normalized_service_url = service_url.strip().rstrip("/")
+    if not normalized_service_url:
+        raise click.ClickException("Launchplane service URL is required.")
+    body = json.dumps(payload).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+    }
+    if bearer_token.strip():
+        headers["Authorization"] = f"Bearer {bearer_token.strip()}"
+    else:
+        headers["Cookie"] = session_cookie.strip()
+    if idempotency_key.strip():
+        headers["Idempotency-Key"] = idempotency_key.strip()
+    request = Request(
+        f"{normalized_service_url}{path}",
+        data=body,
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urlopen(request, timeout=30) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as error:
+        response_text = error.read().decode("utf-8", errors="replace")
+        try:
+            error_payload = json.loads(response_text)
+        except JSONDecodeError:
+            error_payload = {"error": {"message": response_text.strip()}}
+        error_detail = error_payload.get("error") if isinstance(error_payload, dict) else None
+        error_message = error_detail.get("message", "") if isinstance(error_detail, dict) else ""
+        message = str(error_message or f"Launchplane service returned HTTP {error.code}.")
+        raise click.ClickException(message) from error
+    except (URLError, TimeoutError) as error:
+        raise click.ClickException(f"Launchplane service request failed: {error}") from error
+    except JSONDecodeError as error:
+        raise click.ClickException("Launchplane service response was not valid JSON.") from error
+    if not isinstance(response_payload, dict):
+        raise click.ClickException("Launchplane service response was not a JSON object.")
+    return cast(dict[str, object], response_payload)
+
+
 def _load_github_webhook_json_bytes(
     raw_payload_bytes: bytes,
     *,
@@ -12794,6 +12847,110 @@ def authz_policies_import_toml(database_url: str, policy_file: Path, source_labe
             sort_keys=True,
         )
     )
+
+
+@authz_policies.command("grant-workflow")
+@click.option(
+    "--service-url",
+    required=True,
+    help="Deployed Launchplane service base URL. Shared/prod grants go through the service API.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a short-lived bearer token for the service.",
+)
+@click.option(
+    "--session-cookie",
+    default="",
+    help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
+)
+@click.option("--repository", required=True, help="GitHub owner/repo grant target.")
+@click.option(
+    "--workflow-ref", "workflow_refs", multiple=True, help="Allowed workflow_ref pattern."
+)
+@click.option(
+    "--job-workflow-ref",
+    "job_workflow_refs",
+    multiple=True,
+    help="Allowed job_workflow_ref pattern.",
+)
+@click.option("--event-name", "event_names", multiple=True, help="Allowed GitHub event name.")
+@click.option("--ref", "refs", multiple=True, help="Allowed Git ref.")
+@click.option("--environment", "environments", multiple=True, help="Allowed GitHub environment.")
+@click.option("--product", "products", multiple=True, required=True, help="Allowed product.")
+@click.option("--context", "contexts", multiple=True, help="Allowed Launchplane context.")
+@click.option(
+    "--action", "actions", multiple=True, required=True, help="Allowed Launchplane action."
+)
+@click.option("--reason", default="", help="Required audit reason when --apply is used.")
+@click.option(
+    "--related-issue",
+    default="",
+    help="Optional related GitHub issue, e.g. cbusillo/launchplane#83.",
+)
+@click.option("--source-label", default="cli:authz-grant-workflow", show_default=True)
+@click.option(
+    "--idempotency-key", default="", help="Optional explicit Idempotency-Key for apply requests."
+)
+@click.option("--dry-run", "mode", flag_value="dry_run", default="dry_run")
+@click.option("--apply", "mode", flag_value="apply")
+def authz_policies_grant_workflow(
+    service_url: str,
+    bearer_token_env: str,
+    session_cookie: str,
+    repository: str,
+    workflow_refs: tuple[str, ...],
+    job_workflow_refs: tuple[str, ...],
+    event_names: tuple[str, ...],
+    refs: tuple[str, ...],
+    environments: tuple[str, ...],
+    products: tuple[str, ...],
+    contexts: tuple[str, ...],
+    actions: tuple[str, ...],
+    reason: str,
+    related_issue: str,
+    source_label: str,
+    idempotency_key: str,
+    mode: str,
+) -> None:
+    bearer_token = ""
+    if not session_cookie.strip():
+        token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
+        bearer_token = os.environ.get(token_env_key, "").strip()
+        if not bearer_token:
+            raise click.ClickException(
+                f"{token_env_key} is required unless --session-cookie is provided."
+            )
+    payload = {
+        "schema_version": 1,
+        "product": "launchplane",
+        "mode": mode,
+        "reason": reason,
+        "related_issue": related_issue,
+        "grant": {
+            "repository": repository,
+            "workflow_refs": list(workflow_refs),
+            "job_workflow_refs": list(job_workflow_refs),
+            "event_names": list(event_names),
+            "refs": list(refs),
+            "environments": list(environments),
+            "products": list(products),
+            "contexts": list(contexts),
+            "actions": list(actions),
+            "source_label": source_label,
+        },
+    }
+    response_payload = _post_launchplane_service_json(
+        service_url=service_url,
+        path="/v1/authz-policies/github-actions/grants",
+        payload=payload,
+        bearer_token=bearer_token,
+        session_cookie=session_cookie,
+        idempotency_key=idempotency_key,
+    )
+    click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
 
 
 @runtime_key_safety.command("list-policies")

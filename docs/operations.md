@@ -114,6 +114,15 @@ The service uses GitHub OIDC bearer tokens and DB-backed authz policy records.
 Additional evidence routes should land against the same authn/authz boundary
 rather than creating separate ad hoc ingress patterns.
 
+Operators should mutate shared or production authz through the deployed service,
+not by running arbitrary local DB writes from a checkout. Use
+`uv run launchplane authz-policies grant-workflow --service-url ... --dry-run`
+to inspect the diff, then rerun with `--apply --reason ...` and an idempotency
+key when the grant is approved. The CLI is a thin service client: it sends a
+short-lived bearer token or a Launchplane browser session cookie, and the
+service validates the caller, writes any new active policy record, stores audit
+metadata, and reloads the current service worker's active policy.
+
 The deploy workflow maintains DB-backed grants for SellYourOutboard operational
 workflows, including product profile cutover reads/writes, production promotion,
 and generic-web preview refresh/destroy requests. The grant request returns only
