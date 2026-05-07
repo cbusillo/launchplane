@@ -40,6 +40,7 @@ from control_plane.contracts.every_code_work_request import (
     EveryCodeWorkRequestStatusUpdate,
     apply_every_code_work_request_status,
     build_every_code_work_request_id,
+    close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
     requeue_every_code_work_request,
 )
@@ -2081,6 +2082,14 @@ def _handle_every_code_github_webhook(
                 "reason": "unsupported_event",
             },
         )
+    if payload.get("action") == "closed":
+        return _handle_every_code_issue_closed_webhook(
+            start_response=start_response,
+            trace_id=trace_id,
+            delivery_id=delivery_id,
+            payload=payload,
+            record_store=record_store,
+        )
     if payload.get("action") != "labeled":
         return _json_response(
             start_response=start_response,
@@ -2138,6 +2147,85 @@ def _handle_every_code_github_webhook(
         driver_result={"request": stored_record.model_dump(mode="json")},
     )
     accepted_payload["deduped"] = deduped
+    accepted_payload["github_delivery_id"] = delivery_id
+    return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
+
+
+def _handle_every_code_issue_closed_webhook(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    delivery_id: str,
+    payload: dict[str, object],
+    record_store: object,
+) -> list[bytes]:
+    repository_payload = _github_webhook_mapping(payload, "repository")
+    issue_payload = _github_webhook_mapping(payload, "issue")
+    repository = _github_webhook_string(repository_payload, "full_name")
+    issue_number_value = issue_payload.get("number") if issue_payload is not None else None
+    if not isinstance(issue_number_value, int):
+        raise ValueError("GitHub issue webhook requires integer issue.number")
+    issue_url = _github_webhook_string(issue_payload, "html_url")
+    closed_at = _github_webhook_string(issue_payload, "closed_at") or _utc_now_timestamp()
+    state_reason = _github_webhook_string(issue_payload, "state_reason")
+
+    every_code_store = _every_code_work_request_store(record_store)
+    updated_records: list[EveryCodeWorkRequestRecord] = []
+    terminal_records: list[EveryCodeWorkRequestRecord] = []
+    for record in _iter_every_code_work_request_records(
+        every_code_store,
+        repository=repository,
+    ):
+        if record.issue_number != issue_number_value:
+            continue
+        if issue_url.strip() and record.issue_url.strip() != issue_url.strip():
+            continue
+        closed_record = close_every_code_work_request_for_issue(
+            record,
+            closed_at=closed_at,
+            reason=state_reason,
+        )
+        if closed_record is None:
+            terminal_records.append(record)
+            continue
+        every_code_store.write_every_code_work_request_record(closed_record)
+        updated_records.append(closed_record)
+
+    if not updated_records:
+        response_payload: dict[str, object] = {
+            "status": "accepted",
+            "trace_id": trace_id,
+            "skipped": True,
+            "reason": "linked_every_code_request_not_found",
+            "github_delivery_id": delivery_id,
+        }
+        if terminal_records:
+            terminal_record = terminal_records[0]
+            response_payload["reason"] = "linked_every_code_request_already_terminal"
+            response_payload["result"] = {
+                "request_id": terminal_record.request_id,
+                "state": terminal_record.state,
+            }
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload=response_payload,
+        )
+
+    updated_record = updated_records[0]
+    accepted_payload = _accepted_payload(
+        trace_id=trace_id,
+        result={
+            "request_id": updated_record.request_id,
+            "state": updated_record.state,
+            "closed_count": len(updated_records),
+        },
+        driver_result={
+            "request": updated_record.model_dump(mode="json"),
+            "closed_count": len(updated_records),
+            "requests": [record.model_dump(mode="json") for record in updated_records],
+        },
+    )
     accepted_payload["github_delivery_id"] = delivery_id
     return _json_response(start_response=start_response, status_code=202, payload=accepted_payload)
 

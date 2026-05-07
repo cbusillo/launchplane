@@ -242,3 +242,33 @@ def close_every_code_work_request_for_pull_request(
     if not record.started_at.strip():
         updates["started_at"] = closed_at
     return record.model_copy(update=updates)
+
+
+def close_every_code_work_request_for_issue(
+    record: EveryCodeWorkRequestRecord,
+    *,
+    closed_at: str,
+    reason: str = "",
+) -> EveryCodeWorkRequestRecord | None:
+    if not closed_at.strip():
+        raise ValueError("Every Code issue close update requires closed_at")
+    if record.state in {"done", "blocked"}:
+        return None
+
+    normalized_reason = reason.strip().lower()
+    suffix = f" ({normalized_reason})" if normalized_reason else ""
+    summary = f"Source issue closed{suffix}: {record.issue_url.strip()}"
+    updates: dict[str, object] = {
+        "state": "done",
+        "updated_at": closed_at,
+        "finished_at": closed_at,
+        "result_summary": summary,
+        "error_message": "",
+    }
+    if not record.claimed_at.strip():
+        updates["claimed_at"] = closed_at
+    if not record.claimed_by_host.strip():
+        updates["claimed_by_host"] = "github-issue-close"
+    if not record.started_at.strip():
+        updates["started_at"] = closed_at
+    return record.model_copy(update=updates)

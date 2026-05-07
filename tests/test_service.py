@@ -427,19 +427,26 @@ def _every_code_github_issue_labeled_payload(
     repository: str = "cbusillo/code",
     issue_number: int = 123,
     issue_url: str = "",
+    closed_at: str = "",
+    state_reason: str = "",
 ) -> dict[str, object]:
     resolved_issue_url = (
         issue_url.strip() or f"https://github.com/{repository}/issues/{issue_number}"
     )
+    issue_payload = {
+        "number": issue_number,
+        "html_url": resolved_issue_url,
+        "title": "Wire local automation",
+    }
+    if closed_at.strip():
+        issue_payload["closed_at"] = closed_at
+    if state_reason.strip():
+        issue_payload["state_reason"] = state_reason
     return {
         "action": action,
         "label": {"name": label},
         "repository": {"full_name": repository},
-        "issue": {
-            "number": issue_number,
-            "html_url": resolved_issue_url,
-            "title": "Wire local automation",
-        },
+        "issue": issue_payload,
         "sender": {"login": "cbusillo"},
     }
 
@@ -1146,6 +1153,112 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             second_payload["result"]["request"]["result_pr_url"],
             "https://github.com/cbusillo/code/pull/26",
+        )
+
+    def test_every_code_issue_close_marks_linked_request_done(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "every_code_work_request.read",
+                            "every_code_work_request.claim",
+                            "every_code_work_request.update",
+                        ],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        issue_payload = _every_code_github_issue_labeled_payload()
+        close_payload = _every_code_github_issue_labeled_payload(
+            action="closed",
+            closed_at="2026-05-06T16:20:00Z",
+            state_reason="completed",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                headers={"Idempotency-Key": "every-code-issue-close-claim"},
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "running",
+                },
+                headers={"Idempotency-Key": "every-code-issue-close-running"},
+            )
+
+            close_status, closed_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=close_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue-close",
+                    "X-Hub-Signature-256": _github_webhook_signature(close_payload, secret),
+                },
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(close_status, 202)
+        self.assertEqual(closed_response["records"]["state"], "done")
+        self.assertEqual(
+            closed_response["result"]["request"]["finished_at"],
+            "2026-05-06T16:20:00Z",
+        )
+        self.assertEqual(
+            closed_response["result"]["request"]["result_summary"],
+            "Source issue closed (completed): https://github.com/cbusillo/code/issues/123",
         )
 
     def test_every_code_pull_request_close_marks_linked_request_done(self) -> None:

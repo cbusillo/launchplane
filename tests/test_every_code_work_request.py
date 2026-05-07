@@ -6,6 +6,7 @@ from control_plane.contracts.every_code_work_request import (
     apply_every_code_work_request_status,
     build_every_code_work_request_id,
     claim_every_code_work_request,
+    close_every_code_work_request_for_issue,
     close_every_code_work_request_for_pull_request,
     requeue_every_code_work_request,
 )
@@ -137,6 +138,45 @@ class EveryCodeWorkRequestRecordTests(unittest.TestCase):
                 pr_url="https://github.com/cbusillo/code/pull/99",
                 merged=True,
                 closed_at="2026-05-05T22:06:00Z",
+            )
+        )
+
+    def test_issue_close_marks_running_request_done(self) -> None:
+        claimed_record = claim_every_code_work_request(
+            _queued_record(),
+            host="Chris-Studio",
+            claimed_at="2026-05-05T22:01:00Z",
+        )
+        assert claimed_record is not None
+        running_record = apply_every_code_work_request_status(
+            claimed_record,
+            EveryCodeWorkRequestStatusUpdate(
+                state="running",
+                host="Chris-Studio",
+                updated_at="2026-05-05T22:03:00Z",
+            ),
+        )
+
+        done_record = close_every_code_work_request_for_issue(
+            running_record,
+            closed_at="2026-05-05T22:05:00Z",
+            reason="completed",
+        )
+
+        self.assertIsNotNone(done_record)
+        assert done_record is not None
+        self.assertEqual(done_record.state, "done")
+        self.assertEqual(done_record.finished_at, "2026-05-05T22:05:00Z")
+        self.assertEqual(done_record.error_message, "")
+        self.assertEqual(
+            done_record.result_summary,
+            "Source issue closed (completed): https://github.com/cbusillo/code/issues/123",
+        )
+        self.assertIsNone(
+            close_every_code_work_request_for_issue(
+                done_record,
+                closed_at="2026-05-05T22:06:00Z",
+                reason="completed",
             )
         )
 
