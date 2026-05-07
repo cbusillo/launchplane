@@ -618,7 +618,18 @@ def build_every_code_session_command(
     finish_shell = " ".join(
         "$status" if part == "$status" else shlex.quote(part) for part in finish_command
     )
-    return f"{command}\nstatus=$?\n{finish_shell}\nexit $status"
+    session_env = {
+        "EVERY_CODE_SESSION_ORIGIN": "every_code",
+        "EVERY_CODE_REQUEST_ID": record.request_id,
+        "EVERY_CODE_REPOSITORY": record.repository,
+        "EVERY_CODE_ISSUE_NUMBER": str(record.issue_number),
+        "EVERY_CODE_ISSUE_URL": record.issue_url,
+    }
+    env_shell = " ".join(
+        f"{key}={shlex.quote(value)}" for key, value in session_env.items() if value
+    )
+    session_command = f"{env_shell} {command}" if env_shell else command
+    return f"{session_command}\nstatus=$?\n{finish_shell}\nexit $status"
 
 
 def build_every_code_feedback_session_command(
@@ -1651,7 +1662,10 @@ def _send_every_code_pr_feedback_to_session(
 ) -> bool:
     prompt = every_code_pr_feedback_prompt(feedback)
     try:
-        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt, "C-m"))
+        result = runner((tmux_binary, "send-keys", "-t", session_name, prompt))
+        if result.returncode != 0:
+            return False
+        result = runner((tmux_binary, "send-keys", "-t", session_name, "C-m"))
     except OSError:
         return False
     return result.returncode == 0

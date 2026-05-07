@@ -522,6 +522,11 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("--worker-token-env LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", command)
         self.assertIn("--request-id every-code-cbusillo-code-123-test", command)
         self.assertIn("--exit-code $status", command)
+        self.assertIn("EVERY_CODE_SESSION_ORIGIN=every_code", command)
+        self.assertIn("EVERY_CODE_REQUEST_ID=every-code-cbusillo-code-123-test", command)
+        self.assertIn("EVERY_CODE_REPOSITORY=cbusillo/code", command)
+        self.assertIn("EVERY_CODE_ISSUE_NUMBER=123", command)
+        self.assertIn("EVERY_CODE_ISSUE_URL=https://github.com/cbusillo/code/issues/123", command)
 
     def test_preview_label_request_labels_eligible_pull_request(self) -> None:
         runner = _Runner()
@@ -751,9 +756,11 @@ class EveryCodeWorkerTests(unittest.TestCase):
 
         self.assertEqual(result.status, "applied")
         self.assertEqual(feedback.status, "applied")
-        send_call = next(call for call in runner.calls if call[1] == "send-keys")
-        self.assertIn("Please tighten the README wording", send_call[4])
-        self.assertEqual(send_call[-1], "C-m")
+        send_calls = [call for call in runner.calls if call[1] == "send-keys"]
+        self.assertEqual(len(send_calls), 2)
+        self.assertIn("Please tighten the README wording", send_calls[0][4])
+        self.assertEqual(send_calls[0][-1], send_calls[0][4])
+        self.assertEqual(send_calls[1][-1], "C-m")
         reaction_calls = [
             call
             for call in runner.calls
