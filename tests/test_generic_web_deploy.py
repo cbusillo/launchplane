@@ -5,6 +5,7 @@ from unittest.mock import patch
 import click
 
 from control_plane.contracts.deployment_record import DeploymentRecord
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -24,6 +25,7 @@ class _GenericWebDeployStore:
     def __init__(self, profile: LaunchplaneProductProfileRecord) -> None:
         self.profile = profile
         self.deployments: list[DeploymentRecord] = []
+        self.inventories: list[EnvironmentInventory] = []
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -32,6 +34,9 @@ class _GenericWebDeployStore:
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployments.append(record)
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> None:
+        self.inventories.append(record)
 
 
 def _profile() -> LaunchplaneProductProfileRecord:
@@ -135,6 +140,14 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.target_id, "target-123")
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "pass")
+        self.assertEqual(len(store.inventories), 1)
+        self.assertEqual(store.inventories[0].context, "sellyouroutboard-testing")
+        self.assertEqual(store.inventories[0].instance, "testing")
+        self.assertEqual(store.inventories[0].source_git_ref, "abc123")
+        self.assertEqual(
+            store.inventories[0].deployment_record_id,
+            store.deployments[0].record_id,
+        )
         artifact_identity = store.deployments[0].artifact_identity
         assert artifact_identity is not None
         self.assertEqual(
@@ -218,6 +231,7 @@ class GenericWebDeployTests(unittest.TestCase):
         self.assertEqual(result.error_message, "provider failed")
         self.assertEqual(len(store.deployments), 1)
         self.assertEqual(store.deployments[0].deploy.status, "fail")
+        self.assertEqual(store.inventories, [])
 
     def test_resolve_generic_web_profile_lane_rejects_missing_lane(self) -> None:
         store = _GenericWebDeployStore(_profile())

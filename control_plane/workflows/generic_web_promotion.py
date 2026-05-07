@@ -40,6 +40,10 @@ DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS = 60
 
 
 class GenericWebPromotionStore(GenericWebDeployStore, Protocol):
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory: ...
+
     def read_backup_gate_record(self, record_id: str) -> BackupGateRecord: ...
 
     def read_deployment_record(self, record_id: str) -> DeploymentRecord: ...
@@ -166,6 +170,11 @@ def execute_generic_web_prod_promotion(
                 artifact_id=request.artifact_id,
             )
         }
+    )
+    _validate_source_inventory_matches_request(
+        record_store=record_store,
+        request=request,
+        source_lane=source_lane,
     )
     promotion_record_id = generate_promotion_record_id(
         context_name=destination_lane.context,
@@ -365,6 +374,34 @@ def _resolve_backup_gate(
         status=backup_record.status,
         evidence=dict(backup_record.evidence),
     )
+
+
+def _validate_source_inventory_matches_request(
+    *,
+    record_store: GenericWebPromotionStore,
+    request: GenericWebProdPromotionRequest,
+    source_lane: ProductLaneProfile,
+) -> None:
+    try:
+        source_inventory = record_store.read_environment_inventory(
+            context_name=source_lane.context,
+            instance_name=source_lane.instance,
+        )
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            "Generic web prod promotion requires current source environment inventory. "
+            f"No inventory was found for {source_lane.context}/{source_lane.instance}."
+        ) from exc
+    inventory_artifact_id = ""
+    if source_inventory.artifact_identity is not None:
+        inventory_artifact_id = source_inventory.artifact_identity.artifact_id.strip()
+    if inventory_artifact_id != request.artifact_id or source_inventory.source_git_ref != request.source_git_ref:
+        raise click.ClickException(
+            "Generic web prod promotion request does not match current source inventory. "
+            f"Inventory artifact={inventory_artifact_id or '<missing>'} "
+            f"source_ref={source_inventory.source_git_ref}; "
+            f"request artifact={request.artifact_id} source_ref={request.source_git_ref}."
+        )
 
 
 def _health_url_for_lane(*, lane: ProductLaneProfile, health_path: str) -> str:
