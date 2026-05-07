@@ -35,6 +35,19 @@ class _WebhookRunner:
             return subprocess.CompletedProcess(command, 0, json.dumps({"id": 12}), "")
         if command[:5] == ("gh", "api", "-X", "POST", "repos/cbusillo/launchplane/hooks"):
             return subprocess.CompletedProcess(command, 0, json.dumps({"id": 34}), "")
+        if command[:5] == ("gh", "label", "list", "--repo", "cbusillo/code"):
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                json.dumps([{"name": "every-code"}, {"name": "preview"}]),
+                "",
+            )
+        if command[:5] == ("gh", "label", "list", "--repo", "cbusillo/launchplane"):
+            return subprocess.CompletedProcess(command, 0, json.dumps([]), "")
+        if command[:3] == ("gh", "label", "edit"):
+            return subprocess.CompletedProcess(command, 0, "", "")
+        if command[:3] == ("gh", "label", "create"):
+            return subprocess.CompletedProcess(command, 0, "", "")
         raise AssertionError(f"unexpected command: {command}")
 
 
@@ -63,6 +76,8 @@ class EveryCodeWebhookSyncTests(unittest.TestCase):
         self.assertEqual([result.status for result in results], ["updated", "created"])
         self.assertEqual(results[0].hook_id, 12)
         self.assertEqual(results[1].hook_id, 34)
+        self.assertEqual(results[0].labels_synced, 6)
+        self.assertEqual(results[1].labels_synced, 6)
         payloads = {
             command[3]: json.loads(input_text or "{}")
             for command, input_text in runner.calls
@@ -80,6 +95,38 @@ class EveryCodeWebhookSyncTests(unittest.TestCase):
         self.assertEqual(patch_payload["events"], expected_events)
         self.assertEqual(post_payload["events"], expected_events)
         self.assertEqual(patch_payload["config"]["secret"], "secret")
+        label_edits = [command for command, _input in runner.calls if command[:3] == ("gh", "label", "edit")]
+        label_creates = [command for command, _input in runner.calls if command[:3] == ("gh", "label", "create")]
+        self.assertIn(
+            (
+                "gh",
+                "label",
+                "edit",
+                "every-code",
+                "--repo",
+                "cbusillo/code",
+                "--color",
+                "FBCA04",
+                "--description",
+                "Ask Every Code to work this issue.",
+            ),
+            label_edits,
+        )
+        self.assertIn(
+            (
+                "gh",
+                "label",
+                "create",
+                "preview-ready",
+                "--repo",
+                "cbusillo/launchplane",
+                "--color",
+                "1D76DB",
+                "--description",
+                "Every Code preview is ready for source issue validation.",
+            ),
+            label_creates,
+        )
 
 
 if __name__ == "__main__":
