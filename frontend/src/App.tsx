@@ -24,7 +24,7 @@ import {
   Trash2,
   XCircle,
 } from "lucide-react";
-import { ReactNode, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LaunchplaneApiError,
   applyProductConfig,
@@ -43,6 +43,7 @@ import {
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { EveryCodeQueue } from "./EveryCodeQueue";
 import { formatTime, labelForStatus } from "./format";
+import { MetricTile, PanelHead } from "./panel-ui";
 import { StatusIcon, StatusPill, StateBlock, SkeletonRows } from "./status-ui";
 import type {
   AuthIdentity,
@@ -3370,26 +3371,6 @@ function ActionReviewDialog({
   );
 }
 
-function PanelHead({
-  eyebrow,
-  title,
-  right,
-}: {
-  eyebrow: string;
-  title: string;
-  right?: ReactNode;
-}) {
-  return (
-    <div className="panel-head">
-      <div>
-        <p className="eyebrow">{eyebrow}</p>
-        <h2>{title}</h2>
-      </div>
-      {right ? <div className="panel-right">{right}</div> : null}
-    </div>
-  );
-}
-
 function KeyValue({
   label,
   value,
@@ -3412,23 +3393,6 @@ function KeyValue({
       >
         {value || "unknown"}
       </strong>
-    </div>
-  );
-}
-
-function MetricTile({
-  label,
-  status,
-  value,
-}: {
-  label: string;
-  status: Status | string;
-  value: string;
-}) {
-  return (
-    <div className="metric-tile" data-status={status}>
-      <span>{label}</span>
-      <strong>{value}</strong>
     </div>
   );
 }
