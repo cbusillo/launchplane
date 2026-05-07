@@ -107,6 +107,7 @@ from control_plane.every_code_worker import (
     build_every_code_worker_daemon_spec,
     every_code_worker_daemon_status,
     finish_every_code_work_request,
+    request_ready_every_code_pr_preview_labels,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -9769,6 +9770,59 @@ def every_code_finish(
             exit_code=exit_code,
             result_pr_url=result_pr_url,
             result_summary=result_summary,
+        )
+    finally:
+        _close_store(record_store)
+    click.echo(json.dumps(result.as_payload(), indent=2, sort_keys=True))
+
+
+@every_code.command("reconcile-previews")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    show_default=False,
+    help="Optional Postgres connection string for Launchplane work-request records.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Launchplane service base URL for API-backed worker mode.",
+)
+@click.option(
+    "--worker-token-env",
+    default=_EVERY_CODE_WORKER_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the Every Code worker token.",
+)
+@click.option(
+    "--state-dir",
+    type=click.Path(path_type=Path, file_okay=False, dir_okay=True),
+    default=Path("state"),
+    show_default=True,
+    help="Filesystem state directory used when --database-url is not set.",
+)
+@click.option("--repository", default="", help="Optional owner/repo filter.")
+@click.option("--limit", type=click.IntRange(min=1), default=50, show_default=True)
+def every_code_reconcile_previews(
+    database_url: str,
+    service_url: str,
+    worker_token_env: str,
+    state_dir: Path,
+    repository: str,
+    limit: int,
+) -> None:
+    record_store = _every_code_worker_store(
+        state_dir=state_dir,
+        database_url=database_url,
+        service_url=service_url,
+        worker_token_env=worker_token_env,
+    )
+    try:
+        result = request_ready_every_code_pr_preview_labels(
+            record_store=record_store,
+            repository=repository,
+            limit=limit,
         )
     finally:
         _close_store(record_store)
