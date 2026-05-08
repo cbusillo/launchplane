@@ -120,3 +120,9 @@ The merge step is allowed only from a fresh dry-run result whose next action is
 `head_sha` as the GitHub merge `sha` guard and the repository policy's
 `merge_method`. After a successful merge, the worker must re-read the train
 before selecting another queued pull request.
+
+The GitHub adapter maps Launchplane's domain fields to the REST API endpoints:
+blocked labels use the issue labels endpoint, branch refresh uses
+`expected_head_sha`, and merge uses `sha`. A GitHub `409 Conflict` from the
+guarded merge call is treated as stale-head evidence and requires a fresh read
+instead of a blind retry.
