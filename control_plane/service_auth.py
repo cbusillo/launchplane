@@ -48,6 +48,12 @@ class TerminalAgentIdentity:
 
 LaunchplaneIdentity = GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity
 AgentConsumerSubjectType = Literal["github_actions", "github_human", "terminal_agent"]
+AgentConsumerAccessProfile = Literal[
+    "automation_worker",
+    "human_admin",
+    "limited_remote_user",
+    "owner_local_agent",
+]
 AgentConsumerActionSafety = Literal[
     "read",
     "safe_write",
@@ -262,6 +268,7 @@ class AgentConsumerSubject(BaseModel):
     subject_type: AgentConsumerSubjectType
     subject: str
     display_label: str
+    access_profile: AgentConsumerAccessProfile
     role: Literal["read_only", "admin", "worker"] = "read_only"
     product: str = ""
     context: str = ""
@@ -305,6 +312,10 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     return "mutation"
 
 
+def limited_remote_user_action_allowed(action: str) -> bool:
+    return action_safety(action) in {"read", "safe_write"}
+
+
 def agent_consumer_subject(
     *, identity: LaunchplaneIdentity, action: str = "", product: str = "", context: str = ""
 ) -> AgentConsumerSubject:
@@ -314,6 +325,7 @@ def agent_consumer_subject(
             subject_type="github_human",
             subject=identity.login,
             display_label=identity.login,
+            access_profile=("human_admin" if identity.role == "admin" else "limited_remote_user"),
             role=identity.role,
             product=product,
             context=context,
@@ -327,6 +339,7 @@ def agent_consumer_subject(
             subject_type="terminal_agent",
             subject=identity.subject,
             display_label=identity.token_label,
+            access_profile="owner_local_agent",
             role="worker",
             product=product,
             context=context,
@@ -339,6 +352,7 @@ def agent_consumer_subject(
         subject_type="github_actions",
         subject=identity.subject or identity.workflow_ref,
         display_label=identity.repository,
+        access_profile="automation_worker",
         role="worker",
         product=product,
         context=context,
@@ -389,6 +403,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
         self, *, identity: LaunchplaneIdentity, action: str, product: str, context: str
     ) -> bool:
         if isinstance(identity, GitHubHumanIdentity):
+            if identity.role == "read_only" and not limited_remote_user_action_allowed(action):
+                return False
             return any(
                 rule.allows(identity=identity, action=action, product=product, context=context)
                 for rule in self.github_humans

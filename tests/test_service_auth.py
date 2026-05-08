@@ -19,6 +19,7 @@ from control_plane.service_auth import (
     action_safety,
     agent_authz_audit,
     agent_consumer_subject,
+    limited_remote_user_action_allowed,
     parse_authz_policy_toml,
 )
 from control_plane.contracts.authz_policy_record import authz_policy_sha256
@@ -176,6 +177,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         )
 
         self.assertEqual(subject.subject_type, "terminal_agent")
+        self.assertEqual(subject.access_profile, "owner_local_agent")
         self.assertEqual(subject.role, "worker")
         self.assertEqual(subject.action_safety, "read")
         self.assertTrue(subject.read_only_context)
@@ -190,6 +192,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         )
 
         self.assertEqual(subject.subject_type, "github_human")
+        self.assertEqual(subject.access_profile, "human_admin")
         self.assertEqual(subject.role, "admin")
         self.assertEqual(subject.action_safety, "prod")
         self.assertFalse(subject.read_only_context)
@@ -210,6 +213,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         )
 
         self.assertEqual(read_subject.subject_type, "github_actions")
+        self.assertEqual(read_subject.access_profile, "automation_worker")
         self.assertTrue(read_subject.read_only_context)
         self.assertFalse(read_subject.approval_capable)
         self.assertEqual(prod_subject.action_safety, "prod")
@@ -233,6 +237,78 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         for action, expected_safety in cases.items():
             with self.subTest(action=action):
                 self.assertEqual(action_safety(action), expected_safety)
+
+    def test_limited_remote_user_action_allowlist_excludes_privileged_families(self) -> None:
+        allowed_actions = (
+            "product_environment.read",
+            "work_graph.rank",
+            "preview_pr_feedback.write",
+        )
+        denied_actions = (
+            "product_config.apply",
+            "product_config.apply.secret",
+            "generic_web_prod_promotion.execute",
+            "preview_destroy.execute",
+        )
+
+        for action in allowed_actions:
+            with self.subTest(action=action):
+                self.assertTrue(limited_remote_user_action_allowed(action))
+        for action in denied_actions:
+            with self.subTest(action=action):
+                self.assertFalse(limited_remote_user_action_allowed(action))
+
+    def test_human_read_only_role_fails_closed_for_privileged_actions(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            github_humans=(
+                GitHubHumanPolicyRule(
+                    logins=("alice",),
+                    roles=("read_only",),
+                    products=("verireel",),
+                    contexts=("verireel", "verireel-testing"),
+                    actions=(
+                        "product_environment.read",
+                        "preview_pr_feedback.write",
+                        "generic_web_prod_promotion.execute",
+                        "product_config.apply.secret",
+                    ),
+                ),
+            )
+        )
+        identity = _human_identity(role="read_only")
+
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="product_environment.read",
+                product="verireel",
+                context="verireel-testing",
+            )
+        )
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="preview_pr_feedback.write",
+                product="verireel",
+                context="verireel-testing",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="generic_web_prod_promotion.execute",
+                product="verireel",
+                context="verireel",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="product_config.apply.secret",
+                product="verireel",
+                context="verireel-testing",
+            )
+        )
 
     def test_agent_authz_audit_records_safe_denial_metadata(self) -> None:
         audit = agent_authz_audit(

@@ -423,9 +423,12 @@ subject model before diagnostics or downstream intent contracts consume them:
   cleanup, or secret-backed actions even if a policy rule is too broad.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
-  can consume scoped context; admin humans are approval-capable for future
-  operator-mediated intent flows, but direct mutation routes still require their
-  own CSRF/audit design before broad browser writes are allowed.
+  are `limited_remote_user` consumers: even if a rule is accidentally broad,
+  Launchplane only allows read and safe-write action families for them, scoped by
+  the exact repo/product/context/action rule. Admin humans are `human_admin`
+  consumers and are approval-capable for future operator-mediated intent flows,
+  but direct mutation routes still require their own CSRF/audit design before
+  broad browser writes are allowed.
 
 Action names are classified for agent context as `read`, `safe_write`,
 `mutation`, `prod`, `destructive`, `secret_backed`, or `policy_admin`. This
