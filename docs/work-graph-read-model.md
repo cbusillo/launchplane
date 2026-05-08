@@ -14,6 +14,11 @@ from existing product and Every Code records, and return ranked queues with
 compact recommendation reasons. Later service/UI slices can add live GitHub or
 Code Plans ingestion behind the same snapshot and queue contracts.
 
+The agent-facing consumption boundary for this read model is summarized in
+[agent-context-boundary.md](agent-context-boundary.md). This page owns the queue
+shape; the boundary page owns how agents should consume it without turning
+Launchplane into planning authority.
+
 ## Snapshot Contract
 
 A snapshot contains:

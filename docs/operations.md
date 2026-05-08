@@ -68,6 +68,8 @@ Launchplane should eventually expose API ingress for at least:
 
 The first explicit version of that boundary, including the OIDC claim mapping
 and endpoint list, lives in [`service-boundary.md`](service-boundary.md).
+Agent-facing read context and scoped write-intent consumption rules live in
+[`agent-context-boundary.md`](agent-context-boundary.md).
 
 The first implemented service command is:
 

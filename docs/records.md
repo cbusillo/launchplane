@@ -547,6 +547,10 @@ state/
 
 ## Every Code Work Request Record
 
+See [agent-context-boundary.md](agent-context-boundary.md) for the agent-facing
+rules that compose these records into public-safe context and scoped intent
+preflights.
+
 - One durable request per approved Every Code automation trigger.
 - Record the source, repository, issue number and URL, trigger label, trigger
   actor, optional GitHub delivery id, queue/update timestamps, claim host, run

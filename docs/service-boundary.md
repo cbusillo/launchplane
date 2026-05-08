@@ -19,6 +19,10 @@ The current repo-local CLI and file-backed state directory are implementation
 scaffolding. This document defines the boundary those adapters should converge
 on.
 
+Agent-facing context and scoped write-intent rules are summarized in
+[agent-context-boundary.md](agent-context-boundary.md). Keep that page aligned
+with this endpoint inventory whenever agent-visible behavior changes.
+
 Product repos should build, test, and publish product artifacts, then call this
 boundary with minimal trigger facts. They should not carry Launchplane lifecycle
 truth, provider mutation logic, rendered evidence payloads, or copied driver
