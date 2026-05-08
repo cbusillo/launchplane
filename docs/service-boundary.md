@@ -65,6 +65,7 @@ VeriReel product paths:
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
 - work graph chooser route:
+  - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
   - `POST /v1/work-graph/rank`
@@ -209,6 +210,16 @@ when present. Deploy automation also withholds the Project provider env bundle
 until that secret exists, so prepared repo variables do not enable
 unauthenticated runtime reads. That token is not a Launchplane record and must
 remain outside the repo.
+
+`GET /v1/agent/context` is a thin read-only aggregation endpoint for public-safe
+skill preflight. It requires `product_environment.read` for product/context
+`launchplane`, accepts an optional `repository` filter, and composes the existing
+repo-product mapping, work graph snapshot, Every Code summary, and preview
+readiness projections under named sections. Each section reports `available`,
+`unauthorized`, or `unavailable`; optional work-graph planning provider failures
+mark only that section unavailable instead of dropping the whole context or
+silently omitting the failure. The endpoint writes no records, fetches no issue
+bodies, and must preserve the lower-level redaction/provenance rules.
 
 ## Host Assumption
 
