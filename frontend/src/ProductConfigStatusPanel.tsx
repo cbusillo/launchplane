@@ -14,19 +14,24 @@ import type {
 
 export function ProductConfigStatusPanel({
   statuses,
+  selectedEnvironment,
   loading,
   error,
 }: {
   statuses: ProductEnvironmentConfigStatus[];
+  selectedEnvironment: string;
   loading: boolean;
   error: string;
 }) {
-  const totals = summarizeConfigStatuses(statuses);
+  const scopedStatuses = selectedEnvironment.trim()
+    ? statuses.filter((status) => status.environment === selectedEnvironment)
+    : statuses;
+  const totals = summarizeConfigStatuses(scopedStatuses);
   return (
     <section className="panel config-status-panel" aria-busy={loading}>
       <PanelHead
         eyebrow="settings readiness"
-        title="Expected config"
+        title={`Expected config${selectedEnvironment ? ` / ${selectedEnvironment}` : ""}`}
         right={
           <div className="panel-badges">
             <StatusPill status={statusToUiStatus(totals.worst)} />
@@ -40,11 +45,18 @@ export function ProductConfigStatusPanel({
           <code>{error}</code>
         </div>
       ) : null}
-      {loading && !statuses.length ? <ConfigStatusSkeleton /> : null}
-      {!loading && !statuses.length && !error ? (
-        <StateBlock icon={<Settings2 size={18} />} title="No expected config status" />
+      {loading && !scopedStatuses.length ? <ConfigStatusSkeleton /> : null}
+      {!loading && !scopedStatuses.length && !error ? (
+        <StateBlock
+          icon={<Settings2 size={18} />}
+          title={
+            selectedEnvironment
+              ? `No expected config status for ${selectedEnvironment}`
+              : "No expected config status"
+          }
+        />
       ) : null}
-      {statuses.map((status) => (
+      {scopedStatuses.map((status) => (
         <EnvironmentConfigStatus key={`${status.product}:${status.environment}`} status={status} />
       ))}
     </section>
