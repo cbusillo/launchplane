@@ -81,3 +81,15 @@ uv run launchplane work-graph merge-train-policy \
 Workers should load the same typed contract before enqueuing or merging. A
 missing policy for a repository/base branch is a hard failure, not a fallback to
 implicit behavior.
+
+The sequential train dry-run accepts a JSON snapshot of candidate pull requests
+and reports queue order plus the next intended action without mutating GitHub:
+
+```sh
+uv run launchplane work-graph merge-train-dry-run \
+  --snapshot-file path/to/merge-train-snapshot.json
+```
+
+The dry-run orders eligible pull requests by `created_at` and then PR number. It
+excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
+the snapshot repository/base branch has no explicit policy.
