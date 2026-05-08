@@ -26,6 +26,12 @@ class MergeTrainBranchClient(Protocol):
     ) -> None: ...
 
 
+class MergeTrainSnapshotReader(Protocol):
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> "MergeTrainDryRunSnapshot": ...
+
+
 class MergeTrainPullRequestSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -135,6 +141,16 @@ class MergeTrainBranchUpdateResult(BaseModel):
     pull_request_number: int | None = None
     expected_head_sha: str = ""
     reread_required: bool
+    detail: str
+
+
+class MergeTrainRereadResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["reread", "skipped"]
+    repository: str
+    base_branch: str
+    refreshed_result: MergeTrainDryRunResult | None = None
     detail: str
 
 
@@ -249,6 +265,33 @@ def apply_merge_train_branch_update_intent(
             "Updated pull request branch; re-read mergeability and required checks "
             "before continuing."
         ),
+    )
+
+
+def reread_merge_train_after_branch_update(
+    *,
+    branch_update_result: MergeTrainBranchUpdateResult,
+    policy: MergeTrainPolicy,
+    snapshot_reader: MergeTrainSnapshotReader,
+) -> MergeTrainRereadResult:
+    if not branch_update_result.reread_required:
+        return MergeTrainRereadResult(
+            status="skipped",
+            repository=branch_update_result.repository,
+            base_branch=branch_update_result.base_branch,
+            detail="Branch update result does not require a reread.",
+        )
+    snapshot = snapshot_reader.read_merge_train_snapshot(
+        repository=branch_update_result.repository,
+        base_branch=branch_update_result.base_branch,
+    )
+    refreshed_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    return MergeTrainRereadResult(
+        status="reread",
+        repository=branch_update_result.repository,
+        base_branch=branch_update_result.base_branch,
+        refreshed_result=refreshed_result,
+        detail="Re-read mergeability and required checks after branch update.",
     )
 
 
