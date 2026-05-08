@@ -586,6 +586,7 @@ export function App() {
             </section>
             <ProductConfigStatusPanel
               statuses={configStatuses}
+              selectedEnvironment={activeEnvironment?.environment ?? selectedEnvironment}
               loading={configStatusLoading}
               error={configStatusError}
             />
@@ -1390,6 +1391,7 @@ function StateFixtureGallery({
       <div className="fixture-wide">
         <ProductConfigStatusPanel
           statuses={fixtureConfigStatuses}
+          selectedEnvironment={fixtureEnvironment}
           loading={false}
           error=""
         />
