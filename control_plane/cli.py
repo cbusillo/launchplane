@@ -123,6 +123,10 @@ from control_plane.launchplane_mutations import (
     control_plane_root as shared_control_plane_root,
     upsert_launchplane_preview_from_request as shared_upsert_launchplane_preview_from_request,
 )
+from control_plane.merge_train import (
+    MergeTrainDryRunSnapshot,
+    build_merge_train_dry_run_result,
+)
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_record_store, resolve_database_url
@@ -9398,6 +9402,36 @@ def work_graph_merge_train_policy(
     if selected_policy is not None:
         payload["selected_policy"] = selected_policy.model_dump(mode="json")
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@work_graph.command("merge-train-dry-run")
+@click.option(
+    "--snapshot-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    required=True,
+    help="Merge-train dry-run snapshot JSON containing repository, base_branch, and pull_requests.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
+)
+def work_graph_merge_train_dry_run(
+    snapshot_file: Path, policy_file: Path | None
+) -> None:
+    try:
+        snapshot_payload = json.loads(snapshot_file.read_text(encoding="utf-8"))
+        snapshot = MergeTrainDryRunSnapshot.model_validate(snapshot_payload)
+        policy = (
+            load_merge_train_policy(policy_file)
+            if policy_file is not None
+            else build_sellyouroutboard_main_merge_train_policy()
+        )
+        result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @every_code.command("run-once")
