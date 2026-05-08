@@ -602,6 +602,10 @@ state/
   rerunnable, and includes safe rerun guidance without exposing webhook delivery
   ids, blocked error messages, issue bodies, prompt text, or local checkout
   paths.
+- Agent callers should prefer `GET /v1/previews/readiness` over raw preview-gate
+  reads when they only need preview gate status. The readiness projection maps
+  gate state to waiting, ready, needs-attention, or cancelled statuses with
+  source links, freshness/provenance, and safe request-preview guidance.
 
 ## Inventory
 

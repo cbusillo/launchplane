@@ -80,6 +80,9 @@ from control_plane.contracts.preview_pr_feedback_record import (
     PreviewPrFeedbackRecord,
     PreviewPrFeedbackStatus,
 )
+from control_plane.contracts.preview_readiness_read_model import (
+    build_preview_readiness_read_model,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -1647,6 +1650,8 @@ def _serve_ui_route(
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
+    if len(segments) == 3 and segments == ["v1", "previews", "readiness"]:
+        return "every_code_preview_gate.read", {"readiness": "true"}
     if len(segments) == 3 and segments == ["v1", "every-code", "summary"]:
         return "every_code_work_request.read", {"summary": "true"}
     if len(segments) == 3 and segments == ["v1", "every-code", "work-requests"]:
@@ -3060,6 +3065,8 @@ def _terminal_agent_identity_from_bearer(
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
+    if method == "GET" and path == "/v1/previews/readiness":
+        return True
     if method == "GET" and path == "/v1/every-code/summary":
         return True
     if method == "GET" and path == "/v1/every-code/work-requests":
@@ -3109,6 +3116,23 @@ def _every_code_read_payload(
 ) -> dict[str, object]:
     every_code_store = _every_code_work_request_store(record_store)
     segments = [segment for segment in path.split("/") if segment]
+    if path == "/v1/previews/readiness":
+        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
+        pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
+        pr_number_filter = int(pr_number_value) if pr_number_value else None
+        status_filter = str((query.get("status") or [""])[0] or "").strip()
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        offset = _every_code_pagination_value(query, key="offset", default=0)
+        readiness = build_preview_readiness_read_model(
+            generated_at=_utc_now_timestamp(),
+            record_store=every_code_store,
+            repository=repository_filter,
+            pr_number=pr_number_filter,
+            status=status_filter,
+            limit=limit,
+            offset=offset,
+        )
+        return {"readiness": readiness.model_dump(mode="json")}
     if path == "/v1/every-code/summary":
         repository_filter = str((query.get("repository") or [""])[0] or "").strip()
         issue_number_value = str((query.get("issue_number") or [""])[0] or "").strip()
@@ -5009,6 +5033,32 @@ def create_launchplane_service_app(
                                 "error": {
                                     "code": "authorization_denied",
                                     "message": "Workflow cannot read Every Code work requests.",
+                                },
+                            },
+                        )
+                    return _handle_every_code_work_request_read(
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                        record_store=record_store,
+                        path=path,
+                        query=query,
+                    )
+                if action == "every_code_preview_gate.read":
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product="launchplane",
+                        context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Every Code preview readiness.",
                                 },
                             },
                         )

@@ -57,6 +57,7 @@ VeriReel product paths:
 - Every Code local automation work-request routes:
   - `POST /v1/every-code/github-webhook`
   - `GET /v1/every-code/summary`
+  - `GET /v1/previews/readiness`
   - `GET /v1/every-code/work-requests`
   - `GET /v1/every-code/work-requests/{request_id}`
   - `POST /v1/every-code/work-requests/create`
@@ -162,6 +163,14 @@ product/context `launchplane` and supports `repository`, `issue_number`,
 links, state, summary status, claim metadata, timestamps, result PR URL, and
 safe rerun guidance. They intentionally omit raw webhook delivery ids, error
 messages, issue bodies, prompt text, and local checkout paths.
+
+`GET /v1/previews/readiness` returns a compact agent-safe projection of Every
+Code preview gate records. It requires `every_code_preview_gate.read` for
+product/context `launchplane` and supports `repository`, `pr_number`, `status`,
+`limit`, and `offset` query parameters. Readiness items map gate records to
+agent-facing states such as waiting on checks, ready, needs attention, or
+cancelled, include source links and freshness/provenance, and avoid provider-only
+internals or secrets.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the

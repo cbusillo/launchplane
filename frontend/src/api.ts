@@ -15,6 +15,7 @@ import type {
   ProductEnvironmentConfigStatusPayload,
   ProductListPayload,
   ProductProfileListPayload,
+  PreviewReadinessPayload,
   RepoProductMappingPayload,
   WorkGraphRankPayload,
   WorkGraphSnapshot,
@@ -129,6 +130,14 @@ export function readEveryCodeSummary(
 ): Promise<EveryCodeSummaryPayload> {
   return requestJson<EveryCodeSummaryPayload>(
     `/v1/every-code/summary?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export function readPreviewReadiness(
+  limit = 12,
+): Promise<PreviewReadinessPayload> {
+  return requestJson<PreviewReadinessPayload>(
+    `/v1/previews/readiness?limit=${encodeURIComponent(String(limit))}`,
   );
 }
 
