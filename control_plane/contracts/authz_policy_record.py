@@ -14,6 +14,8 @@ AuthzPolicyStatus = Literal["active", "superseded"]
 
 def authz_policy_sha256(policy: LaunchplaneAuthzPolicy) -> str:
     payload = policy.model_dump(mode="json", exclude_none=True)
+    if not policy.terminal_agents:
+        payload.pop("terminal_agents", None)
     canonical_json = json.dumps(payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical_json.encode("utf-8")).hexdigest()
 

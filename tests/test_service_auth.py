@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
@@ -16,6 +18,7 @@ from control_plane.service_auth import (
     TerminalAgentPolicyRule,
     parse_authz_policy_toml,
 )
+from control_plane.contracts.authz_policy_record import authz_policy_sha256
 from control_plane.service_human_auth import (
     GitHubOAuthConfig,
     HumanSessionManager,
@@ -537,6 +540,52 @@ class GitHubOidcVerifierHardeningTests(unittest.TestCase):
 
 
 class LaunchplaneAuthzPolicyCompatibilityTests(unittest.TestCase):
+    def test_policy_sha256_omits_empty_terminal_agents_for_existing_records(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/launchplane",
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("launchplane_service_deploy.execute",),
+                ),
+            )
+        )
+        legacy_payload = policy.model_dump(mode="json", exclude_none=True)
+        legacy_payload.pop("terminal_agents", None)
+        legacy_sha256 = hashlib.sha256(
+            json.dumps(legacy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+        self.assertEqual(authz_policy_sha256(policy), legacy_sha256)
+
+    def test_policy_sha256_includes_terminal_agent_rules_when_present(self) -> None:
+        base_policy = LaunchplaneAuthzPolicy(
+            github_actions=(
+                GitHubActionsPolicyRule(
+                    repository="cbusillo/launchplane",
+                    products=("launchplane",),
+                    contexts=("launchplane",),
+                    actions=("launchplane_service_deploy.execute",),
+                ),
+            )
+        )
+        terminal_policy = base_policy.model_copy(
+            update={
+                "terminal_agents": (
+                    TerminalAgentPolicyRule(
+                        subjects=("local-owner-agent",),
+                        token_labels=("local-owner-read",),
+                        products=("sellyouroutboard",),
+                        contexts=("sellyouroutboard",),
+                        actions=("product_environment.read",),
+                    ),
+                )
+            }
+        )
+
+        self.assertNotEqual(authz_policy_sha256(terminal_policy), authz_policy_sha256(base_policy))
+
     def test_actions_policy_matches_patterns_and_scopes(self) -> None:
         rule = GitHubActionsPolicyRule(
             repository="cbusillo/site",
