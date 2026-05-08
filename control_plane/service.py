@@ -37,8 +37,11 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.agent_write_intent import (
     AgentWriteIntentRequest,
+    AgentWriteIntentSecretEvidence,
+    agent_write_intent_secret_action,
     authz_action_for_agent_write_intent,
     evaluate_agent_write_intent,
+    secret_evidence_for_agent_write_intent,
 )
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -98,6 +101,12 @@ from control_plane.contracts.promotion_record import (
     PostDeployUpdateEvidence,
     PromotionRecord,
     ReleaseStatus,
+)
+from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
+from control_plane.runtime_key_safety import (
+    evaluate_runtime_key_safety_from_store,
+    latest_active_runtime_key_safety_policy,
+    runtime_key_safety_environment_class,
 )
 from control_plane.runtime_key_safety_http import (
     RuntimeKeySafetyPolicyRouteResult,
@@ -2870,6 +2879,43 @@ def _replay_idempotent_response(
     )
 
 
+def _agent_write_intent_secret_evidence(
+    *, record_store: object, request: AgentWriteIntentRequest
+) -> AgentWriteIntentSecretEvidence:
+    if not request.secret_bindings:
+        return secret_evidence_for_agent_write_intent(request=request, evaluation=None)
+    if request.destination is None:
+        return secret_evidence_for_agent_write_intent(
+            request=request, evaluation=None, unavailable=True
+        )
+    try:
+        policy_record = latest_active_runtime_key_safety_policy(
+            record_store  # type: ignore[arg-type]
+        )
+        evaluation = evaluate_runtime_key_safety_from_store(
+            record_store=record_store,  # type: ignore[arg-type]
+            policy_record=policy_record,
+            target=RuntimeKeySafetyTarget(
+                context=request.destination.context,
+                instance=request.destination.instance,
+                environment_class=runtime_key_safety_environment_class(
+                    request.destination.instance
+                ),
+            ),
+            required_binding_keys=request.secret_bindings,
+        )
+    except (AttributeError, ValueError):
+        return secret_evidence_for_agent_write_intent(
+            request=request, evaluation=None, unavailable=True
+        )
+    return secret_evidence_for_agent_write_intent(
+        request=request,
+        evaluation=evaluation,
+        policy_record_id=policy_record.record_id,
+        policy_sha256=policy_record.policy_sha256,
+    )
+
+
 def _read_idempotency_record(
     *,
     record_store: object,
@@ -5447,6 +5493,14 @@ def create_launchplane_service_app(
                     product=intent_request.product,
                     context=intent_request.context,
                 )
+                if intent_request.secret_bindings:
+                    secret_authz_action = agent_write_intent_secret_action(intent_request)
+                    authorized = authorized and authz_policy.allows(
+                        identity=identity,
+                        action=secret_authz_action,
+                        product=intent_request.product,
+                        context=intent_request.context,
+                    )
                 intent_audit = agent_authz_audit(
                     identity=identity,
                     action=intent_authz_action,
@@ -5457,10 +5511,15 @@ def create_launchplane_service_app(
                     policy_source=resolved_authz_policy_source,
                     policy_sha256=resolved_authz_policy_sha256,
                 )
+                secret_evidence = _agent_write_intent_secret_evidence(
+                    record_store=record_store,
+                    request=intent_request,
+                )
                 evaluation = evaluate_agent_write_intent(
                     request=intent_request,
                     authorized=authorized,
                     audit=intent_audit,
+                    secret_evidence=secret_evidence,
                 )
                 result = {"intent": evaluation.model_dump(mode="json")}
                 driver_result = result

@@ -223,6 +223,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             "preview_pr_feedback.write": "safe_write",
             "every_code_work_request.rerun": "safe_write",
             "product_config.apply": "mutation",
+            "product_config.apply.secret": "secret_backed",
             "generic_web_prod_promotion.execute": "prod",
             "preview_destroy.execute": "destructive",
             "secret_binding.apply": "secret_backed",

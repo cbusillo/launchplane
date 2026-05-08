@@ -292,7 +292,7 @@ def action_safety(action: str) -> AgentConsumerActionSafety:
     action_parts = tuple(part for part in re.split(r"[_.-]+", normalized_action) if part)
     if normalized_action.startswith("authz_policy"):
         return "policy_admin"
-    if "secret" in action_parts:
+    if "secret" in action_parts or normalized_action.endswith(".secret"):
         return "secret_backed"
     if any(part in action_parts for part in ("destroy", "cleanup", "delete", "rollback")):
         return "destructive"
