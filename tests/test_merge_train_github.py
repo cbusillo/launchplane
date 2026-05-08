@@ -4,6 +4,7 @@ from unittest.mock import patch
 from urllib.error import HTTPError
 
 from control_plane.merge_train_github import GitHubMergeTrainClient
+from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.merge_train_github import RecordingMergeTrainGitHubTransport
@@ -104,6 +105,166 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 transport.request(method="PUT", path="/repos/cbusillo/repo/pulls/1/merge")
 
         self.assertEqual(caught.exception.status_code, 409)
+
+
+class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
+    def test_snapshot_reader_builds_pull_request_snapshots_from_github(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [
+                    _github_pull_request(42, mergeable=None),
+                ],
+                _github_pull_request(42, mergeable=True),
+                {"permission": "admin"},
+                {"state": "success"},
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+        reader = GitHubMergeTrainSnapshotReader(transport=transport)
+
+        snapshot = reader.read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(snapshot.repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(snapshot.base_branch, "main")
+        self.assertEqual(len(snapshot.pull_requests), 1)
+        pull_request = snapshot.pull_requests[0]
+        self.assertEqual(pull_request.number, 42)
+        self.assertEqual(pull_request.labels, ("ready-to-merge",))
+        self.assertEqual(pull_request.actor_role, "repo_admin")
+        self.assertEqual(pull_request.head_sha, "head-42")
+        self.assertEqual(pull_request.base_sha, "base-42")
+        self.assertEqual(pull_request.mergeable, "mergeable")
+        self.assertEqual(pull_request.required_checks_status, "pass")
+        self.assertFalse(pull_request.branch_update_required)
+        self.assertEqual(
+            [request.path for request in transport.requests],
+            [
+                "/repos/cbusillo/sellyouroutboard/pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=1",
+                "/repos/cbusillo/sellyouroutboard/pulls/42",
+                "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
+                "/repos/cbusillo/sellyouroutboard/commits/head-42/status",
+                "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100",
+            ],
+        )
+
+    def test_snapshot_reader_paginates_pull_requests(self) -> None:
+        first_page = [_github_pull_request(number) for number in range(1, 101)]
+        second_page = [_github_pull_request(101)]
+        responses: list[object] = [first_page, second_page]
+        for number in range(1, 102):
+            responses.extend(
+                [
+                    _github_pull_request(number),
+                    {"permission": "admin"},
+                    {"state": "success"},
+                    {"check_runs": [_check_run("completed", "success")]},
+                ]
+            )
+        transport = RecordingMergeTrainGitHubTransport(responses=tuple(responses))
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(len(snapshot.pull_requests), 101)
+        self.assertEqual(snapshot.pull_requests[0].number, 1)
+        self.assertEqual(snapshot.pull_requests[-1].number, 101)
+
+    def test_snapshot_reader_maps_owner_association_without_permission_lookup(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [_github_pull_request(12, author_association="OWNER")],
+                _github_pull_request(12, author_association="OWNER"),
+                {"state": "success"},
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(snapshot.pull_requests[0].actor_role, "repo_owner")
+        self.assertNotIn("collaborators", "\n".join(request.path for request in transport.requests))
+
+    def test_snapshot_reader_combines_pending_checks_without_mutation(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [_github_pull_request(13)],
+                _github_pull_request(13, mergeable=None, mergeable_state="behind"),
+                {"permission": "admin"},
+                {"state": "success"},
+                {"check_runs": [_check_run("queued", None)]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        pull_request = snapshot.pull_requests[0]
+        self.assertEqual(pull_request.mergeable, "unknown")
+        self.assertEqual(pull_request.required_checks_status, "pending")
+        self.assertTrue(pull_request.branch_update_required)
+        self.assertTrue(all(request.method == "GET" for request in transport.requests))
+
+    def test_snapshot_reader_uses_check_runs_when_legacy_statuses_are_absent(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [_github_pull_request(14)],
+                _github_pull_request(14),
+                {"permission": "admin"},
+                {"state": "pending", "total_count": 0},
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(snapshot.pull_requests[0].required_checks_status, "pass")
+
+    def test_snapshot_reader_fails_closed_on_missing_required_shape(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(responses=([{"number": 1}],))
+
+        with self.assertRaisesRegex(MergeTrainGitHubError, "head"):
+            GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+
+def _github_pull_request(
+    number: int,
+    *,
+    mergeable: bool | None = True,
+    mergeable_state: str = "clean",
+    author_association: str = "COLLABORATOR",
+) -> dict[str, object]:
+    return {
+        "number": number,
+        "html_url": f"https://github.com/cbusillo/sellyouroutboard/pull/{number}",
+        "title": f"Pull request {number}",
+        "state": "open",
+        "draft": False,
+        "created_at": f"2026-05-08T10:{number % 60:02d}:00Z",
+        "labels": [{"name": "ready-to-merge"}],
+        "user": {"login": "cbusillo"},
+        "author_association": author_association,
+        "head": {"sha": f"head-{number}"},
+        "base": {"sha": f"base-{number}"},
+        "mergeable": mergeable,
+        "mergeable_state": mergeable_state,
+    }
+
+
+def _check_run(status: str, conclusion: str | None) -> dict[str, object]:
+    payload: dict[str, object] = {"status": status}
+    if conclusion is not None:
+        payload["conclusion"] = conclusion
+    return payload
 
 
 if __name__ == "__main__":

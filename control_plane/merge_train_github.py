@@ -1,12 +1,17 @@
 import json
 from typing import Protocol
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
+from control_plane.merge_train import MergeTrainCheckStatus
+from control_plane.merge_train import MergeTrainDryRunSnapshot
+from control_plane.merge_train import MergeTrainMergeableState
+from control_plane.merge_train import MergeTrainPullRequestSnapshot
+from control_plane.merge_train import MergeTrainPullRequestState
 
 
 class MergeTrainGitHubError(RuntimeError):
@@ -122,6 +127,140 @@ class GitHubMergeTrainClient:
         return merge_commit_sha
 
 
+class GitHubMergeTrainSnapshotReader:
+    def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
+        self.transport = transport
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        repository_path = _repository_path(repository)
+        normalized_base_branch = _required_value(
+            base_branch, "GitHub pull request base branch is required."
+        )
+        pull_requests = tuple(
+            self._pull_request_snapshot(
+                repository=repository,
+                repository_path=repository_path,
+                pull_request=pull_request,
+            )
+            for pull_request in self._list_open_pull_requests(
+                repository_path=repository_path, base_branch=normalized_base_branch
+            )
+        )
+        return MergeTrainDryRunSnapshot(
+            repository=repository,
+            base_branch=normalized_base_branch,
+            pull_requests=pull_requests,
+        )
+
+    def _list_open_pull_requests(
+        self, *, repository_path: str, base_branch: str
+    ) -> tuple[dict[str, object], ...]:
+        pull_requests: list[dict[str, object]] = []
+        page = 1
+        while True:
+            query = urlencode(
+                {
+                    "state": "open",
+                    "base": base_branch,
+                    "sort": "created",
+                    "direction": "asc",
+                    "per_page": "100",
+                    "page": str(page),
+                }
+            )
+            payload = self.transport.request(
+                method="GET", path=f"/repos/{repository_path}/pulls?{query}"
+            )
+            if not isinstance(payload, list):
+                raise MergeTrainGitHubError(
+                    "GitHub pull request list response must be a JSON array."
+                )
+            page_pull_requests = [_json_object(item, "GitHub pull request entry") for item in payload]
+            pull_requests.extend(page_pull_requests)
+            if len(page_pull_requests) < 100:
+                return tuple(pull_requests)
+            page += 1
+
+    def _pull_request_snapshot(
+        self, *, repository: str, repository_path: str, pull_request: dict[str, object]
+    ) -> MergeTrainPullRequestSnapshot:
+        pull_request_number = _required_int(
+            pull_request.get("number"), "GitHub pull request entry requires number."
+        )
+        detail = _json_object(
+            self.transport.request(
+                method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
+            ),
+            "GitHub pull request detail response",
+        )
+        source = pull_request | detail
+        head = _json_object(source.get("head"), "GitHub pull request head")
+        base = _json_object(source.get("base"), "GitHub pull request base")
+        head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+        user = _json_object(source.get("user"), "GitHub pull request user")
+        actor_role = self._actor_role_for_pull_request(
+            repository_path=repository_path,
+            username=_required_text(user.get("login"), "GitHub pull request user requires login."),
+            author_association=str(source.get("author_association") or ""),
+        )
+        return MergeTrainPullRequestSnapshot(
+            number=pull_request_number,
+            url=str(source.get("html_url") or "").strip(),
+            title=str(source.get("title") or "").strip(),
+            state=_pull_request_state(str(source.get("state") or "")),
+            is_draft=bool(source.get("draft")),
+            created_at=_required_text(
+                source.get("created_at"), "GitHub pull request entry requires created_at."
+            ),
+            labels=_labels(source.get("labels")),
+            actor_role=actor_role,
+            head_sha=head_sha,
+            base_sha=str(base.get("sha") or "").strip(),
+            mergeable=_mergeable_state(source),
+            required_checks_status=self._required_checks_status(
+                repository_path=repository_path, head_sha=head_sha
+            ),
+            branch_update_required=_branch_update_required(source),
+        )
+
+    def _actor_role_for_pull_request(
+        self, *, repository_path: str, username: str, author_association: str
+    ) -> str:
+        if author_association.upper() == "OWNER":
+            return "repo_owner"
+        payload = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/collaborators/{quote(username, safe='')}/permission",
+            ),
+            "GitHub collaborator permission response",
+        )
+        return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
+
+    def _required_checks_status(
+        self, *, repository_path: str, head_sha: str
+    ) -> MergeTrainCheckStatus:
+        encoded_head_sha = quote(head_sha, safe="")
+        status_payload = _json_object(
+            self.transport.request(
+                method="GET", path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
+            ),
+            "GitHub combined status response",
+        )
+        check_runs_payload = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?per_page=100",
+            ),
+            "GitHub check runs response",
+        )
+        return _combine_check_statuses(
+            _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
+        )
+
+
 class MergeTrainGitHubRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -165,6 +304,116 @@ def _repository_path(repository: str) -> str:
     if len(parts) != 2 or not all(part.strip() for part in parts):
         raise ValueError("GitHub repository must be formatted as owner/name.")
     return "/".join(quote(part.strip(), safe="") for part in parts)
+
+
+def _json_object(value: object, label: str) -> dict[str, object]:
+    if not isinstance(value, dict):
+        raise MergeTrainGitHubError(f"{label} must be a JSON object.")
+    return value
+
+
+def _required_int(value: object, message: str) -> int:
+    if not isinstance(value, int) or value <= 0:
+        raise MergeTrainGitHubError(message)
+    return value
+
+
+def _required_text(value: object, message: str) -> str:
+    if not isinstance(value, str):
+        raise MergeTrainGitHubError(message)
+    normalized = value.strip()
+    if not normalized:
+        raise MergeTrainGitHubError(message)
+    return normalized
+
+
+def _pull_request_state(value: str) -> MergeTrainPullRequestState:
+    normalized = value.strip().lower()
+    if normalized == "open":
+        return "open"
+    if normalized == "closed":
+        return "closed"
+    raise MergeTrainGitHubError("GitHub pull request state must be open or closed.")
+
+
+def _labels(value: object) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise MergeTrainGitHubError("GitHub pull request labels must be a JSON array.")
+    labels: list[str] = []
+    for item in value:
+        label = _json_object(item, "GitHub pull request label")
+        name = _required_text(label.get("name"), "GitHub pull request label requires name.")
+        if name not in labels:
+            labels.append(name)
+    return tuple(labels)
+
+
+def _mergeable_state(source: dict[str, object]) -> MergeTrainMergeableState:
+    if bool(source.get("draft")):
+        return "unknown"
+    mergeable = source.get("mergeable")
+    if mergeable is True:
+        return "mergeable"
+    if mergeable is False:
+        return "conflicting"
+    return "unknown"
+
+
+def _branch_update_required(source: dict[str, object]) -> bool:
+    mergeable_state = str(source.get("mergeable_state") or "").strip().lower()
+    return mergeable_state == "behind"
+
+
+def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:
+    if payload.get("total_count") == 0:
+        return "unknown"
+    state = str(payload.get("state") or "").strip().lower()
+    if state == "success":
+        return "pass"
+    if state in {"failure", "error"}:
+        return "fail"
+    if state == "pending":
+        return "pending"
+    return "unknown"
+
+
+def _check_runs_status(payload: dict[str, object]) -> MergeTrainCheckStatus:
+    check_runs = payload.get("check_runs")
+    if not isinstance(check_runs, list):
+        raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
+    if not check_runs:
+        return "unknown"
+    statuses: list[MergeTrainCheckStatus] = []
+    for item in check_runs:
+        check_run = _json_object(item, "GitHub check run")
+        statuses.append(_check_run_status(check_run))
+    return _combine_check_statuses(*statuses)
+
+
+def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
+    status = str(check_run.get("status") or "").strip().lower()
+    if status != "completed":
+        return "pending" if status else "unknown"
+    conclusion = str(check_run.get("conclusion") or "").strip().lower()
+    if conclusion in {"success", "neutral", "skipped"}:
+        return "pass"
+    if conclusion in {"failure", "timed_out", "cancelled", "action_required"}:
+        return "fail"
+    return "unknown"
+
+
+def _combine_check_statuses(*statuses: MergeTrainCheckStatus) -> MergeTrainCheckStatus:
+    if any(status == "fail" for status in statuses):
+        return "fail"
+    if any(status == "pending" for status in statuses):
+        return "pending"
+    if statuses and all(status == "pass" for status in statuses):
+        return "pass"
+    if any(status == "pass" for status in statuses):
+        return "pass"
+    return "unknown"
 
 
 def _required_value(value: str, message: str) -> str:

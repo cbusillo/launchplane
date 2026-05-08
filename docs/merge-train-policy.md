@@ -131,3 +131,8 @@ blocked labels use the issue labels endpoint, branch refresh uses
 `expected_head_sha`, and merge uses `sha`. A GitHub `409 Conflict` from the
 guarded merge call is treated as stale-head evidence and requires a fresh read
 instead of a blind retry.
+
+Live worker reads build the same `MergeTrainDryRunSnapshot` contract from
+GitHub pull requests for the policy repository/base branch. The reader only uses
+GET requests, preserves unknown mergeability or check evidence as `unknown` or
+`pending`, and fails closed when required pull request fields are missing.
