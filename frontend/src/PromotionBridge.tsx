@@ -23,6 +23,7 @@ import type {
   GenericWebPromotionWorkflowPayload,
   GenericWebPromotionWorkflowRequest,
   LaneSummary,
+  ProductActionAvailability,
   Status,
 } from "./types";
 
@@ -54,8 +55,10 @@ export function PromotionBridge({
   prod,
   testing,
   actions,
+  environmentActions = [],
   product,
   context,
+  environment = "prod",
   decision,
   loading,
   onAction,
@@ -65,8 +68,10 @@ export function PromotionBridge({
   prod: LaneSummary | null;
   testing: LaneSummary | null;
   actions: DriverActionDescriptor[];
+  environmentActions?: ProductActionAvailability[];
   product: string;
   context: string;
+  environment?: string;
   decision: PromotionDecision;
   loading: boolean;
   onAction: (action: DriverActionDescriptor) => void;
@@ -81,6 +86,12 @@ export function PromotionBridge({
   const workflowAction = actions.find(
     (action) =>
       action.route_path === "/v1/drivers/generic-web/prod-promotion-workflow",
+  );
+  const productPromotionAction = environmentActions.find(
+    (action) => action.action_id === "prod_promotion",
+  );
+  const productWorkflowAction = environmentActions.find(
+    (action) => action.action_id === "prod_promotion_workflow",
   );
   const [dryRunResult, setDryRunResult] =
     useState<GenericWebProdPromotionPayload | null>(null);
@@ -98,6 +109,9 @@ export function PromotionBridge({
   const testingSourceRef = sourceRefFromLane(testing);
   const supportsGenericWebPromotion =
     primaryAction?.route_path === "/v1/drivers/generic-web/prod-promotion";
+  const productAllowsWorkflow = productWorkflowAction?.enabled ?? Boolean(workflowAction);
+  const promotionBlockers = actionDisabledReasons(productPromotionAction);
+  const workflowBlockers = actionDisabledReasons(productWorkflowAction);
   const canDryRun = Boolean(
     supportsGenericWebPromotion &&
       decision.verdict === "ready" &&
@@ -206,8 +220,8 @@ export function PromotionBridge({
   return (
     <section className={`panel promotion-bridge verdict-${decision.verdict}`}>
       <PanelHead
-        eyebrow="promotion decision"
-        title="Testing to prod"
+        eyebrow={`${product || "product"} promotion`}
+        title={`Testing to ${environment}`}
         right={<StatusPill status={decision.verdict} />}
       />
       {loading ? (
@@ -234,6 +248,12 @@ export function PromotionBridge({
               <code>{decision.prodArtifact || "unknown prod"}</code>
             </div>
           </div>
+          <PromotionActionAvailability
+            productAction={productPromotionAction}
+            workflowAction={productWorkflowAction}
+            promotionBlockers={promotionBlockers}
+            workflowBlockers={workflowBlockers}
+          />
           <div className="gate-list">
             {decision.gates.map((gate) => (
               <div className="gate-row" key={gate.label}>
@@ -265,6 +285,17 @@ export function PromotionBridge({
                     )}
                     <span>Dry run promotion</span>
                   </button>
+                  {!canDryRun ? (
+                    <ActionBlockerList
+                      reasons={dryRunDisabledReasons({
+                        decision,
+                        testingArtifact,
+                        testingSourceRef,
+                        product,
+                        context,
+                      })}
+                    />
+                  ) : null}
                   {dryRunResult ? (
                     <div className="workflow-action-row">
                       <button
@@ -281,21 +312,15 @@ export function PromotionBridge({
                         )}
                         <span>Run workflow dry run</span>
                       </button>
-                      <button
-                        className="button button-primary bridge-action"
-                        type="button"
-                        data-safety="mutation"
-                        disabled={!canDispatchWorkflow}
-                        onClick={() => dispatchPromotionWorkflow(false)}
-                      >
-                        {submittingWorkflowMode === "promote" ? (
-                          <Loader2 className="spin" size={16} />
-                        ) : (
-                          <Send size={16} />
-                        )}
-                        <span>Promote through workflow</span>
-                      </button>
                     </div>
+                  ) : null}
+                  {dryRunResult && !canDispatchWorkflow ? (
+                    <ActionBlockerList
+                      reasons={workflowDisabledReasons({
+                        product,
+                        context,
+                      })}
+                    />
                   ) : null}
                 </>
               ) : (
@@ -338,6 +363,134 @@ export function PromotionBridge({
       )}
     </section>
   );
+}
+
+function PromotionActionAvailability({
+  productAction,
+  workflowAction,
+  promotionBlockers,
+  workflowBlockers,
+}: {
+  productAction?: ProductActionAvailability;
+  workflowAction?: ProductActionAvailability;
+  promotionBlockers: string[];
+  workflowBlockers: string[];
+}) {
+  if (!productAction && !workflowAction) {
+    return null;
+  }
+  return (
+    <div className="bridge-action-availability" aria-label="Promotion action availability">
+      <ActionAvailabilityRow
+        label="Live promotion"
+        action={productAction}
+        blockers={promotionBlockers}
+      />
+      <ActionAvailabilityRow
+        label="Workflow dispatch"
+        action={workflowAction}
+        blockers={workflowBlockers}
+      />
+    </div>
+  );
+}
+
+function ActionAvailabilityRow({
+  label,
+  action,
+  blockers,
+}: {
+  label: string;
+  action?: ProductActionAvailability;
+  blockers: string[];
+}) {
+  if (!action) {
+    return (
+      <div className="bridge-action-availability-row" data-enabled="false">
+        <strong>{label}</strong>
+        <span>not advertised</span>
+      </div>
+    );
+  }
+  return (
+    <div className="bridge-action-availability-row" data-enabled={action.enabled}>
+      <strong>{label}</strong>
+      <span>{action.enabled ? "available" : blockers.join("; ") || "blocked"}</span>
+    </div>
+  );
+}
+
+function ActionBlockerList({ reasons }: { reasons: string[] }) {
+  if (!reasons.length) {
+    return null;
+  }
+  return (
+    <div className="bridge-action-blockers" role="status">
+      {reasons.map((reason) => (
+        <span key={reason}>{reason}</span>
+      ))}
+    </div>
+  );
+}
+
+function actionDisabledReasons(action?: ProductActionAvailability): string[] {
+  if (!action || action.enabled) {
+    return [];
+  }
+  return action.disabled_reasons.length ? action.disabled_reasons : ["Action is disabled."];
+}
+
+function dryRunDisabledReasons({
+  decision,
+  testingArtifact,
+  testingSourceRef,
+  product,
+  context,
+}: {
+  decision: PromotionDecision;
+  testingArtifact: string;
+  testingSourceRef: string;
+  product: string;
+  context: string;
+}): string[] {
+  const reasons: string[] = [];
+  if (decision.verdict !== "ready") {
+    reasons.push(decision.blockingEvidence || "Promotion evidence is not ready.");
+  }
+  if (!testingArtifact) {
+    reasons.push("Testing artifact evidence is missing.");
+  }
+  if (!testingSourceRef) {
+    reasons.push("Testing source ref evidence is missing.");
+  }
+  if (!product.trim()) {
+    reasons.push("Product key is missing.");
+  }
+  if (!context.trim()) {
+    reasons.push("Prod context is missing.");
+  }
+  return uniqueStrings(reasons);
+}
+
+function workflowDisabledReasons({
+  product,
+  context,
+}: {
+  product: string;
+  context: string;
+}): string[] {
+  const reasons: string[] = [];
+  if (!product.trim()) {
+    reasons.push("Product key is missing.");
+  }
+  if (!context.trim()) {
+    reasons.push("Prod context is missing.");
+  }
+  return uniqueStrings(reasons);
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 export function buildPromotionDecision(
