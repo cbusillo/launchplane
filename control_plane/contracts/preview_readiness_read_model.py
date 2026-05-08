@@ -4,6 +4,11 @@ from typing import Literal, Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.data_provenance import (
+    AgentContextEvidence,
+    AgentContextProvenance,
+    safe_agent_context_text,
+)
 from control_plane.contracts.every_code_preview_gate_record import (
     EveryCodePreviewGateRecord,
     EveryCodePreviewGateStatus,
@@ -56,6 +61,8 @@ class PreviewReadinessItem(BaseModel):
     source_of_truth_url: str
     safe_to_request_preview: bool
     needs_operator_attention: bool
+    context_provenance: AgentContextProvenance
+    evidence: tuple[AgentContextEvidence, ...] = ()
 
     @model_validator(mode="after")
     def _validate_item(self) -> "PreviewReadinessItem":
@@ -139,11 +146,16 @@ def _readiness_item_from_gate(gate: EveryCodePreviewGateRecord) -> PreviewReadin
         last_checked_at=gate.last_checked_at,
         ready_at=gate.ready_at or gate.labeled_at,
         terminal_at=gate.cancelled_at,
-        detail=_detail(gate=gate, readiness_status=readiness_status),
-        check_summary=gate.check_summary,
+        detail=safe_agent_context_text(
+            _detail(gate=gate, readiness_status=readiness_status),
+            fallback="Preview readiness status is recorded without detail.",
+        ),
+        check_summary=safe_agent_context_text(gate.check_summary, fallback=""),
         source_of_truth_url=gate.pr_url,
         safe_to_request_preview=gate.status in {"ready", "labeled"},
         needs_operator_attention=gate.status == "blocked",
+        context_provenance=_provenance(gate),
+        evidence=_evidence(gate),
     )
 
 
@@ -177,3 +189,45 @@ def _detail(
     if readiness_status == "needs_attention":
         return gate.blocked_reason or "Preview readiness needs operator attention."
     return gate.blocked_reason or "Preview readiness is terminal for this pull request."
+
+
+def _provenance(gate: EveryCodePreviewGateRecord) -> AgentContextProvenance:
+    return AgentContextProvenance(
+        source_kind="record",
+        source_record_id=gate.gate_id,
+        source_url=gate.pr_url,
+        recorded_at=gate.created_at,
+        refreshed_at=gate.updated_at,
+        freshness_status=_freshness_status(gate),
+        detail="Every Code preview gate record projected for agent readiness context.",
+    )
+
+
+def _evidence(gate: EveryCodePreviewGateRecord) -> tuple[AgentContextEvidence, ...]:
+    evidence = [
+        AgentContextEvidence(
+            code="source_of_truth",
+            state="verified",
+            detail="Linked pull request is the source of truth for preview readiness.",
+            source_url=gate.pr_url,
+            recorded_at=gate.updated_at,
+        ),
+        AgentContextEvidence(
+            code="preview_gate_record",
+            state=_freshness_status(gate),
+            detail=f"Preview gate status is {gate.status}.",
+            source_url=gate.pr_url,
+            recorded_at=gate.last_checked_at or gate.updated_at,
+        ),
+    ]
+    if gate.issue_url.strip():
+        evidence.append(
+            AgentContextEvidence(
+                code="source_issue",
+                state="verified",
+                detail="Linked issue requested the local automation work.",
+                source_url=gate.issue_url,
+                recorded_at=gate.created_at,
+            )
+        )
+    return tuple(evidence)

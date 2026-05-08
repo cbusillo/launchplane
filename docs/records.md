@@ -600,12 +600,15 @@ state/
   reads when they only need status. The summary projection links back to the
   issue and result PR, reports whether work is active, stuck, complete, or
   rerunnable, and includes safe rerun guidance without exposing webhook delivery
-  ids, blocked error messages, issue bodies, prompt text, or local checkout
-  paths.
+  ids, blocked error messages, issue bodies, prompt text, local checkout paths,
+  or local worker hostnames. Summary entries include compact agent-context
+  provenance and evidence for the source issue and recorded work-request state.
 - Agent callers should prefer `GET /v1/previews/readiness` over raw preview-gate
   reads when they only need preview gate status. The readiness projection maps
   gate state to waiting, ready, needs-attention, or cancelled statuses with
-  source links, freshness/provenance, and safe request-preview guidance.
+  source links, freshness/provenance, and safe request-preview guidance. Detail
+  fields are bounded and redacted so provider-only internals, local paths, and
+  secret-shaped values are not copied into agent context payloads.
 
 ## Inventory
 

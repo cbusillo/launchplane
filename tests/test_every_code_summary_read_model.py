@@ -65,7 +65,7 @@ class EveryCodeSummaryReadModelTests(unittest.TestCase):
                         issue_number=191,
                         issue_url="https://github.com/cbusillo/launchplane/issues/191",
                         claimed_at="2026-05-06T02:01:00Z",
-                        claimed_by_host="local-mac",
+                        claimed_by_host="Chris-Studio.local",
                         started_at="2026-05-06T02:02:00Z",
                         finished_at="2026-05-06T02:08:00Z",
                         updated_at="2026-05-06T02:08:00Z",
@@ -93,6 +93,9 @@ class EveryCodeSummaryReadModelTests(unittest.TestCase):
         self.assertFalse(summaries[190].safe_to_rerun)
         self.assertEqual(summaries[191].summary_status, "stuck")
         self.assertTrue(summaries[191].safe_to_rerun)
+        self.assertEqual(summaries[191].claimed_by_host, "claimed_local_worker")
+        self.assertEqual(summaries[191].provenance.source_record_id, summaries[191].request_id)
+        self.assertIn("work_request_record", {entry.code for entry in summaries[191].evidence})
         self.assertNotIn("private", summaries[191].model_dump_json())
         self.assertEqual(summaries[192].summary_status, "complete")
         self.assertEqual(summaries[192].result_pr_url, "https://github.com/cbusillo/launchplane/pull/200")

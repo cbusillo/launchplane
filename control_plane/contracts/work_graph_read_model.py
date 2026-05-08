@@ -4,6 +4,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.data_provenance import agent_safe_host_label
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.product_environment_read_model import ProductSiteOverview
 from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
@@ -326,7 +327,7 @@ def _work_request_issue_snapshot(request: EveryCodeWorkRequestRecord) -> WorkGra
         url=request.issue_url,
         state="closed" if request.state == "done" else "open",
         focus=_work_request_focus(request),
-        manager=request.claimed_by_host or request.trigger_actor or "Code",
+        manager=agent_safe_host_label(request.claimed_by_host) or request.trigger_actor or "Code",
         finish_line=request.result_summary,
         labels=tuple(label for label in (request.trigger_label,) if label),
         blocked_by=1 if request.state == "blocked" else 0,

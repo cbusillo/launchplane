@@ -23,6 +23,27 @@ export interface DataProvenance {
   detail: string;
 }
 
+export interface AgentContextEvidence {
+  code: string;
+  state: FreshnessStatus;
+  detail: string;
+  source_url: string;
+  sensitivity: "public" | "internal" | "restricted";
+  recorded_at: string;
+}
+
+export interface AgentContextProvenance {
+  source_kind: "record" | "provider" | "descriptor" | "unsupported";
+  freshness_status: FreshnessStatus;
+  source_url: string;
+  source_record_id: string;
+  recorded_at: string;
+  refreshed_at: string;
+  stale_after: string;
+  detail: string;
+  sensitivity: "public" | "internal" | "restricted";
+}
+
 export interface DriverActionDescriptor {
   action_id: string;
   label: string;
@@ -569,6 +590,8 @@ export interface EveryCodeWorkRequestSummary {
   result_summary: string;
   safe_to_rerun: boolean;
   next_action: string;
+  provenance: AgentContextProvenance;
+  evidence: AgentContextEvidence[];
 }
 
 export interface EveryCodeSummaryPayload {
@@ -615,6 +638,8 @@ export interface PreviewReadinessItem {
   source_of_truth_url: string;
   safe_to_request_preview: boolean;
   needs_operator_attention: boolean;
+  context_provenance: AgentContextProvenance;
+  evidence: AgentContextEvidence[];
 }
 
 export interface PreviewReadinessPayload {

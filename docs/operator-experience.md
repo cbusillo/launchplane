@@ -142,6 +142,13 @@ Every operator-visible field needs a trust state:
 Do not show fixture, demo, fallback, inferred, or placeholder operational data in
 production UI without a visible trust state.
 
+Agent-facing context uses the same trust vocabulary and applies stricter safety
+rules because payloads may be copied into local terminal sessions. Agent context
+must include compact provenance for the source record or source URL, distinguish
+verified, recorded, stale, missing, and unsupported evidence, and redact local
+paths, secret-shaped values, bearer tokens, provider-only topology, raw issue
+bodies, and worker hostnames before response serialization.
+
 ## UI Rebuild
 
 When the API contract is ready, rebuild the UI around:

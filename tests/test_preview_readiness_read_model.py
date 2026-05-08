@@ -127,6 +127,29 @@ class PreviewReadinessReadModelTests(unittest.TestCase):
         self.assertEqual(len(read_model.items), 1)
         self.assertEqual(read_model.items[0].detail, "Timed out.")
 
+    def test_preview_readiness_redacts_agent_unsafe_detail(self) -> None:
+        read_model = build_preview_readiness_read_model(
+            generated_at="2026-05-08T18:35:00Z",
+            record_store=_Store(
+                (
+                    _gate(
+                        status="blocked",
+                        blocked_reason="Failed in /Users/chris/private/checkout with token=secret-value",
+                        check_summary="Authorization: Bearer abcdefghijklmnopqrstuvwxyz123456",
+                    ),
+                )
+            ),
+        )
+
+        item = read_model.items[0]
+        self.assertIn("[redacted-path]", item.detail)
+        self.assertIn("token=[redacted]", item.detail)
+        self.assertIn("Bearer [redacted]", item.check_summary)
+        self.assertNotIn("/Users/chris", item.model_dump_json())
+        self.assertNotIn("secret-value", item.model_dump_json())
+        self.assertEqual(item.context_provenance.source_record_id, item.gate_id)
+        self.assertIn("preview_gate_record", {entry.code for entry in item.evidence})
+
     def test_invalid_status_filter_fails_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "status filter is invalid"):
             build_preview_readiness_read_model(
