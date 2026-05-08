@@ -35,6 +35,7 @@ async function requestJson<T>(
   path: string,
   method: "GET" | "POST" = "GET",
   body?: unknown,
+  signal?: AbortSignal,
 ): Promise<T> {
   const headers: HeadersInit = {
     Accept: "application/json",
@@ -47,6 +48,7 @@ async function requestJson<T>(
     credentials: "same-origin",
     headers,
     body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
   });
   const payload = (await response.json()) as T | ApiErrorPayload;
   if (!response.ok) {
@@ -102,9 +104,13 @@ export function listProducts(): Promise<ProductListPayload> {
 export function readProductEnvironmentConfigStatus(
   product: string,
   environment: string,
+  signal?: AbortSignal,
 ): Promise<ProductEnvironmentConfigStatusPayload> {
   return requestJson<ProductEnvironmentConfigStatusPayload>(
     `/v1/products/${encodeURIComponent(product)}/environments/${encodeURIComponent(environment)}/config-status`,
+    "GET",
+    undefined,
+    signal,
   );
 }
 

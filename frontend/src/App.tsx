@@ -404,6 +404,7 @@ export function App() {
         readProductEnvironmentConfigStatus(
           selectedProductOverview.product,
           environment.environment,
+          controller.signal,
         ).then((payload) => payload.config_status),
       ),
     )

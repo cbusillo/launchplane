@@ -144,6 +144,7 @@ function EnvironmentDetailStrip({
   const blockedActions = environment.available_actions.filter(
     (action) => !action.enabled,
   );
+  const baseUrl = safeExternalHttpUrl(environment.base_url);
   return (
     <div className="environment-detail-strip" data-environment={environment.environment}>
       <div className="environment-detail-identity">
@@ -151,11 +152,13 @@ function EnvironmentDetailStrip({
           {environment.environment}
         </span>
         <code>{environment.context}</code>
-        {environment.base_url ? (
-          <a href={environment.base_url} target="_blank" rel="noreferrer">
+        {baseUrl ? (
+          <a href={baseUrl.href} target="_blank" rel="noreferrer">
             <ExternalLink size={13} aria-hidden="true" />
             {environment.base_url}
           </a>
+        ) : environment.base_url ? (
+          <code>{environment.base_url}</code>
         ) : null}
       </div>
       <div className="environment-detail-facts">
@@ -192,4 +195,17 @@ function EnvironmentDetailStrip({
       ) : null}
     </div>
   );
+}
+
+function safeExternalHttpUrl(value: string): URL | null {
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return null;
+  }
+  try {
+    const url = new URL(trimmed);
+    return url.protocol === "http:" || url.protocol === "https:" ? url : null;
+  } catch {
+    return null;
+  }
 }
