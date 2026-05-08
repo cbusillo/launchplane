@@ -596,6 +596,12 @@ state/
   to linked issues. A single pull request can close multiple Every Code requests;
   queued matches are terminalized with service-owned claim metadata so terminal
   records still satisfy the work-request contract.
+- Agent callers should prefer `GET /v1/every-code/summary` over raw work-request
+  reads when they only need status. The summary projection links back to the
+  issue and result PR, reports whether work is active, stuck, complete, or
+  rerunnable, and includes safe rerun guidance without exposing webhook delivery
+  ids, blocked error messages, issue bodies, prompt text, or local checkout
+  paths.
 
 ## Inventory
 

@@ -3,6 +3,7 @@ import type {
   AuthSessionPayload,
   DriverListPayload,
   DriverViewPayload,
+  EveryCodeSummaryPayload,
   EveryCodeWorkRequestListPayload,
   GenericWebProdPromotionPayload,
   GenericWebProdPromotionRequest,
@@ -120,6 +121,14 @@ export function listEveryCodeWorkRequests(
 ): Promise<EveryCodeWorkRequestListPayload> {
   return requestJson<EveryCodeWorkRequestListPayload>(
     `/v1/every-code/work-requests?limit=${encodeURIComponent(String(limit))}`,
+  );
+}
+
+export function readEveryCodeSummary(
+  limit = 12,
+): Promise<EveryCodeSummaryPayload> {
+  return requestJson<EveryCodeSummaryPayload>(
+    `/v1/every-code/summary?limit=${encodeURIComponent(String(limit))}`,
   );
 }
 

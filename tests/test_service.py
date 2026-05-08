@@ -1095,6 +1095,88 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(show_payload["request"]["state"], "claimed")
         self.assertEqual(show_payload["request"]["github_delivery_id"], "delivery-1")
 
+    def test_every_code_summary_returns_agent_safe_projection(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.read"],
+                    }
+                ]
+            }
+        )
+        issue_payload = _every_code_github_issue_labeled_payload()
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            webhook_status, _ = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-1",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            summary_status, summary_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/summary",
+                query_string="repository=cbusillo/code&issue_number=123&state=queued",
+            )
+
+        self.assertEqual(webhook_status, 202)
+        self.assertEqual(summary_status, 200)
+        summary = summary_payload["summary"]
+        self.assertEqual(summary["repository"], "cbusillo/code")
+        self.assertEqual(summary["issue_number"], 123)
+        self.assertEqual(summary["state_filter"], "queued")
+        self.assertEqual(len(summary["summaries"]), 1)
+        request_summary = summary["summaries"][0]
+        self.assertEqual(request_summary["repository"], "cbusillo/code")
+        self.assertEqual(request_summary["issue_number"], 123)
+        self.assertEqual(request_summary["summary_status"], "active")
+        self.assertFalse(request_summary["safe_to_rerun"])
+        self.assertNotIn("github_delivery_id", request_summary)
+
+    def test_every_code_summary_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/summary",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_every_code_github_webhook_dedupes_finished_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         policy = LaunchplaneAuthzPolicy.model_validate(
