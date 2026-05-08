@@ -421,6 +421,13 @@ Action names are classified for agent context as `read`, `safe_write`,
 classification is diagnostic and contractual; authorization still fails closed
 through the exact action/product/context policy rule.
 
+Agent-facing authorization diagnostics include an `agent_audit` envelope with
+the decision, safe reason code, agent subject, action, product, context, policy
+source, policy digest, and `authz_policy` source kind. This first audit surface
+is response provenance, not a persisted intent record. Future scoped write-intent
+routes should reuse the same shape and add durable record links once they create
+records.
+
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a
 matching `github_humans` rule exists. The GitHub OAuth client requests

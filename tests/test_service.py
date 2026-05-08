@@ -5170,6 +5170,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["authz"]["agent_consumer"]["action_safety"], "read")
         self.assertTrue(payload["authz"]["agent_consumer"]["read_only_context"])
         self.assertFalse(payload["authz"]["agent_consumer"]["approval_capable"])
+        self.assertEqual(payload["authz"]["agent_audit"]["decision"], "denied")
+        self.assertEqual(
+            payload["authz"]["agent_audit"]["reason_code"], "authorization_denied"
+        )
+        self.assertEqual(payload["authz"]["agent_audit"]["subject"]["action_safety"], "read")
         self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
 
     def test_product_profile_list_denial_includes_authz_diagnostics(self) -> None:
@@ -11877,6 +11882,14 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["authz"]["request"]["action"], "preview_pr_feedback.write")
         self.assertEqual(payload["authz"]["request"]["product"], "verireel")
         self.assertEqual(payload["authz"]["request"]["context"], "verireel-testing")
+        self.assertEqual(payload["authz"]["agent_audit"]["decision"], "denied")
+        self.assertEqual(
+            payload["authz"]["agent_audit"]["reason_code"], "authorization_denied"
+        )
+        self.assertEqual(
+            payload["authz"]["agent_audit"]["subject"]["action_safety"], "safe_write"
+        )
+        self.assertEqual(payload["authz"]["agent_audit"]["source_kind"], "authz_policy")
         self.assertIn("policy_sha256", payload["authz"])
         self.assertIn("policy_source", payload["authz"])
 

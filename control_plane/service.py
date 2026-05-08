@@ -111,13 +111,14 @@ from control_plane.launchplane_mutations import (
     control_plane_root,
 )
 from control_plane.service_auth import (
+    AgentAuthzDecision,
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
     TerminalAgentIdentity,
     TokenVerifier,
-    agent_consumer_subject,
+    agent_authz_audit,
     load_authz_policy,
     parse_authz_policy_toml,
 )
@@ -3445,6 +3446,8 @@ def _authz_diagnostic_payload(
     action: str = "",
     product: str = "",
     context: str = "",
+    decision: str = "denied",
+    reason_code: str = "authorization_denied",
 ) -> dict[str, object]:
     if isinstance(identity, GitHubHumanIdentity):
         identity_payload: dict[str, object] = {
@@ -3470,14 +3473,21 @@ def _authz_diagnostic_payload(
             "environment": identity.environment,
             "subject": identity.subject,
         }
+    normalized_decision: AgentAuthzDecision = "allowed" if decision == "allowed" else "denied"
+    audit = agent_authz_audit(
+        identity=identity,
+        action=action,
+        product=product,
+        context=context,
+        decision=normalized_decision,
+        reason_code=reason_code,
+        policy_source=authz_policy_source,
+        policy_sha256=authz_policy_sha256_value,
+    )
     payload: dict[str, object] = {
         "identity": identity_payload,
-        "agent_consumer": agent_consumer_subject(
-            identity=identity,
-            action=action,
-            product=product,
-            context=context,
-        ).model_dump(mode="json"),
+        "agent_consumer": audit.subject.model_dump(mode="json"),
+        "agent_audit": audit.model_dump(mode="json"),
         "policy_source": authz_policy_source,
         "policy_sha256": authz_policy_sha256_value,
     }
