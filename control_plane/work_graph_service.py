@@ -11,11 +11,16 @@ from control_plane.contracts.product_environment_read_model import (
     ProductReadModelStore,
     build_product_site_overviews,
 )
+from control_plane.contracts.repo_product_mapping_read_model import (
+    RepoProductMappingProductStore,
+    RepoProductMappingWorkRequestStore,
+    build_repo_product_mapping_from_records,
+)
 from control_plane.contracts.work_graph_read_model import (
     WorkGraphPlanningIssueFacts,
     WorkGraphSnapshot,
     build_work_graph_queue,
-    build_work_graph_snapshot_from_records,
+    build_work_graph_snapshot_from_repo_mapping,
 )
 
 
@@ -54,10 +59,20 @@ def build_work_graph_snapshot_service_payload(
         record_store=product_store,
         action_allowed=action_allowed,
     )
+    readable_product_profiles = tuple(
+        profile
+        for profile in product_store.list_product_profile_records()
+        if action_allowed("product_environment.read", profile.product, "launchplane")
+    )
     planning_issue_facts = planning_facts_provider() if planning_facts_provider is not None else ()
-    snapshot = build_work_graph_snapshot_from_records(
+    repo_mapping = build_repo_product_mapping_from_records(
         generated_at=generated_at,
-        product_overviews=product_overviews,
+        product_profiles=readable_product_profiles,
+        work_requests=work_requests,
+    )
+    snapshot = build_work_graph_snapshot_from_repo_mapping(
+        generated_at=generated_at,
+        repo_mapping=repo_mapping,
         work_requests=work_requests,
         planning_issue_facts=planning_issue_facts,
     )
@@ -67,6 +82,28 @@ def build_work_graph_snapshot_service_payload(
             "product_count": len(product_overviews),
             "work_request_count": len(work_requests),
             "planning_fact_count": len(planning_issue_facts),
+        },
+    }
+
+
+def build_repo_product_mapping_service_payload(
+    *,
+    generated_at: str,
+    product_store: RepoProductMappingProductStore,
+    work_request_store: RepoProductMappingWorkRequestStore,
+) -> dict[str, object]:
+    product_profiles = product_store.list_product_profile_records()
+    work_requests = work_request_store.list_every_code_work_request_records(limit=100)
+    mapping = build_repo_product_mapping_from_records(
+        generated_at=generated_at,
+        product_profiles=product_profiles,
+        work_requests=work_requests,
+    )
+    return {
+        "mapping": mapping.model_dump(mode="json"),
+        "source": {
+            "product_count": len(product_profiles),
+            "work_request_count": len(work_requests),
         },
     }
 

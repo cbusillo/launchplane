@@ -14,6 +14,7 @@ import type {
   ProductEnvironmentConfigStatusPayload,
   ProductListPayload,
   ProductProfileListPayload,
+  RepoProductMappingPayload,
   WorkGraphRankPayload,
   WorkGraphSnapshot,
   WorkGraphSnapshotPayload,
@@ -124,6 +125,10 @@ export function listEveryCodeWorkRequests(
 
 export function readWorkGraphSnapshot(): Promise<WorkGraphSnapshotPayload> {
   return requestJson<WorkGraphSnapshotPayload>("/v1/work-graph/snapshot");
+}
+
+export function readRepoProductMapping(): Promise<RepoProductMappingPayload> {
+  return requestJson<RepoProductMappingPayload>("/v1/repo-product-mapping");
 }
 
 export function rankWorkGraphSnapshot(

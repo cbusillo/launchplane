@@ -8,6 +8,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.work_graph_service import (
     WorkGraphRankEnvelope,
+    build_repo_product_mapping_service_payload,
     build_work_graph_rank_result,
     build_work_graph_snapshot_service_payload,
 )
@@ -33,15 +34,25 @@ def _work_request(**overrides: object) -> EveryCodeWorkRequestRecord:
 
 
 class _EmptyProductStore:
+    def __init__(
+        self, records: tuple[LaunchplaneProductProfileRecord, ...] = ()
+    ) -> None:
+        self.records = records
+
     def list_product_profile_records(
         self,
         *,
         driver_id: str = "",
     ) -> tuple[LaunchplaneProductProfileRecord, ...]:
-        return ()
+        if not driver_id:
+            return self.records
+        return tuple(record for record in self.records if record.driver_id == driver_id)
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
-        raise AssertionError("empty product store should not read product profiles")
+        for record in self.records:
+            if record.product == product:
+                return record
+        raise AssertionError(f"test product store has no product profile for {product!r}")
 
 
 class _WorkRequestStore:
@@ -62,6 +73,64 @@ class _WorkRequestStore:
 
 
 class WorkGraphServiceTests(unittest.TestCase):
+    def test_repo_product_mapping_payload_classifies_products_and_awareness_repos(self) -> None:
+        payload = build_repo_product_mapping_service_payload(
+            generated_at="2026-05-08T18:05:00Z",
+            product_store=_EmptyProductStore(
+                (
+                    LaunchplaneProductProfileRecord.model_validate(
+                        {
+                            "schema_version": 1,
+                            "product": "example-site",
+                            "display_name": "Example Site",
+                            "repository": "every/example-site",
+                            "driver_id": "generic-web",
+                            "image": {"repository": "ghcr.io/every/example-site"},
+                            "runtime_port": 3000,
+                            "health_path": "/healthz",
+                            "lanes": (
+                                {"instance": "testing", "context": "example-site"},
+                                {"instance": "prod", "context": "example-site"},
+                            ),
+                            "historical_contexts": ("example-site-legacy",),
+                            "preview": {"enabled": True, "context": "example-site-preview"},
+                            "updated_at": "2026-05-02T22:30:00Z",
+                            "source": "test",
+                        }
+                    ),
+                )
+            ),
+            work_request_store=_WorkRequestStore(
+                (
+                    _work_request(repository="every/example-site"),
+                    _work_request(
+                        request_id="every-code-cbusillo-tooling-12",
+                        repository="cbusillo/tooling",
+                        issue_number=12,
+                        issue_url="https://github.com/cbusillo/tooling/issues/12",
+                    ),
+                )
+            ),
+        )
+
+        self.assertEqual(payload["source"], {"product_count": 1, "work_request_count": 2})
+        mapping = cast(dict[str, object], payload["mapping"])
+        repositories = cast(list[dict[str, object]], mapping["repositories"])
+        by_repository = {str(repo["repository"]): repo for repo in repositories}
+        product_repo = by_repository["every/example-site"]
+        self.assertEqual(product_repo["classification"], "managed_runtime")
+        self.assertEqual(product_repo["product"], "example-site")
+        self.assertEqual(product_repo["display_name"], "Example Site")
+        self.assertEqual(product_repo["driver_id"], "generic-web")
+        self.assertEqual(product_repo["contexts"], ["example-site", "example-site-legacy"])
+        self.assertEqual(product_repo["environments"], ["testing", "prod"])
+        self.assertEqual(product_repo["preview_context"], "example-site-preview")
+        self.assertEqual(product_repo["source"], "product_profile")
+        awareness_repo = by_repository["cbusillo/tooling"]
+        self.assertEqual(awareness_repo["classification"], "active_awareness")
+        self.assertEqual(awareness_repo["product"], "")
+        self.assertEqual(awareness_repo["source"], "every_code_work_request")
+
     def test_snapshot_payload_builds_source_counts_and_applies_planning_facts(self) -> None:
         work_request_store = _WorkRequestStore((_work_request(),))
 
@@ -96,6 +165,42 @@ class WorkGraphServiceTests(unittest.TestCase):
         self.assertEqual(issues[0]["focus"], "Now")
         self.assertEqual(issues[0]["manager"], "@cellmechanic")
         self.assertEqual(issues[0]["blocking"], 2)
+
+    def test_snapshot_payload_does_not_classify_unauthorized_product_repo_as_managed(
+        self,
+    ) -> None:
+        product = LaunchplaneProductProfileRecord.model_validate(
+            {
+                "schema_version": 1,
+                "product": "example-site",
+                "display_name": "Example Site",
+                "repository": "every/example-site",
+                "driver_id": "generic-web",
+                "image": {"repository": "ghcr.io/every/example-site"},
+                "runtime_port": 3000,
+                "health_path": "/healthz",
+                "lanes": ({"instance": "prod", "context": "example-site"},),
+                "updated_at": "2026-05-02T22:30:00Z",
+                "source": "test",
+            }
+        )
+
+        payload = build_work_graph_snapshot_service_payload(
+            generated_at="2026-05-06T02:05:00Z",
+            product_store=_EmptyProductStore((product,)),
+            work_request_store=_WorkRequestStore(
+                (_work_request(repository="every/example-site"),)
+            ),
+            action_allowed=lambda _action, _product, _context: False,
+            planning_facts_provider=None,
+        )
+
+        snapshot = cast(dict[str, object], payload["snapshot"])
+        source = cast(dict[str, object], payload["source"])
+        repos = cast(list[dict[str, object]], snapshot["repos"])
+        self.assertEqual(source["product_count"], 1)
+        self.assertEqual(repos[0]["classification"], "active_awareness")
+        self.assertEqual(repos[0]["product"], "")
 
     def test_rank_result_returns_summary_and_driver_queue(self) -> None:
         snapshot_payload = build_work_graph_snapshot_service_payload(

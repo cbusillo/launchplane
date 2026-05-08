@@ -99,6 +99,23 @@ until Launchplane has an explicit repo classification. Empty planning facts do
 not erase Every Code work-request facts. The snapshot route does not fetch or
 store GitHub issue bodies and does not write new records.
 
+Agents and operator tools can read the same repository classification source
+without asking for a ranked queue first:
+
+```sh
+GET /v1/repo-product-mapping
+```
+
+The route requires `product_environment.read` for the Launchplane service
+context. It returns `mapping.repositories` with each repository's
+classification, product key when Launchplane owns the runtime, display name,
+driver id, known contexts, stable environments, preview context, update time,
+and source. Product profile records create `managed_runtime` mappings. Durable
+Every Code work requests create `active_awareness` mappings only when no product
+profile already owns the repo. The mapping is a read model for work graph and
+future agent context; it does not make awareness/support repos Launchplane-owned
+runtime repos.
+
 The GitHub Project provider shells out to:
 
 ```sh

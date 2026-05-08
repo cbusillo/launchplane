@@ -3344,6 +3344,90 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_repo_product_mapping_returns_managed_and_awareness_repos(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "product_environment.read",
+                            "every_code_work_request.write",
+                        ],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            create_status, _ = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/tooling",
+                    "issue_number": 12,
+                    "issue_url": "https://github.com/cbusillo/tooling/issues/12",
+                    "issue_title": "Support repo follow-up",
+                    "trigger_label": "every-code",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-08T18:00:00Z",
+                },
+                headers={"Idempotency-Key": "every-code-create-tooling-12"},
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/repo-product-mapping",
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+        repositories = payload["mapping"]["repositories"]
+        by_repository = {repository["repository"]: repository for repository in repositories}
+        self.assertEqual(by_repository["every/example-site"]["classification"], "managed_runtime")
+        self.assertEqual(by_repository["every/example-site"]["product"], "example-site")
+        self.assertEqual(by_repository["every/example-site"]["environments"], ["testing", "prod"])
+        self.assertEqual(by_repository["cbusillo/tooling"]["classification"], "active_awareness")
+        self.assertEqual(payload["source"]["product_count"], 1)
+        self.assertEqual(payload["source"]["work_request_count"], 1)
+
+    def test_repo_product_mapping_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/repo-product-mapping",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
     def test_health_endpoint_reports_storage_backend(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(

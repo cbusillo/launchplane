@@ -142,6 +142,7 @@ from control_plane.work_graph_service import (
     WorkGraphPlanningFactsProvider,
 )
 from control_plane.work_graph_http import (
+    handle_repo_product_mapping_read,
     handle_work_graph_snapshot_read,
     rank_work_graph_snapshot,
     work_graph_rank_denied_response,
@@ -1702,6 +1703,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "launchplane_service.read", {}
     if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
         return "work_graph.rank", {}
+    if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
+        return "product_environment.read", {"repo_product_mapping": "true"}
     if len(segments) == 2 and segments == ["v1", "product-profiles"]:
         return "product_profile.read", {}
     if (
@@ -5157,6 +5160,18 @@ def create_launchplane_service_app(
                             action=requested_action,
                             product=requested_product,
                             context=requested_context,
+                        )
+
+                    if params.get("repo_product_mapping") == "true":
+                        return handle_repo_product_mapping_read(
+                            authz_policy=authz_policy,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                            product_store=record_store,
+                            work_request_store=_every_code_work_request_store(record_store),
+                            utc_now=_utc_now_timestamp,
+                            json_response=_json_response,
+                            start_response=start_response,
                         )
 
                     if control_plane_product_read_service.is_product_environment_detail_request(

@@ -63,6 +63,7 @@ VeriReel product paths:
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
 - work graph chooser route:
+  - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
   - `POST /v1/work-graph/rank`
 - product driver routes:
@@ -100,12 +101,12 @@ grant routes accept GitHub Actions OIDC callers and authenticated admin human
 sessions, require the `launchplane_service_deploy.execute` action, and remain
 the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
 human policy rules. The terminal-agent grant route uses the same boundary for
-DB-backed terminal-agent read rules. Grant requests support `dry_run` and `apply` modes. Apply
-requests must include an audit reason, write a new active policy record only
-when the grant is not already present, and immediately refresh the in-process
-policy used by the current service worker. Responses return record metadata,
-rule counts, a compact diff, and redacted audit metadata rather than echoing
-workflow refs, human logins, or the full policy body.
+DB-backed terminal-agent read rules. Grant requests support `dry_run` and
+`apply` modes. Apply requests must include an audit reason, write a new active
+policy record only when the grant is not already present, and immediately
+refresh the in-process policy used by the current service worker. Responses
+return record metadata, rule counts, a compact diff, and redacted audit metadata
+rather than echoing workflow refs, human logins, or the full policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a compatibility alias. Built assets live under `/ui/assets/...`, while
@@ -158,6 +159,14 @@ returns the queue payload under `result.queue`. The route requires the
 `work_graph.rank` action for product/context `launchplane`, performs no storage
 writes, and does not make Launchplane authoritative for copied GitHub or Code
 Plans state.
+
+`GET /v1/repo-product-mapping` returns the repository ownership/awareness read
+model used by work graph and future agent context. The route requires
+`product_environment.read` for product/context `launchplane`, performs no
+writes, and distinguishes Launchplane-managed runtime repos from awareness-only
+Every Code work-request repos. Managed runtime entries come from product profile
+records and include product, contexts, stable environments, driver id, and
+preview context; awareness entries do not imply Launchplane runtime ownership.
 
 `GET /v1/work-graph/snapshot` returns the current Launchplane-assembled work
 graph snapshot for the same authorization boundary. It composes product
