@@ -115,6 +115,11 @@ merge or mutate GitHub. A later worker pass must read a fresh snapshot for the
 same repository/base branch and continue only when that fresh dry-run result
 selects `merge`.
 
+A worker pass applies at most one transition from one fresh snapshot. It may add
+the block label, request a branch refresh, record a wait boundary, perform one
+guarded merge, or report an idle queue; it must not chain follow-up reads or
+mutations in the same pass.
+
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed
 `head_sha` as the GitHub merge `sha` guard and the repository policy's
