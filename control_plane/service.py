@@ -30,6 +30,11 @@ from control_plane import product_onboarding_service as control_plane_product_on
 from control_plane import product_read_service as control_plane_product_read_service
 from control_plane import live_target_runtime as control_plane_live_target_runtime
 from control_plane import secrets as control_plane_secrets
+from control_plane.agent_context_service import (
+    agent_context_action_allowed,
+    agent_context_allowed,
+    build_agent_context_service_payload,
+)
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
     authz_policy_sha256,
@@ -1677,6 +1682,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "every_code_pr_feedback.read", {}
     if len(segments) == 3 and segments == ["v1", "every-code", "preview-gates"]:
         return "every_code_preview_gate.read", {}
+    if len(segments) == 3 and segments == ["v1", "agent", "context"]:
+        return "product_environment.read", {"agent_context": "true"}
     if len(segments) == 4 and segments[:3] == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {"request_id": segments[3]}
     if len(segments) == 2 and segments == ["v1", "drivers"]:
@@ -5308,6 +5315,48 @@ def create_launchplane_service_app(
                             action=requested_action,
                             product=requested_product,
                             context=requested_context,
+                        )
+
+                    if params.get("agent_context") == "true":
+                        if not agent_context_allowed(
+                            authz_policy=authz_policy,
+                            identity=identity,
+                        ):
+                            return _json_response(
+                                start_response=start_response,
+                                status_code=403,
+                                payload={
+                                    "status": "rejected",
+                                    "trace_id": request_trace_id,
+                                    "error": {
+                                        "code": "authorization_denied",
+                                        "message": "Workflow cannot read Launchplane agent context.",
+                                    },
+                                },
+                            )
+                        repository_filter = str(
+                            (query.get("repository") or [""])[0] or ""
+                        ).strip()
+                        agent_context = build_agent_context_service_payload(
+                            generated_at=_utc_now_timestamp(),
+                            repository=repository_filter,
+                            product_store=record_store,
+                            work_request_store=_every_code_work_request_store(record_store),
+                            preview_readiness_store=_every_code_work_request_store(record_store),
+                            action_allowed=agent_context_action_allowed(
+                                authz_policy=authz_policy,
+                                identity=identity,
+                            ),
+                            planning_facts_provider=work_graph_planning_facts_provider,
+                        )
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=200,
+                            payload={
+                                "status": "ok",
+                                "trace_id": request_trace_id,
+                                "context": agent_context.model_dump(mode="json"),
+                            },
                         )
 
                     if params.get("repo_product_mapping") == "true":
