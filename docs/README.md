@@ -27,6 +27,8 @@ Use these docs as the source of truth for `launchplane`.
   environment, settings, promotion, cleanup, and UI rebuild contract.
 - [work-graph-read-model.md](work-graph-read-model.md) — Code Plans/GitHub work
   graph snapshot and recommendation queue contract.
+- [merge-train-policy.md](merge-train-policy.md) — repository/base-branch merge
+  train policy contract, enqueue authority, and smoke-target policy.
 - [agent-context-boundary.md](agent-context-boundary.md) — public-safe agent
   context, caller profiles, scoped intent, redaction, and provenance boundary.
 - [operations.md](operations.md) — operator workflows and runtime boundary rules.
