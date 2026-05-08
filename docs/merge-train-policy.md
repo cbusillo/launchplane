@@ -108,3 +108,9 @@ pre-update check results are stale after a branch refresh.
 The reread step rebuilds the dry-run decision from a fresh pull request snapshot.
 If checks are still pending or mergeability is unknown, the next action remains
 `wait_for_checks`; Launchplane must not merge from pre-refresh evidence.
+
+The wait step records the selected pull request, its observed head SHA,
+mergeability state, and required-check status as a polling boundary. It does not
+merge or mutate GitHub. A later worker pass must read a fresh snapshot for the
+same repository/base branch and continue only when that fresh dry-run result
+selects `merge`.
