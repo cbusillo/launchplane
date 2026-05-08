@@ -12,6 +12,8 @@ from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     GitHubOidcVerifier,
     LaunchplaneAuthzPolicy,
+    TerminalAgentIdentity,
+    TerminalAgentPolicyRule,
     parse_authz_policy_toml,
 )
 from control_plane.service_human_auth import (
@@ -70,6 +72,18 @@ def _human_identity(**overrides: object) -> GitHubHumanIdentity:
         organizations=values["organizations"],  # type: ignore[arg-type]
         teams=values["teams"],  # type: ignore[arg-type]
         role=values["role"],  # type: ignore[arg-type]
+    )
+
+
+def _terminal_agent_identity(**overrides: object) -> TerminalAgentIdentity:
+    values: dict[str, object] = {
+        "subject": "local-owner-agent",
+        "token_label": "local-owner-read",
+    }
+    values.update(overrides)
+    return TerminalAgentIdentity(
+        subject=str(values["subject"]),
+        token_label=str(values["token_label"]),
     )
 
 
@@ -263,6 +277,80 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
+    def test_terminal_agent_policy_fails_closed_by_subject_label_and_scope(self) -> None:
+        rule = TerminalAgentPolicyRule(
+            subjects=("local-*-agent",),
+            token_labels=("local-owner-*",),
+            products=("sellyouroutboard",),
+            contexts=("sellyouroutboard-testing",),
+            actions=("product_environment.read",),
+        )
+        identity = _terminal_agent_identity()
+
+        self.assertTrue(
+            rule.allows(
+                identity=identity,
+                action="product_environment.read",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+            )
+        )
+        denied_cases = (
+            ("subject", _terminal_agent_identity(subject="other-agent"), "sellyouroutboard", "sellyouroutboard-testing", "product_environment.read"),
+            ("token_label", _terminal_agent_identity(token_label="write-token"), "sellyouroutboard", "sellyouroutboard-testing", "product_environment.read"),
+            ("product", identity, "other-product", "sellyouroutboard-testing", "product_environment.read"),
+            ("context", identity, "sellyouroutboard", "other-context", "product_environment.read"),
+            ("action", identity, "sellyouroutboard", "sellyouroutboard-testing", "generic_web_prod_promotion.execute"),
+        )
+        for name, case_identity, product, context, action in denied_cases:
+            with self.subTest(name=name):
+                self.assertFalse(
+                    rule.allows(
+                        identity=case_identity,
+                        action=action,
+                        product=product,
+                        context=context,
+                    )
+                )
+
+    def test_combined_policy_separates_terminal_agents_from_other_identities(self) -> None:
+        policy = LaunchplaneAuthzPolicy(
+            terminal_agents=(
+                TerminalAgentPolicyRule(
+                    subjects=("local-owner-agent",),
+                    token_labels=("local-owner-read",),
+                    products=("sellyouroutboard",),
+                    contexts=("sellyouroutboard-testing",),
+                    actions=("product_environment.read",),
+                ),
+            )
+        )
+
+        self.assertTrue(
+            policy.allows(
+                identity=_terminal_agent_identity(),
+                action="product_environment.read",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=_actions_identity(repository="cbusillo/sellyouroutboard"),
+                action="product_environment.read",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=_human_identity(login="local-owner-agent"),
+                action="product_environment.read",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+            )
+        )
+
     def test_syo_preview_grant_covers_pull_request_branch_refs(self) -> None:
         rule = GitHubActionsPolicyRule(
             repository="cbusillo/sellyouroutboard",
@@ -348,13 +436,22 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             teams = ["cbusillo/platform"]
             roles = ["admin"]
             actions = ["*"]
+
+            [[terminal_agents]]
+            subjects = ["local-owner-agent"]
+            token_labels = ["local-owner-read"]
+            products = ["sellyouroutboard"]
+            contexts = ["sellyouroutboard-testing"]
+            actions = ["product_environment.read"]
             """
         )
 
         self.assertEqual(len(policy.github_actions), 1)
         self.assertEqual(len(policy.github_humans), 1)
+        self.assertEqual(len(policy.terminal_agents), 1)
         self.assertEqual(policy.github_actions[0].repository, "cbusillo/verireel")
         self.assertEqual(policy.github_humans[0].roles, ("admin",))
+        self.assertEqual(policy.terminal_agents[0].subjects, ("local-owner-agent",))
 
 
 class HumanSessionBoundaryTests(unittest.TestCase):

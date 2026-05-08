@@ -55,6 +55,7 @@ from control_plane.service_auth import (
     GitHubActionsIdentity,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
+    TerminalAgentIdentity,
 )
 from control_plane.service_human_auth import (
     GITHUB_EMAILS_URL,
@@ -4303,6 +4304,184 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_terminal_agent_read_token_can_read_redacted_product_environment(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.write_runtime_environment_record(
+                RuntimeEnvironmentRecord(
+                    scope="instance",
+                    context="example-site",
+                    instance="prod",
+                    env={"INTERNAL_CALLBACK_URL": "https://internal.example-site.invalid"},
+                    updated_at="2026-05-02T22:32:00Z",
+                    source_label="test",
+                )
+            )
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                control_plane_secrets.write_secret_value(
+                    record_store=store,
+                    scope="context_instance",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    name="SMTP_PASSWORD",
+                    plaintext_value="super-secret-password",
+                    binding_key="SMTP_PASSWORD",
+                    context_name="example-site",
+                    instance_name="prod",
+                    actor="test",
+                )
+            store.close()
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "terminal_agents": [
+                        {
+                            "subjects": ["local-owner-agent"],
+                            "token_labels": ["local-owner-read"],
+                            "products": ["example-site"],
+                            "contexts": ["example-site"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/products/example-site/environments/prod/config-status",
+                    authorization="Bearer terminal-read-token",
+                )
+
+        response_text = json.dumps(payload)
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["config_status"]["product"], "example-site")
+        self.assertNotIn("https://internal.example-site.invalid", response_text)
+        self.assertNotIn("super-secret-password", response_text)
+
+    def test_terminal_agent_read_token_rejects_non_read_routes_even_if_policy_grants_action(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload_with_prod())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "terminal_agents": [
+                        {
+                            "subjects": ["local-owner-agent"],
+                            "token_labels": ["local-owner-read"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["generic_web_prod_promotion.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/prod-promotion",
+                    authorization="Bearer terminal-read-token",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "promotion": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "artifact_id": "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+                            "source_git_ref": "abc123",
+                        },
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertIn("can only read", payload["error"]["message"])
+
+    def test_terminal_agent_read_token_requires_matching_configured_secret(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "terminal_agents": [
+                        {
+                            "subjects": ["local-owner-agent"],
+                            "token_labels": ["local-owner-read"],
+                            "products": ["example-site"],
+                            "contexts": ["example-site"],
+                            "actions": ["product_environment.read"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/products/example-site/environments/prod/config-status",
+                    authorization="Bearer wrong-token",
+                )
+
+        self.assertEqual(status_code, 401)
+        self.assertEqual(payload["error"]["code"], "authentication_required")
+
     def test_product_context_cutover_endpoint_updates_profile_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
@@ -7932,6 +8111,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS": ("info@shinycomputers.com"),
                                 "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": ("webhook-secret"),
                                 "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token",
+                                "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
+                                "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
+                                "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "local-owner-read",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "cbusillo",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
@@ -7969,6 +8151,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             updated_env_text,
         )
         self.assertIn("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN=worker-token", updated_env_text)
+        self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN=terminal-read-token", updated_env_text)
+        self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT=local-owner-agent", updated_env_text)
+        self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL=local-owner-read", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER=cbusillo", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER=4", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT=200", updated_env_text)
@@ -8545,6 +8730,210 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIsNone(dry_run_idempotency_record)
         self.assertEqual(workflow_status_code, 403)
         self.assertEqual(workflow_payload["error"]["code"], "authorization_denied")
+
+    def test_terminal_agent_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/terminal-agents/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow local terminal agent product context reads.",
+                    "related_issue": "cbusillo/launchplane#426",
+                    "grant": {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-read"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["sellyouroutboard"],
+                        "actions": ["product_environment.read"],
+                        "source_label": "test:terminal-agent-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-terminal-agent-grant:syo-read",
+                },
+            )
+            repeat_status_code, repeat_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/terminal-agents/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow local terminal agent product context reads.",
+                    "related_issue": "cbusillo/launchplane#426",
+                    "grant": {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-read"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["sellyouroutboard"],
+                        "actions": ["product_environment.read"],
+                        "source_label": "test:terminal-agent-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-terminal-agent-grant:syo-read-repeat",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(
+            payload["result"]["diff"]["new_terminal_agents_rule_count"], 1
+        )
+        self.assertEqual(
+            payload["result"]["audit"]["requested_grant_summary"]["subject_count"], 1
+        )
+        self.assertNotIn(
+            "local-owner-agent",
+            json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True),
+        )
+        self.assertEqual(repeat_status_code, 202)
+        self.assertEqual(repeat_payload["result"]["changed"], False)
+        self.assertTrue(
+            active_policy.policy.allows(
+                identity=TerminalAgentIdentity(
+                    subject="local-owner-agent", token_label="local-owner-read"
+                ),
+                action="product_environment.read",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+
+    def test_terminal_agent_authz_policy_grant_endpoint_dry_run_does_not_write_or_reload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+                )
+            finally:
+                store.close()
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/terminal-agents/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "reason": "Inspect terminal-agent product context grant.",
+                    "related_issue": "cbusillo/launchplane#426",
+                    "grant": {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-read"],
+                        "products": ["example-site"],
+                        "contexts": ["example-site"],
+                        "actions": ["product_environment.read"],
+                        "source_label": "test:terminal-agent-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-terminal-agent-grant:dry-run",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_records = store.list_authz_policy_records(status="active")
+                dry_run_idempotency_record = store.read_idempotency_record(
+                    scope="github-human:alice",
+                    route_path="/v1/authz-policies/terminal-agents/grants",
+                    idempotency_key="authz-terminal-agent-grant:dry-run",
+                )
+            finally:
+                store.close()
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                clear=True,
+            ):
+                read_status_code, read_payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/products/example-site/environments/prod/config-status",
+                    authorization="Bearer terminal-read-token",
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry_run")
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(len(active_records), 1)
+        self.assertIsNone(dry_run_idempotency_record)
+        self.assertEqual(read_status_code, 403)
+        self.assertEqual(read_payload["error"]["code"], "authorization_denied")
 
     def test_authz_policy_grant_endpoint_apply_requires_reason(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

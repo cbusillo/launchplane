@@ -40,6 +40,7 @@ it can reach, trust, or decrypt DB-backed state.
 | Process wiring | `LAUNCHPLANE_SERVICE_HOST`, `LAUNCHPLANE_SERVICE_PORT`, `LAUNCHPLANE_SERVICE_AUDIENCE`, `LAUNCHPLANE_STATE_DIR`, `LAUNCHPLANE_APP_ROOT` | Service target env | Runtime/process wiring, not product config. |
 | Every Code webhook ingress secret | `LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET` | Bootstrap env or platform secret | Required before unauthenticated GitHub webhook ingress can trust the request body. Store it outside repository config. |
 | Every Code worker bearer token | `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` | Bootstrap env or platform secret | Shared by the Launchplane service and local worker to authorize worker read/claim/status routes. Store it outside repository config. |
+| Terminal-agent read bearer token | `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN`, optional `LAUNCHPLANE_TERMINAL_AGENT_SUBJECT`, optional `LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` | Bootstrap env or platform secret | Shared by the Launchplane service and a trusted local terminal agent for redacted `GET` context reads only. Store it outside repository config and keep it distinct from Every Code worker credentials. |
 
 The Launchplane self-deploy workflow has a manual `omit_every_code_env`
 compatibility input for the one deploy that teaches an older running service to

@@ -53,6 +53,7 @@ VeriReel product paths:
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
   - `POST /v1/authz-policies/github-humans/grants`
+  - `POST /v1/authz-policies/terminal-agents/grants`
 - Every Code local automation work-request routes:
   - `POST /v1/every-code/github-webhook`
   - `GET /v1/every-code/work-requests`
@@ -98,7 +99,8 @@ and preview mutations as authenticated Launchplane routes. The authz policy
 grant routes accept GitHub Actions OIDC callers and authenticated admin human
 sessions, require the `launchplane_service_deploy.execute` action, and remain
 the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
-human policy rules. Grant requests support `dry_run` and `apply` modes. Apply
+human policy rules. The terminal-agent grant route uses the same boundary for
+DB-backed terminal-agent read rules. Grant requests support `dry_run` and `apply` modes. Apply
 requests must include an audit reason, write a new active policy record only
 when the grant is not already present, and immediately refresh the in-process
 policy used by the current service worker. Responses return record metadata,
@@ -134,6 +136,22 @@ scoped in code to `GET /v1/every-code/work-requests`,
 write product records, or access other Launchplane service routes. This keeps
 remote DB credentials on the Launchplane host while still allowing visible local
 Code/tmux work sessions to claim, rerun terminal requests, and report progress.
+
+Local terminal agents that need Launchplane context use a separate read-only
+bearer credential, not the browser OAuth session cookie and not
+`LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`. Configure
+`LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` on the service and provide the same
+secret to the trusted local terminal agent out of band. Optional
+`LAUNCHPLANE_TERMINAL_AGENT_SUBJECT` and
+`LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL` values identify the local owner subject
+and token label used by `terminal_agents` authz policy rules; the defaults are
+`local-owner-agent` and `local-owner-read`. The service only accepts this
+identity on `GET` routes, so even an overly broad terminal-agent policy rule
+cannot dispatch product config writes, prod promotion, destructive cleanup,
+authz policy mutation, read-model POSTs, or plaintext secret reveal routes.
+Policy still scopes which redacted read actions and product/context pairs the
+agent can access, such as `product_environment.read` for product environment and
+config-status diagnostics.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the
@@ -188,6 +206,12 @@ browser session after OAuth callback and sets an `HttpOnly`, `SameSite=Lax`
 session cookie signed with `LAUNCHPLANE_SESSION_SECRET`. Sessions are backed by
 the Launchplane database when `LAUNCHPLANE_DATABASE_URL` is configured. GitHub
 access tokens stay server-side and are not exposed to the React operator UI.
+
+Local terminal agents should use the dedicated terminal-agent read bearer token
+when they only need redacted Launchplane context from a trusted operator shell.
+This avoids copying browser session cookies into terminal processes and keeps
+agent credentials independent from GitHub Actions OIDC and Every Code worker
+automation.
 
 Launchplane should verify:
 

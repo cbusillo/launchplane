@@ -13106,6 +13106,97 @@ def authz_policies_grant_human(
     click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
 
 
+@authz_policies.command("grant-terminal-agent")
+@click.option(
+    "--service-url",
+    required=True,
+    help="Deployed Launchplane service base URL. Shared/prod grants go through the service API.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a short-lived bearer token for the service.",
+)
+@click.option(
+    "--session-cookie",
+    default="",
+    help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
+)
+@click.option("--subject", "subjects", multiple=True, required=True, help="Allowed terminal-agent subject.")
+@click.option(
+    "--token-label",
+    "token_labels",
+    multiple=True,
+    required=True,
+    help="Allowed terminal-agent token label.",
+)
+@click.option("--product", "products", multiple=True, required=True, help="Allowed product.")
+@click.option("--context", "contexts", multiple=True, help="Allowed Launchplane context.")
+@click.option(
+    "--action", "actions", multiple=True, required=True, help="Allowed Launchplane action."
+)
+@click.option("--reason", default="", help="Required audit reason when --apply is used.")
+@click.option(
+    "--related-issue",
+    default="",
+    help="Optional related GitHub issue, e.g. cbusillo/launchplane#426.",
+)
+@click.option("--source-label", default="cli:authz-grant-terminal-agent", show_default=True)
+@click.option(
+    "--idempotency-key", default="", help="Optional explicit Idempotency-Key for apply requests."
+)
+@click.option("--dry-run", "mode", flag_value="dry_run", default="dry_run")
+@click.option("--apply", "mode", flag_value="apply")
+def authz_policies_grant_terminal_agent(
+    service_url: str,
+    bearer_token_env: str,
+    session_cookie: str,
+    subjects: tuple[str, ...],
+    token_labels: tuple[str, ...],
+    products: tuple[str, ...],
+    contexts: tuple[str, ...],
+    actions: tuple[str, ...],
+    reason: str,
+    related_issue: str,
+    source_label: str,
+    idempotency_key: str,
+    mode: str,
+) -> None:
+    bearer_token = ""
+    if not session_cookie.strip():
+        token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
+        bearer_token = os.environ.get(token_env_key, "").strip()
+        if not bearer_token:
+            raise click.ClickException(
+                f"{token_env_key} is required unless --session-cookie is provided."
+            )
+    payload = {
+        "schema_version": 1,
+        "product": "launchplane",
+        "mode": mode,
+        "reason": reason,
+        "related_issue": related_issue,
+        "grant": {
+            "subjects": list(subjects),
+            "token_labels": list(token_labels),
+            "products": list(products),
+            "contexts": list(contexts),
+            "actions": list(actions),
+            "source_label": source_label,
+        },
+    }
+    response_payload = _post_launchplane_service_json(
+        service_url=service_url,
+        path="/v1/authz-policies/terminal-agents/grants",
+        payload=payload,
+        bearer_token=bearer_token,
+        session_cookie=session_cookie,
+        idempotency_key=idempotency_key,
+    )
+    click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
+
+
 @runtime_key_safety.command("list-policies")
 @click.option(
     "--database-url",

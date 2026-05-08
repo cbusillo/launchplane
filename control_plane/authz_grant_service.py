@@ -11,11 +11,14 @@ from control_plane.contracts.authz_policy_record import (
     build_authz_policy_record_id,
 )
 from control_plane.service_auth import (
+    GitHubActionsIdentity,
     GitHubActionsPolicyRule,
     GitHubHumanPolicyRule,
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    TerminalAgentIdentity,
+    TerminalAgentPolicyRule,
 )
 
 
@@ -170,9 +173,79 @@ class AuthzPolicyGitHubHumanGrantEnvelope(BaseModel):
         return self
 
 
-AuthzPolicyGrant = AuthzPolicyGitHubActionsGrant | AuthzPolicyGitHubHumanGrant
+class AuthzPolicyTerminalAgentGrant(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subjects: tuple[str, ...] = ()
+    token_labels: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    actions: tuple[str, ...]
+    source_label: str = "service:authz-terminal-agent-policy-grant"
+
+    @staticmethod
+    def _normalized_tuple(values: tuple[str, ...]) -> tuple[str, ...]:
+        return tuple(value.strip() for value in values if value.strip())
+
+    @model_validator(mode="after")
+    def _validate_grant(self) -> "AuthzPolicyTerminalAgentGrant":
+        self.subjects = self._normalized_tuple(self.subjects)
+        self.token_labels = self._normalized_tuple(self.token_labels)
+        self.products = self._normalized_tuple(self.products)
+        self.contexts = self._normalized_tuple(self.contexts)
+        self.actions = self._normalized_tuple(self.actions)
+        if not self.subjects:
+            raise ValueError("Authz terminal-agent policy grant requires a subject.")
+        if not self.token_labels:
+            raise ValueError("Authz terminal-agent policy grant requires a token label.")
+        if not self.actions:
+            raise ValueError("Authz terminal-agent policy grant requires at least one action.")
+        self.source_label = (
+            self.source_label.strip() or "service:authz-terminal-agent-policy-grant"
+        )
+        return self
+
+    def to_policy_rule(self) -> TerminalAgentPolicyRule:
+        return TerminalAgentPolicyRule(
+            subjects=self.subjects,
+            token_labels=self.token_labels,
+            products=self.products,
+            contexts=self.contexts,
+            actions=self.actions,
+        )
+
+
+class AuthzPolicyTerminalAgentGrantEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    mode: Literal["dry_run", "apply"] = "apply"
+    reason: str = ""
+    related_issue: str = ""
+    grant: AuthzPolicyTerminalAgentGrant
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "AuthzPolicyTerminalAgentGrantEnvelope":
+        if self.product.strip() != "launchplane":
+            raise ValueError("Authz terminal-agent policy grant writes require product 'launchplane'.")
+        self.product = "launchplane"
+        self.reason = self.reason.strip()
+        self.related_issue = self.related_issue.strip()
+        if self.mode == "apply" and not self.reason:
+            raise ValueError("Authz terminal-agent policy grant apply requires reason.")
+        return self
+
+
+AuthzPolicyGrant = (
+    AuthzPolicyGitHubActionsGrant
+    | AuthzPolicyGitHubHumanGrant
+    | AuthzPolicyTerminalAgentGrant
+)
 AuthzPolicyGrantEnvelope = (
-    AuthzPolicyGitHubActionsGrantEnvelope | AuthzPolicyGitHubHumanGrantEnvelope
+    AuthzPolicyGitHubActionsGrantEnvelope
+    | AuthzPolicyGitHubHumanGrantEnvelope
+    | AuthzPolicyTerminalAgentGrantEnvelope
 )
 
 
@@ -185,6 +258,7 @@ def summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[
         "policy_sha256": record.policy_sha256,
         "github_actions_rule_count": len(record.policy.github_actions),
         "github_humans_rule_count": len(record.policy.github_humans),
+        "terminal_agents_rule_count": len(record.policy.terminal_agents),
     }
 
 
@@ -195,6 +269,13 @@ def authz_policy_operator_payload(identity: LaunchplaneIdentity) -> dict[str, ob
             "login": identity.login,
             "role": identity.role,
         }
+    if isinstance(identity, TerminalAgentIdentity):
+        return {
+            "type": "terminal_agent",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    assert isinstance(identity, GitHubActionsIdentity)
     return {
         "type": "github_actions",
         "repository": identity.repository,
@@ -211,6 +292,8 @@ def authz_policy_grant_diff(
     desired_rule = grant.to_policy_rule()
     if isinstance(grant, AuthzPolicyGitHubHumanGrant):
         changed = not any(rule == desired_rule for rule in current_policy.github_humans)
+    elif isinstance(grant, AuthzPolicyTerminalAgentGrant):
+        changed = not any(rule == desired_rule for rule in current_policy.terminal_agents)
     else:
         changed = not any(rule == desired_rule for rule in current_policy.github_actions)
     return {
@@ -221,6 +304,9 @@ def authz_policy_grant_diff(
         "previous_github_humans_rule_count": len(current_policy.github_humans),
         "new_github_humans_rule_count": len(current_policy.github_humans)
         + int(changed and isinstance(grant, AuthzPolicyGitHubHumanGrant)),
+        "previous_terminal_agents_rule_count": len(current_policy.terminal_agents),
+        "new_terminal_agents_rule_count": len(current_policy.terminal_agents)
+        + int(changed and isinstance(grant, AuthzPolicyTerminalAgentGrant)),
     }
 
 
@@ -271,6 +357,15 @@ def authz_policy_grant_response_audit_payload(
                 "contexts": requested_grant.get("contexts") or (),
                 "actions": requested_grant.get("actions") or (),
             }
+        elif "subjects" in requested_grant or "token_labels" in requested_grant:
+            response_audit["requested_grant_summary"] = {
+                "principal_type": "terminal_agent",
+                "subject_count": len(requested_grant.get("subjects") or ()),
+                "token_label_count": len(requested_grant.get("token_labels") or ()),
+                "products": requested_grant.get("products") or (),
+                "contexts": requested_grant.get("contexts") or (),
+                "actions": requested_grant.get("actions") or (),
+            }
         else:
             response_audit["requested_grant_summary"] = {
                 "principal_type": "github_human",
@@ -309,6 +404,26 @@ def plan_github_human_authz_policy_grant(
     *,
     record_store: AuthzPolicyRecordStore,
     grant: AuthzPolicyGitHubHumanGrant,
+) -> tuple[LaunchplaneAuthzPolicy, LaunchplaneAuthzPolicyRecord, dict[str, object]]:
+    active_records = record_store.list_authz_policy_records(status="active", limit=1)
+    if not active_records:
+        raise ValueError("No active Launchplane authz policy record found.")
+    current_record = active_records[0]
+    current_policy = current_record.policy
+    return (
+        current_policy,
+        current_record,
+        authz_policy_grant_diff(
+            current_policy=current_policy,
+            grant=grant,
+        ),
+    )
+
+
+def plan_terminal_agent_authz_policy_grant(
+    *,
+    record_store: AuthzPolicyRecordStore,
+    grant: AuthzPolicyTerminalAgentGrant,
 ) -> tuple[LaunchplaneAuthzPolicy, LaunchplaneAuthzPolicyRecord, dict[str, object]]:
     active_records = record_store.list_authz_policy_records(status="active", limit=1)
     if not active_records:
@@ -429,6 +544,76 @@ def write_github_human_authz_policy_grant(
 
     updated_policy = current_policy.model_copy(
         update={"github_humans": current_policy.github_humans + (desired_rule,)}
+    )
+    updated_at = now_timestamp()
+    policy_sha256 = authz_policy_sha256(updated_policy)
+    record = LaunchplaneAuthzPolicyRecord(
+        record_id=build_authz_policy_record_id(
+            updated_at=updated_at,
+            policy_sha256=policy_sha256,
+        ),
+        status="active",
+        source=request.grant.source_label,
+        updated_at=updated_at,
+        policy_sha256=policy_sha256,
+        policy=updated_policy,
+        audit=authz_policy_grant_audit_payload(
+            request=request,
+            identity=identity,
+            previous_record=current_record,
+            new_record=None,
+            changed=True,
+            trace_id=trace_id,
+            now_timestamp=now_timestamp,
+        ),
+    )
+    record.audit = authz_policy_grant_audit_payload(
+        request=request,
+        identity=identity,
+        previous_record=current_record,
+        new_record=record,
+        changed=True,
+        trace_id=trace_id,
+        now_timestamp=now_timestamp,
+    )
+    record_store.write_authz_policy_record(record)
+    return updated_policy, record, changed, diff, record.audit
+
+
+def write_terminal_agent_authz_policy_grant(
+    *,
+    record_store: AuthzPolicyRecordStore,
+    request: AuthzPolicyTerminalAgentGrantEnvelope,
+    identity: LaunchplaneIdentity,
+    trace_id: str,
+    now_timestamp: TimestampProvider,
+) -> tuple[
+    LaunchplaneAuthzPolicy,
+    LaunchplaneAuthzPolicyRecord,
+    bool,
+    dict[str, object],
+    dict[str, object],
+]:
+    current_policy, current_record, diff = plan_terminal_agent_authz_policy_grant(
+        record_store=record_store,
+        grant=request.grant,
+    )
+    changed = bool(diff["changed"])
+    desired_rule = request.grant.to_policy_rule()
+    if not changed:
+        audit = authz_policy_grant_audit_payload(
+            request=request,
+            identity=identity,
+            previous_record=current_record,
+            new_record=None,
+            changed=False,
+            trace_id=trace_id,
+            now_timestamp=now_timestamp,
+        )
+        return current_policy, current_record, False, diff, audit
+
+    updated_policy = current_policy.model_copy(
+        update={"terminal_agents": current_policy.terminal_agents + (desired_rule,)}
     )
     updated_at = now_timestamp()
     policy_sha256 = authz_policy_sha256(updated_policy)
