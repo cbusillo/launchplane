@@ -42,10 +42,27 @@ The command prints a `WorkGraphQueue` JSON payload with:
 
 - ranked items
 - ready/waiting/blocked state
+- agent-actionable fields: `safe_to_start`, `next_action`, `why_now`,
+  `blocked_by_count`, `source_of_truth_url`, `handoff_url`, and compact
+  `evidence`
 - recommendation category, such as `quick_win`, `deep_work`, or
   `attention_needed`
 - score and explanation reasons
 - hidden count for closed, done, or overflow items
+
+Queue items are intentionally compact. `source_of_truth_url` and `handoff_url`
+point agents back to GitHub issues or pull requests instead of copying issue
+bodies or long planning prose into Launchplane. `safe_to_start` is true only for
+ready items that are in the active/next lane or have a failing check/deploy
+signal that needs attention. Waiting and blocked items stay visible for
+awareness, but agents should inspect the blocker or external signal before
+starting implementation.
+
+`evidence` entries carry small source-linked signals with a trust state of
+`verified`, `recorded`, `stale`, `missing`, or `unsupported`. The first slice
+uses verified/recorded signals from the supplied snapshot. Future persisted
+snapshot history can make stale/missing provider evidence explicit without
+changing the queue shape.
 
 ## Service Route
 

@@ -560,7 +560,12 @@ export type WorkGraphFocus =
   | "Later"
   | "Done"
   | "Unknown";
-export type WorkGraphState = "ready" | "waiting" | "blocked" | "done" | "hidden";
+export type WorkGraphState =
+  | "ready"
+  | "waiting"
+  | "blocked"
+  | "done"
+  | "hidden";
 export type WorkGraphRecommendation =
   | "quick_win"
   | "deep_work"
@@ -629,6 +634,18 @@ export interface WorkGraphQueueItem {
   recommendation: WorkGraphRecommendation;
   score: number;
   updated_at: string;
+  safe_to_start: boolean;
+  next_action: string;
+  why_now: string;
+  blocked_by_count: number;
+  source_of_truth_url: string;
+  handoff_url: string;
+  evidence: Array<{
+    code: string;
+    state: "verified" | "recorded" | "stale" | "missing" | "unsupported";
+    detail: string;
+    source_url: string;
+  }>;
   reasons: Array<{ code: string; detail: string }>;
 }
 
