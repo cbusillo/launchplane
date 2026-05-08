@@ -127,6 +127,11 @@ from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     build_merge_train_dry_run_result,
 )
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    GitHubMergeTrainSnapshotReader,
+    UrllibMergeTrainGitHubTransport,
+)
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_record_store, resolve_database_url
@@ -189,6 +194,10 @@ from control_plane.workflows.ship import (
     generate_deployment_record_id,
     utc_now_timestamp,
 )
+from control_plane.workflows.merge_train_worker import (
+    MergeTrainWorkerClients,
+    run_merge_train_worker_step,
+)
 
 ARTIFACT_IMAGE_REFERENCE_ENV_KEY = "DOCKER_IMAGE_REFERENCE"
 DEFAULT_DOKPLOY_SHIP_SOURCE_GIT_REF = "origin/main"
@@ -203,6 +212,7 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
 )
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _EVERY_CODE_WORKER_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN"
+_MERGE_TRAIN_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
 _MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
     "LAUNCHPLANE_POLICY_TOML",
@@ -9432,6 +9442,93 @@ def work_graph_merge_train_dry_run(
     except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(result.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@work_graph.command("merge-train-run-once")
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
+)
+@click.option(
+    "--repository",
+    default="cbusillo/sellyouroutboard",
+    show_default=True,
+    help="owner/name repository whose policy should run once.",
+)
+@click.option("--base-branch", default="main", show_default=True)
+@click.option(
+    "--github-token-env",
+    default=_MERGE_TRAIN_GITHUB_TOKEN_ENV_KEY,
+    show_default=True,
+    help="Environment variable containing the GitHub token used by the merge train.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+@click.option(
+    "--mutate/--dry-run",
+    default=False,
+    show_default=True,
+    help="Apply the selected worker transition. The default only reads GitHub and reports intent.",
+)
+def work_graph_merge_train_run_once(
+    policy_file: Path | None,
+    repository: str,
+    base_branch: str,
+    github_token_env: str,
+    github_api_base_url: str,
+    mutate: bool,
+) -> None:
+    try:
+        policy = (
+            load_merge_train_policy(policy_file)
+            if policy_file is not None
+            else build_sellyouroutboard_main_merge_train_policy()
+        )
+        policy.find_repository_policy(repository=repository, base_branch=base_branch)
+        token_env = github_token_env.strip()
+        if not token_env:
+            raise click.ClickException("merge-train run-once requires --github-token-env.")
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
+        transport = UrllibMergeTrainGitHubTransport(
+            token=token, api_base_url=github_api_base_url
+        )
+        snapshot_reader = GitHubMergeTrainSnapshotReader(transport=transport)
+        snapshot = snapshot_reader.read_merge_train_snapshot(
+            repository=repository, base_branch=base_branch
+        )
+        dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+        if mutate:
+            github_client = GitHubMergeTrainClient(transport=transport)
+            worker_step_result = run_merge_train_worker_step(
+                policy=policy,
+                snapshot=snapshot,
+                clients=MergeTrainWorkerClients(
+                    label_client=github_client,
+                    branch_client=github_client,
+                    merge_client=github_client,
+                ),
+            )
+            payload: dict[str, object] = worker_step_result.model_dump(mode="json")
+            payload["mode"] = "mutate"
+        else:
+            payload = {
+                "mode": "dry-run",
+                "repository": snapshot.repository,
+                "base_branch": snapshot.base_branch,
+                "snapshot": snapshot.model_dump(mode="json"),
+                "dry_run_result": dry_run_result.model_dump(mode="json"),
+            }
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @every_code.command("run-once")

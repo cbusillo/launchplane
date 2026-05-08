@@ -90,6 +90,19 @@ uv run launchplane work-graph merge-train-dry-run \
   --snapshot-file path/to/merge-train-snapshot.json
 ```
 
+The smoke-target run-once command reads a live GitHub snapshot for the selected
+repository/base branch and reports the same worker-step intent without mutating
+by default:
+
+```sh
+GITHUB_TOKEN=... uv run launchplane work-graph merge-train-run-once
+```
+
+Passing `--mutate` applies exactly one worker transition from that fresh
+snapshot. Use it only from the intended operator environment for the smoke
+target; the command is a narrow bootstrap surface, not a long-running train
+scheduler.
+
 The dry-run orders eligible pull requests by `created_at` and then PR number. It
 excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
 the snapshot repository/base branch has no explicit policy.
