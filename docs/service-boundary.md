@@ -56,6 +56,7 @@ VeriReel product paths:
   - `POST /v1/authz-policies/terminal-agents/grants`
 - Every Code local automation work-request routes:
   - `POST /v1/every-code/github-webhook`
+  - `GET /v1/every-code/summary`
   - `GET /v1/every-code/work-requests`
   - `GET /v1/every-code/work-requests/{request_id}`
   - `POST /v1/every-code/work-requests/create`
@@ -153,6 +154,14 @@ authz policy mutation, read-model POSTs, or plaintext secret reveal routes.
 Policy still scopes which redacted read actions and product/context pairs the
 agent can access, such as `product_environment.read` for product environment and
 config-status diagnostics.
+
+`GET /v1/every-code/summary` returns a compact agent-safe projection of Every
+Code work requests. It requires `every_code_work_request.read` for
+product/context `launchplane` and supports `repository`, `issue_number`,
+`state`, `limit`, and `offset` query parameters. Summary entries include source
+links, state, summary status, claim metadata, timestamps, result PR URL, and
+safe rerun guidance. They intentionally omit raw webhook delivery ids, error
+messages, issue bodies, prompt text, and local checkout paths.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the

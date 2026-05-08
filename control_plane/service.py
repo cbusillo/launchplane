@@ -56,6 +56,9 @@ from control_plane.contracts.every_code_pr_feedback_record import (
     apply_every_code_pr_feedback_status,
     build_every_code_pr_feedback_id,
 )
+from control_plane.contracts.every_code_summary_read_model import (
+    build_every_code_summary_read_model,
+)
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.preview_mutation_request import (
@@ -1644,6 +1647,8 @@ def _serve_ui_route(
 
 def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
     segments = [segment for segment in path.split("/") if segment]
+    if len(segments) == 3 and segments == ["v1", "every-code", "summary"]:
+        return "every_code_work_request.read", {"summary": "true"}
     if len(segments) == 3 and segments == ["v1", "every-code", "work-requests"]:
         return "every_code_work_request.read", {}
     if len(segments) == 3 and segments == ["v1", "every-code", "pr-feedback"]:
@@ -3055,6 +3060,8 @@ def _terminal_agent_identity_from_bearer(
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
+    if method == "GET" and path == "/v1/every-code/summary":
+        return True
     if method == "GET" and path == "/v1/every-code/work-requests":
         return True
     if method == "GET" and path == "/v1/every-code/pr-feedback":
@@ -3102,6 +3109,23 @@ def _every_code_read_payload(
 ) -> dict[str, object]:
     every_code_store = _every_code_work_request_store(record_store)
     segments = [segment for segment in path.split("/") if segment]
+    if path == "/v1/every-code/summary":
+        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
+        issue_number_value = str((query.get("issue_number") or [""])[0] or "").strip()
+        issue_number_filter = int(issue_number_value) if issue_number_value else None
+        state_filter = str((query.get("state") or [""])[0] or "").strip()
+        limit = _every_code_pagination_value(query, key="limit", default=50)
+        offset = _every_code_pagination_value(query, key="offset", default=0)
+        summary = build_every_code_summary_read_model(
+            generated_at=_utc_now_timestamp(),
+            record_store=every_code_store,
+            repository=repository_filter,
+            issue_number=issue_number_filter,
+            state=state_filter,
+            limit=limit,
+            offset=offset,
+        )
+        return {"summary": summary.model_dump(mode="json")}
     if path == "/v1/every-code/pr-feedback":
         request_id_filter = str((query.get("request_id") or [""])[0] or "").strip()
         repository_filter = str((query.get("repository") or [""])[0] or "").strip()

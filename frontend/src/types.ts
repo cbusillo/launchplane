@@ -548,6 +548,42 @@ export interface EveryCodeWorkRequestListPayload {
   requests: EveryCodeWorkRequestRecord[];
 }
 
+export interface EveryCodeWorkRequestSummary {
+  request_id: string;
+  repository: string;
+  issue_number: number;
+  issue_url: string;
+  issue_title: string;
+  state: EveryCodeWorkRequestRecord["state"];
+  summary_status: "active" | "stuck" | "complete" | "rerunnable";
+  source: string;
+  trigger_label: string;
+  trigger_actor: string;
+  claimed_by_host: string;
+  queued_at: string;
+  updated_at: string;
+  claimed_at: string;
+  started_at: string;
+  finished_at: string;
+  result_pr_url: string;
+  result_summary: string;
+  safe_to_rerun: boolean;
+  next_action: string;
+}
+
+export interface EveryCodeSummaryPayload {
+  status: "ok";
+  trace_id: string;
+  summary: {
+    schema_version: number;
+    generated_at: string;
+    repository: string;
+    issue_number: number | null;
+    state_filter: EveryCodeWorkRequestRecord["state"] | "";
+    summaries: EveryCodeWorkRequestSummary[];
+  };
+}
+
 export type WorkGraphRepoClassification =
   | "managed_runtime"
   | "active_awareness"
