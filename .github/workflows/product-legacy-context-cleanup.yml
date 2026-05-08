@@ -134,7 +134,7 @@ jobs:
           jq . "$response_file"
 
       - name: Upload cleanup artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: launchplane-product-legacy-context-cleanup-${{ inputs.product }}
           path: launchplane-product-legacy-context-cleanup.json
