@@ -54,7 +54,7 @@ def build_work_graph_snapshot_service_payload(
     action_allowed: ActionAllowed,
     planning_facts_provider: WorkGraphPlanningFactsProvider | None,
 ) -> dict[str, object]:
-    work_requests = work_request_store.list_every_code_work_request_records(limit=100)
+    work_requests = work_request_store.list_every_code_work_request_records(limit=None)
     product_overviews = build_product_site_overviews(
         record_store=product_store,
         action_allowed=action_allowed,
@@ -93,7 +93,7 @@ def build_repo_product_mapping_service_payload(
     work_request_store: RepoProductMappingWorkRequestStore,
 ) -> dict[str, object]:
     product_profiles = product_store.list_product_profile_records()
-    work_requests = work_request_store.list_every_code_work_request_records(limit=100)
+    work_requests = work_request_store.list_every_code_work_request_records(limit=None)
     mapping = build_repo_product_mapping_from_records(
         generated_at=generated_at,
         product_profiles=product_profiles,

@@ -69,7 +69,16 @@ class _WorkRequestStore:
         offset: int = 0,
     ) -> tuple[EveryCodeWorkRequestRecord, ...]:
         self.seen_limit = limit
-        return self.records
+        records = self.records
+        if repository:
+            records = tuple(record for record in records if record.repository == repository)
+        if state:
+            records = tuple(record for record in records if record.state == state)
+        if offset > 0:
+            records = records[offset:]
+        if limit is not None:
+            records = records[:limit]
+        return records
 
 
 class WorkGraphServiceTests(unittest.TestCase):
@@ -152,7 +161,7 @@ class WorkGraphServiceTests(unittest.TestCase):
             ),
         )
 
-        self.assertEqual(work_request_store.seen_limit, 100)
+        self.assertIsNone(work_request_store.seen_limit)
         self.assertEqual(
             payload["source"],
             {"product_count": 0, "work_request_count": 1, "planning_fact_count": 1},
@@ -165,6 +174,34 @@ class WorkGraphServiceTests(unittest.TestCase):
         self.assertEqual(issues[0]["focus"], "Now")
         self.assertEqual(issues[0]["manager"], "@cellmechanic")
         self.assertEqual(issues[0]["blocking"], 2)
+
+    def test_repo_product_mapping_reads_past_first_hundred_work_requests(self) -> None:
+        work_request_store = _WorkRequestStore(
+            tuple(
+                _work_request(
+                    request_id=f"every-code-cbusillo-tool-{index}",
+                    repository=f"cbusillo/tool-{index}",
+                    issue_number=index + 1,
+                    issue_url=f"https://github.com/cbusillo/tool-{index}/issues/{index + 1}",
+                )
+                for index in range(105)
+            )
+        )
+
+        payload = build_repo_product_mapping_service_payload(
+            generated_at="2026-05-08T18:05:00Z",
+            product_store=_EmptyProductStore(),
+            work_request_store=work_request_store,
+        )
+
+        mapping = cast(dict[str, object], payload["mapping"])
+        repositories = cast(list[dict[str, object]], mapping["repositories"])
+        self.assertIsNone(work_request_store.seen_limit)
+        self.assertEqual(payload["source"], {"product_count": 0, "work_request_count": 105})
+        self.assertIn(
+            "cbusillo/tool-104",
+            {str(repository["repository"]) for repository in repositories},
+        )
 
     def test_snapshot_payload_does_not_classify_unauthorized_product_repo_as_managed(
         self,
