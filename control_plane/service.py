@@ -117,6 +117,7 @@ from control_plane.service_auth import (
     LaunchplaneIdentity,
     TerminalAgentIdentity,
     TokenVerifier,
+    agent_consumer_subject,
     load_authz_policy,
     parse_authz_policy_toml,
 )
@@ -3471,6 +3472,12 @@ def _authz_diagnostic_payload(
         }
     payload: dict[str, object] = {
         "identity": identity_payload,
+        "agent_consumer": agent_consumer_subject(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        ).model_dump(mode="json"),
         "policy_source": authz_policy_source,
         "policy_sha256": authz_policy_sha256_value,
     }

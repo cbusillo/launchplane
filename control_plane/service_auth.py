@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fnmatch import fnmatchcase
+import re
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -46,6 +47,16 @@ class TerminalAgentIdentity:
 
 
 LaunchplaneIdentity = GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity
+AgentConsumerSubjectType = Literal["github_actions", "github_human", "terminal_agent"]
+AgentConsumerActionSafety = Literal[
+    "read",
+    "safe_write",
+    "mutation",
+    "prod",
+    "destructive",
+    "secret_backed",
+    "policy_admin",
+]
 
 
 class TokenVerifier(Protocol):
@@ -242,6 +253,85 @@ class TerminalAgentPolicyRule(BaseModel):
         if self.actions and action not in self.actions:
             return False
         return True
+
+
+class AgentConsumerSubject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject_type: AgentConsumerSubjectType
+    subject: str
+    display_label: str
+    role: Literal["read_only", "admin", "worker"] = "read_only"
+    product: str = ""
+    context: str = ""
+    action: str = ""
+    action_safety: AgentConsumerActionSafety = "read"
+    read_only_context: bool = False
+    approval_capable: bool = False
+
+
+def action_safety(action: str) -> AgentConsumerActionSafety:
+    normalized_action = action.strip()
+    if not normalized_action:
+        return "read"
+    action_parts = tuple(part for part in re.split(r"[_.-]+", normalized_action) if part)
+    if normalized_action.startswith("authz_policy"):
+        return "policy_admin"
+    if "secret" in action_parts:
+        return "secret_backed"
+    if any(part in action_parts for part in ("destroy", "cleanup", "delete", "rollback")):
+        return "destructive"
+    if "prod" in action_parts or "promotion" in action_parts:
+        return "prod"
+    if normalized_action.endswith(".read") or normalized_action == "work_graph.rank":
+        return "read"
+    if normalized_action.endswith(".write") or "rerun" in action_parts:
+        return "safe_write"
+    return "mutation"
+
+
+def agent_consumer_subject(
+    *, identity: LaunchplaneIdentity, action: str = "", product: str = "", context: str = ""
+) -> AgentConsumerSubject:
+    safety = action_safety(action)
+    if isinstance(identity, GitHubHumanIdentity):
+        return AgentConsumerSubject(
+            subject_type="github_human",
+            subject=identity.login,
+            display_label=identity.login,
+            role=identity.role,
+            product=product,
+            context=context,
+            action=action,
+            action_safety=safety,
+            read_only_context=identity.role == "read_only",
+            approval_capable=identity.role == "admin",
+        )
+    if isinstance(identity, TerminalAgentIdentity):
+        return AgentConsumerSubject(
+            subject_type="terminal_agent",
+            subject=identity.subject,
+            display_label=identity.token_label,
+            role="worker",
+            product=product,
+            context=context,
+            action=action,
+            action_safety=safety,
+            read_only_context=True,
+            approval_capable=False,
+        )
+    return AgentConsumerSubject(
+        subject_type="github_actions",
+        subject=identity.subject or identity.workflow_ref,
+        display_label=identity.repository,
+        role="worker",
+        product=product,
+        context=context,
+        action=action,
+        action_safety=safety,
+        read_only_context=safety == "read",
+        approval_capable=safety in {"mutation", "prod", "destructive", "secret_backed", "policy_admin"},
+    )
 
 
 class LaunchplaneAuthzPolicy(BaseModel):

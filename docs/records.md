@@ -609,6 +609,10 @@ state/
   source links, freshness/provenance, and safe request-preview guidance. Detail
   fields are bounded and redacted so provider-only internals, local paths, and
   secret-shaped values are not copied into agent context payloads.
+- Agent-consumer authorization diagnostics use a compact subject model for
+  GitHub Actions, terminal agents, and GitHub humans. The model records the
+  requested action, product, context, safety family, read-only-context status,
+  and approval-capable status without replacing exact policy-rule authorization.
 
 ## Inventory
 

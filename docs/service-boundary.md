@@ -400,6 +400,27 @@ authorize read endpoints, but POST mutation routes remain GitHub Actions OIDC
 only until browser-initiated mutation workflows get a dedicated CSRF and audit
 design.
 
+Agent consumers use the same allow-list policy but are classified into a compact
+subject model before diagnostics or downstream intent contracts consume them:
+
+- `github_actions`: workflow subjects from verified OIDC claims. Read actions
+  are context-only; write, prod, destructive, secret-backed, and policy-admin
+  actions require explicit matching policy grants for the workflow identity.
+- `terminal_agent`: trusted local terminal agents authenticated by the dedicated
+  read bearer token. These subjects are always read-only context consumers and
+  cannot use POST routes, product mutations, authz policy changes, destructive
+  cleanup, or secret-backed actions even if a policy rule is too broad.
+- `github_human`: browser-session humans with `read_only` or `admin` role from
+  GitHub human policy rules or bootstrap admin email matching. Read-only humans
+  can consume scoped context; admin humans are approval-capable for future
+  operator-mediated intent flows, but direct mutation routes still require their
+  own CSRF/audit design before broad browser writes are allowed.
+
+Action names are classified for agent context as `read`, `safe_write`,
+`mutation`, `prod`, `destructive`, `secret_backed`, or `policy_admin`. This
+classification is diagnostic and contractual; authorization still fails closed
+through the exact action/product/context policy rule.
+
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a
 matching `github_humans` rule exists. The GitHub OAuth client requests

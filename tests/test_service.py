@@ -5166,6 +5166,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
         self.assertEqual(payload["authz"]["identity"]["repository"], "every/verireel")
+        self.assertEqual(payload["authz"]["agent_consumer"]["subject_type"], "github_actions")
+        self.assertEqual(payload["authz"]["agent_consumer"]["action_safety"], "read")
+        self.assertTrue(payload["authz"]["agent_consumer"]["read_only_context"])
+        self.assertFalse(payload["authz"]["agent_consumer"]["approval_capable"])
         self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
 
     def test_product_profile_list_denial_includes_authz_diagnostics(self) -> None:
