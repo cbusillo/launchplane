@@ -126,12 +126,13 @@ export function PromotionBridge({
     supportsGenericWebPromotion &&
       workflowAction &&
       dryRunResult &&
+      productAllowsWorkflow &&
       product.trim() &&
       context.trim() &&
       !loading &&
       !submittingWorkflowMode,
   );
-  const canPromoteThroughWorkflow = Boolean(canDispatchWorkflow && productAllowsWorkflow);
+  const workflowAvailabilityKey = `${productWorkflowAction?.action_id ?? ""}:${productWorkflowAction?.enabled ?? ""}:${workflowBlockers.join("|")}`;
   const verdictLabel =
     decision.verdict === "ready"
       ? "Ready to promote"
@@ -146,7 +147,7 @@ export function PromotionBridge({
     setDryRunTraceId("");
     setWorkflowError("");
     setWorkflowTraceId("");
-  }, [product, context, testingArtifact, testingSourceRef]);
+  }, [product, context, environment, testingArtifact, testingSourceRef, workflowAvailabilityKey]);
 
   function runPromotionDryRun() {
     if (!canDryRun) {
@@ -317,7 +318,7 @@ export function PromotionBridge({
                         className="button button-primary bridge-action"
                         type="button"
                         data-safety="mutation"
-                        disabled={!canPromoteThroughWorkflow}
+                        disabled={!canDispatchWorkflow}
                         onClick={() => dispatchPromotionWorkflow(false)}
                       >
                         {submittingWorkflowMode === "promote" ? (
@@ -329,7 +330,7 @@ export function PromotionBridge({
                       </button>
                     </div>
                   ) : null}
-                  {dryRunResult && !canPromoteThroughWorkflow ? (
+                  {dryRunResult && !canDispatchWorkflow ? (
                     <ActionBlockerList
                       reasons={workflowDisabledReasons({
                         canDispatchWorkflow,
