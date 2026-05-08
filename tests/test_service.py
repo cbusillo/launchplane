@@ -23,6 +23,7 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -1172,6 +1173,88 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 app,
                 method="GET",
                 path="/v1/every-code/summary",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_preview_readiness_returns_agent_safe_projection(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": ["*"],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_preview_gate.read"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_every_code_preview_gate_record(
+                EveryCodePreviewGateRecord(
+                    gate_id="every-code-preview-gate-cbusillo-code-26-abcdef",
+                    request_id="every-code-cbusillo-code-26-test",
+                    repository="cbusillo/code",
+                    issue_number=26,
+                    issue_url="https://github.com/cbusillo/code/issues/26",
+                    pr_number=31,
+                    pr_url="https://github.com/cbusillo/code/pull/31",
+                    head_sha="abcdef1234567890",
+                    status="blocked",
+                    created_at="2026-05-08T18:00:00Z",
+                    updated_at="2026-05-08T18:01:00Z",
+                    blocked_at="2026-05-08T18:01:00Z",
+                    last_checked_at="2026-05-08T18:01:00Z",
+                    blocked_reason="static_checks failed.",
+                    check_summary="static_checks=failure",
+                )
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(repository="cbusillo/launchplane", event_name="workflow_dispatch")
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/readiness",
+                query_string="repository=cbusillo/code&pr_number=31&status=blocked",
+            )
+
+        self.assertEqual(status_code, 200)
+        readiness = payload["readiness"]
+        self.assertEqual(readiness["repository"], "cbusillo/code")
+        self.assertEqual(readiness["pr_number"], 31)
+        self.assertEqual(readiness["status_filter"], "blocked")
+        self.assertEqual(len(readiness["items"]), 1)
+        item = readiness["items"][0]
+        self.assertEqual(item["readiness_status"], "needs_attention")
+        self.assertEqual(item["freshness_status"], "verified")
+        self.assertEqual(item["source_of_truth_url"], "https://github.com/cbusillo/code/pull/31")
+        self.assertTrue(item["needs_operator_attention"])
+
+    def test_preview_readiness_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/previews/readiness",
             )
 
         self.assertEqual(status_code, 403)

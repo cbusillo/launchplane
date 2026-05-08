@@ -584,6 +584,52 @@ export interface EveryCodeSummaryPayload {
   };
 }
 
+export interface PreviewReadinessItem {
+  gate_id: string;
+  request_id: string;
+  repository: string;
+  issue_number: number;
+  issue_url: string;
+  pr_number: number;
+  pr_url: string;
+  head_sha: string;
+  gate_status: "pending" | "ready" | "blocked" | "labeled" | "cancelled";
+  readiness_status:
+    | "waiting_on_checks"
+    | "ready"
+    | "needs_attention"
+    | "cancelled";
+  freshness_status:
+    | "verified"
+    | "recorded"
+    | "stale"
+    | "missing"
+    | "unsupported";
+  provenance: string;
+  updated_at: string;
+  last_checked_at: string;
+  ready_at: string;
+  terminal_at: string;
+  detail: string;
+  check_summary: string;
+  source_of_truth_url: string;
+  safe_to_request_preview: boolean;
+  needs_operator_attention: boolean;
+}
+
+export interface PreviewReadinessPayload {
+  status: "ok";
+  trace_id: string;
+  readiness: {
+    schema_version: number;
+    generated_at: string;
+    repository: string;
+    pr_number: number | null;
+    status_filter: PreviewReadinessItem["gate_status"] | "";
+    items: PreviewReadinessItem[];
+  };
+}
+
 export type WorkGraphRepoClassification =
   | "managed_runtime"
   | "active_awareness"
