@@ -622,8 +622,11 @@ state/
   safe-write action families even when a human policy rule is too broad.
 - Agent-facing authorization diagnostics include an `agent_audit` response
   provenance envelope with decision, safe reason code, subject, action, product,
-  context, policy source, policy digest, and `authz_policy` source kind. It is
-  intentionally not a persisted write-intent record yet.
+  context, policy source, policy digest, and `authz_policy` source kind.
+- Agent write-intent evaluations are persisted as
+  `launchplane_agent_write_intents` records. Each record stores the request,
+  evaluation result, `agent_audit` envelope, trace id, optional idempotency key,
+  and recorded timestamp so later action routes can link to durable evidence.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

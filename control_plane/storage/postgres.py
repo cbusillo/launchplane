@@ -22,6 +22,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, sessionmaker
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -525,6 +526,34 @@ class LaunchplaneEveryCodePreviewGateRow(Base):
     head_sha: Mapped[str] = mapped_column(String, nullable=False)
     status: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneAgentWriteIntentRow(Base):
+    __tablename__ = "launchplane_agent_write_intents"
+    __table_args__ = (
+        Index(
+            "launchplane_agent_write_intents_product_context_idx",
+            "product",
+            "context",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_agent_write_intents_status_idx",
+            "status",
+            desc("recorded_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String, nullable=False)
+    intent: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    authz_action: Mapped[str] = mapped_column(String, nullable=False)
+    product: Mapped[str] = mapped_column(String, nullable=False)
+    context: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1350,6 +1379,57 @@ class PostgresRecordStore(HumanSessionStore):
                 status=record.status,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> None:
+        self._write_row(
+            LaunchplaneAgentWriteIntentRow(
+                record_id=record.record_id,
+                recorded_at=record.recorded_at,
+                trace_id=record.trace_id,
+                intent=record.evaluation.intent,
+                mode=record.evaluation.mode,
+                status=record.evaluation.status,
+                authz_action=record.evaluation.authz_action,
+                product=record.evaluation.product,
+                context=record.evaluation.context,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
+        return self._read_model(
+            model_type=AgentWriteIntentRecord,
+            orm_model=LaunchplaneAgentWriteIntentRow,
+            filters=(LaunchplaneAgentWriteIntentRow.record_id == record_id,),
+        )
+
+    def list_agent_write_intent_records(
+        self,
+        *,
+        status: str = "",
+        product: str = "",
+        context_name: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[AgentWriteIntentRecord, ...]:
+        filters: list[object] = []
+        if status:
+            filters.append(LaunchplaneAgentWriteIntentRow.status == status)
+        if product:
+            filters.append(LaunchplaneAgentWriteIntentRow.product == product)
+        if context_name:
+            filters.append(LaunchplaneAgentWriteIntentRow.context == context_name)
+        return self._list_models(
+            model_type=AgentWriteIntentRecord,
+            orm_model=LaunchplaneAgentWriteIntentRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneAgentWriteIntentRow.recorded_at.desc(),
+                LaunchplaneAgentWriteIntentRow.record_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
         )
 
     def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> None:
@@ -2246,6 +2326,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_lifecycle_plans": 0,
             "preview_pr_feedback": 0,
             "every_code_preview_gates": 0,
+            "agent_write_intents": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
         }
@@ -2306,6 +2387,10 @@ class PostgresRecordStore(HumanSessionStore):
             for gate_record in filesystem_store.list_every_code_preview_gate_records():
                 self.write_every_code_preview_gate_record(gate_record)
                 counts["every_code_preview_gates"] += 1
+        if hasattr(filesystem_store, "list_agent_write_intent_records"):
+            for intent_record in filesystem_store.list_agent_write_intent_records():
+                self.write_agent_write_intent_record(intent_record)
+                counts["agent_write_intents"] += 1
         for release_tuple_record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1

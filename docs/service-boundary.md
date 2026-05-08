@@ -437,15 +437,15 @@ through the exact action/product/context policy rule.
 
 Agent-facing authorization diagnostics include an `agent_audit` envelope with
 the decision, safe reason code, agent subject, action, product, context, policy
-source, policy digest, and `authz_policy` source kind. This first audit surface
-is response provenance, not a persisted intent record. Future scoped write-intent
-routes should reuse the same shape and add durable record links once they create
-records.
+source, policy digest, and `authz_policy` source kind. Write-intent evaluations
+persist that same provenance as `launchplane_agent_write_intents` records and
+return the record id so later action routes can link to durable evidence.
 
 `POST /v1/agent/write-intents/evaluate` is the first scoped intent surface. It
 does not execute product/runtime mutations. It validates a requested intent,
 maps it to the exact existing policy action, evaluates the caller's policy grant,
-and returns status, safe next action, source URL, and `agent_audit` metadata.
+persists the evaluation record, and returns status, safe next action, source URL,
+record id, and `agent_audit` metadata.
 Agents can use it to preflight safe rerun, preview, config, cleanup, and
 promotion-dispatch candidates without receiving a generic write token or reusable
 credentials. Some intents, such as product config apply and promotion dry-run,

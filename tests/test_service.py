@@ -5363,6 +5363,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_agent_write_intent_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
+            state_dir = root / "state"
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -5380,7 +5381,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 }
             )
             app = create_launchplane_service_app(
-                state_dir=root / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=root,
@@ -5400,6 +5401,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
 
+            record_pointer = payload["result"]["record"]
+            record = FilesystemRecordStore(state_dir).read_agent_write_intent_record(
+                record_pointer["record_id"]
+            )
+
         self.assertEqual(status_code, 202)
         intent = payload["result"]["intent"]
         self.assertEqual(intent["status"], "allowed")
@@ -5408,6 +5414,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(intent["reason_code"], "authorized")
         self.assertEqual(intent["audit"]["decision"], "allowed")
         self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
+        self.assertEqual(record.evaluation.status, "allowed")
+        self.assertEqual(record.evaluation.intent, "every_code_rerun")
+        self.assertEqual(record.request.source_url, "https://github.com/cbusillo/launchplane/issues/386")
+        self.assertEqual(record.trace_id, payload["trace_id"])
 
     def test_agent_write_intent_evaluate_denies_ungranted_intent(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
