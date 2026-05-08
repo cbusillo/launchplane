@@ -104,3 +104,7 @@ When the selected pull request needs a branch refresh, Launchplane updates that
 pull request using the observed head SHA as the compare point. The worker must
 then re-read mergeability and required checks before any later merge decision;
 pre-update check results are stale after a branch refresh.
+
+The reread step rebuilds the dry-run decision from a fresh pull request snapshot.
+If checks are still pending or mergeability is unknown, the next action remains
+`wait_for_checks`; Launchplane must not merge from pre-refresh evidence.

@@ -16,6 +16,7 @@ from control_plane.merge_train import (
     apply_merge_train_branch_update_intent,
     apply_merge_train_block_intent,
     build_merge_train_dry_run_result,
+    reread_merge_train_after_branch_update,
 )
 
 
@@ -37,6 +38,18 @@ class _FakeBranchClient:
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
         self.updated_branches.append((repository, pull_request_number, expected_head_sha))
+
+
+class _FakeSnapshotReader:
+    def __init__(self, snapshot: MergeTrainDryRunSnapshot) -> None:
+        self.snapshot = snapshot
+        self.reads: list[tuple[str, str]] = []
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        self.reads.append((repository, base_branch))
+        return self.snapshot
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
@@ -279,6 +292,79 @@ class MergeTrainBranchUpdateIntentTests(unittest.TestCase):
         self.assertEqual(result.status, "skipped")
         self.assertFalse(result.reread_required)
         self.assertEqual(branch_client.updated_branches, [])
+
+
+class MergeTrainRereadTests(unittest.TestCase):
+    def test_reread_after_branch_update_re_evaluates_fresh_snapshot(self) -> None:
+        policy = build_sellyouroutboard_main_merge_train_policy()
+        stale_result = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(51, branch_update_required=True),),
+            ),
+        )
+        branch_update_result = apply_merge_train_branch_update_intent(
+            dry_run_result=stale_result, branch_client=_FakeBranchClient()
+        )
+        snapshot_reader = _FakeSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(
+                        51,
+                        created_at="2026-05-08T10:00:00Z",
+                        required_checks_status="pending",
+                    ),
+                ),
+            )
+        )
+
+        result = reread_merge_train_after_branch_update(
+            branch_update_result=branch_update_result,
+            policy=policy,
+            snapshot_reader=snapshot_reader,
+        )
+
+        self.assertEqual(result.status, "reread")
+        self.assertEqual(snapshot_reader.reads, [("cbusillo/sellyouroutboard", "main")])
+        self.assertIsNotNone(result.refreshed_result)
+        refreshed_result = result.refreshed_result
+        assert refreshed_result is not None
+        self.assertEqual(refreshed_result.intended_next_action, "wait_for_checks")
+
+    def test_reread_skips_when_branch_update_was_not_required(self) -> None:
+        policy = build_sellyouroutboard_main_merge_train_policy()
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=policy,
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(52),),
+            ),
+        )
+        branch_update_result = apply_merge_train_branch_update_intent(
+            dry_run_result=dry_run_result, branch_client=_FakeBranchClient()
+        )
+        snapshot_reader = _FakeSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(),
+            )
+        )
+
+        result = reread_merge_train_after_branch_update(
+            branch_update_result=branch_update_result,
+            policy=policy,
+            snapshot_reader=snapshot_reader,
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertIsNone(result.refreshed_result)
+        self.assertEqual(snapshot_reader.reads, [])
 
 
 def _pull_request(
