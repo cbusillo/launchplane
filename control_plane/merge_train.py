@@ -2,6 +2,7 @@ from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.contracts.merge_train_policy import MergeTrainRepositoryPolicy
 
@@ -24,6 +25,17 @@ class MergeTrainBranchClient(Protocol):
     def update_pull_request_branch(
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None: ...
+
+
+class MergeTrainMergeClient(Protocol):
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: MergeTrainMergeMethod,
+    ) -> str: ...
 
 
 class MergeTrainSnapshotReader(Protocol):
@@ -109,7 +121,7 @@ class MergeTrainDryRunResult(BaseModel):
     repository: str
     base_branch: str
     policy_key: str
-    merge_method: str
+    merge_method: MergeTrainMergeMethod
     failure_policy: str
     enqueue_label: str
     blocked_label: str
@@ -165,6 +177,20 @@ class MergeTrainWaitResult(BaseModel):
     mergeable: MergeTrainMergeableState | None = None
     required_checks_status: MergeTrainCheckStatus | None = None
     poll_required: bool
+    detail: str
+
+
+class MergeTrainMergeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["merged", "skipped"]
+    repository: str
+    base_branch: str
+    pull_request_number: int | None = None
+    head_sha: str = ""
+    merge_method: MergeTrainMergeMethod | None = None
+    merge_commit_sha: str = ""
+    reread_required: bool
     detail: str
 
 
@@ -333,6 +359,41 @@ def build_merge_train_wait_result(
         required_checks_status=dry_run_result.selected_pr.required_checks_status,
         poll_required=True,
         detail=dry_run_result.next_action_detail,
+    )
+
+
+def apply_merge_train_merge_intent(
+    *,
+    dry_run_result: MergeTrainDryRunResult,
+    merge_client: MergeTrainMergeClient,
+) -> MergeTrainMergeResult:
+    if dry_run_result.intended_next_action != "merge" or dry_run_result.selected_pr is None:
+        return MergeTrainMergeResult(
+            status="skipped",
+            repository=dry_run_result.repository,
+            base_branch=dry_run_result.base_branch,
+            reread_required=False,
+            detail="Dry-run result does not allow a merge.",
+        )
+    merge_commit_sha = merge_client.merge_pull_request(
+        repository=dry_run_result.repository,
+        pull_request_number=dry_run_result.selected_pr.number,
+        head_sha=dry_run_result.selected_pr.head_sha,
+        merge_method=dry_run_result.merge_method,
+    )
+    return MergeTrainMergeResult(
+        status="merged",
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        pull_request_number=dry_run_result.selected_pr.number,
+        head_sha=dry_run_result.selected_pr.head_sha,
+        merge_method=dry_run_result.merge_method,
+        merge_commit_sha=merge_commit_sha,
+        reread_required=True,
+        detail=(
+            f"Merged pull request #{dry_run_result.selected_pr.number}; "
+            "re-read the merge train before selecting the next queued entry."
+        ),
     )
 
 

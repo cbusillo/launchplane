@@ -15,6 +15,7 @@ from control_plane.merge_train import (
     MergeTrainPullRequestSnapshot,
     apply_merge_train_branch_update_intent,
     apply_merge_train_block_intent,
+    apply_merge_train_merge_intent,
     build_merge_train_dry_run_result,
     build_merge_train_wait_result,
     reread_merge_train_after_branch_update,
@@ -39,6 +40,24 @@ class _FakeBranchClient:
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
         self.updated_branches.append((repository, pull_request_number, expected_head_sha))
+
+
+class _FakeMergeClient:
+    def __init__(self) -> None:
+        self.merged_pull_requests: list[tuple[str, int, str, str]] = []
+
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: str,
+    ) -> str:
+        self.merged_pull_requests.append(
+            (repository, pull_request_number, head_sha, merge_method)
+        )
+        return f"merge-{pull_request_number}"
 
 
 class _FakeSnapshotReader:
@@ -431,6 +450,57 @@ class MergeTrainWaitTests(unittest.TestCase):
         self.assertIsNone(result.mergeable)
         self.assertIsNone(result.required_checks_status)
         self.assertFalse(result.poll_required)
+
+
+class MergeTrainMergeIntentTests(unittest.TestCase):
+    def test_merge_intent_uses_selected_head_sha_and_policy_method(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(71),),
+            ),
+        )
+        merge_client = _FakeMergeClient()
+
+        result = apply_merge_train_merge_intent(
+            dry_run_result=dry_run_result, merge_client=merge_client
+        )
+
+        self.assertEqual(result.status, "merged")
+        self.assertEqual(result.pull_request_number, 71)
+        self.assertEqual(result.head_sha, "head-71")
+        self.assertEqual(result.merge_method, "merge")
+        self.assertEqual(result.merge_commit_sha, "merge-71")
+        self.assertTrue(result.reread_required)
+        self.assertEqual(
+            merge_client.merged_pull_requests,
+            [("cbusillo/sellyouroutboard", 71, "head-71", "merge")],
+        )
+
+    def test_merge_intent_skips_non_merge_actions_without_mutation(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(72, required_checks_status="pending"),),
+            ),
+        )
+        merge_client = _FakeMergeClient()
+
+        result = apply_merge_train_merge_intent(
+            dry_run_result=dry_run_result, merge_client=merge_client
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertIsNone(result.pull_request_number)
+        self.assertEqual(result.head_sha, "")
+        self.assertIsNone(result.merge_method)
+        self.assertEqual(result.merge_commit_sha, "")
+        self.assertFalse(result.reread_required)
+        self.assertEqual(merge_client.merged_pull_requests, [])
 
 
 def _pull_request(
