@@ -16,6 +16,7 @@ from control_plane.merge_train import (
     apply_merge_train_branch_update_intent,
     apply_merge_train_block_intent,
     build_merge_train_dry_run_result,
+    build_merge_train_wait_result,
     reread_merge_train_after_branch_update,
 )
 
@@ -365,6 +366,71 @@ class MergeTrainRereadTests(unittest.TestCase):
         self.assertEqual(result.status, "skipped")
         self.assertIsNone(result.refreshed_result)
         self.assertEqual(snapshot_reader.reads, [])
+
+
+class MergeTrainWaitTests(unittest.TestCase):
+    def test_wait_result_records_selected_pr_and_head_sha_for_pending_checks(
+        self,
+    ) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(61, required_checks_status="pending"),
+                ),
+            ),
+        )
+
+        result = build_merge_train_wait_result(dry_run_result=dry_run_result)
+
+        self.assertEqual(result.status, "waiting")
+        self.assertEqual(result.pull_request_number, 61)
+        self.assertEqual(result.head_sha, "head-61")
+        self.assertEqual(result.mergeable, "mergeable")
+        self.assertEqual(result.required_checks_status, "pending")
+        self.assertTrue(result.poll_required)
+        self.assertIn("Wait for mergeability", result.detail)
+
+    def test_wait_result_records_unknown_mergeability(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(62, mergeable="unknown"),
+                ),
+            ),
+        )
+
+        result = build_merge_train_wait_result(dry_run_result=dry_run_result)
+
+        self.assertEqual(result.status, "waiting")
+        self.assertEqual(result.pull_request_number, 62)
+        self.assertEqual(result.mergeable, "unknown")
+        self.assertEqual(result.required_checks_status, "pass")
+        self.assertTrue(result.poll_required)
+
+    def test_wait_result_skips_non_wait_actions(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(63),),
+            ),
+        )
+
+        result = build_merge_train_wait_result(dry_run_result=dry_run_result)
+
+        self.assertEqual(result.status, "skipped")
+        self.assertIsNone(result.pull_request_number)
+        self.assertEqual(result.head_sha, "")
+        self.assertIsNone(result.mergeable)
+        self.assertIsNone(result.required_checks_status)
+        self.assertFalse(result.poll_required)
 
 
 def _pull_request(

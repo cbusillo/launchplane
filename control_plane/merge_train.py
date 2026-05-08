@@ -154,6 +154,20 @@ class MergeTrainRereadResult(BaseModel):
     detail: str
 
 
+class MergeTrainWaitResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["waiting", "skipped"]
+    repository: str
+    base_branch: str
+    pull_request_number: int | None = None
+    head_sha: str = ""
+    mergeable: MergeTrainMergeableState | None = None
+    required_checks_status: MergeTrainCheckStatus | None = None
+    poll_required: bool
+    detail: str
+
+
 def build_merge_train_dry_run_result(
     *, policy: MergeTrainPolicy, snapshot: MergeTrainDryRunSnapshot
 ) -> MergeTrainDryRunResult:
@@ -292,6 +306,33 @@ def reread_merge_train_after_branch_update(
         base_branch=branch_update_result.base_branch,
         refreshed_result=refreshed_result,
         detail="Re-read mergeability and required checks after branch update.",
+    )
+
+
+def build_merge_train_wait_result(
+    *, dry_run_result: MergeTrainDryRunResult
+) -> MergeTrainWaitResult:
+    if (
+        dry_run_result.intended_next_action != "wait_for_checks"
+        or dry_run_result.selected_pr is None
+    ):
+        return MergeTrainWaitResult(
+            status="skipped",
+            repository=dry_run_result.repository,
+            base_branch=dry_run_result.base_branch,
+            poll_required=False,
+            detail="Dry-run result does not require check polling.",
+        )
+    return MergeTrainWaitResult(
+        status="waiting",
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        pull_request_number=dry_run_result.selected_pr.number,
+        head_sha=dry_run_result.selected_pr.head_sha,
+        mergeable=dry_run_result.selected_pr.mergeable,
+        required_checks_status=dry_run_result.selected_pr.required_checks_status,
+        poll_required=True,
+        detail=dry_run_result.next_action_detail,
     )
 
 
