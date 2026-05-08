@@ -39,7 +39,13 @@ class GitHubHumanIdentity:
     role: Literal["read_only", "admin"]
 
 
-LaunchplaneIdentity = GitHubActionsIdentity | GitHubHumanIdentity
+@dataclass(frozen=True)
+class TerminalAgentIdentity:
+    subject: str
+    token_label: str
+
+
+LaunchplaneIdentity = GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity
 
 
 class TokenVerifier(Protocol):
@@ -208,12 +214,43 @@ class GitHubHumanPolicyRule(BaseModel):
         return True
 
 
+class TerminalAgentPolicyRule(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subjects: tuple[str, ...] = ()
+    token_labels: tuple[str, ...] = ()
+    products: tuple[str, ...] = ()
+    contexts: tuple[str, ...] = ()
+    actions: tuple[str, ...] = ()
+
+    @staticmethod
+    def _matches_any(value: str, allowed_values: tuple[str, ...]) -> bool:
+        normalized_value = value.strip()
+        return any(fnmatchcase(normalized_value, allowed_value) for allowed_value in allowed_values)
+
+    def allows(
+        self, *, identity: TerminalAgentIdentity, action: str, product: str, context: str
+    ) -> bool:
+        if self.subjects and not self._matches_any(identity.subject, self.subjects):
+            return False
+        if self.token_labels and not self._matches_any(identity.token_label, self.token_labels):
+            return False
+        if self.products and product not in self.products:
+            return False
+        if self.contexts and context not in self.contexts:
+            return False
+        if self.actions and action not in self.actions:
+            return False
+        return True
+
+
 class LaunchplaneAuthzPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     schema_version: int = Field(default=1, ge=1)
     github_actions: tuple[GitHubActionsPolicyRule, ...] = ()
     github_humans: tuple[GitHubHumanPolicyRule, ...] = ()
+    terminal_agents: tuple[TerminalAgentPolicyRule, ...] = ()
 
     def allows(
         self, *, identity: LaunchplaneIdentity, action: str, product: str, context: str
@@ -222,6 +259,11 @@ class LaunchplaneAuthzPolicy(BaseModel):
             return any(
                 rule.allows(identity=identity, action=action, product=product, context=context)
                 for rule in self.github_humans
+            )
+        if isinstance(identity, TerminalAgentIdentity):
+            return any(
+                rule.allows(identity=identity, action=action, product=product, context=context)
+                for rule in self.terminal_agents
             )
         return any(
             rule.allows(identity=identity, action=action, product=product, context=context)

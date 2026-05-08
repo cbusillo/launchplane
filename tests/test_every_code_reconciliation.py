@@ -154,6 +154,61 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(grant["roles"], ["admin"])
         self.assertEqual(grant["actions"], ["generic_web_prod_promotion.dispatch"])
 
+    def test_cli_authz_grant_terminal_agent_posts_service_request(self) -> None:
+        runner = CliRunner()
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"mode": "apply", "changed": True},
+            }
+
+        with patch("control_plane.cli._post_launchplane_service_json", side_effect=fake_post):
+            result = runner.invoke(
+                main,
+                [
+                    "authz-policies",
+                    "grant-terminal-agent",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--session-cookie",
+                    "launchplane_session=signed",
+                    "--subject",
+                    "local-owner-agent",
+                    "--token-label",
+                    "local-owner-read",
+                    "--product",
+                    "sellyouroutboard",
+                    "--context",
+                    "sellyouroutboard",
+                    "--action",
+                    "product_environment.read",
+                    "--reason",
+                    "Allow local terminal agent product context reads.",
+                    "--related-issue",
+                    "cbusillo/launchplane#426",
+                    "--idempotency-key",
+                    "authz-terminal-agent-grant:syo-read",
+                    "--apply",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(captured_request["bearer_token"], "")
+        self.assertEqual(captured_request["session_cookie"], "launchplane_session=signed")
+        self.assertEqual(captured_request["path"], "/v1/authz-policies/terminal-agents/grants")
+        self.assertEqual(captured_request["idempotency_key"], "authz-terminal-agent-grant:syo-read")
+        payload = captured_request["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["mode"], "apply")
+        grant = payload["grant"]
+        assert isinstance(grant, dict)
+        self.assertEqual(grant["subjects"], ["local-owner-agent"])
+        self.assertEqual(grant["token_labels"], ["local-owner-read"])
+        self.assertEqual(grant["actions"], ["product_environment.read"])
+
     def test_creates_queued_request_when_trigger_label_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             store = FilesystemRecordStore(state_dir=Path(tempdir))

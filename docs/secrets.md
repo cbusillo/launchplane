@@ -108,6 +108,9 @@ title: Secrets
   - `LAUNCHPLANE_DATABASE_URL`
   - `LAUNCHPLANE_MASTER_ENCRYPTION_KEY`
   - policy/bootstrap selectors such as `LAUNCHPLANE_POLICY_*`
+  - service-ingress bearer secrets such as
+    `LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN` and
+    `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN`
 - Treat these as DB-backed Launchplane-owned data instead of live service-host
   env once the shared store is available:
   - `DOKPLOY_HOST`

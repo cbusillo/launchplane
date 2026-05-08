@@ -109,6 +109,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    TerminalAgentIdentity,
     TokenVerifier,
     load_authz_policy,
     parse_authz_policy_toml,
@@ -330,6 +331,9 @@ _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS",
         "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET",
         "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN",
+        "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN",
+        "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT",
+        "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER",
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT",
@@ -1172,6 +1176,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
+        "/v1/authz-policies/terminal-agents/grants",
     }
 )
 _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
@@ -1783,6 +1788,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
+        "/v1/authz-policies/terminal-agents/grants",
         "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
@@ -2717,6 +2723,8 @@ def _idempotency_key(environ: dict[str, object]) -> str:
 def _identity_actor(identity: LaunchplaneIdentity) -> str:
     if isinstance(identity, GitHubHumanIdentity):
         return f"github:{identity.login}"
+    if isinstance(identity, TerminalAgentIdentity):
+        return f"terminal-agent:{identity.subject}"
     return (
         f"github-actions:{identity.repository}:{identity.workflow_ref or identity.job_workflow_ref}"
     )
@@ -2725,6 +2733,8 @@ def _identity_actor(identity: LaunchplaneIdentity) -> str:
 def _idempotency_scope(identity: LaunchplaneIdentity) -> str:
     if isinstance(identity, GitHubHumanIdentity):
         return "|".join(("github-human", identity.login, str(identity.github_id)))
+    if isinstance(identity, TerminalAgentIdentity):
+        return "|".join(("terminal-agent", identity.subject, identity.token_label))
     workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
     return "|".join(
         (
@@ -2958,6 +2968,7 @@ def _should_store_idempotency_record(
         in {
             "/v1/authz-policies/github-actions/grants",
             "/v1/authz-policies/github-humans/grants",
+            "/v1/authz-policies/terminal-agents/grants",
         }
         and isinstance(driver_result, dict)
         and driver_result.get("mode") == "dry_run"
@@ -3009,6 +3020,35 @@ def _bearer_token(environ: dict[str, object]) -> str:
 
 def _every_code_worker_token_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN", "").strip()
+
+
+def _terminal_agent_read_token_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN", "").strip()
+
+
+def _terminal_agent_subject_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT", "local-owner-agent").strip()
+
+
+def _terminal_agent_token_label_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL", "local-owner-read").strip()
+
+
+def _terminal_agent_identity_from_bearer(
+    environ: dict[str, object]
+) -> TerminalAgentIdentity | None:
+    expected_token = _terminal_agent_read_token_from_env()
+    if not expected_token:
+        return None
+    try:
+        provided_token = _bearer_token(environ)
+    except PermissionError:
+        return None
+    if not secrets.compare_digest(provided_token, expected_token):
+        return None
+    subject = _terminal_agent_subject_from_env() or "local-owner-agent"
+    token_label = _terminal_agent_token_label_from_env() or "local-owner-read"
+    return TerminalAgentIdentity(subject=subject, token_label=token_label)
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
@@ -3322,8 +3362,14 @@ def _read_identity(
     human_identity = _session_identity(environ=environ, session_manager=session_manager)
     if human_identity is not None:
         return human_identity
+    terminal_agent_identity = _terminal_agent_identity_from_bearer(environ)
+    if terminal_agent_identity is not None:
+        return terminal_agent_identity
     token = _bearer_token(environ)
-    return verifier.verify(token)
+    try:
+        return verifier.verify(token)
+    except ValueError as error:
+        raise PermissionError(str(error)) from error
 
 
 def _human_identity_payload(identity: GitHubHumanIdentity) -> dict[str, object]:
@@ -3353,6 +3399,12 @@ def _authz_diagnostic_payload(
             "type": "github_human",
             "login": identity.login,
             "role": identity.role,
+        }
+    elif isinstance(identity, TerminalAgentIdentity):
+        identity_payload = {
+            "type": "terminal_agent",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
         }
     else:
         identity_payload = {
@@ -4512,6 +4564,22 @@ def create_launchplane_service_app(
                     identity = verifier.verify(token)
                     if not isinstance(identity, GitHubActionsIdentity):
                         raise PermissionError("Mutation routes require GitHub Actions OIDC.")
+            if isinstance(identity, TerminalAgentIdentity) and method != "GET":
+                return _json_response(
+                    start_response=start_response,
+                    status_code=403,
+                    payload={
+                        "status": "rejected",
+                        "trace_id": request_trace_id,
+                        "error": {
+                            "code": "authorization_denied",
+                            "message": (
+                                "Terminal agent credentials can only read redacted "
+                                "Launchplane context."
+                            ),
+                        },
+                    },
+                )
             if method == "GET":
                 assert read_route is not None
                 action, params = read_route
@@ -5726,6 +5794,124 @@ def create_launchplane_service_app(
                         authz_policy_record=authz_policy_record,
                         changed=changed,
                         mode=human_authz_grant_request.mode,
+                        diff=diff,
+                        audit=audit,
+                    )
+                )
+            elif path == "/v1/authz-policies/terminal-agents/grants":
+                terminal_authz_grant_request = control_plane_authz_grant_service.AuthzPolicyTerminalAgentGrantEnvelope.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Authz terminal-agent policy grant writes require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=terminal_authz_grant_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write Launchplane authz terminal-agent policy grants.",
+                            },
+                        },
+                    )
+                if terminal_authz_grant_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    (
+                        current_policy,
+                        current_record,
+                        diff,
+                    ) = control_plane_authz_grant_service.plan_terminal_agent_authz_policy_grant(
+                        record_store=record_store,
+                        grant=terminal_authz_grant_request.grant,
+                    )
+                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
+                        request=terminal_authz_grant_request,
+                        identity=identity,
+                        previous_record=current_record,
+                        new_record=None,
+                        changed=bool(diff["changed"]),
+                        trace_id=request_trace_id,
+                        now_timestamp=_now_timestamp,
+                    )
+                    authz_policy_record = current_record
+                    changed = bool(diff["changed"])
+                    if terminal_authz_grant_request.mode == "apply":
+                        (
+                            updated_policy,
+                            authz_policy_record,
+                            changed,
+                            diff,
+                            audit,
+                        ) = control_plane_authz_grant_service.write_terminal_agent_authz_policy_grant(
+                            record_store=record_store,
+                            request=terminal_authz_grant_request,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                            now_timestamp=_now_timestamp,
+                        )
+                    else:
+                        updated_policy = current_policy
+                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
+                            record_id=current_record.record_id,
+                            status=current_record.status,
+                            source=current_record.source,
+                            updated_at=current_record.updated_at,
+                            policy_sha256=current_record.policy_sha256,
+                            policy=current_record.policy,
+                            audit=audit,
+                        )
+                except ValueError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authz_policy_unavailable",
+                                "message": "Launchplane active authz policy is unavailable.",
+                            },
+                        },
+                    )
+                if terminal_authz_grant_request.mode == "apply":
+                    authz_policy = updated_policy
+                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                    resolved_authz_policy_source = "db"
+                result, driver_result = (
+                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
+                        authz_policy_record=authz_policy_record,
+                        changed=changed,
+                        mode=terminal_authz_grant_request.mode,
                         diff=diff,
                         audit=audit,
                     )

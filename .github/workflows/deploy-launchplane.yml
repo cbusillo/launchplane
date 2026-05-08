@@ -66,6 +66,9 @@ jobs:
       LAUNCHPLANE_WORK_GRAPH_GH_TOKEN: ${{ secrets.LAUNCHPLANE_WORK_GRAPH_GH_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN: ${{ secrets.LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN }}
       LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET: ${{ secrets.LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET }}
+      LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: ${{ secrets.LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN }}
+      LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_SUBJECT }}
+      LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL }}
     steps:
       - name: Resolve deploy inputs
         id: prep
@@ -228,6 +231,9 @@ jobs:
                 --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
                 --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
                 --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
+                --arg terminal_agent_read_token "${LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN:-}" \
+                --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" \
+                --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
                 '(
                   {
@@ -236,7 +242,10 @@ jobs:
                   LAUNCHPLANE_PUBLIC_URL: $public_url,
                   LAUNCHPLANE_SESSION_SECRET: $session_secret,
                   LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
+                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
+                  LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
+                  LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
+                  LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
                   }
                   + (
                     if (($omit_every_code_env | not)
