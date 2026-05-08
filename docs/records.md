@@ -617,6 +617,11 @@ state/
   provenance envelope with decision, safe reason code, subject, action, product,
   context, policy source, policy digest, and `authz_policy` source kind. It is
   intentionally not a persisted write-intent record yet.
+- Scoped agent write-intent evaluation is exposed at
+  `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
+  intent to an exact existing policy action, evaluates authorization, and returns
+  status/evidence links without executing runtime mutations or returning
+  credentials.
 
 ## Inventory
 

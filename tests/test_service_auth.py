@@ -253,6 +253,24 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(audit.policy_source, "db")
         self.assertEqual(audit.policy_sha256, "abc123")
 
+    def test_agent_write_intent_actions_use_existing_policy_action_names(self) -> None:
+        from control_plane.contracts.agent_write_intent import (
+            authz_action_for_agent_write_intent,
+        )
+
+        self.assertEqual(
+            authz_action_for_agent_write_intent("every_code_rerun"),
+            "every_code_work_request.write",
+        )
+        self.assertEqual(
+            authz_action_for_agent_write_intent("preview_refresh"),
+            "preview_refresh.execute",
+        )
+        self.assertEqual(
+            authz_action_for_agent_write_intent("promotion_dispatch"),
+            "generic_web_prod_promotion_workflow.execute",
+        )
+
     def test_actions_policy_fails_closed_by_claim_and_scope(self) -> None:
         rule = GitHubActionsPolicyRule(
             repository="cbusillo/verireel",
