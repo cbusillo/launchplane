@@ -189,6 +189,8 @@ jobs:
           tags: |
             ${{ steps.prep.outputs.image_repository }}:main
             ${{ steps.prep.outputs.image_repository }}:sha-${{ github.event_name == 'workflow_run' && github.event.workflow_run.head_sha || github.sha }}
+          cache-from: type=registry,ref=${{ steps.prep.outputs.image_repository }}:buildcache
+          cache-to: type=registry,ref=${{ steps.prep.outputs.image_repository }}:buildcache,mode=max
 
       - name: Resolve image reference
         id: image
