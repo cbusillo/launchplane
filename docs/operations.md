@@ -231,7 +231,11 @@ The workflow should use GitHub OIDC to call Launchplane's own service API and
 update the image digest plus known OAuth env only. DB-backed authz policy records
 own live product/workflow grants; keep Dokploy host/token authority in
 Launchplane-managed secrets instead of duplicating those credentials in GitHub
-repository secrets.
+repository secrets for normal deploy execution. The deploy workflow also needs
+break-glass `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST` and
+`LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN` repository secrets for rollback fallback:
+they are used only when a failed rollout makes the Launchplane service route
+unable to accept its own rollback request.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must resolve from the runner that executes the
 deploy workflow. Use a Launchplane `GET /v1/health` endpoint reachable from that

@@ -184,14 +184,18 @@ Configure these GitHub settings before enabling it:
 - repository secrets:
   - optional `LAUNCHPLANE_GITHUB_CLIENT_SECRET`
   - optional `LAUNCHPLANE_SESSION_SECRET`
+  - emergency rollback fallback `LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST`
+  - emergency rollback fallback `LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN`
 
 The deploy workflow now uses GitHub OIDC plus Launchplane's own service API to
 request a self-deploy. It updates the immutable image reference and known OAuth
 env keys while preserving the target's minimal bootstrap policy env. Live
 product/workflow authz changes should move through DB-backed policy records, not
-repo-local TOML. Dokploy
-credentials should live in Launchplane-managed secrets inside the shared store,
-not in GitHub repository secrets.
+repo-local TOML. Normal Dokploy credentials should live in Launchplane-managed
+secrets inside the shared store, not in GitHub repository secrets. The emergency
+rollback fallback secrets are intentionally narrower: the deploy workflow uses
+them only after a failed rollout makes the Launchplane service route unavailable
+for self-rollback.
 
 `LAUNCHPLANE_DEPLOY_HEALTH_URLS` must point at Launchplane URLs that GitHub-hosted
 runners can reach, typically the public `https://.../v1/health` endpoint.
