@@ -41,6 +41,10 @@ from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_work_request import build_every_code_work_request_id
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
+from control_plane.contracts.merge_train_policy import (
+    build_sellyouroutboard_main_merge_train_policy,
+    load_merge_train_policy,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -9356,6 +9360,44 @@ def work_graph_rank(snapshot_file: Path, limit: int) -> None:
     except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(queue.model_dump(mode="json"), indent=2, sort_keys=True))
+
+
+@work_graph.command("merge-train-policy")
+@click.option(
+    "--policy-file",
+    type=click.Path(path_type=Path, exists=True, dir_okay=False),
+    default=None,
+    help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
+)
+@click.option("--repository", default="", help="Optional owner/name repository lookup.")
+@click.option("--base-branch", default="main", show_default=True)
+def work_graph_merge_train_policy(
+    policy_file: Path | None, repository: str, base_branch: str
+) -> None:
+    try:
+        policy = (
+            load_merge_train_policy(policy_file)
+            if policy_file is not None
+            else build_sellyouroutboard_main_merge_train_policy()
+        )
+        selected_policy = None
+        if repository.strip():
+            selected_policy = policy.find_repository_policy(
+                repository=repository, base_branch=base_branch
+            )
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    payload: dict[str, object] = {
+        "status": "ok",
+        "policy_sha256": policy.policy_sha256,
+        "repository_count": len(policy.policies),
+        "policies": [
+            repository_policy.model_dump(mode="json") for repository_policy in policy.policies
+        ],
+    }
+    if selected_policy is not None:
+        payload["selected_policy"] = selected_policy.model_dump(mode="json")
+    click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
 @every_code.command("run-once")
