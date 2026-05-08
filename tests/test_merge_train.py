@@ -13,6 +13,7 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
+    apply_merge_train_branch_update_intent,
     apply_merge_train_block_intent,
     build_merge_train_dry_run_result,
 )
@@ -26,6 +27,16 @@ class _FakeLabelClient:
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
         self.applied_labels.append((repository, pull_request_number, label))
+
+
+class _FakeBranchClient:
+    def __init__(self) -> None:
+        self.updated_branches: list[tuple[str, int, str]] = []
+
+    def update_pull_request_branch(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> None:
+        self.updated_branches.append((repository, pull_request_number, expected_head_sha))
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
@@ -223,6 +234,51 @@ class MergeTrainBlockIntentTests(unittest.TestCase):
 
         self.assertEqual(result.status, "blocked")
         self.assertTrue(result.train_should_continue)
+
+
+class MergeTrainBranchUpdateIntentTests(unittest.TestCase):
+    def test_branch_update_intent_updates_selected_pr_and_requires_reread(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(41, branch_update_required=True),),
+            ),
+        )
+        branch_client = _FakeBranchClient()
+
+        result = apply_merge_train_branch_update_intent(
+            dry_run_result=dry_run_result, branch_client=branch_client
+        )
+
+        self.assertEqual(result.status, "updated")
+        self.assertEqual(result.pull_request_number, 41)
+        self.assertEqual(result.expected_head_sha, "head-41")
+        self.assertTrue(result.reread_required)
+        self.assertEqual(
+            branch_client.updated_branches,
+            [("cbusillo/sellyouroutboard", 41, "head-41")],
+        )
+
+    def test_branch_update_intent_skips_other_actions_without_mutation(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(42),),
+            ),
+        )
+        branch_client = _FakeBranchClient()
+
+        result = apply_merge_train_branch_update_intent(
+            dry_run_result=dry_run_result, branch_client=branch_client
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertFalse(result.reread_required)
+        self.assertEqual(branch_client.updated_branches, [])
 
 
 def _pull_request(

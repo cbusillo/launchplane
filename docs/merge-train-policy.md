@@ -99,3 +99,8 @@ first live mutation is idempotent application of `blocked_label`. Repositories
 using `pause_train` stop after that label action; repositories using
 `continue_after_blocking_pr` may continue to the next eligible pull request once
 the blocked pull request has been labeled.
+
+When the selected pull request needs a branch refresh, Launchplane updates that
+pull request using the observed head SHA as the compare point. The worker must
+then re-read mergeability and required checks before any later merge decision;
+pre-update check results are stale after a branch refresh.

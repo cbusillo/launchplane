@@ -20,6 +20,12 @@ class MergeTrainLabelClient(Protocol):
     ) -> None: ...
 
 
+class MergeTrainBranchClient(Protocol):
+    def update_pull_request_branch(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> None: ...
+
+
 class MergeTrainPullRequestSnapshot(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -120,6 +126,18 @@ class MergeTrainBlockResult(BaseModel):
     detail: str
 
 
+class MergeTrainBranchUpdateResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["updated", "skipped"]
+    repository: str
+    base_branch: str
+    pull_request_number: int | None = None
+    expected_head_sha: str = ""
+    reread_required: bool
+    detail: str
+
+
 def build_merge_train_dry_run_result(
     *, policy: MergeTrainPolicy, snapshot: MergeTrainDryRunSnapshot
 ) -> MergeTrainDryRunResult:
@@ -195,6 +213,41 @@ def apply_merge_train_block_intent(
         detail=(
             f"Applied {dry_run_result.blocked_label} to pull request "
             f"#{dry_run_result.selected_pr.number}."
+        ),
+    )
+
+
+def apply_merge_train_branch_update_intent(
+    *,
+    dry_run_result: MergeTrainDryRunResult,
+    branch_client: MergeTrainBranchClient,
+) -> MergeTrainBranchUpdateResult:
+    if (
+        dry_run_result.intended_next_action != "update_branch"
+        or dry_run_result.selected_pr is None
+    ):
+        return MergeTrainBranchUpdateResult(
+            status="skipped",
+            repository=dry_run_result.repository,
+            base_branch=dry_run_result.base_branch,
+            reread_required=False,
+            detail="Dry-run result does not require a branch update.",
+        )
+    branch_client.update_pull_request_branch(
+        repository=dry_run_result.repository,
+        pull_request_number=dry_run_result.selected_pr.number,
+        expected_head_sha=dry_run_result.selected_pr.head_sha,
+    )
+    return MergeTrainBranchUpdateResult(
+        status="updated",
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        pull_request_number=dry_run_result.selected_pr.number,
+        expected_head_sha=dry_run_result.selected_pr.head_sha,
+        reread_required=True,
+        detail=(
+            "Updated pull request branch; re-read mergeability and required checks "
+            "before continuing."
         ),
     )
 
