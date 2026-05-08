@@ -114,3 +114,9 @@ mergeability state, and required-check status as a polling boundary. It does not
 merge or mutate GitHub. A later worker pass must read a fresh snapshot for the
 same repository/base branch and continue only when that fresh dry-run result
 selects `merge`.
+
+The merge step is allowed only from a fresh dry-run result whose next action is
+`merge`. The merge request must use the selected pull request's observed
+`head_sha` as the GitHub merge `sha` guard and the repository policy's
+`merge_method`. After a successful merge, the worker must re-read the train
+before selecting another queued pull request.
