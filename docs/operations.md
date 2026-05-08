@@ -207,6 +207,10 @@ Dokploy-hosted.
   replacement.
 - The current repo workflow for that posture is
   `.github/workflows/deploy-launchplane.yml`.
+- Launchplane image builds use Docker Hub public mirror-qualified base images
+  and the CI container scan pulls Trivy from GHCR so self-hosted runners do not
+  fail closed on Docker Hub anonymous pull limits before Launchplane code is
+  built or scanned.
 - Deploy verification should probe Launchplane's live health endpoint, currently
   `GET /v1/health`, after the Dokploy update.
 - When rollout health fails, deploy automation should restore the previous
