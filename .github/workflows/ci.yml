@@ -88,14 +88,16 @@ jobs:
           context: .
           load: true
           tags: launchplane-ci:test
-          cache-from: type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
+          cache-from: >-
+            type=registry,ref=ghcr.io/${{ github.repository }}:buildcache
 
       - name: Scan runtime image
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             -v "${RUNNER_TEMP}/trivy-cache:/root/.cache" \
-            aquasec/trivy:0.70.0 image \
+            ghcr.io/aquasecurity/trivy:0.70.0 \
+            image \
             --scanners vulnerability \
             --ignore-unfixed \
             --severity HIGH,CRITICAL \

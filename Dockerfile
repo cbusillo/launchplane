@@ -1,4 +1,4 @@
-FROM node:22-bookworm-slim AS frontend-build
+FROM mirror.gcr.io/library/node:22-bookworm-slim AS frontend-build
 
 WORKDIR /app
 
@@ -12,7 +12,7 @@ RUN pnpm install --frozen-lockfile
 COPY frontend /app/frontend
 RUN pnpm build
 
-FROM python:3.13-slim
+FROM mirror.gcr.io/library/python:3.13-slim
 
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
 
