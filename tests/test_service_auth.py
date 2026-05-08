@@ -16,6 +16,8 @@ from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
+    action_safety,
+    agent_consumer_subject,
     parse_authz_policy_toml,
 )
 from control_plane.contracts.authz_policy_record import authz_policy_sha256
@@ -164,6 +166,72 @@ class GitHubOidcVerifierBoundaryTests(unittest.TestCase):
 
 
 class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
+    def test_agent_consumer_subject_classifies_terminal_agent_as_read_only_context(self) -> None:
+        subject = agent_consumer_subject(
+            identity=_terminal_agent_identity(),
+            action="product_environment.read",
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+        )
+
+        self.assertEqual(subject.subject_type, "terminal_agent")
+        self.assertEqual(subject.role, "worker")
+        self.assertEqual(subject.action_safety, "read")
+        self.assertTrue(subject.read_only_context)
+        self.assertFalse(subject.approval_capable)
+
+    def test_agent_consumer_subject_classifies_human_admin_as_approval_capable(self) -> None:
+        subject = agent_consumer_subject(
+            identity=_human_identity(role="admin"),
+            action="generic_web_prod_promotion.execute",
+            product="verireel",
+            context="verireel",
+        )
+
+        self.assertEqual(subject.subject_type, "github_human")
+        self.assertEqual(subject.role, "admin")
+        self.assertEqual(subject.action_safety, "prod")
+        self.assertFalse(subject.read_only_context)
+        self.assertTrue(subject.approval_capable)
+
+    def test_agent_consumer_subject_classifies_actions_by_requested_safety(self) -> None:
+        read_subject = agent_consumer_subject(
+            identity=_actions_identity(),
+            action="product_environment.read",
+            product="verireel",
+            context="verireel-testing",
+        )
+        prod_subject = agent_consumer_subject(
+            identity=_actions_identity(),
+            action="verireel_prod_deploy.execute",
+            product="verireel",
+            context="verireel",
+        )
+
+        self.assertEqual(read_subject.subject_type, "github_actions")
+        self.assertTrue(read_subject.read_only_context)
+        self.assertFalse(read_subject.approval_capable)
+        self.assertEqual(prod_subject.action_safety, "prod")
+        self.assertFalse(prod_subject.read_only_context)
+        self.assertTrue(prod_subject.approval_capable)
+
+    def test_action_safety_classifies_privileged_action_families(self) -> None:
+        cases = {
+            "product_environment.read": "read",
+            "work_graph.rank": "read",
+            "preview_pr_feedback.write": "safe_write",
+            "every_code_work_request.rerun": "safe_write",
+            "product_config.apply": "mutation",
+            "generic_web_prod_promotion.execute": "prod",
+            "preview_destroy.execute": "destructive",
+            "secret_binding.apply": "secret_backed",
+            "authz_policy_grant.write": "policy_admin",
+        }
+
+        for action, expected_safety in cases.items():
+            with self.subTest(action=action):
+                self.assertEqual(action_safety(action), expected_safety)
+
     def test_actions_policy_fails_closed_by_claim_and_scope(self) -> None:
         rule = GitHubActionsPolicyRule(
             repository="cbusillo/verireel",
