@@ -131,6 +131,7 @@ export function PromotionBridge({
       !loading &&
       !submittingWorkflowMode,
   );
+  const canPromoteThroughWorkflow = Boolean(canDispatchWorkflow && productAllowsWorkflow);
   const verdictLabel =
     decision.verdict === "ready"
       ? "Ready to promote"
@@ -312,11 +313,28 @@ export function PromotionBridge({
                         )}
                         <span>Run workflow dry run</span>
                       </button>
+                      <button
+                        className="button button-primary bridge-action"
+                        type="button"
+                        data-safety="mutation"
+                        disabled={!canPromoteThroughWorkflow}
+                        onClick={() => dispatchPromotionWorkflow(false)}
+                      >
+                        {submittingWorkflowMode === "promote" ? (
+                          <Loader2 className="spin" size={16} />
+                        ) : (
+                          <Send size={16} />
+                        )}
+                        <span>Promote through workflow</span>
+                      </button>
                     </div>
                   ) : null}
-                  {dryRunResult && !canDispatchWorkflow ? (
+                  {dryRunResult && !canPromoteThroughWorkflow ? (
                     <ActionBlockerList
                       reasons={workflowDisabledReasons({
+                        canDispatchWorkflow,
+                        productAllowsWorkflow,
+                        workflowBlockers,
                         product,
                         context,
                       })}
@@ -473,13 +491,25 @@ function dryRunDisabledReasons({
 }
 
 function workflowDisabledReasons({
+  canDispatchWorkflow,
+  productAllowsWorkflow,
+  workflowBlockers,
   product,
   context,
 }: {
+  canDispatchWorkflow: boolean;
+  productAllowsWorkflow: boolean;
+  workflowBlockers: string[];
   product: string;
   context: string;
 }): string[] {
   const reasons: string[] = [];
+  if (!canDispatchWorkflow) {
+    reasons.push("Workflow dry run is not ready.");
+  }
+  if (!productAllowsWorkflow) {
+    reasons.push(...workflowBlockers);
+  }
   if (!product.trim()) {
     reasons.push("Product key is missing.");
   }
