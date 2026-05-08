@@ -428,6 +428,15 @@ is response provenance, not a persisted intent record. Future scoped write-inten
 routes should reuse the same shape and add durable record links once they create
 records.
 
+`POST /v1/agent/write-intents/evaluate` is the first scoped intent surface. It
+does not execute product/runtime mutations. It validates a requested intent,
+maps it to the exact existing policy action, evaluates the caller's policy grant,
+and returns status, safe next action, source URL, and `agent_audit` metadata.
+Agents can use it to preflight safe rerun, preview, config, cleanup, and
+promotion-dispatch candidates without receiving a generic write token or reusable
+credentials. Some intents, such as product config apply and promotion dry-run,
+remain dry-run-first even when the caller has the underlying policy action.
+
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a
 matching `github_humans` rule exists. The GitHub OAuth client requests

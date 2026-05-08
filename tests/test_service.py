@@ -5214,6 +5214,199 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["authz"]["identity"]["repository"], "every/verireel")
         self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
 
+    def test_agent_write_intent_evaluate_returns_allowed_dry_run_without_execution(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["every_code_work_request.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "dry_run",
+                    "product": "launchplane",
+                    "context": "launchplane",
+                    "source_url": "https://github.com/cbusillo/launchplane/issues/386",
+                    "reason": "Check whether rerun can be requested safely.",
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "allowed")
+        self.assertEqual(intent["authz_action"], "every_code_work_request.write")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["reason_code"], "authorized")
+        self.assertEqual(intent["audit"]["decision"], "allowed")
+        self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
+
+    def test_agent_write_intent_evaluate_denies_ungranted_intent(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["every_code_work_request.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "promotion_dispatch",
+                    "mode": "apply",
+                    "product": "verireel",
+                    "context": "verireel",
+                    "source_url": "https://github.com/cbusillo/launchplane/issues/386",
+                    "reason": "Request prod promotion dispatch.",
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "authorization_denied")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["audit"]["decision"], "denied")
+        self.assertEqual(intent["audit"]["subject"]["action_safety"], "prod")
+
+    def test_agent_write_intent_evaluate_requires_dry_run_for_config_apply(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["verireel"],
+                            "contexts": ["verireel-testing"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "product_config_apply",
+                    "mode": "apply",
+                    "product": "verireel",
+                    "context": "verireel-testing",
+                    "source_url": "https://github.com/cbusillo/launchplane/issues/386",
+                    "reason": "Apply product config after review.",
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "dry_run_required")
+        self.assertFalse(intent["safe_to_execute"])
+        self.assertEqual(intent["audit"]["reason_code"], "dry_run_required")
+
+    def test_terminal_agent_write_intent_evaluate_checks_scoped_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "terminal_agents": [
+                        {
+                            "subjects": ["local-owner-agent"],
+                            "token_labels": ["local-owner-read"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["every_code_work_request.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/agent/write-intents/evaluate",
+                    authorization="Bearer terminal-read-token",
+                    payload={
+                        "intent": "every_code_rerun",
+                        "mode": "dry_run",
+                        "product": "launchplane",
+                        "context": "launchplane",
+                        "source_url": "https://github.com/cbusillo/launchplane/issues/386",
+                        "reason": "Check whether local agent can request a rerun.",
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "allowed")
+        self.assertEqual(intent["audit"]["subject"]["subject_type"], "terminal_agent")
+        self.assertFalse(intent["audit"]["subject"]["approval_capable"])
+
     def test_product_profile_write_rejects_unauthorized_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

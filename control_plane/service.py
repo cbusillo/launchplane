@@ -35,6 +35,11 @@ from control_plane.contracts.authz_policy_record import (
     authz_policy_sha256,
     build_authz_policy_record_id,
 )
+from control_plane.contracts.agent_write_intent import (
+    AgentWriteIntentRequest,
+    authz_action_for_agent_write_intent,
+    evaluate_agent_write_intent,
+)
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.every_code_work_request import (
@@ -1181,6 +1186,7 @@ _VERIREEL_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
 
 _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
     {
+        "/v1/agent/write-intents/evaluate",
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         "/v1/authz-policies/github-actions/grants",
@@ -1790,6 +1796,7 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
+        "/v1/agent/write-intents/evaluate",
         "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
@@ -4632,7 +4639,11 @@ def create_launchplane_service_app(
                     identity = verifier.verify(token)
                     if not isinstance(identity, GitHubActionsIdentity):
                         raise PermissionError("Mutation routes require GitHub Actions OIDC.")
-            if isinstance(identity, TerminalAgentIdentity) and method != "GET":
+            if (
+                isinstance(identity, TerminalAgentIdentity)
+                and method != "GET"
+                and path != "/v1/agent/write-intents/evaluate"
+            ):
                 return _json_response(
                     start_response=start_response,
                     status_code=403,
@@ -5425,6 +5436,34 @@ def create_launchplane_service_app(
                 every_code_store.write_every_code_work_request_record(record)
                 result = {"request_id": record.request_id, "state": record.state}
                 driver_result = {"request": record.model_dump(mode="json")}
+            elif path == "/v1/agent/write-intents/evaluate":
+                intent_request = AgentWriteIntentRequest.model_validate(payload)
+                intent_authz_action = authz_action_for_agent_write_intent(
+                    intent_request.intent
+                )
+                authorized = authz_policy.allows(
+                    identity=identity,
+                    action=intent_authz_action,
+                    product=intent_request.product,
+                    context=intent_request.context,
+                )
+                intent_audit = agent_authz_audit(
+                    identity=identity,
+                    action=intent_authz_action,
+                    product=intent_request.product,
+                    context=intent_request.context,
+                    decision="allowed" if authorized else "denied",
+                    reason_code="authorized" if authorized else "authorization_denied",
+                    policy_source=resolved_authz_policy_source,
+                    policy_sha256=resolved_authz_policy_sha256,
+                )
+                evaluation = evaluate_agent_write_intent(
+                    request=intent_request,
+                    authorized=authorized,
+                    audit=intent_audit,
+                )
+                result = {"intent": evaluation.model_dump(mode="json")}
+                driver_result = result
             elif path == "/v1/every-code/work-requests/claim":
                 if not authz_policy.allows(
                     identity=identity,
