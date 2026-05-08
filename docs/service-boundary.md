@@ -436,6 +436,12 @@ Agents can use it to preflight safe rerun, preview, config, cleanup, and
 promotion-dispatch candidates without receiving a generic write token or reusable
 credentials. Some intents, such as product config apply and promotion dry-run,
 remain dry-run-first even when the caller has the underlying policy action.
+Secret-backed intents may name managed secret binding keys plus a runtime
+destination. Launchplane evaluates the existing runtime key-safety policy and an
+additional `.secret` policy action such as `product_config.apply.secret`, then
+returns sanitized binding keys, policy ids, and finding codes only. It never
+returns plaintext secret values, ciphertext, provider env dumps, or token
+prefixes to the agent.
 
 For first access, `LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS` may name comma-separated
 verified GitHub email addresses that receive the `admin` role even before a

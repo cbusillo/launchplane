@@ -622,6 +622,11 @@ state/
   intent to an exact existing policy action, evaluates authorization, and returns
   status/evidence links without executing runtime mutations or returning
   credentials.
+- Secret-backed write-intent evaluation is metadata-only. Requests may include
+  managed secret binding keys and a runtime destination, but responses include
+  only binding keys, runtime key-safety policy ids/digests, and finding codes.
+  They must not include plaintext, ciphertext, token prefixes, or provider env
+  dumps.
 
 ## Inventory
 

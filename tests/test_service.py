@@ -50,6 +50,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretSafetyRule,
 )
+from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
@@ -5406,6 +5407,278 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(intent["status"], "allowed")
         self.assertEqual(intent["audit"]["subject"]["subject_type"], "terminal_agent")
         self.assertFalse(intent["audit"]["subject"]["approval_capable"])
+
+    def test_agent_write_intent_evaluate_checks_secret_binding_policy_without_reveal(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-service-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-05T20:00:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="SMTP_PASSWORD",
+                            secret_class="prod_only",
+                            allowed_contexts=("sellyouroutboard",),
+                            allowed_instances=("prod",),
+                        ),
+                    ),
+                )
+            )
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-smtp-password-binding-smtp-password",
+                    secret_id="secret-smtp-password",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    binding_key="SMTP_PASSWORD",
+                    context="sellyouroutboard",
+                    instance="prod",
+                    created_at="2026-05-05T20:00:00Z",
+                    updated_at="2026-05-05T20:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": [
+                                "product_config.apply",
+                                "product_config.apply.secret",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "product_config_apply",
+                    "mode": "dry_run",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "source_url": "https://github.com/cbusillo/launchplane/issues/387",
+                    "reason": "Preflight managed secret-backed product config.",
+                    "secret_bindings": ["SMTP_PASSWORD"],
+                    "destination": {
+                        "kind": "runtime_environment",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                },
+            )
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "allowed")
+        self.assertEqual(intent["secret_evidence"]["status"], "pass")
+        self.assertEqual(intent["secret_evidence"]["checked_binding_keys"], ["SMTP_PASSWORD"])
+        self.assertEqual(intent["secret_evidence"]["findings"], [])
+        self.assertNotIn("smtp-secret-value", response_text)
+        self.assertNotIn("ciphertext", response_text)
+
+    def test_agent_write_intent_evaluate_denies_secret_without_secret_action_grant(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-service-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-05T20:00:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="SMTP_PASSWORD",
+                            secret_class="prod_only",
+                            allowed_contexts=("sellyouroutboard",),
+                            allowed_instances=("prod",),
+                        ),
+                    ),
+                )
+            )
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-smtp-password-binding-smtp-password",
+                    secret_id="secret-smtp-password",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    binding_key="SMTP_PASSWORD",
+                    context="sellyouroutboard",
+                    instance="prod",
+                    created_at="2026-05-05T20:00:00Z",
+                    updated_at="2026-05-05T20:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "product_config_apply",
+                    "mode": "dry_run",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "source_url": "https://github.com/cbusillo/launchplane/issues/387",
+                    "reason": "Preflight managed secret-backed product config.",
+                    "secret_bindings": ["SMTP_PASSWORD"],
+                    "destination": {
+                        "kind": "runtime_environment",
+                        "context": "sellyouroutboard",
+                        "instance": "prod",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "authorization_denied")
+        self.assertEqual(intent["secret_evidence"]["status"], "pass")
+
+    def test_agent_write_intent_evaluate_denies_disallowed_secret_destination(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_runtime_key_safety_policy_record(
+                RuntimeKeySafetyPolicyRecord(
+                    record_id="runtime-key-safety-policy-service-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-05T20:00:00Z",
+                    rules=(
+                        RuntimeSecretSafetyRule(
+                            binding_key="SMTP_PASSWORD",
+                            secret_class="prod_only",
+                            allowed_contexts=("sellyouroutboard",),
+                            allowed_instances=("prod",),
+                        ),
+                    ),
+                )
+            )
+            store.write_secret_binding(
+                SecretBinding(
+                    binding_id="secret-smtp-password-binding-smtp-password",
+                    secret_id="secret-smtp-password",
+                    integration=control_plane_secrets.RUNTIME_ENVIRONMENT_SECRET_INTEGRATION,
+                    binding_key="SMTP_PASSWORD",
+                    context="sellyouroutboard",
+                    instance="testing",
+                    created_at="2026-05-05T20:00:00Z",
+                    updated_at="2026-05-05T20:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": [
+                                "product_config.apply",
+                                "product_config.apply.secret",
+                            ],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "product_config_apply",
+                    "mode": "dry_run",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard",
+                    "source_url": "https://github.com/cbusillo/launchplane/issues/387",
+                    "reason": "Preflight managed secret-backed product config.",
+                    "secret_bindings": ["SMTP_PASSWORD"],
+                    "destination": {
+                        "kind": "runtime_environment",
+                        "context": "sellyouroutboard",
+                        "instance": "testing",
+                    },
+                },
+            )
+
+        self.assertEqual(status_code, 202)
+        intent = payload["result"]["intent"]
+        self.assertEqual(intent["status"], "denied")
+        self.assertEqual(intent["reason_code"], "secret_evidence_denied")
+        self.assertEqual(intent["secret_evidence"]["status"], "fail")
+        self.assertEqual(
+            intent["secret_evidence"]["findings"][0]["code"],
+            "secret_class_not_allowed",
+        )
 
     def test_product_profile_write_rejects_unauthorized_product(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
