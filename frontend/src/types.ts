@@ -619,6 +619,33 @@ export interface WorkGraphSnapshotPayload {
   };
 }
 
+export interface RepoProductMappingEntry {
+  repository: string;
+  classification: WorkGraphRepoClassification;
+  product: string;
+  display_name: string;
+  driver_id: string;
+  contexts: string[];
+  environments: string[];
+  preview_context: string;
+  source: "product_profile" | "every_code_work_request" | "explicit";
+  updated_at: string;
+}
+
+export interface RepoProductMappingPayload {
+  status: "ok";
+  trace_id: string;
+  mapping: {
+    schema_version: number;
+    generated_at: string;
+    repositories: RepoProductMappingEntry[];
+  };
+  source: {
+    product_count: number;
+    work_request_count: number;
+  };
+}
+
 export interface WorkGraphQueueItem {
   repository: string;
   repo_classification: WorkGraphRepoClassification;

@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.product_environment_read_model import ProductSiteOverview
+from control_plane.contracts.repo_product_mapping_read_model import RepoProductMapping
 
 
 RepoClassification = Literal[
@@ -228,6 +229,53 @@ def build_work_graph_snapshot_from_records(
     for request in work_requests:
         key = (request.repository.strip().lower(), request.issue_number)
         request_issue_keys.add(key)
+        issues.append(
+            _apply_planning_issue_facts(
+                _work_request_issue_snapshot(request),
+                planning_facts_by_issue.get(key),
+            )
+        )
+    for facts in planning_issue_facts:
+        repository_key = facts.repository.strip().lower()
+        key = (repository_key, facts.number)
+        if key in request_issue_keys or repository_key not in repo_snapshots:
+            continue
+        issue = _planning_facts_issue_snapshot(facts)
+        if issue is not None:
+            issues.append(issue)
+    return WorkGraphSnapshot(
+        generated_at=generated_at,
+        repos=tuple(repo_snapshots.values()),
+        issues=tuple(issues),
+    )
+
+
+def build_work_graph_snapshot_from_repo_mapping(
+    *,
+    generated_at: str,
+    repo_mapping: RepoProductMapping,
+    work_requests: tuple[EveryCodeWorkRequestRecord, ...],
+    planning_issue_facts: tuple[WorkGraphPlanningIssueFacts, ...] = (),
+) -> WorkGraphSnapshot:
+    repo_snapshots = {
+        entry.repository.strip().lower(): WorkGraphRepoSnapshot(
+            repository=entry.repository,
+            classification=entry.classification,
+            product=entry.product,
+            display_name=entry.display_name,
+        )
+        for entry in repo_mapping.repositories
+    }
+    planning_facts_by_issue = {
+        (facts.repository.strip().lower(), facts.number): facts for facts in planning_issue_facts
+    }
+    request_issue_keys: set[tuple[str, int]] = set()
+    issues: list[WorkGraphIssueSnapshot] = []
+    for request in work_requests:
+        key = (request.repository.strip().lower(), request.issue_number)
+        request_issue_keys.add(key)
+        if key[0] not in repo_snapshots:
+            continue
         issues.append(
             _apply_planning_issue_facts(
                 _work_request_issue_snapshot(request),
