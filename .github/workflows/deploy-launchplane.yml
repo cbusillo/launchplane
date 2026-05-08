@@ -604,6 +604,57 @@ jobs:
             return 1
           }
 
+          post_terminal_agent_grant() {
+            local product_name="$1"
+            local context_name="$2"
+            local action_name="$3"
+            local source_label="$4"
+            local idempotency_suffix="$5"
+            local request_payload response_file status_code
+
+            request_payload="$({
+              jq -n \
+                --arg product_name "$product_name" \
+                --arg context_name "$context_name" \
+                --arg action_name "$action_name" \
+                --arg source_label "$source_label" \
+                --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-local-owner-agent}" \
+                --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-local-owner-read}" \
+                '{
+                  schema_version: 1,
+                  product: "launchplane",
+                  mode: "apply",
+                  reason: ("Deploy workflow ensuring terminal-agent authz grant " + $source_label),
+                  related_issue: "cbusillo/launchplane#426",
+                  grant: {
+                    subjects: [$terminal_agent_subject],
+                    token_labels: [$terminal_agent_token_label],
+                    products: [$product_name],
+                    contexts: [$context_name],
+                    actions: [$action_name],
+                    source_label: $source_label
+                  }
+                }'
+            })"
+            response_file="$(mktemp)"
+            status_code="$(curl -sS \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: launchplane-terminal-agent-authz-grant:${idempotency_suffix}:${GITHUB_SHA}" \
+              --data "$request_payload" \
+              "${{ steps.service.outputs.service_url }}/v1/authz-policies/terminal-agents/grants")"
+            if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+              cat "$response_file"
+              return 0
+            fi
+            cat "$response_file" >&2
+            echo "Launchplane terminal-agent authz grant request failed with HTTP ${status_code}." >&2
+            return 1
+          }
+
           apply_product_onboarding() {
             local idempotency_suffix="$1"
             local request_payload response_file status_code
@@ -872,6 +923,12 @@ jobs:
             generic_web_prod_promotion.execute \
             deploy:syo-prod-promotion-execute-grant \
             syo-prod-promotion-execute
+          post_terminal_agent_grant \
+            sellyouroutboard \
+            sellyouroutboard \
+            product_environment.read \
+            deploy:syo-terminal-agent-product-environment-read-grant \
+            syo-terminal-agent-product-environment-read
           post_grant \
             "$GITHUB_REPOSITORY" \
             live-target-runtime.yml \
