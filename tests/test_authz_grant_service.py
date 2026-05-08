@@ -7,10 +7,14 @@ from typing import cast
 from control_plane.authz_grant_service import (
     AuthzPolicyGitHubActionsGrant,
     AuthzPolicyGitHubActionsGrantEnvelope,
+    AuthzPolicyGitHubHumanGrant,
+    AuthzPolicyGitHubHumanGrantEnvelope,
     authz_policy_grant_response_audit_payload,
     build_authz_policy_grant_service_result,
     plan_github_actions_authz_policy_grant,
+    plan_github_human_authz_policy_grant,
     write_github_actions_authz_policy_grant,
+    write_github_human_authz_policy_grant,
 )
 from control_plane.contracts.authz_policy_record import (
     LaunchplaneAuthzPolicyRecord,
@@ -106,6 +110,25 @@ def _grant_request(mode: str = "apply") -> AuthzPolicyGitHubActionsGrantEnvelope
     )
 
 
+def _human_grant_request(mode: str = "apply") -> AuthzPolicyGitHubHumanGrantEnvelope:
+    return AuthzPolicyGitHubHumanGrantEnvelope.model_validate(
+        {
+            "product": "launchplane",
+            "mode": mode,
+            "reason": "Grant SYO promotion workflow dispatch to the operator.",
+            "related_issue": "cbusillo/launchplane#153",
+            "grant": {
+                "logins": ["cbusillo"],
+                "roles": ["admin"],
+                "products": ["sellyouroutboard"],
+                "contexts": ["sellyouroutboard"],
+                "actions": ["generic_web_prod_promotion.dispatch"],
+                "source_label": "test:human-grant",
+            },
+        }
+    )
+
+
 class AuthzGrantServiceTests(unittest.TestCase):
     def test_grant_normalizes_tuple_values(self) -> None:
         grant = AuthzPolicyGitHubActionsGrant.model_validate(
@@ -119,6 +142,19 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertEqual(grant.repository, "cbusillo/launchplane")
         self.assertEqual(grant.workflow_refs, ("workflow",))
         self.assertEqual(grant.actions, ("product_profile.read",))
+
+    def test_human_grant_normalizes_tuple_values(self) -> None:
+        grant = AuthzPolicyGitHubHumanGrant.model_validate(
+            {
+                "logins": [" cbusillo ", ""],
+                "roles": ["admin"],
+                "actions": [" generic_web_prod_promotion.dispatch "],
+            }
+        )
+
+        self.assertEqual(grant.logins, ("cbusillo",))
+        self.assertEqual(grant.roles, ("admin",))
+        self.assertEqual(grant.actions, ("generic_web_prod_promotion.dispatch",))
 
     def test_plan_and_write_grant_records_changed_policy(self) -> None:
         store = _AuthzPolicyStore((_active_record(),))
@@ -148,6 +184,7 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertEqual(len(updated_policy.github_actions), 2)
         self.assertEqual(audit["reason"], request.reason)
         self.assertIn("workflow_refs", json.dumps(audit, sort_keys=True))
+        self.assertEqual(write_diff["new_github_humans_rule_count"], 0)
 
         result, driver_result = build_authz_policy_grant_service_result(
             authz_policy_record=record,
@@ -161,6 +198,50 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertNotIn("requested_grant", driver_audit)
         requested_grant_summary = cast(dict[str, object], driver_audit["requested_grant_summary"])
         self.assertEqual(requested_grant_summary["workflow_ref_count"], 1)
+
+    def test_plan_and_write_human_grant_records_changed_policy(self) -> None:
+        store = _AuthzPolicyStore((_active_record(),))
+        request = _human_grant_request()
+
+        _current_policy, current_record, diff = plan_github_human_authz_policy_grant(
+            record_store=store,
+            grant=request.grant,
+        )
+        self.assertEqual(current_record.record_id, store.records[0].record_id)
+        self.assertEqual(diff["changed"], True)
+        self.assertEqual(diff["new_github_actions_rule_count"], 1)
+        self.assertEqual(diff["new_github_humans_rule_count"], 1)
+
+        updated_policy, record, changed, write_diff, audit = (
+            write_github_human_authz_policy_grant(
+                record_store=store,
+                request=request,
+                identity=_identity(),
+                trace_id="trace-human",
+                now_timestamp=lambda: "2026-05-07T16:00:00Z",
+            )
+        )
+
+        self.assertTrue(changed)
+        self.assertEqual(write_diff, diff)
+        self.assertEqual(store.written_records, [record])
+        self.assertEqual(len(updated_policy.github_humans), 1)
+        self.assertEqual(audit["reason"], request.reason)
+        self.assertIn("logins", json.dumps(audit, sort_keys=True))
+
+        result, driver_result = build_authz_policy_grant_service_result(
+            authz_policy_record=record,
+            changed=changed,
+            mode=request.mode,
+            diff=write_diff,
+            audit=audit,
+        )
+        self.assertEqual(result["authz_policy_record_id"], record.record_id)
+        driver_audit = cast(dict[str, object], driver_result["audit"])
+        requested_grant_summary = cast(dict[str, object], driver_audit["requested_grant_summary"])
+        self.assertEqual(requested_grant_summary["principal_type"], "github_human")
+        self.assertEqual(requested_grant_summary["login_count"], 1)
+        self.assertNotIn("logins", requested_grant_summary)
 
     def test_repeated_grant_does_not_write_new_record(self) -> None:
         store = _AuthzPolicyStore((_active_record(),))
@@ -199,6 +280,22 @@ class AuthzGrantServiceTests(unittest.TestCase):
         self.assertNotIn("requested_grant", response_audit)
         requested_grant_summary = cast(dict[str, object], response_audit["requested_grant_summary"])
         self.assertEqual(requested_grant_summary["actions"], ["product_profile.read"])
+
+    def test_response_audit_summarizes_human_grant_without_logins(self) -> None:
+        audit: dict[str, object] = {
+            "requested_grant": _human_grant_request().grant.to_policy_rule().model_dump(
+                mode="json"
+            ),
+            "mode": "dry_run",
+        }
+
+        response_audit = authz_policy_grant_response_audit_payload(audit)
+
+        self.assertNotIn("requested_grant", response_audit)
+        self.assertNotIn("cbusillo", json.dumps(response_audit, sort_keys=True))
+        requested_grant_summary = cast(dict[str, object], response_audit["requested_grant_summary"])
+        self.assertEqual(requested_grant_summary["principal_type"], "github_human")
+        self.assertEqual(requested_grant_summary["login_count"], 1)
 
 
 if __name__ == "__main__":

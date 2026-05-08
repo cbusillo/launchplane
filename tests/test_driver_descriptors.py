@@ -383,6 +383,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
                     control_plane_service._GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
                     "/v1/authz-policies/github-actions/grants",
+                    "/v1/authz-policies/github-humans/grants",
                 }
             ),
         )

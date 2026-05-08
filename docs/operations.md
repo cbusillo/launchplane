@@ -90,6 +90,7 @@ Current implementation scope:
 - `POST /v1/evidence/previews/generations`
 - `POST /v1/evidence/previews/destroyed`
 - `POST /v1/authz-policies/github-actions/grants`
+- `POST /v1/authz-policies/github-humans/grants`
 - `POST /v1/product-profiles/context-cutover/apply`
 - `POST /v1/previews/lifecycle-plan`
 - `POST /v1/drivers/verireel/preview-refresh`
@@ -117,6 +118,7 @@ rather than creating separate ad hoc ingress patterns.
 Operators should mutate shared or production authz through the deployed service,
 not by running arbitrary local DB writes from a checkout. Use
 `uv run launchplane authz-policies grant-workflow --service-url ... --dry-run`
+or `uv run launchplane authz-policies grant-human --service-url ... --dry-run`
 to inspect the diff, then rerun with `--apply --reason ...` and an idempotency
 key when the grant is approved. The CLI is a thin service client: it sends a
 short-lived bearer token or a Launchplane browser session cookie, and the
@@ -126,8 +128,8 @@ metadata, and reloads the current service worker's active policy.
 The deploy workflow maintains DB-backed grants for SellYourOutboard operational
 workflows, including product profile cutover reads/writes, production promotion,
 and generic-web preview refresh/destroy requests. The grant request returns only
-authz policy record metadata and rule counts; it does not echo workflow refs or
-the full policy body.
+authz policy record metadata and rule counts; it does not echo workflow refs,
+human logins, or the full policy body.
 
 The manual Product Context Cutover workflow plans or applies the same
 current-authority record move through the Launchplane service. Run it first with
