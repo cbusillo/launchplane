@@ -57,6 +57,7 @@ AgentConsumerActionSafety = Literal[
     "secret_backed",
     "policy_admin",
 ]
+AgentAuthzDecision = Literal["allowed", "denied"]
 
 
 class TokenVerifier(Protocol):
@@ -270,6 +271,20 @@ class AgentConsumerSubject(BaseModel):
     approval_capable: bool = False
 
 
+class AgentAuthzAudit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: AgentAuthzDecision
+    reason_code: str
+    subject: AgentConsumerSubject
+    action: str
+    product: str
+    context: str
+    policy_source: str
+    policy_sha256: str
+    source_kind: Literal["authz_policy"] = "authz_policy"
+
+
 def action_safety(action: str) -> AgentConsumerActionSafety:
     normalized_action = action.strip()
     if not normalized_action:
@@ -331,6 +346,34 @@ def agent_consumer_subject(
         action_safety=safety,
         read_only_context=safety == "read",
         approval_capable=safety in {"mutation", "prod", "destructive", "secret_backed", "policy_admin"},
+    )
+
+
+def agent_authz_audit(
+    *,
+    identity: LaunchplaneIdentity,
+    action: str,
+    product: str,
+    context: str,
+    decision: AgentAuthzDecision,
+    reason_code: str,
+    policy_source: str,
+    policy_sha256: str,
+) -> AgentAuthzAudit:
+    return AgentAuthzAudit(
+        decision=decision,
+        reason_code=reason_code,
+        subject=agent_consumer_subject(
+            identity=identity,
+            action=action,
+            product=product,
+            context=context,
+        ),
+        action=action,
+        product=product,
+        context=context,
+        policy_source=policy_source,
+        policy_sha256=policy_sha256,
     )
 
 

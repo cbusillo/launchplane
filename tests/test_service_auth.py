@@ -17,6 +17,7 @@ from control_plane.service_auth import (
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     action_safety,
+    agent_authz_audit,
     agent_consumer_subject,
     parse_authz_policy_toml,
 )
@@ -231,6 +232,26 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         for action, expected_safety in cases.items():
             with self.subTest(action=action):
                 self.assertEqual(action_safety(action), expected_safety)
+
+    def test_agent_authz_audit_records_safe_denial_metadata(self) -> None:
+        audit = agent_authz_audit(
+            identity=_actions_identity(),
+            action="preview_pr_feedback.write",
+            product="verireel",
+            context="verireel-testing",
+            decision="denied",
+            reason_code="authorization_denied",
+            policy_source="db",
+            policy_sha256="abc123",
+        )
+
+        self.assertEqual(audit.decision, "denied")
+        self.assertEqual(audit.reason_code, "authorization_denied")
+        self.assertEqual(audit.subject.subject_type, "github_actions")
+        self.assertEqual(audit.subject.action_safety, "safe_write")
+        self.assertEqual(audit.source_kind, "authz_policy")
+        self.assertEqual(audit.policy_source, "db")
+        self.assertEqual(audit.policy_sha256, "abc123")
 
     def test_actions_policy_fails_closed_by_claim_and_scope(self) -> None:
         rule = GitHubActionsPolicyRule(

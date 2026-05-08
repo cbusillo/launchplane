@@ -613,6 +613,10 @@ state/
   GitHub Actions, terminal agents, and GitHub humans. The model records the
   requested action, product, context, safety family, read-only-context status,
   and approval-capable status without replacing exact policy-rule authorization.
+- Agent-facing authorization diagnostics include an `agent_audit` response
+  provenance envelope with decision, safe reason code, subject, action, product,
+  context, policy source, policy digest, and `authz_policy` source kind. It is
+  intentionally not a persisted write-intent record yet.
 
 ## Inventory
 
