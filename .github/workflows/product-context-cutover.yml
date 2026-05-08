@@ -130,7 +130,7 @@ jobs:
           jq . "$response_file"
 
       - name: Upload cutover artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: launchplane-product-context-cutover-${{ inputs.product }}
           path: launchplane-product-context-cutover.json

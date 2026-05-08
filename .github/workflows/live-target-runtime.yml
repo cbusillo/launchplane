@@ -141,7 +141,7 @@ jobs:
           } >>"$GITHUB_STEP_SUMMARY"
 
       - name: Upload response artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: live-target-runtime-response
           path: live-target-runtime-response.json
