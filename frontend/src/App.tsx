@@ -30,10 +30,7 @@ import {
 import { ApiErrorPanel, AuthPanel } from "./AuthPanels";
 import { formatTime, labelForStatus } from "./format";
 import { LanePanel } from "./LanePanel";
-import {
-  artifactFromLane,
-  worstStatus,
-} from "./laneSummary";
+import { artifactFromLane, worstStatus } from "./laneSummary";
 import { KeyValue, PanelHead } from "./panel-ui";
 import { PreviewInventory } from "./PreviewInventory";
 import {
@@ -82,10 +79,7 @@ import type {
   Status,
   WorkGraphQueueItem,
 } from "./types";
-import {
-  type WorkGraphFilter,
-  type WorkGraphMode,
-} from "./WorkGraphQueue";
+import { type WorkGraphFilter, type WorkGraphMode } from "./WorkGraphQueue";
 
 type Theme = "dark" | "light";
 const assetUrl = (path: string) => `${import.meta.env.BASE_URL}${path}`;
@@ -455,7 +449,9 @@ export function App() {
         (environment) => environment.environment === selectedEnvironment,
       )
     ) {
-      setSelectedEnvironment(selectedProductOverview.environments[0].environment);
+      setSelectedEnvironment(
+        selectedProductOverview.environments[0].environment,
+      );
     }
   }, [selectedProductOverview, selectedEnvironment]);
 
@@ -555,7 +551,9 @@ export function App() {
               product={selectedProductOverview}
               selected={selected}
               loading={loading}
-              selectedEnvironment={activeEnvironment?.environment ?? selectedEnvironment}
+              selectedEnvironment={
+                activeEnvironment?.environment ?? selectedEnvironment
+              }
               onSelectEnvironment={setSelectedEnvironment}
             />
             <section className="lane-grid" aria-busy={loading}>
@@ -572,7 +570,9 @@ export function App() {
                 environmentActions={activeEnvironment?.available_actions ?? []}
                 product={selectedDriver?.product ?? selected.driverId}
                 context={selected.prodContext}
-                environment={activeEnvironment?.environment ?? selectedEnvironment}
+                environment={
+                  activeEnvironment?.environment ?? selectedEnvironment
+                }
                 decision={promotionDecision}
                 loading={loading}
                 onAction={setReviewAction}
@@ -586,7 +586,9 @@ export function App() {
             </section>
             <ProductConfigStatusPanel
               statuses={configStatuses}
-              selectedEnvironment={activeEnvironment?.environment ?? selectedEnvironment}
+              selectedEnvironment={
+                activeEnvironment?.environment ?? selectedEnvironment
+              }
               loading={configStatusLoading}
               error={configStatusError}
             />
@@ -972,7 +974,10 @@ function EvidenceDetailDrawer({
   );
 }
 
-function configStatusErrorMessage(environment: string, apiError: unknown): string {
+function configStatusErrorMessage(
+  environment: string,
+  apiError: unknown,
+): string {
   const prefix = `${environment} config status`;
   if (apiError instanceof LaunchplaneApiError) {
     return `${prefix}: ${apiError.message}`;
@@ -1090,8 +1095,10 @@ function StateFixtureGallery({
       base_driver_id: "generic-web",
       environments: configEnvironments.map((environment) => ({
         ...environment,
-        context: environment.environment === "prod" ? "verireel" : "verireel-testing",
-        trust_state: environment.environment === "prod" ? "recorded" : "verified",
+        context:
+          environment.environment === "prod" ? "verireel" : "verireel-testing",
+        trust_state:
+          environment.environment === "prod" ? "recorded" : "verified",
       })),
       preview: {
         enabled: true,
@@ -1102,7 +1109,9 @@ function StateFixtureGallery({
         trust_state: "recorded",
         provenance: readyTesting.provenance,
       },
-      warnings: ["Runtime owner route evidence is recorded, not provider verified."],
+      warnings: [
+        "Runtime owner route evidence is recorded, not provider verified.",
+      ],
       trust_state: "recorded",
       provenance: readyTesting.provenance,
       available_actions: [],
@@ -1220,6 +1229,21 @@ function StateFixtureGallery({
       recommendation: "deep_work",
       score: 126,
       updated_at: "2026-05-06T02:12:00Z",
+      safe_to_start: true,
+      next_action:
+        "Continue the active implementation path from the linked source of truth.",
+      why_now: "It is marked as the active focus item.",
+      blocked_by_count: 0,
+      source_of_truth_url: "https://github.com/cbusillo/launchplane/issues/190",
+      handoff_url: "https://github.com/cbusillo/launchplane/issues/190",
+      evidence: [
+        {
+          code: "source_of_truth",
+          state: "verified",
+          detail: "Linked GitHub issue is the source of truth.",
+          source_url: "https://github.com/cbusillo/launchplane/issues/190",
+        },
+      ],
       reasons: [{ code: "focus", detail: "Now lane" }],
     },
     {
@@ -1237,6 +1261,20 @@ function StateFixtureGallery({
       recommendation: "quick_win",
       score: 110,
       updated_at: "2026-05-06T01:03:00Z",
+      safe_to_start: true,
+      next_action: "Start a focused branch from the linked source of truth.",
+      why_now: "It is ready, focused, and has no tracked subissues.",
+      blocked_by_count: 0,
+      source_of_truth_url: "https://github.com/cbusillo/verireel/pull/169",
+      handoff_url: "https://github.com/cbusillo/verireel/pull/169",
+      evidence: [
+        {
+          code: "source_of_truth",
+          state: "verified",
+          detail: "Linked GitHub pull request is the source of truth.",
+          source_url: "https://github.com/cbusillo/verireel/pull/169",
+        },
+      ],
       reasons: [{ code: "small", detail: "No subissues" }],
     },
     {
@@ -1254,7 +1292,25 @@ function StateFixtureGallery({
       recommendation: "blocked_cleanup",
       score: 42,
       updated_at: "2026-05-05T23:00:00Z",
-      reasons: [{ code: "blocked", detail: "Waiting on downstream validation" }],
+      safe_to_start: false,
+      next_action:
+        "Inspect the blocking dependency before starting implementation.",
+      why_now:
+        "The item is visible because dependency cleanup may unblock later work.",
+      blocked_by_count: 1,
+      source_of_truth_url: "https://github.com/cbusillo/launchplane/issues/248",
+      handoff_url: "https://github.com/cbusillo/launchplane/issues/248",
+      evidence: [
+        {
+          code: "blocked_by",
+          state: "verified",
+          detail: "Blocked by one dependency item.",
+          source_url: "https://github.com/cbusillo/launchplane/issues/248",
+        },
+      ],
+      reasons: [
+        { code: "blocked", detail: "Waiting on downstream validation" },
+      ],
     },
     {
       repository: "cbusillo/odoo-tenant-opw",
@@ -1266,12 +1322,30 @@ function StateFixtureGallery({
       url: "https://github.com/cbusillo/odoo-tenant-opw/issues/302",
       focus: "Later",
       manager: "Unassigned",
-      finish_line: "Choose whether this belongs in Launchplane or stays tenant-owned.",
+      finish_line:
+        "Choose whether this belongs in Launchplane or stays tenant-owned.",
       state: "ready",
       recommendation: "switch_projects",
       score: 58,
       updated_at: "2026-05-05T21:30:00Z",
-      reasons: [{ code: "repo_classification", detail: "Awareness-only repo." }],
+      safe_to_start: false,
+      next_action: "Review the linked source of truth before changing code.",
+      why_now: "It is ranked from compact planning and operational signals.",
+      blocked_by_count: 0,
+      source_of_truth_url:
+        "https://github.com/cbusillo/odoo-tenant-opw/issues/302",
+      handoff_url: "https://github.com/cbusillo/odoo-tenant-opw/issues/302",
+      evidence: [
+        {
+          code: "source_of_truth",
+          state: "verified",
+          detail: "Linked GitHub issue is the source of truth.",
+          source_url: "https://github.com/cbusillo/odoo-tenant-opw/issues/302",
+        },
+      ],
+      reasons: [
+        { code: "repo_classification", detail: "Awareness-only repo." },
+      ],
     },
   ];
 

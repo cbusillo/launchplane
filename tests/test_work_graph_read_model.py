@@ -109,6 +109,13 @@ class WorkGraphReadModelTests(unittest.TestCase):
         self.assertEqual(first.repo_classification, "managed_runtime")
         self.assertEqual(first.product, "launchplane")
         self.assertGreater(first.score, queue.items[1].score)
+        self.assertTrue(first.safe_to_start)
+        self.assertEqual(first.blocked_by_count, 0)
+        self.assertEqual(first.source_of_truth_url, first.url)
+        self.assertEqual(first.handoff_url, first.url)
+        self.assertIn("Start a focused branch", first.next_action)
+        self.assertIn("unblocks 2", first.why_now)
+        self.assertIn("source_of_truth", {entry.code for entry in first.evidence})
         self.assertIn("repo_classification", {reason.code for reason in first.reasons})
         self.assertIn("finish_line", {reason.code for reason in first.reasons})
 
@@ -131,7 +138,39 @@ class WorkGraphReadModelTests(unittest.TestCase):
         self.assertEqual(queue.items[0].number, 153)
         self.assertEqual(queue.items[0].state, "ready")
         self.assertEqual(queue.items[0].recommendation, "attention_needed")
+        self.assertTrue(queue.items[0].safe_to_start)
+        self.assertIn("failing check", queue.items[0].next_action)
+        self.assertIn("operator attention", queue.items[0].why_now)
+        self.assertIn("checks", {entry.code for entry in queue.items[0].evidence})
         self.assertIn("failed_signal", {reason.code for reason in queue.items[0].reasons})
+
+    def test_blocked_item_is_not_safe_to_start_and_names_dependency_count(self) -> None:
+        snapshot = WorkGraphSnapshot.model_validate(
+            {
+                "generated_at": "2026-05-06T01:45:00Z",
+                "repos": (_repo().model_dump(mode="json"),),
+                "issues": (
+                    _issue(
+                        number=260,
+                        title="Blocked tenant work",
+                        url="https://github.com/cbusillo/launchplane/issues/260",
+                        focus="Waiting",
+                        labels=("plan", "plan:blocked"),
+                        blocked_by=2,
+                    ).model_dump(mode="json"),
+                ),
+            }
+        )
+
+        queue = build_work_graph_queue(snapshot)
+
+        item = queue.items[0]
+        self.assertFalse(item.safe_to_start)
+        self.assertEqual(item.state, "blocked")
+        self.assertEqual(item.blocked_by_count, 2)
+        self.assertIn("blocking dependency", item.next_action)
+        self.assertIn("dependency cleanup", item.why_now)
+        self.assertIn("blocked_by", {entry.code for entry in item.evidence})
 
     def test_closed_and_done_items_are_hidden(self) -> None:
         snapshot = WorkGraphSnapshot.model_validate(

@@ -88,7 +88,10 @@ export function WorkGraphQueue({
         <StateBlock icon={<Route size={18} />} title="No ranked work yet" />
       ) : null}
       {!loading && !error && items.length && !filteredItems.length ? (
-        <StateBlock icon={<Route size={18} />} title="No work matches filters" />
+        <StateBlock
+          icon={<Route size={18} />}
+          title="No work matches filters"
+        />
       ) : null}
       {filteredItems.slice(0, 5).map((item) => (
         <a
@@ -111,22 +114,36 @@ export function WorkGraphQueue({
               <span>{item.manager || "Unassigned"}</span>
               <span>{formatTime(item.updated_at)}</span>
               <span>
-                {item.product_display_name || item.product || item.repo_classification}
+                {item.product_display_name ||
+                  item.product ||
+                  item.repo_classification}
               </span>
             </span>
             {item.finish_line ? (
               <span className="work-graph-finish">{item.finish_line}</span>
             ) : null}
+            {item.next_action ? (
+              <span className="work-graph-next-action">{item.next_action}</span>
+            ) : null}
             <span className="work-graph-tags">
-              <span className="status-pill" data-status={workGraphStateStatus(item.state)}>
+              <span
+                className="status-pill"
+                data-status={workGraphStateStatus(item.state)}
+              >
                 <StatusIcon status={workGraphStateStatus(item.state)} />
                 {item.state}
+              </span>
+              <span className="reason-chip">
+                {item.safe_to_start ? "safe to start" : "needs review"}
               </span>
               <span className="recommendation-chip">
                 {recommendationLabel(item.recommendation)}
               </span>
               {item.reasons.slice(0, 2).map((reason) => (
-                <span className="reason-chip" key={`${item.repository}:${item.number}:${reason.code}`}>
+                <span
+                  className="reason-chip"
+                  key={`${item.repository}:${item.number}:${reason.code}`}
+                >
                   {reasonLabel(reason.code)}
                 </span>
               ))}
@@ -135,7 +152,9 @@ export function WorkGraphQueue({
         </a>
       ))}
       {hiddenCount ? (
-        <code className="work-graph-hidden">{hiddenCount} hidden by rank or state</code>
+        <code className="work-graph-hidden">
+          {hiddenCount} hidden by rank or state
+        </code>
       ) : null}
     </div>
   );

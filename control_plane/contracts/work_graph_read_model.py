@@ -145,6 +145,15 @@ class WorkGraphRecommendationReason(BaseModel):
     detail: str
 
 
+class WorkGraphQueueEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    state: Literal["verified", "recorded", "stale", "missing", "unsupported"]
+    detail: str
+    source_url: str = ""
+
+
 class WorkGraphQueueItem(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -162,6 +171,13 @@ class WorkGraphQueueItem(BaseModel):
     recommendation: WorkItemRecommendation
     score: int
     updated_at: str = ""
+    safe_to_start: bool
+    next_action: str
+    why_now: str
+    blocked_by_count: int = Field(default=0, ge=0)
+    source_of_truth_url: str
+    handoff_url: str = ""
+    evidence: tuple[WorkGraphQueueEvidence, ...] = ()
     reasons: tuple[WorkGraphRecommendationReason, ...]
 
 
@@ -375,6 +391,13 @@ def _build_queue_item(
         recommendation=recommendation,
         score=_score(issue=issue, repo=repo, state=state, recommendation=recommendation),
         updated_at=issue.updated_at,
+        safe_to_start=_safe_to_start(issue=issue, state=state),
+        next_action=_next_action(issue=issue, state=state, recommendation=recommendation),
+        why_now=_why_now(issue=issue, repo=repo, state=state, recommendation=recommendation),
+        blocked_by_count=issue.blocked_by,
+        source_of_truth_url=issue.url,
+        handoff_url=issue.url,
+        evidence=_queue_evidence(issue=issue),
         reasons=reasons,
     )
 
@@ -492,6 +515,103 @@ def _recommendation_reasons(
     if issue.finish_line.strip():
         reasons.append(WorkGraphRecommendationReason(code="finish_line", detail=issue.finish_line))
     return tuple(reasons)
+
+
+def _safe_to_start(*, issue: WorkGraphIssueSnapshot, state: WorkItemState) -> bool:
+    if state != "ready":
+        return False
+    return issue.focus in {"Now", "Next"} or issue.check_state == "failure" or issue.deploy_state == "failure"
+
+
+def _next_action(
+    *,
+    issue: WorkGraphIssueSnapshot,
+    state: WorkItemState,
+    recommendation: WorkItemRecommendation,
+) -> str:
+    if state == "blocked":
+        return "Inspect the blocking dependency before starting implementation."
+    if state == "waiting":
+        return "Wait for the next external signal or move the item into a ready lane."
+    if issue.check_state == "failure" or issue.deploy_state == "failure":
+        return "Open the failing check or deploy source and fix the current regression."
+    if issue.focus == "Now":
+        return "Continue the active implementation path from the linked source of truth."
+    if recommendation == "quick_win":
+        return "Start a focused branch from the linked source of truth."
+    if recommendation == "deep_work":
+        return "Confirm the next slice, then start a focused branch from the linked source of truth."
+    return "Review the linked source of truth before changing code."
+
+
+def _why_now(
+    *,
+    issue: WorkGraphIssueSnapshot,
+    repo: WorkGraphRepoSnapshot,
+    state: WorkItemState,
+    recommendation: WorkItemRecommendation,
+) -> str:
+    if issue.check_state == "failure" or issue.deploy_state == "failure":
+        return "A failing check or deploy signal needs operator attention."
+    if state == "blocked":
+        return "The item is visible because dependency cleanup may unblock later work."
+    if issue.blocking:
+        return f"It unblocks {issue.blocking} other item(s)."
+    if recommendation == "quick_win":
+        return "It is ready, focused, and has no tracked subissues."
+    if issue.focus == "Now":
+        return "It is marked as the active focus item."
+    if repo.classification == "managed_runtime":
+        return "It belongs to a Launchplane-managed runtime repo."
+    return "It is ranked from compact planning and operational signals."
+
+
+def _queue_evidence(issue: WorkGraphIssueSnapshot) -> tuple[WorkGraphQueueEvidence, ...]:
+    evidence = [
+        WorkGraphQueueEvidence(
+            code="source_of_truth",
+            state="verified",
+            detail="Linked GitHub issue or pull request is the source of truth.",
+            source_url=issue.url,
+        )
+    ]
+    if issue.focus != "Unknown":
+        evidence.append(
+            WorkGraphQueueEvidence(
+                code="focus",
+                state="recorded",
+                detail=f"Focus lane is {issue.focus}.",
+                source_url=issue.url,
+            )
+        )
+    if issue.check_state != "unknown":
+        evidence.append(
+            WorkGraphQueueEvidence(
+                code="checks",
+                state="verified",
+                detail=f"Check state is {issue.check_state}.",
+                source_url=issue.url,
+            )
+        )
+    if issue.deploy_state != "unknown":
+        evidence.append(
+            WorkGraphQueueEvidence(
+                code="deploy",
+                state="verified",
+                detail=f"Deploy state is {issue.deploy_state}.",
+                source_url=issue.url,
+            )
+        )
+    if issue.blocked_by:
+        evidence.append(
+            WorkGraphQueueEvidence(
+                code="blocked_by",
+                state="verified",
+                detail=f"Blocked by {issue.blocked_by} dependency item(s).",
+                source_url=issue.url,
+            )
+        )
+    return tuple(evidence)
 
 
 def _queue_sort_key(item: WorkGraphQueueItem) -> tuple[int, str, str, int]:
