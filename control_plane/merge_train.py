@@ -1,4 +1,4 @@
-from typing import Literal
+from typing import Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
@@ -12,6 +12,12 @@ MergeTrainDryRunAction = Literal[
 ]
 MergeTrainMergeableState = Literal["mergeable", "conflicting", "unknown"]
 MergeTrainPullRequestState = Literal["open", "closed", "merged"]
+
+
+class MergeTrainLabelClient(Protocol):
+    def add_pull_request_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> None: ...
 
 
 class MergeTrainPullRequestSnapshot(BaseModel):
@@ -102,6 +108,18 @@ class MergeTrainDryRunResult(BaseModel):
     next_action_detail: str
 
 
+class MergeTrainBlockResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["blocked", "skipped"]
+    repository: str
+    base_branch: str
+    pull_request_number: int | None = None
+    blocked_label: str
+    train_should_continue: bool
+    detail: str
+
+
 def build_merge_train_dry_run_result(
     *, policy: MergeTrainPolicy, snapshot: MergeTrainDryRunSnapshot
 ) -> MergeTrainDryRunResult:
@@ -131,6 +149,53 @@ def build_merge_train_dry_run_result(
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
+    )
+
+
+def apply_merge_train_block_intent(
+    *,
+    dry_run_result: MergeTrainDryRunResult,
+    label_client: MergeTrainLabelClient,
+) -> MergeTrainBlockResult:
+    if dry_run_result.intended_next_action != "block" or dry_run_result.selected_pr is None:
+        return MergeTrainBlockResult(
+            status="skipped",
+            repository=dry_run_result.repository,
+            base_branch=dry_run_result.base_branch,
+            blocked_label=dry_run_result.blocked_label,
+            train_should_continue=True,
+            detail="Dry-run result does not require a block label.",
+        )
+    train_should_continue = dry_run_result.failure_policy == "continue_after_blocking_pr"
+    if dry_run_result.blocked_label in dry_run_result.selected_pr.labels:
+        return MergeTrainBlockResult(
+            status="blocked",
+            repository=dry_run_result.repository,
+            base_branch=dry_run_result.base_branch,
+            pull_request_number=dry_run_result.selected_pr.number,
+            blocked_label=dry_run_result.blocked_label,
+            train_should_continue=train_should_continue,
+            detail=(
+                f"Pull request #{dry_run_result.selected_pr.number} already has "
+                f"{dry_run_result.blocked_label}."
+            ),
+        )
+    label_client.add_pull_request_label(
+        repository=dry_run_result.repository,
+        pull_request_number=dry_run_result.selected_pr.number,
+        label=dry_run_result.blocked_label,
+    )
+    return MergeTrainBlockResult(
+        status="blocked",
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        pull_request_number=dry_run_result.selected_pr.number,
+        blocked_label=dry_run_result.blocked_label,
+        train_should_continue=train_should_continue,
+        detail=(
+            f"Applied {dry_run_result.blocked_label} to pull request "
+            f"#{dry_run_result.selected_pr.number}."
+        ),
     )
 
 

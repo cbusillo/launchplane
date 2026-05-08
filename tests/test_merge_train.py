@@ -7,13 +7,25 @@ from click.testing import CliRunner
 
 from control_plane.cli import main
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicy,
     build_sellyouroutboard_main_merge_train_policy,
 )
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
+    apply_merge_train_block_intent,
     build_merge_train_dry_run_result,
 )
+
+
+class _FakeLabelClient:
+    def __init__(self) -> None:
+        self.applied_labels: list[tuple[str, int, str]] = []
+
+    def add_pull_request_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> None:
+        self.applied_labels.append((repository, pull_request_number, label))
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
@@ -120,6 +132,97 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "dry-run")
         self.assertEqual(payload["queue_order"], [22])
         self.assertEqual(payload["selected_pr"]["number"], 22)
+
+
+class MergeTrainBlockIntentTests(unittest.TestCase):
+    def test_block_intent_applies_blocked_label_and_pauses_train(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(31, required_checks_status="fail"),),
+            ),
+        )
+        label_client = _FakeLabelClient()
+
+        result = apply_merge_train_block_intent(
+            dry_run_result=dry_run_result, label_client=label_client
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.pull_request_number, 31)
+        self.assertEqual(result.blocked_label, "merge-blocked")
+        self.assertFalse(result.train_should_continue)
+        self.assertEqual(
+            label_client.applied_labels,
+            [("cbusillo/sellyouroutboard", 31, "merge-blocked")],
+        )
+
+    def test_block_intent_skips_non_block_actions_without_mutation(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(32),),
+            ),
+        )
+        label_client = _FakeLabelClient()
+
+        result = apply_merge_train_block_intent(
+            dry_run_result=dry_run_result, label_client=label_client
+        )
+
+        self.assertEqual(result.status, "skipped")
+        self.assertTrue(result.train_should_continue)
+        self.assertEqual(label_client.applied_labels, [])
+
+    def test_block_intent_is_idempotent_when_blocked_label_exists(self) -> None:
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=build_sellyouroutboard_main_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(
+                        34,
+                        labels=("ready-to-merge", "merge-blocked"),
+                        required_checks_status="fail",
+                    ),
+                ),
+            ),
+        )
+        label_client = _FakeLabelClient()
+
+        result = apply_merge_train_block_intent(
+            dry_run_result=dry_run_result, label_client=label_client
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertEqual(result.pull_request_number, 34)
+        self.assertEqual(label_client.applied_labels, [])
+
+    def test_block_intent_can_continue_train_when_policy_allows_it(self) -> None:
+        base_policy = build_sellyouroutboard_main_merge_train_policy()
+        repository_policy = base_policy.policies[0].model_copy(
+            update={"failure_policy": "continue_after_blocking_pr"}
+        )
+        dry_run_result = build_merge_train_dry_run_result(
+            policy=MergeTrainPolicy(policies=(repository_policy,)),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(33, mergeable="conflicting"),),
+            ),
+        )
+
+        result = apply_merge_train_block_intent(
+            dry_run_result=dry_run_result, label_client=_FakeLabelClient()
+        )
+
+        self.assertEqual(result.status, "blocked")
+        self.assertTrue(result.train_should_continue)
 
 
 def _pull_request(
