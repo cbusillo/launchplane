@@ -162,7 +162,9 @@ product/context `launchplane` and supports `repository`, `issue_number`,
 `state`, `limit`, and `offset` query parameters. Summary entries include source
 links, state, summary status, claim metadata, timestamps, result PR URL, and
 safe rerun guidance. They intentionally omit raw webhook delivery ids, error
-messages, issue bodies, prompt text, and local checkout paths.
+messages, issue bodies, prompt text, local checkout paths, and local worker
+hostnames. Entries include compact agent-context provenance and evidence so
+callers can tell recorded request state apart from source-of-truth links.
 
 `GET /v1/previews/readiness` returns a compact agent-safe projection of Every
 Code preview gate records. It requires `every_code_preview_gate.read` for
@@ -170,7 +172,8 @@ product/context `launchplane` and supports `repository`, `pr_number`, `status`,
 `limit`, and `offset` query parameters. Readiness items map gate records to
 agent-facing states such as waiting on checks, ready, needs attention, or
 cancelled, include source links and freshness/provenance, and avoid provider-only
-internals or secrets.
+internals, local paths, or secrets. Detail fields and check summaries are bounded
+and redacted before they leave the read-model projection.
 
 `POST /v1/work-graph/rank` ranks a caller-supplied work graph snapshot and
 returns the queue payload under `result.queue`. The route requires the

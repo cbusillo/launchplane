@@ -368,7 +368,7 @@ class WorkGraphReadModelTests(unittest.TestCase):
 
         issue = snapshot.issues[0]
         self.assertEqual(issue.focus, "Now")
-        self.assertEqual(issue.manager, "local-mac")
+        self.assertEqual(issue.manager, "claimed_local_worker")
         self.assertEqual(issue.updated_at, "2026-05-06T03:50:00Z")
 
     def test_sparse_planning_subissue_completion_does_not_break_snapshot(self) -> None:
