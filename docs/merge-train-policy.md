@@ -93,3 +93,9 @@ uv run launchplane work-graph merge-train-dry-run \
 The dry-run orders eligible pull requests by `created_at` and then PR number. It
 excludes draft, closed, unlabeled, or unauthorized entries and fails closed when
 the snapshot repository/base branch has no explicit policy.
+
+When the selected pull request is blocked by failed checks or conflicts, the
+first live mutation is idempotent application of `blocked_label`. Repositories
+using `pause_train` stop after that label action; repositories using
+`continue_after_blocking_pr` may continue to the next eligible pull request once
+the blocked pull request has been labeled.
