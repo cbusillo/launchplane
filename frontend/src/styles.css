@@ -1123,6 +1123,35 @@ p {
   padding: 6px 0;
 }
 
+.bridge-action-availability {
+  display: grid;
+  gap: 1px;
+  border-bottom: 1px solid var(--hair-soft);
+  background: var(--hair-soft);
+}
+
+.bridge-action-availability-row {
+  display: grid;
+  grid-template-columns: minmax(130px, 0.46fr) minmax(0, 1fr);
+  gap: 10px;
+  min-width: 0;
+  background: color-mix(in oklab, var(--panel) 92%, var(--bg-1));
+  padding: 9px 14px;
+}
+
+.bridge-action-availability-row strong {
+  color: var(--fg-strong);
+  font-size: 12px;
+}
+
+.bridge-action-availability-row span {
+  color: var(--status-fail);
+}
+
+.bridge-action-availability-row[data-enabled="true"] span {
+  color: var(--status-ok);
+}
+
 .gate-row,
 .preview-row,
 .secret-row,
@@ -1173,8 +1202,22 @@ p {
 
 .workflow-action-row {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
+}
+
+.bridge-action-blockers {
+  display: grid;
+  gap: 5px;
+  border: 1px solid var(--hair-soft);
+  border-radius: 6px;
+  background: color-mix(in oklab, var(--status-fail) 8%, var(--bg-2));
+  padding: 9px 10px;
+}
+
+.bridge-action-blockers span {
+  color: var(--fg-muted);
+  font-size: 12px;
 }
 
 .bridge-inline-alert,
@@ -2041,6 +2084,10 @@ p {
   }
 
   .product-environment-strip {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .fixture-grid {
     grid-template-columns: minmax(0, 1fr);
   }
 

@@ -569,8 +569,10 @@ export function App() {
                 prod={prodDriverView?.lane_summary ?? null}
                 testing={testingDriverView?.lane_summary ?? null}
                 actions={actions}
+                environmentActions={activeEnvironment?.available_actions ?? []}
                 product={selectedDriver?.product ?? selected.driverId}
                 context={selected.prodContext}
+                environment={activeEnvironment?.environment ?? selectedEnvironment}
                 decision={promotionDecision}
                 loading={loading}
                 onAction={setReviewAction}
@@ -1324,8 +1326,10 @@ function StateFixtureGallery({
             prod={missingBackupProd}
             testing={readyTesting}
             actions={FIXTURE_GENERIC_WEB_ACTIONS}
+            environmentActions={configEnvironments[1].available_actions}
             product="sellyouroutboard"
             context="sellyouroutboard-testing"
+            environment="prod"
             decision={buildPromotionDecision(missingBackupProd, readyTesting, {
               requireProdBackup: false,
             })}
