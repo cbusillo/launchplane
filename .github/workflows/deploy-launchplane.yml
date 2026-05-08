@@ -21,6 +21,11 @@ on:
         required: false
         default: false
         type: boolean
+      omit_terminal_agent_env:
+        description: Temporarily omit terminal-agent env for one compatibility deploy.
+        required: false
+        default: true
+        type: boolean
 
 permissions:
   actions: read
@@ -214,6 +219,12 @@ jobs:
               | jq -r '.value'
             })"
 
+            previous_runtime_payload="$(curl -fsSL \
+              -H "Authorization: Bearer ${oidc_token}" \
+              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
+            previous_image_reference="$(printf '%s' "$previous_runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
+            echo "previous_image_reference=$previous_image_reference" >> "$GITHUB_OUTPUT"
+
             service_env_json="$({
               jq -n \
                 --arg github_client_id "${LAUNCHPLANE_GITHUB_CLIENT_ID:-}" \
@@ -235,6 +246,7 @@ jobs:
                 --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" \
                 --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
+                --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env != false }}' \
                 '(
                   {
                   LAUNCHPLANE_GITHUB_CLIENT_ID: $github_client_id,
@@ -242,11 +254,19 @@ jobs:
                   LAUNCHPLANE_PUBLIC_URL: $public_url,
                   LAUNCHPLANE_SESSION_SECRET: $session_secret,
                   LAUNCHPLANE_COOKIE_SECURE: $cookie_secure,
-                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails,
-                  LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
-                  LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
-                  LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
+                  LAUNCHPLANE_BOOTSTRAP_ADMIN_EMAILS: $bootstrap_admin_emails
                   }
+                  + (
+                    if ($omit_terminal_agent_env | not) then
+                      {
+                        LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
+                        LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
+                        LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
+                      }
+                    else
+                      {}
+                    end
+                  )
                   + (
                     if (($omit_every_code_env | not)
                       and (($enable_every_code_runtime_secrets | ascii_downcase) == "true")) then
@@ -282,7 +302,7 @@ jobs:
                 --argjson service_env "$service_env_json" \
                 '{schema_version: 1, product: "launchplane", deploy: ({target_type: $target_type, target_id: $target_id, image_reference: $image_reference} + (if ($service_env | length) > 0 then {oauth_env: $service_env} else {} end))}'
             })"
-            idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:db-authz"
+            idempotency_key="launchplane-self-deploy:${{ steps.image.outputs.image_reference }}:${{ github.run_id }}:${{ github.run_attempt }}:db-authz"
 
             curl -sS \
               -o "$response_file" \
@@ -346,6 +366,78 @@ jobs:
           done
 
           echo "Timed out waiting for Launchplane image '$expected_image_reference' to become live and healthy." >&2
+          exit 1
+
+      - name: Roll back failed Launchplane deploy
+        if: failure() && steps.self_deploy.outputs.previous_image_reference != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          previous_image_reference="${{ steps.self_deploy.outputs.previous_image_reference }}"
+          if [ -z "$previous_image_reference" ] || [ "$previous_image_reference" = "${{ steps.image.outputs.image_reference }}" ]; then
+            echo "No distinct previous Launchplane image reference is available for rollback."
+            exit 0
+          fi
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${{ steps.service.outputs.service_audience }}" \
+            | jq -r '.value'
+          })"
+
+          rollback_payload="$({
+            jq -n \
+              --arg target_type "$LAUNCHPLANE_DOKPLOY_TARGET_TYPE" \
+              --arg target_id "$LAUNCHPLANE_DOKPLOY_TARGET_ID" \
+              --arg image_reference "$previous_image_reference" \
+              '{schema_version: 1, product: "launchplane", deploy: {target_type: $target_type, target_id: $target_id, image_reference: $image_reference, no_cache: true}}'
+          })"
+          rollback_response_file="$(mktemp)"
+          rollback_status="$(curl -sS \
+            -o "$rollback_response_file" \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H "Content-Type: application/json" \
+            -H "Idempotency-Key: launchplane-self-deploy-rollback:${previous_image_reference}:${{ github.run_id }}:${{ github.run_attempt }}" \
+            --data "$rollback_payload" \
+            "${{ steps.service.outputs.service_url }}/v1/drivers/launchplane/self-deploy")"
+          if [ "$rollback_status" != "200" ] && [ "$rollback_status" != "202" ]; then
+            cat "$rollback_response_file" >&2
+            echo "Launchplane rollback request failed with HTTP ${rollback_status}." >&2
+            exit 1
+          fi
+
+          deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          while [ "$SECONDS" -lt "$deadline" ]; do
+            all_healthy=1
+            while IFS= read -r raw_url; do
+              health_url="$(printf '%s' "$raw_url" | xargs)"
+              if [ -z "$health_url" ]; then
+                continue
+              fi
+              response_body="$(curl -fsSL "$health_url" 2>/dev/null || true)"
+              if [ -z "$response_body" ] || ! printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+                all_healthy=0
+                break
+              fi
+            done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
+
+            runtime_payload="$(curl -fsSL \
+              -H "Authorization: Bearer ${oidc_token}" \
+              "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
+            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
+
+            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$previous_image_reference" ]; then
+              echo "Rolled Launchplane back to $previous_image_reference."
+              exit 0
+            fi
+            sleep 5
+          done
+
+          echo "Timed out waiting for Launchplane rollback image '$previous_image_reference' to become live and healthy." >&2
           exit 1
 
       - name: Ensure product context workflow authz grants
