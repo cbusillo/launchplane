@@ -5,6 +5,7 @@ from typing import TypeVar
 from pydantic import BaseModel
 
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.agent_write_intent import AgentWriteIntentRecord
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord
@@ -117,6 +118,44 @@ class FilesystemRecordStore:
         return self._write_model(
             "launchplane_runtime_key_safety_policies", record.record_id, record
         )
+
+    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> Path:
+        return self._write_model("launchplane_agent_write_intents", record.record_id, record)
+
+    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord:
+        return AgentWriteIntentRecord.model_validate(
+            self._read_model(
+                AgentWriteIntentRecord,
+                "launchplane_agent_write_intents",
+                record_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_agent_write_intent_records(
+        self,
+        *,
+        status: str = "",
+        product: str = "",
+        context_name: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[AgentWriteIntentRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                AgentWriteIntentRecord,
+                "launchplane_agent_write_intents",
+            )
+            if (not status or record.evaluation.status == status)
+            and (not product or record.evaluation.product == product)
+            and (not context_name or record.evaluation.context == context_name)
+        ]
+        records.sort(key=lambda record: (record.recorded_at, record.record_id), reverse=True)
+        if offset > 0:
+            records = records[offset:]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def list_runtime_key_safety_policy_records(
         self,

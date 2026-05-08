@@ -41,10 +41,12 @@ from control_plane.contracts.authz_policy_record import (
     build_authz_policy_record_id,
 )
 from control_plane.contracts.agent_write_intent import (
+    AgentWriteIntentRecord,
     AgentWriteIntentRequest,
     AgentWriteIntentSecretEvidence,
     agent_write_intent_secret_action,
     authz_action_for_agent_write_intent,
+    build_agent_write_intent_record_id,
     evaluate_agent_write_intent,
     secret_evidence_for_agent_write_intent,
 )
@@ -1907,6 +1909,10 @@ class _EveryCodeWorkRequestStore(Protocol):
     ) -> tuple[EveryCodePreviewGateRecord, ...]: ...
 
 
+class _AgentWriteIntentRecordStore(Protocol):
+    def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
+
+
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (
         "write_every_code_work_request_record",
@@ -1922,6 +1928,12 @@ def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkReques
     if all(hasattr(record_store, method_name) for method_name in required_methods):
         return cast(_EveryCodeWorkRequestStore, record_store)
     raise TypeError("record store does not support Every Code work requests")
+
+
+def _agent_write_intent_record_store(record_store: object) -> _AgentWriteIntentRecordStore:
+    if hasattr(record_store, "write_agent_write_intent_record"):
+        return cast(_AgentWriteIntentRecordStore, record_store)
+    raise TypeError("record store does not support agent write intent records")
 
 
 def _supports_every_code_work_requests(record_store: object) -> bool:
@@ -5570,7 +5582,30 @@ def create_launchplane_service_app(
                     audit=intent_audit,
                     secret_evidence=secret_evidence,
                 )
-                result = {"intent": evaluation.model_dump(mode="json")}
+                recorded_at = _utc_now_timestamp()
+                intent_record = AgentWriteIntentRecord(
+                    record_id=build_agent_write_intent_record_id(
+                        recorded_at=recorded_at,
+                        trace_id=request_trace_id,
+                        request=intent_request,
+                        evaluation=evaluation,
+                    ),
+                    recorded_at=recorded_at,
+                    trace_id=request_trace_id,
+                    idempotency_key=request_idempotency_key,
+                    request=intent_request,
+                    evaluation=evaluation,
+                )
+                _agent_write_intent_record_store(record_store).write_agent_write_intent_record(
+                    intent_record
+                )
+                result = {
+                    "intent": evaluation.model_dump(mode="json"),
+                    "record": {
+                        "record_id": intent_record.record_id,
+                        "recorded_at": intent_record.recorded_at,
+                    },
+                }
                 driver_result = result
             elif path == "/v1/every-code/work-requests/claim":
                 if not authz_policy.allows(

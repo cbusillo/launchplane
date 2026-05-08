@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import json
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -114,8 +116,51 @@ class AgentWriteIntentEvaluation(BaseModel):
     )
 
 
+class AgentWriteIntentRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    record_id: str
+    recorded_at: str
+    trace_id: str
+    idempotency_key: str = ""
+    request: AgentWriteIntentRequest
+    evaluation: AgentWriteIntentEvaluation
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> "AgentWriteIntentRecord":
+        if not self.record_id.strip():
+            raise ValueError("agent write intent record requires record_id")
+        if not self.recorded_at.strip():
+            raise ValueError("agent write intent record requires recorded_at")
+        if not self.trace_id.strip():
+            raise ValueError("agent write intent record requires trace_id")
+        return self
+
+
 def authz_action_for_agent_write_intent(intent: AgentWriteIntentKind) -> str:
     return _INTENT_AUTHZ_ACTIONS[intent]
+
+
+def build_agent_write_intent_record_id(
+    *,
+    recorded_at: str,
+    trace_id: str,
+    request: AgentWriteIntentRequest,
+    evaluation: AgentWriteIntentEvaluation,
+) -> str:
+    normalized_timestamp = recorded_at.replace("-", "").replace(":", "").replace(
+        "+00:00", "Z"
+    )
+    payload = {
+        "trace_id": trace_id,
+        "intent": request.model_dump(mode="json"),
+        "evaluation": evaluation.model_dump(mode="json"),
+    }
+    digest = hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    return f"agent-write-intent-{normalized_timestamp}-{digest}"
 
 
 def agent_write_intent_secret_action(request: AgentWriteIntentRequest) -> str:

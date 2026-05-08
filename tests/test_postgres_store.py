@@ -15,6 +15,12 @@ from control_plane.contracts.artifact_identity import (
     ArtifactIdentityManifest,
     ArtifactImageReference,
 )
+from control_plane.contracts.agent_write_intent import (
+    AgentWriteIntentEvaluation,
+    AgentWriteIntentRecord,
+    AgentWriteIntentRequest,
+    build_agent_write_intent_record_id,
+)
 from control_plane.contracts.authz_policy_record import LaunchplaneAuthzPolicyRecord
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
@@ -71,7 +77,12 @@ from control_plane.contracts.secret_record import (
     SecretRecord,
     SecretVersion,
 )
-from control_plane.service_auth import GitHubHumanIdentity, LaunchplaneAuthzPolicy
+from control_plane.service_auth import (
+    GitHubActionsIdentity,
+    GitHubHumanIdentity,
+    LaunchplaneAuthzPolicy,
+    agent_authz_audit,
+)
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
@@ -420,6 +431,69 @@ def _human_session(*, session_id: str = "session-1") -> LaunchplaneHumanSession:
             teams=frozenset({"shinycomputers/launchplane-admins"}),
             role="admin",
         ),
+    )
+
+
+def _agent_write_intent_record(
+    *, record_id: str = "", recorded_at: str = "2026-05-08T20:55:00Z"
+) -> AgentWriteIntentRecord:
+    identity = GitHubActionsIdentity(
+        repository="every/verireel",
+        repository_owner="every",
+        workflow_ref="every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main",
+        job_workflow_ref="",
+        ref="refs/heads/main",
+        ref_type="branch",
+        event_name="pull_request",
+        environment="",
+        subject="repo:every/verireel:ref:refs/heads/main",
+        sha="abc123",
+        raw_claims={},
+    )
+    request = AgentWriteIntentRequest(
+        intent="every_code_rerun",
+        mode="dry_run",
+        product="launchplane",
+        context="launchplane",
+        source_url="https://github.com/cbusillo/launchplane/issues/386",
+        reason="Check whether rerun can be requested safely.",
+    )
+    audit = agent_authz_audit(
+        identity=identity,
+        action="every_code_work_request.write",
+        product="launchplane",
+        context="launchplane",
+        decision="allowed",
+        reason_code="authorized",
+        policy_source="test",
+        policy_sha256="abc123",
+    )
+    evaluation = AgentWriteIntentEvaluation(
+        intent="every_code_rerun",
+        mode="dry_run",
+        status="allowed",
+        authz_action="every_code_work_request.write",
+        product="launchplane",
+        context="launchplane",
+        source_url="https://github.com/cbusillo/launchplane/issues/386",
+        safe_to_execute=False,
+        next_action="Review the dry-run result before requesting apply authority.",
+        reason_code="authorized",
+        audit=audit,
+    )
+    resolved_record_id = record_id or build_agent_write_intent_record_id(
+        recorded_at=recorded_at,
+        trace_id="launchplane_req_test_write_intent",
+        request=request,
+        evaluation=evaluation,
+    )
+    return AgentWriteIntentRecord(
+        record_id=resolved_record_id,
+        recorded_at=recorded_at,
+        trace_id="launchplane_req_test_write_intent",
+        idempotency_key="intent-eval-1",
+        request=request,
+        evaluation=evaluation,
     )
 
 
@@ -1383,6 +1457,30 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(listed_records[0].head_sha, "abcdef1234567890")
         self.assertEqual(listed_records[0].blocked_reason, "Checks did not pass: static_checks")
 
+    def test_agent_write_intent_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _agent_write_intent_record()
+            store.write_agent_write_intent_record(record)
+            loaded_record = store.read_agent_write_intent_record(record.record_id)
+            listed_records = store.list_agent_write_intent_records(
+                status="allowed",
+                product="launchplane",
+                context_name="launchplane",
+            )
+            store.close()
+
+        self.assertEqual(loaded_record.record_id, record.record_id)
+        self.assertEqual(loaded_record.evaluation.intent, "every_code_rerun")
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(listed_records[0].trace_id, "launchplane_req_test_write_intent")
+        self.assertEqual(listed_records[0].evaluation.audit.reason_code, "authorized")
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1791,6 +1889,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_lifecycle_plans": 1,
                     "preview_pr_feedback": 1,
                     "every_code_preview_gates": 0,
+                    "agent_write_intents": 0,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
                 },
