@@ -99,6 +99,61 @@ class EveryCodeIssueReconciliationTests(unittest.TestCase):
         self.assertEqual(result.exit_code, 1)
         self.assertIn("LAUNCHPLANE_SERVICE_TOKEN is required", result.output)
 
+    def test_cli_authz_grant_human_posts_service_request(self) -> None:
+        runner = CliRunner()
+        captured_request: dict[str, object] = {}
+
+        def fake_post(**kwargs: object) -> dict[str, object]:
+            captured_request.update(kwargs)
+            return {
+                "status": "accepted",
+                "result": {"mode": "apply", "changed": True},
+            }
+
+        with patch("control_plane.cli._post_launchplane_service_json", side_effect=fake_post):
+            result = runner.invoke(
+                main,
+                [
+                    "authz-policies",
+                    "grant-human",
+                    "--service-url",
+                    "https://launchplane.example",
+                    "--session-cookie",
+                    "launchplane_session=signed",
+                    "--login",
+                    "cbusillo",
+                    "--role",
+                    "admin",
+                    "--product",
+                    "sellyouroutboard",
+                    "--context",
+                    "sellyouroutboard",
+                    "--action",
+                    "generic_web_prod_promotion.dispatch",
+                    "--reason",
+                    "Allow SYO workflow dry-run validation.",
+                    "--related-issue",
+                    "cbusillo/launchplane#153",
+                    "--idempotency-key",
+                    "authz-human-grant:syo-dispatch",
+                    "--apply",
+                ],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(captured_request["bearer_token"], "")
+        self.assertEqual(captured_request["session_cookie"], "launchplane_session=signed")
+        self.assertEqual(captured_request["path"], "/v1/authz-policies/github-humans/grants")
+        self.assertEqual(captured_request["idempotency_key"], "authz-human-grant:syo-dispatch")
+        payload = captured_request["payload"]
+        assert isinstance(payload, dict)
+        self.assertEqual(payload["mode"], "apply")
+        grant = payload["grant"]
+        assert isinstance(grant, dict)
+        self.assertEqual(grant["logins"], ["cbusillo"])
+        self.assertEqual(grant["roles"], ["admin"])
+        self.assertEqual(grant["actions"], ["generic_web_prod_promotion.dispatch"])
+
     def test_creates_queued_request_when_trigger_label_is_present(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             store = FilesystemRecordStore(state_dir=Path(tempdir))

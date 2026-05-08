@@ -8089,7 +8089,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ],
                         "event_names": ["workflow_dispatch"],
-                        "products": ["sellyouroutboard"],
+                        "products": ["sellyouroutboard", "launchplane"],
                         "contexts": ["launchplane"],
                         "actions": ["product_profile.read"],
                         "source_label": "test:audit-grant",
@@ -8128,7 +8128,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
                         ],
                         "event_names": ["workflow_dispatch"],
-                        "products": ["sellyouroutboard"],
+                        "products": ["sellyouroutboard", "launchplane"],
                         "contexts": ["launchplane"],
                         "actions": ["product_profile.read"],
                         "source_label": "test:audit-grant",
@@ -8330,6 +8330,221 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIsInstance(human_operator, dict)
         assert isinstance(human_operator, dict)
         self.assertEqual(human_operator["type"], "github_human")
+
+    def test_human_authz_policy_grant_endpoint_writes_db_record_and_updates_runtime(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-humans/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow SYO promotion workflow dispatch from the operator UI.",
+                    "related_issue": "cbusillo/launchplane#153",
+                    "grant": {
+                        "logins": ["alice"],
+                        "roles": ["admin"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["sellyouroutboard", "launchplane"],
+                        "actions": [
+                            "generic_web_prod_promotion.dispatch",
+                            "product_environment.read",
+                        ],
+                        "source_label": "test:human-promotion-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-human-grant:dispatch",
+                },
+            )
+            repeat_status_code, repeat_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-humans/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Allow SYO promotion workflow dispatch from the operator UI.",
+                    "related_issue": "cbusillo/launchplane#153",
+                    "grant": {
+                        "logins": ["alice"],
+                        "roles": ["admin"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["sellyouroutboard", "launchplane"],
+                        "actions": [
+                            "generic_web_prod_promotion.dispatch",
+                            "product_environment.read",
+                        ],
+                        "source_label": "test:human-promotion-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-human-grant:dispatch-repeat",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_policy = store.list_authz_policy_records(status="active", limit=1)[0]
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(
+            payload["result"]["diff"]["new_github_humans_rule_count"], 2
+        )
+        self.assertEqual(
+            payload["result"]["audit"]["requested_grant_summary"]["login_count"], 1
+        )
+        self.assertNotIn("alice", json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True))
+        self.assertEqual(repeat_status_code, 202)
+        self.assertEqual(repeat_payload["result"]["changed"], False)
+        self.assertTrue(
+            active_policy.policy.allows(
+                identity=_human_identity(role="admin"),
+                action="generic_web_prod_promotion.dispatch",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+
+    def test_human_authz_policy_grant_endpoint_dry_run_does_not_write_or_reload(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            profile_payload = _product_profile_payload_with_prod()
+            profile_payload["lanes"] = tuple(
+                {**lane, "context": "sellyouroutboard"}
+                for lane in _product_profile_lanes(profile_payload)
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                store.write_product_profile_record(
+                    LaunchplaneProductProfileRecord.model_validate(profile_payload)
+                )
+            finally:
+                store.close()
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/authz-policies/github-humans/grants",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "reason": "Inspect SYO operator promotion grant.",
+                    "related_issue": "cbusillo/launchplane#153",
+                    "grant": {
+                        "logins": ["alice"],
+                        "roles": ["admin"],
+                        "products": ["sellyouroutboard"],
+                        "contexts": ["sellyouroutboard"],
+                        "actions": ["generic_web_prod_promotion.dispatch"],
+                        "source_label": "test:human-promotion-grant",
+                    },
+                },
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "authz-human-grant:dry-run",
+                },
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                active_records = store.list_authz_policy_records(status="active")
+                dry_run_idempotency_record = store.read_idempotency_record(
+                    scope="github-human:alice",
+                    route_path="/v1/authz-policies/github-humans/grants",
+                    idempotency_key="authz-human-grant:dry-run",
+                )
+            finally:
+                store.close()
+            workflow_status_code, workflow_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/generic-web/prod-promotion-workflow",
+                payload={
+                    "schema_version": 1,
+                    "product": "sellyouroutboard",
+                    "workflow": {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "context": "sellyouroutboard",
+                        "dry_run": True,
+                    },
+                },
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry_run")
+        self.assertEqual(payload["result"]["changed"], True)
+        self.assertEqual(len(active_records), 1)
+        self.assertIsNone(dry_run_idempotency_record)
+        self.assertEqual(workflow_status_code, 403)
+        self.assertEqual(workflow_payload["error"]["code"], "authorization_denied")
 
     def test_authz_policy_grant_endpoint_apply_requires_reason(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

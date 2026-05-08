@@ -1171,6 +1171,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         _GENERIC_WEB_PROD_PROMOTION_ROUTE.route_path,
         _GENERIC_WEB_PROD_PROMOTION_WORKFLOW_ROUTE.route_path,
         "/v1/authz-policies/github-actions/grants",
+        "/v1/authz-policies/github-humans/grants",
     }
 )
 _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
@@ -1781,6 +1782,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/evidence/previews/generations",
         "/v1/evidence/previews/destroyed",
         "/v1/authz-policies/github-actions/grants",
+        "/v1/authz-policies/github-humans/grants",
         "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
@@ -2952,7 +2954,11 @@ def _should_store_idempotency_record(
     if path in _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES:
         return False
     if (
-        path == "/v1/authz-policies/github-actions/grants"
+        path
+        in {
+            "/v1/authz-policies/github-actions/grants",
+            "/v1/authz-policies/github-humans/grants",
+        }
         and isinstance(driver_result, dict)
         and driver_result.get("mode") == "dry_run"
     ):
@@ -5602,6 +5608,124 @@ def create_launchplane_service_app(
                         authz_policy_record=authz_policy_record,
                         changed=changed,
                         mode=authz_grant_request.mode,
+                        diff=diff,
+                        audit=audit,
+                    )
+                )
+            elif path == "/v1/authz-policies/github-humans/grants":
+                human_authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubHumanGrantEnvelope.model_validate(
+                    payload
+                )
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Authz human policy grant writes require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=human_authz_grant_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write Launchplane authz human policy grants.",
+                            },
+                        },
+                    )
+                if human_authz_grant_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                try:
+                    (
+                        current_policy,
+                        current_record,
+                        diff,
+                    ) = control_plane_authz_grant_service.plan_github_human_authz_policy_grant(
+                        record_store=record_store,
+                        grant=human_authz_grant_request.grant,
+                    )
+                    audit = control_plane_authz_grant_service.authz_policy_grant_audit_payload(
+                        request=human_authz_grant_request,
+                        identity=identity,
+                        previous_record=current_record,
+                        new_record=None,
+                        changed=bool(diff["changed"]),
+                        trace_id=request_trace_id,
+                        now_timestamp=_now_timestamp,
+                    )
+                    authz_policy_record = current_record
+                    changed = bool(diff["changed"])
+                    if human_authz_grant_request.mode == "apply":
+                        (
+                            updated_policy,
+                            authz_policy_record,
+                            changed,
+                            diff,
+                            audit,
+                        ) = control_plane_authz_grant_service.write_github_human_authz_policy_grant(
+                            record_store=record_store,
+                            request=human_authz_grant_request,
+                            identity=identity,
+                            trace_id=request_trace_id,
+                            now_timestamp=_now_timestamp,
+                        )
+                    else:
+                        updated_policy = current_policy
+                        authz_policy_record = LaunchplaneAuthzPolicyRecord(
+                            record_id=current_record.record_id,
+                            status=current_record.status,
+                            source=current_record.source,
+                            updated_at=current_record.updated_at,
+                            policy_sha256=current_record.policy_sha256,
+                            policy=current_record.policy,
+                            audit=audit,
+                        )
+                except ValueError:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authz_policy_unavailable",
+                                "message": "Launchplane active authz policy is unavailable.",
+                            },
+                        },
+                    )
+                if human_authz_grant_request.mode == "apply":
+                    authz_policy = updated_policy
+                    resolved_authz_policy_sha256 = authz_policy_record.policy_sha256
+                    resolved_authz_policy_source = "db"
+                result, driver_result = (
+                    control_plane_authz_grant_service.build_authz_policy_grant_service_result(
+                        authz_policy_record=authz_policy_record,
+                        changed=changed,
+                        mode=human_authz_grant_request.mode,
                         diff=diff,
                         audit=audit,
                     )

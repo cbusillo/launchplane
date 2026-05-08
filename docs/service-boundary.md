@@ -52,6 +52,7 @@ VeriReel product paths:
   - `POST /v1/product-profiles/legacy-context-cleanup/apply`
 - authz policy maintenance route:
   - `POST /v1/authz-policies/github-actions/grants`
+  - `POST /v1/authz-policies/github-humans/grants`
 - Every Code local automation work-request routes:
   - `POST /v1/every-code/github-webhook`
   - `GET /v1/every-code/work-requests`
@@ -94,15 +95,15 @@ Launchplane verifies GitHub OIDC, authorizes workflow identity claims, accepts
 deployment/promotion/preview lifecycle evidence over HTTP, and executes the
 current Odoo/VeriReel artifact, deploy, backup, promotion, rollback, maintenance,
 and preview mutations as authenticated Launchplane routes. The authz policy
-grant route accepts GitHub Actions OIDC callers and authenticated admin human
-sessions, requires the `launchplane_service_deploy.execute` action, and remains
-the service-owned write/reload boundary for DB-backed GitHub Actions policy
-rules. Grant requests support `dry_run` and `apply` modes. Apply requests must
-include an audit reason, write a new active policy record only when the grant is
-not already present, and immediately refresh the in-process policy used by the
-current service worker. Responses return record metadata, rule counts, a compact
-diff, and redacted audit metadata rather than echoing workflow refs or the full
-policy body.
+grant routes accept GitHub Actions OIDC callers and authenticated admin human
+sessions, require the `launchplane_service_deploy.execute` action, and remain
+the service-owned write/reload boundary for DB-backed GitHub Actions and GitHub
+human policy rules. Grant requests support `dry_run` and `apply` modes. Apply
+requests must include an audit reason, write a new active policy record only
+when the grant is not already present, and immediately refresh the in-process
+policy used by the current service worker. Responses return record metadata,
+rule counts, a compact diff, and redacted audit metadata rather than echoing
+workflow refs, human logins, or the full policy body.
 
 The service also serves the built operator UI shell at `/`, with `/ui` retained
 as a compatibility alias. Built assets live under `/ui/assets/...`, while
