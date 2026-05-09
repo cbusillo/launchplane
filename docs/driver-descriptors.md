@@ -134,6 +134,15 @@ generic web lifecycle and add named product-specific gates or runtime actions.
 The relationship is explicit metadata; product-specific capabilities are still
 declared directly on the product driver.
 
+Odoo declares `base_driver_id="generic-web"` and exposes Odoo-shaped preview
+routes for the same lifecycle: `POST /v1/drivers/odoo/preview-desired-state`,
+`POST /v1/drivers/odoo/preview-refresh`,
+`POST /v1/drivers/odoo/preview-inventory`,
+`POST /v1/drivers/odoo/preview-readiness`, and
+`POST /v1/drivers/odoo/preview-destroy`. These routes use the generic-web
+preview request schema and record writer so Odoo PR previews land in the same
+Launchplane preview and preview-generation records as generic-web previews.
+
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call
 against that product and verifies the product profile's `driver_id` or driver
@@ -158,6 +167,8 @@ Odoo exposes:
 
 - artifact publish handoff
 - post-deploy settings
+- PR preview desired state, refresh, readiness, inventory, and destroy through
+  the generic-web preview lifecycle
 - prod backup gate
 - testing-to-prod promotion
 - prod rollback

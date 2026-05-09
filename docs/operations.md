@@ -646,6 +646,15 @@ Any exported release-tuple catalog is seed/reference material now, not live
 runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
 
+Odoo PR previews use Odoo-shaped Launchplane driver routes over the same
+generic-web preview lifecycle. Product workflows call
+`POST /v1/drivers/odoo/preview-refresh` with a preview slug, preview URL, and
+immutable image reference; Launchplane resolves the Odoo product profile preview
+context, verifies the profile is preview-enabled, runs generic-web readiness, and
+writes shared preview and preview-generation records. Cleanup calls
+`POST /v1/drivers/odoo/preview-destroy` and leaves the same cleanup/read-model
+history as generic-web previews.
+
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
 payload shape. VeriReel preview runtime now flows through Launchplane drivers:

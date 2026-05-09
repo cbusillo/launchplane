@@ -24,6 +24,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyTarget,
 )
 from control_plane.contracts.secret_record import SecretBinding
+from control_plane.drivers.registry import read_driver_descriptor
 from control_plane.runtime_key_safety import (
     evaluate_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
@@ -560,9 +561,17 @@ def resolve_generic_web_preview_profile(
     *, record_store: GenericWebPreviewProfileStore, product: str
 ) -> LaunchplaneProductProfileRecord:
     profile = record_store.read_product_profile_record(product)
-    if profile.driver_id != "generic-web":
+    driver_id = profile.driver_id.strip()
+    driver_is_generic_web = driver_id == "generic-web"
+    if not driver_is_generic_web:
+        try:
+            driver_is_generic_web = read_driver_descriptor(driver_id).base_driver_id == "generic-web"
+        except FileNotFoundError:
+            driver_is_generic_web = False
+    if not driver_is_generic_web:
         raise click.ClickException(
-            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, not generic-web."
+            f"Product {profile.product!r} is configured for driver {profile.driver_id!r}, "
+            "not generic-web or a generic-web based driver."
         )
     if not profile.preview.enabled:
         raise click.ClickException(

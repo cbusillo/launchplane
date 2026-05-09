@@ -664,6 +664,63 @@ _GENERIC_WEB_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+_ODOO_PREVIEW_DESIRED_STATE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-desired-state",
+    envelope_model=GenericWebPreviewDesiredStateEnvelope,
+    denial_message=(
+        "Workflow cannot discover Odoo preview desired state for the requested product/context."
+    ),
+)
+
+
+_ODOO_PREVIEW_REFRESH_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-refresh",
+    envelope_model=GenericWebPreviewRefreshEnvelope,
+    denial_message="Workflow cannot refresh Odoo preview state for the requested product/context.",
+)
+
+
+_ODOO_PREVIEW_INVENTORY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-inventory",
+    envelope_model=GenericWebPreviewInventoryEnvelope,
+    denial_message="Workflow cannot read Odoo preview inventory for the requested product/context.",
+)
+
+
+_ODOO_PREVIEW_READINESS_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-readiness",
+    envelope_model=GenericWebPreviewReadinessEnvelope,
+    denial_message="Workflow cannot evaluate Odoo preview readiness for the requested product/context.",
+)
+
+
+_ODOO_PREVIEW_DESTROY_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-destroy",
+    envelope_model=GenericWebPreviewDestroyEnvelope,
+    denial_message="Workflow cannot destroy Odoo preview state for the requested product/context.",
+)
+
+
+_PREVIEW_DESIRED_STATE_ROUTE_PATHS = frozenset(
+    {
+        _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+        _ODOO_PREVIEW_DESIRED_STATE_ROUTE.route_path,
+    }
+)
+_PREVIEW_INVENTORY_ROUTE_PATHS = frozenset(
+    {_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path, _ODOO_PREVIEW_INVENTORY_ROUTE.route_path}
+)
+_PREVIEW_REFRESH_ROUTE_PATHS = frozenset(
+    {_GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path, _ODOO_PREVIEW_REFRESH_ROUTE.route_path}
+)
+_PREVIEW_READINESS_ROUTE_PATHS = frozenset(
+    {_GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path, _ODOO_PREVIEW_READINESS_ROUTE.route_path}
+)
+_PREVIEW_DESTROY_ROUTE_PATHS = frozenset(
+    {_GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path, _ODOO_PREVIEW_DESTROY_ROUTE.route_path}
+)
+
+
 class BackupGateEvidenceEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1610,6 +1667,46 @@ def _authorize_generic_web_preview_route(
         trace_id=trace_id,
     )
     return request, profile, authorization_response
+
+
+def _generic_web_preview_desired_state_route_metadata(
+    path: str,
+) -> _DriverRouteExecutionMetadata[GenericWebPreviewDesiredStateEnvelope]:
+    if path == _ODOO_PREVIEW_DESIRED_STATE_ROUTE.route_path:
+        return _ODOO_PREVIEW_DESIRED_STATE_ROUTE
+    return _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE
+
+
+def _generic_web_preview_inventory_route_metadata(
+    path: str,
+) -> _DriverRouteExecutionMetadata[GenericWebPreviewInventoryEnvelope]:
+    if path == _ODOO_PREVIEW_INVENTORY_ROUTE.route_path:
+        return _ODOO_PREVIEW_INVENTORY_ROUTE
+    return _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE
+
+
+def _generic_web_preview_refresh_route_metadata(
+    path: str,
+) -> _DriverRouteExecutionMetadata[GenericWebPreviewRefreshEnvelope]:
+    if path == _ODOO_PREVIEW_REFRESH_ROUTE.route_path:
+        return _ODOO_PREVIEW_REFRESH_ROUTE
+    return _GENERIC_WEB_PREVIEW_REFRESH_ROUTE
+
+
+def _generic_web_preview_readiness_route_metadata(
+    path: str,
+) -> _DriverRouteExecutionMetadata[GenericWebPreviewReadinessEnvelope]:
+    if path == _ODOO_PREVIEW_READINESS_ROUTE.route_path:
+        return _ODOO_PREVIEW_READINESS_ROUTE
+    return _GENERIC_WEB_PREVIEW_READINESS_ROUTE
+
+
+def _generic_web_preview_destroy_route_metadata(
+    path: str,
+) -> _DriverRouteExecutionMetadata[GenericWebPreviewDestroyEnvelope]:
+    if path == _ODOO_PREVIEW_DESTROY_ROUTE.route_path:
+        return _ODOO_PREVIEW_DESTROY_ROUTE
+    return _GENERIC_WEB_PREVIEW_DESTROY_ROUTE
 
 
 def _http_status_text(status_code: int) -> str:
@@ -2869,7 +2966,7 @@ def _request_fingerprint(payload: dict[str, object]) -> str:
 def _canonical_request_payload_for_idempotency(
     *, route_path: str, payload: dict[str, object]
 ) -> dict[str, object]:
-    if route_path != _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
+    if route_path not in _PREVIEW_DESTROY_ROUTE_PATHS:
         return payload
     canonical_payload = json.loads(json.dumps(payload))
     destroy_payload = canonical_payload.get("destroy")
@@ -6800,10 +6897,10 @@ def create_launchplane_service_app(
                     request=generic_web_workflow_request.workflow,
                 )
                 result = driver_result.model_dump(mode="json")
-            elif path == _GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE.route_path:
+            elif path in _PREVIEW_DESIRED_STATE_ROUTE_PATHS:
                 generic_web_desired_state_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
-                        route_metadata=_GENERIC_WEB_PREVIEW_DESIRED_STATE_ROUTE,
+                        route_metadata=_generic_web_preview_desired_state_route_metadata(path),
                         payload=payload,
                         record_store=record_store,
                         authz_policy=authz_policy,
@@ -6837,10 +6934,10 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_desired_state_id": preview_desired_state_id}
-            elif path == _GENERIC_WEB_PREVIEW_INVENTORY_ROUTE.route_path:
+            elif path in _PREVIEW_INVENTORY_ROUTE_PATHS:
                 generic_web_inventory_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
-                        route_metadata=_GENERIC_WEB_PREVIEW_INVENTORY_ROUTE,
+                        route_metadata=_generic_web_preview_inventory_route_metadata(path),
                         payload=payload,
                         record_store=record_store,
                         authz_policy=authz_policy,
@@ -6864,10 +6961,10 @@ def create_launchplane_service_app(
                     preview_slugs=tuple(item.previewSlug for item in driver_result.previews),
                 )
                 result = {"preview_inventory_scan_id": preview_inventory_scan_id}
-            elif path == _GENERIC_WEB_PREVIEW_REFRESH_ROUTE.route_path:
+            elif path in _PREVIEW_REFRESH_ROUTE_PATHS:
                 generic_web_refresh_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
-                        route_metadata=_GENERIC_WEB_PREVIEW_REFRESH_ROUTE,
+                        route_metadata=_generic_web_preview_refresh_route_metadata(path),
                         payload=payload,
                         record_store=record_store,
                         authz_policy=authz_policy,
@@ -6907,10 +7004,10 @@ def create_launchplane_service_app(
                     driver_result=driver_result,
                     profile=profile,
                 )
-            elif path == _GENERIC_WEB_PREVIEW_READINESS_ROUTE.route_path:
+            elif path in _PREVIEW_READINESS_ROUTE_PATHS:
                 generic_web_readiness_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
-                        route_metadata=_GENERIC_WEB_PREVIEW_READINESS_ROUTE,
+                        route_metadata=_generic_web_preview_readiness_route_metadata(path),
                         payload=payload,
                         record_store=record_store,
                         authz_policy=authz_policy,
@@ -6929,10 +7026,10 @@ def create_launchplane_service_app(
                     profile=profile,
                 )
                 result = {}
-            elif path == _GENERIC_WEB_PREVIEW_DESTROY_ROUTE.route_path:
+            elif path in _PREVIEW_DESTROY_ROUTE_PATHS:
                 generic_web_destroy_request, profile, authorization_response = (
                     _authorize_generic_web_preview_route(
-                        route_metadata=_GENERIC_WEB_PREVIEW_DESTROY_ROUTE,
+                        route_metadata=_generic_web_preview_destroy_route_metadata(path),
                         payload=payload,
                         record_store=record_store,
                         authz_policy=authz_policy,

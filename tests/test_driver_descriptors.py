@@ -92,10 +92,15 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         descriptor = read_driver_descriptor("odoo")
         actions = {action.action_id: action for action in descriptor.actions}
 
+        self.assertEqual(descriptor.base_driver_id, "generic-web")
         self.assertEqual(actions["prod_backup_gate"].safety, "safe_write")
         self.assertEqual(actions["prod_promotion"].safety, "mutation")
         self.assertEqual(actions["prod_rollback"].safety, "destructive")
         self.assertEqual(actions["prod_rollback"].route_path, "/v1/drivers/odoo/prod-rollback")
+        self.assertEqual(actions["preview_refresh"].route_path, "/v1/drivers/odoo/preview-refresh")
+        self.assertEqual(actions["preview_refresh"].scope, "preview")
+        self.assertEqual(actions["preview_inventory"].safety, "safe_write")
+        self.assertEqual(actions["preview_destroy"].safety, "destructive")
 
     def test_verireel_descriptor_exposes_preview_and_stable_capabilities(self) -> None:
         descriptor = read_driver_descriptor("verireel")
@@ -285,6 +290,38 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._ODOO_PROD_ROLLBACK_ROUTE,
                     control_plane_service.OdooProdRollbackEnvelope,
                     "prod rollback driver",
+                ),
+            },
+        )
+
+    def test_odoo_preview_execution_metadata_matches_descriptors(self) -> None:
+        self.assert_route_metadata_matches_descriptor(
+            driver_id="odoo",
+            route_metadata_by_action={
+                "preview_desired_state": (
+                    control_plane_service._ODOO_PREVIEW_DESIRED_STATE_ROUTE,
+                    control_plane_service.GenericWebPreviewDesiredStateEnvelope,
+                    "Odoo preview desired state",
+                ),
+                "preview_inventory": (
+                    control_plane_service._ODOO_PREVIEW_INVENTORY_ROUTE,
+                    control_plane_service.GenericWebPreviewInventoryEnvelope,
+                    "Odoo preview inventory",
+                ),
+                "preview_refresh": (
+                    control_plane_service._ODOO_PREVIEW_REFRESH_ROUTE,
+                    control_plane_service.GenericWebPreviewRefreshEnvelope,
+                    "refresh Odoo",
+                ),
+                "preview_readiness": (
+                    control_plane_service._ODOO_PREVIEW_READINESS_ROUTE,
+                    control_plane_service.GenericWebPreviewReadinessEnvelope,
+                    "Odoo preview readiness",
+                ),
+                "preview_destroy": (
+                    control_plane_service._ODOO_PREVIEW_DESTROY_ROUTE,
+                    control_plane_service.GenericWebPreviewDestroyEnvelope,
+                    "destroy Odoo",
                 ),
             },
         )

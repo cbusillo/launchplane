@@ -387,9 +387,12 @@ GENERIC_WEB_DRIVER = DriverDescriptor(
 
 ODOO_DRIVER = DriverDescriptor(
     driver_id="odoo",
+    base_driver_id="generic-web",
     label="Odoo",
     product="odoo",
-    description="Stable-lane Odoo artifact, deploy, backup, promotion, rollback, and settings driver.",
+    description=(
+        "Odoo artifact, deploy, preview, backup, promotion, rollback, and settings driver."
+    ),
     context_patterns=("cm", "opw"),
     provider_boundary=PROVIDER_BOUNDARY_NOTE,
     capabilities=(
@@ -413,6 +416,23 @@ ODOO_DRIVER = DriverDescriptor(
             description="Capture backup evidence, promote testing to prod, and roll back prod to stored artifacts.",
             actions=("prod_backup_gate", "prod_promotion", "prod_rollback"),
             panels=("lane_health", "deployment_evidence", "promotion_evidence", "backup_evidence"),
+        ),
+        DriverCapabilityDescriptor(
+            capability_id="previewable",
+            label="Previewable",
+            description=(
+                "Create, refresh, inventory, and destroy Odoo PR previews through the "
+                "generic-web preview lifecycle."
+            ),
+            actions=("preview_desired_state", "preview_refresh"),
+            panels=("preview_inventory", "deployment_evidence", "audit"),
+        ),
+        DriverCapabilityDescriptor(
+            capability_id="preview_inventory_managed",
+            label="Preview inventory managed",
+            description="Read provider inventory and reconcile current Odoo preview state.",
+            actions=("preview_inventory", "preview_destroy"),
+            panels=("preview_inventory", "deployment_evidence", "audit"),
         ),
     ),
     actions=(
@@ -444,6 +464,54 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/post-deploy",
             authz_action="odoo_post_deploy.execute",
             writes_records=("odoo_instance_override",),
+        ),
+        _action(
+            "preview_desired_state",
+            "Discover desired previews",
+            "Discover labeled Odoo pull requests and record desired preview state.",
+            safety="safe_write",
+            scope="context",
+            route_path="/v1/drivers/odoo/preview-desired-state",
+            authz_action="preview_desired_state.discover",
+            writes_records=("preview_desired_state",),
+        ),
+        _action(
+            "preview_refresh",
+            "Refresh preview",
+            "Create or update an Odoo preview through the generic-web preview lifecycle.",
+            safety="mutation",
+            scope="preview",
+            route_path="/v1/drivers/odoo/preview-refresh",
+            authz_action="preview_refresh.execute",
+        ),
+        _action(
+            "preview_inventory",
+            "Read preview inventory",
+            "Scan provider state for active Odoo previews and record inventory evidence.",
+            safety="safe_write",
+            scope="context",
+            route_path="/v1/drivers/odoo/preview-inventory",
+            authz_action="preview_inventory.read",
+            writes_records=("preview_inventory_scan",),
+        ),
+        _action(
+            "preview_readiness",
+            "Evaluate preview readiness",
+            "Validate Odoo preview template settings before provider mutation.",
+            safety="read",
+            scope="context",
+            route_path="/v1/drivers/odoo/preview-readiness",
+            authz_action="preview_readiness.evaluate",
+        ),
+        _action(
+            "preview_destroy",
+            "Destroy preview",
+            "Destroy an Odoo preview application and record cleanup evidence.",
+            safety="destructive",
+            scope="preview",
+            route_path="/v1/drivers/odoo/preview-destroy",
+            authz_action="preview_destroy.execute",
+            writes_records=("preview",),
         ),
         _action(
             "prod_backup_gate",
