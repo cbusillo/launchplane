@@ -1,0 +1,54 @@
+---
+name: Dokploy Legacy Dev Cleanup
+
+"on":
+  workflow_dispatch:
+    inputs:
+      apply:
+        description: Delete the exact target names listed in target_names.
+        required: true
+        default: false
+        type: boolean
+      target_names:
+        description: Comma-separated exact target names from a prior dry-run.
+        required: false
+        default: ""
+        type: string
+      confirmation:
+        description: Type `delete legacy cm dev targets` when apply=true.
+        required: false
+        default: ""
+        type: string
+
+jobs:
+  cleanup:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Run legacy dev cleanup
+        env:
+          LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
+          LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
+          APPLY: ${{ inputs.apply }}
+          TARGET_NAMES: ${{ inputs.target_names }}
+          CONFIRMATION: ${{ inputs.confirmation }}
+        run: |
+          args=()
+          if [ "$APPLY" = "true" ]; then
+            args+=(--apply)
+          fi
+          args+=(--target-names "$TARGET_NAMES")
+          args+=(--confirmation "$CONFIRMATION")
+          uv run python -m control_plane.workflows.dokploy_legacy_dev_cleanup "${args[@]}"
