@@ -395,6 +395,35 @@ def _product_profile_payload(product: str = "sellyouroutboard") -> dict[str, obj
     }
 
 
+def _odoo_preview_profile_payload(product: str = "odoo-tenant-cm") -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "product": product,
+        "display_name": "CM Odoo",
+        "repository": f"cbusillo/{product}",
+        "driver_id": "odoo",
+        "image": {"repository": f"ghcr.io/cbusillo/{product}"},
+        "runtime_port": 8069,
+        "health_path": "/web/health",
+        "lanes": (
+            {
+                "instance": "testing",
+                "context": "cm",
+                "base_url": "https://cm-testing.example.com",
+                "health_url": "https://cm-testing.example.com/web/health",
+            },
+        ),
+        "preview": {
+            "enabled": True,
+            "context": "cm",
+            "slug_template": "pr-{number}",
+            "app_name_prefix": "cm-odoo-preview",
+        },
+        "updated_at": "2026-05-09T12:00:00Z",
+        "source": "test",
+    }
+
+
 def _product_profile_payload_with_prod(product: str = "sellyouroutboard") -> dict[str, object]:
     payload = _product_profile_payload(product)
     lanes = list(cast(tuple[dict[str, object], ...], payload["lanes"]))
@@ -8242,6 +8271,149 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     generation.failure_summary,
                     "Dokploy API POST /api/application.update failed (500): provider exploded",
                 )
+
+    def test_odoo_preview_refresh_route_reuses_generic_preview_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-09T15:00:00Z",
+                    "refresh_finished_at": "2026-05-09T15:05:00Z",
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "preview_slug": "pr-42",
+                    "application_name": "cm-odoo-preview-pr-42",
+                    "application_id": "app-odoo-preview",
+                    "preview_url": "https://pr-42.cm.example.test",
+                },
+            ) as refresh:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "refresh": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "preview_slug": "pr-42",
+                            "preview_url": "https://pr-42.cm.example.test",
+                            "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                        },
+                    },
+                    headers={"Idempotency-Key": "odoo-preview-refresh:cm:42:sha"},
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["records"]["transition"], "verifying")
+            self.assertEqual(payload["result"]["application_id"], "app-odoo-preview")
+            preview = FilesystemRecordStore(state_dir=state_dir).read_preview_record(
+                "preview-cm-odoo-tenant-cm-pr-42"
+            )
+            self.assertEqual(preview.state, "pending")
+            refresh.assert_called_once()
+            _, kwargs = refresh.call_args
+            self.assertEqual(kwargs["profile"].driver_id, "odoo")
+            self.assertEqual(kwargs["profile"].preview.context, "cm")
+
+    def test_odoo_preview_refresh_route_fails_closed_when_preview_disabled(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            profile_payload = _odoo_preview_profile_payload()
+            profile_payload["preview"] = {"enabled": False}
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(profile_payload)
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/odoo-tenant-cm",
+                                "workflow_refs": [
+                                    "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
+                                ],
+                                "event_names": ["pull_request"],
+                                "products": ["odoo-tenant-cm"],
+                                "contexts": ["cm"],
+                                "actions": ["preview_refresh.execute"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/preview-refresh",
+                payload={
+                    "schema_version": 1,
+                    "product": "odoo-tenant-cm",
+                    "refresh": {
+                        "schema_version": 1,
+                        "product": "odoo-tenant-cm",
+                        "preview_slug": "pr-42",
+                        "preview_url": "https://pr-42.cm.example.test",
+                        "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-preview-refresh:cm:42:sha"},
+            )
+
+            self.assertEqual(status_code, 400)
+            self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_generic_web_preview_refresh_route_keeps_blocked_result_non_mutating(
         self,

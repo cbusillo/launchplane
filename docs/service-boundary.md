@@ -866,6 +866,10 @@ retries do not collide. The regular cleanup workflow uses
   `generic-web-preview-refresh:<product>:<anchor_pr_number>:<sha>`
 - generic-web preview destroy driver:
   `generic-web-preview-destroy:<product>:<anchor_pr_number>`
+- Odoo preview refresh driver:
+  `odoo-preview-refresh:<product>:<anchor_pr_number>:<sha>`
+- Odoo preview destroy driver:
+  `odoo-preview-destroy:<product>:<anchor_pr_number>`
 
 Generic-web product workflow clients live in product repositories as thin
 Launchplane callers until Launchplane provides a shared distributable helper.
@@ -877,6 +881,12 @@ not retry `AbortError` or timeout aborts, and use stable idempotency keys for th
 same product operation. Generic-web preview destroy keys intentionally omit the
 free-form destroy reason so the same preview cleanup is idempotent even when the
 caller wording changes between cleanup paths.
+
+Odoo preview routes intentionally reuse the generic-web preview request schema,
+profile resolver, and record writer. Product repos call the Odoo-shaped routes
+so authz and driver views remain product-specific, while Launchplane still writes
+the shared preview and preview-generation records from DB-backed product profile
+preview configuration.
 
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`

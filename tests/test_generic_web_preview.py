@@ -92,12 +92,14 @@ class _GenericWebPreviewStore:
         return bindings
 
 
-def _profile(*, preview_enabled: bool = True) -> LaunchplaneProductProfileRecord:
+def _profile(
+    *, preview_enabled: bool = True, driver_id: str = "generic-web"
+) -> LaunchplaneProductProfileRecord:
     return LaunchplaneProductProfileRecord(
         product="sellyouroutboard",
         display_name="SellYourOutboard.com",
         repository="cbusillo/sellyouroutboard",
-        driver_id="generic-web",
+        driver_id=driver_id,
         image=ProductImageProfile(repository="ghcr.io/cbusillo/sellyouroutboard"),
         runtime_port=3000,
         health_path="/api/health",
@@ -160,6 +162,25 @@ def _runtime_secret_binding(*, status: SecretStatus = "configured") -> SecretBin
 
 
 class GenericWebPreviewTests(unittest.TestCase):
+    def test_resolve_generic_web_preview_profile_accepts_based_driver(self) -> None:
+        profile = _profile(driver_id="odoo")
+
+        resolved = resolve_generic_web_preview_profile(
+            record_store=_GenericWebPreviewStore(profile),
+            product="sellyouroutboard",
+        )
+
+        self.assertEqual(resolved.driver_id, "odoo")
+
+    def test_resolve_generic_web_preview_profile_rejects_unbased_driver(self) -> None:
+        profile = _profile(driver_id="missing-driver")
+
+        with self.assertRaises(click.ClickException):
+            resolve_generic_web_preview_profile(
+                record_store=_GenericWebPreviewStore(profile),
+                product="sellyouroutboard",
+            )
+
     def test_render_preview_slug_uses_template_when_present(self) -> None:
         self.assertEqual(
             render_preview_slug(
