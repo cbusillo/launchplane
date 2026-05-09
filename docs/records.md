@@ -632,6 +632,12 @@ preflights.
   `launchplane_agent_write_intents` records. Each record stores the request,
   evaluation result, `agent_audit` envelope, trace id, optional idempotency key,
   and recorded timestamp so later action routes can link to durable evidence.
+- Merge train service runs are persisted as `launchplane_merge_train_runs`
+  records. Each record stores the repository/base branch, mode, status, policy
+  key and digest, fresh GitHub snapshot, dry-run decision, selected pull request
+  metadata, trace id, recorded timestamp, and optional one-step worker result.
+  The record is evidence for a single service call, not queue authority for a
+  later pass.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

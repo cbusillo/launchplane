@@ -234,6 +234,13 @@ mark only that section unavailable instead of dropping the whole context or
 silently omitting the failure. The endpoint writes no records, fetches no issue
 bodies, and must preserve the lower-level redaction/provenance rules.
 
+`POST /v1/work-graph/merge-train/run-once` is the authenticated service ingress
+for one merge-train read or mutation pass. It resolves repository/base policy
+before authorization, token lookup, or GitHub reads, authorizes against the
+policy's `service_authz`, reads a fresh GitHub snapshot, and writes a
+`launchplane_merge_train_runs` record for accepted dry-run and mutate calls.
+Mutation mode still applies at most one worker transition from that snapshot.
+
 ## Host Assumption
 
 - Launchplane runs behind an operator-owned HTTPS host.

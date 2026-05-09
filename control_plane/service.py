@@ -79,6 +79,7 @@ from control_plane.contracts.idempotency_record import build_launchplane_idempot
 from control_plane.contracts.merge_train_policy import (
     build_sellyouroutboard_main_merge_train_policy,
 )
+from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -2908,6 +2909,7 @@ def _accepted_payload(
                 "transition",
                 "request_id",
                 "state",
+                "merge_train_run_id",
             }
         },
         **({"result": serialized_driver_result} if serialized_driver_result else {}),
@@ -5657,6 +5659,7 @@ def create_launchplane_service_app(
                     "mode": "mutate" if merge_train_request.mutate else "dry-run",
                     "dry_run_result": dry_run_result.model_dump(mode="json"),
                 }
+                worker_step_result = None
                 if merge_train_request.mutate:
                     github_client = GitHubMergeTrainClient(transport=transport)
                     worker_step_result = run_merge_train_worker_step(
@@ -5672,6 +5675,16 @@ def create_launchplane_service_app(
                     driver_result = worker_step_result
                 else:
                     driver_result = result
+                run_record = build_merge_train_run_record(
+                    recorded_at=_utc_now_timestamp(),
+                    trace_id=request_trace_id,
+                    policy_sha256=policy.policy_sha256,
+                    snapshot=snapshot,
+                    dry_run_result=dry_run_result,
+                    worker_step_result=worker_step_result,
+                )
+                record_store.write_merge_train_run_record(run_record)
+                result["merge_train_run_id"] = run_record.run_id
             elif path == "/v1/agent/write-intents/evaluate":
                 intent_request = AgentWriteIntentRequest.model_validate(payload)
                 intent_authz_action = authz_action_for_agent_write_intent(
