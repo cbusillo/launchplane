@@ -16,10 +16,12 @@ name: Merge Train Runner
         required: false
         default: main
       mutate:
-        description: Apply one worker mutation when admitted
+        description: >-
+          Apply one worker mutation when admitted. Scheduled runs use
+          LAUNCHPLANE_MERGE_TRAIN_MUTATE instead.
         type: boolean
         required: false
-        default: true
+        default: false
 
 permissions:
   contents: read
@@ -45,7 +47,17 @@ jobs:
       MERGE_TRAIN_REPOSITORY: >-
         ${{ inputs.repository || vars.LAUNCHPLANE_MERGE_TRAIN_REPOSITORY }}
       MERGE_TRAIN_BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
-      MERGE_TRAIN_MUTATE: ${{ inputs.mutate && 'true' || 'false' }}
+      MERGE_TRAIN_MUTATE: >-
+        ${{
+          (
+            github.event_name == 'schedule' &&
+            vars.LAUNCHPLANE_MERGE_TRAIN_MUTATE == 'true'
+          ) && 'true' ||
+          (
+            github.event_name != 'schedule' && inputs.mutate
+          ) && 'true' ||
+          'false'
+        }}
     steps:
       - name: Request admission decision
         id: admission
