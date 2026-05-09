@@ -1051,6 +1051,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                     preview_slug="pr-28",
                     preview_url="https://pr-28.cm-preview.shinycomputers.com",
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    timeout_seconds=240,
                 ),
             )
 
@@ -1081,10 +1082,12 @@ class GenericWebPreviewTests(unittest.TestCase):
             no_cache=False,
         )
         wait_for_deployment.assert_called_once()
+        _, wait_kwargs = wait_for_deployment.call_args
+        self.assertEqual(wait_kwargs["timeout_seconds"], 210)
         wait_health.assert_called_once_with(
             preview_url="https://pr-28.cm-preview.shinycomputers.com",
             health_path="/web/health",
-            timeout_seconds=300,
+            timeout_seconds=30,
         )
 
     def test_execute_generic_web_preview_refresh_allows_preview_safe_copied_secret_key(
