@@ -679,6 +679,23 @@ shape. Until that follow-up lands, CM previews are a single active staged target
 behind pre-existing DNS/nginx routing and are intended to make the client-visible
 Odoo system usable before full ephemeral preview infrastructure exists.
 
+For stable Odoo target replacement planning, use the read-only dry-run command
+before considering any provider mutation:
+
+```sh
+uv run launchplane odoo-targets replacement-plan \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --product odoo-tenant-cm \
+  --instance testing
+```
+
+The plan reads the product profile, Launchplane Dokploy target/id records,
+current inventory, live Dokploy target payload, domains, volume env keys, latest
+deployment, and expected runtime identity. It does not create, delete, deploy,
+or change routes. Later apply workflows must build on this plan and keep the
+same explicit volume, route, post-deploy, health, canonical URL, logo, and
+runtime identity checks.
+
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
 payload shape. VeriReel preview runtime now flows through Launchplane drivers:

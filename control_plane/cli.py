@@ -187,6 +187,10 @@ from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
 )
+from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementRequest,
+    build_odoo_stable_target_replacement_plan,
+)
 from control_plane.workflows.promote import (
     build_executed_promotion_record,
     build_promotion_record,
@@ -14326,6 +14330,63 @@ def dokploy_targets_relabel(
 @main.group("odoo-overrides")
 def odoo_overrides() -> None:
     """Odoo instance override record commands."""
+
+
+@main.group("odoo-targets")
+def odoo_targets() -> None:
+    """Odoo stable target planning commands."""
+
+
+@odoo_targets.command("replacement-plan")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for Launchplane Odoo target records.",
+)
+@click.option("--product", default="odoo-tenant-cm", show_default=True)
+@click.option("--instance", "instance_name", required=True)
+@click.option(
+    "--strategy",
+    type=click.Choice(["recreate-in-place", "replace-and-cutover"]),
+    default="recreate-in-place",
+    show_default=True,
+)
+@click.option(
+    "--allow-empty-data",
+    is_flag=True,
+    help="Allow missing volume env keys in the dry-run plan for an intentionally empty target.",
+)
+@click.option(
+    "--control-plane-root",
+    type=click.Path(path_type=Path, file_okay=False),
+    default=None,
+    help="Optional Launchplane repo root used to resolve Dokploy credentials.",
+)
+def odoo_targets_replacement_plan(
+    database_url: str,
+    product: str,
+    instance_name: str,
+    strategy: str,
+    allow_empty_data: bool,
+    control_plane_root: Path | None,
+) -> None:
+    launchplane_root = control_plane_root or _control_plane_root()
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        plan = build_odoo_stable_target_replacement_plan(
+            control_plane_root=launchplane_root,
+            record_store=postgres_store,
+            request=OdooStableTargetReplacementRequest(
+                product=product,
+                instance=instance_name,
+                strategy=cast(Literal["recreate-in-place", "replace-and-cutover"], strategy),
+                allow_empty_data=allow_empty_data,
+            ),
+        )
+    finally:
+        postgres_store.close()
+    click.echo(json.dumps(plan.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @odoo_overrides.command("put-config-param")
