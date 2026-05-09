@@ -655,6 +655,28 @@ writes shared preview and preview-generation records. Cleanup calls
 `POST /v1/drivers/odoo/preview-destroy` and leaves the same cleanup/read-model
 history as generic-web previews.
 
+Stage-MVP Odoo previews may point at a Dokploy `compose` template lane only when
+the product profile uses `driver_id="odoo"` and `preview.data_transport_mode` is
+`bootstrap`. In that mode Launchplane reuses the configured compose target,
+renders the Odoo raw compose file for the requested immutable image, overlays
+runtime-environment records when present, requires the Odoo raw-compose safety
+env keys already present on the live target, including non-default Odoo master
+and admin password values, applies profile-owned preview override env such as
+`ODOO_INSTALL_MODULES`, applies preview URL env keys, deploys the compose
+target, and records the requested PR URL as the preview generation. This is
+intentionally not generic compose preview support:
+generic-web application previews still require application template lanes, and
+stable deploy/promotion routes do not inherit Odoo's compose preview behavior.
+Destroy for the staged compose MVP is a record/cleanup handoff only and must not
+delete the shared compose target.
+
+The long-term Odoo preview target is isolated per-PR runtime state, either by a
+provider-supported compose clone/create/delete path or by a dedicated
+application-backed template if Odoo can be safely reduced to an application
+shape. Until that follow-up lands, CM previews are a single active staged target
+behind pre-existing DNS/nginx routing and are intended to make the client-visible
+Odoo system usable before full ephemeral preview infrastructure exists.
+
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
 payload shape. VeriReel preview runtime now flows through Launchplane drivers:

@@ -129,6 +129,39 @@ def _profile(
     )
 
 
+def _odoo_compose_profile() -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="odoo-tenant-cm",
+        display_name="Odoo CM",
+        repository="cbusillo/odoo-tenant-cm",
+        driver_id="odoo",
+        image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-cm"),
+        runtime_port=8069,
+        health_path="/web/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="testing",
+                context="cm",
+                base_url="https://testing.cm.example.test",
+                health_url="https://testing.cm.example.test/web/health",
+            ),
+        ),
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context="cm",
+            enable_label="preview",
+            slug_template="pr-{number}",
+            app_name_prefix="cm-odoo-preview",
+            template_instance="testing",
+            override_env={"ODOO_INSTALL_MODULES": "cm_custom,cm_website"},
+            preview_url_env_keys=("WEB_BASE_URL",),
+            data_transport_mode="bootstrap",
+        ),
+        updated_at="2026-05-09T15:00:00Z",
+        source="test",
+    )
+
+
 def _preview_runtime_policy(
     *, secret_class: RuntimeSecretClass = "preview"
 ) -> RuntimeKeySafetyPolicyRecord:
@@ -441,6 +474,234 @@ class GenericWebPreviewTests(unittest.TestCase):
         read_dokploy_config.assert_not_called()
         fetch_dokploy_target_payload.assert_not_called()
 
+    def test_evaluate_generic_web_preview_readiness_allows_odoo_compose_stage_template(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_odoo_compose_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="cm",
+                    instance="testing",
+                    target_type="compose",
+                    target_id="compose-cm-testing",
+                    target_name="cm-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "composeId": "compose-cm-testing",
+                    "name": "cm-testing",
+                    "environmentId": "env-1",
+                    "env": (
+                        "ODOO_DB_NAME=cm_preview\n"
+                        "ODOO_DB_USER=odoo\n"
+                        "ODOO_DB_PASSWORD=safe\n"
+                        "ODOO_DATA_VOLUME=cm_data\n"
+                        "ODOO_LOG_VOLUME=cm_logs\n"
+                        "ODOO_DB_VOLUME=cm_db\n"
+                        "ODOO_MASTER_PASSWORD=safe-master\n"
+                        "ODOO_ADMIN_PASSWORD=safe-admin\n"
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="odoo-tenant-cm"),
+                checked_at="2026-05-09T15:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "pass")
+        self.assertEqual(result.template_target_type, "compose")
+        self.assertEqual(result.template_target_id, "compose-cm-testing")
+        self.assertEqual(result.transport.data_transport_mode, "bootstrap")
+        self.assertEqual(result.missing_provider_fields, ())
+        self.assertEqual(
+            result.checks[1].message,
+            "Staged Odoo compose preview uses Launchplane-rendered compose source.",
+        )
+
+    def test_evaluate_generic_web_preview_readiness_blocks_non_odoo_compose_template(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="sellyouroutboard-testing",
+                    instance="testing",
+                    target_type="compose",
+                    target_id="compose-testing",
+                    target_name="sellyouroutboard-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config"
+            ) as read_dokploy_config,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload"
+            ) as fetch_dokploy_target_payload,
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="sellyouroutboard"),
+                checked_at="2026-05-09T15:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "blocked")
+        self.assertEqual(result.template_target_type, "compose")
+        self.assertEqual(
+            result.checks[0].message,
+            "Generic web preview readiness requires the template lane to be a Dokploy application.",
+        )
+        read_dokploy_config.assert_not_called()
+        fetch_dokploy_target_payload.assert_not_called()
+
+    def test_evaluate_generic_web_preview_readiness_blocks_odoo_compose_missing_safe_env(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_odoo_compose_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="cm",
+                    instance="testing",
+                    target_type="compose",
+                    target_id="compose-cm-testing",
+                    target_name="cm-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "composeId": "compose-cm-testing",
+                    "name": "cm-testing",
+                    "environmentId": "env-1",
+                    "env": "ODOO_DB_NAME=cm_preview\nODOO_DB_USER=odoo\n",
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="odoo-tenant-cm"),
+                checked_at="2026-05-09T15:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "blocked")
+        self.assertEqual(
+            result.missing_template_env_keys,
+            (
+                "ODOO_DB_PASSWORD",
+                "ODOO_DATA_VOLUME",
+                "ODOO_LOG_VOLUME",
+                "ODOO_DB_VOLUME",
+                "ODOO_MASTER_PASSWORD",
+                "ODOO_ADMIN_PASSWORD",
+            ),
+        )
+
+    def test_evaluate_generic_web_preview_readiness_accepts_odoo_compose_runtime_env(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_odoo_compose_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="cm",
+                    instance="testing",
+                    target_type="compose",
+                    target_id="compose-cm-testing",
+                    target_name="cm-testing",
+                ),
+            ),
+        )
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "composeId": "compose-cm-testing",
+                    "name": "cm-testing",
+                    "environmentId": "env-1",
+                    "env": "ODOO_DB_NAME=cm_preview\nODOO_DB_USER=odoo\n",
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={
+                    "ODOO_DB_PASSWORD": "safe",
+                    "ODOO_DATA_VOLUME": "cm_data",
+                    "ODOO_LOG_VOLUME": "cm_logs",
+                    "ODOO_DB_VOLUME": "cm_db",
+                    "ODOO_MASTER_PASSWORD": "safe-master",
+                    "ODOO_ADMIN_PASSWORD": "safe-admin",
+                },
+            ),
+        ):
+            result = evaluate_generic_web_preview_readiness(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewReadinessRequest(product="odoo-tenant-cm"),
+                checked_at="2026-05-09T15:00:00Z",
+            )
+
+        self.assertEqual(result.readiness_status, "pass")
+        self.assertEqual(result.missing_template_env_keys, ())
+
     def test_execute_generic_web_preview_refresh_blocks_before_provider_mutation(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         source = DokploySourceOfTruth(
@@ -696,6 +957,185 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertIn("runtime key-safety gate failed", result.error_message)
         self.assertIn("secret_class_not_allowed", result.error_message)
         dokploy_request.assert_not_called()
+
+    def test_execute_generic_web_preview_refresh_updates_odoo_compose_stage_target(
+        self,
+    ) -> None:
+        store = _GenericWebPreviewStore(_odoo_compose_profile())
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="cm",
+                    instance="testing",
+                    target_type="compose",
+                    target_id="compose-cm-testing",
+                    target_name="cm-testing",
+                ),
+            ),
+        )
+        env_updates: list[str] = []
+
+        def _fake_fetch(**kwargs: object) -> dict[str, object]:
+            self.assertEqual(kwargs["target_type"], "compose")
+            self.assertEqual(kwargs["target_id"], "compose-cm-testing")
+            return {
+                "composeId": "compose-cm-testing",
+                "name": "cm-testing",
+                "environmentId": "env-1",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "",
+                "env": (
+                    "ODOO_DB_NAME=cm_preview\n"
+                    "ODOO_DB_USER=odoo\n"
+                    "ODOO_DB_PASSWORD=safe\n"
+                    "ODOO_DATA_VOLUME=cm_data\n"
+                    "ODOO_LOG_VOLUME=cm_logs\n"
+                    "ODOO_DB_VOLUME=cm_db\n"
+                    "ODOO_MASTER_PASSWORD=safe-master\n"
+                    "ODOO_ADMIN_PASSWORD=safe-admin\n"
+                    "WEB_BASE_URL=https://testing.cm.example.test\n"
+                ),
+            }
+
+        def _fake_update_env(**kwargs: object) -> None:
+            env_updates.append(str(kwargs["env_text"]))
+
+        domain_requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            domain_requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/domain.byComposeId":
+                return [
+                    {
+                        "domainId": "domain-testing",
+                        "host": "cm-testing.shinycomputers.com",
+                        "serviceName": "web",
+                        "port": 8069,
+                        "domainType": "compose",
+                    }
+                ]
+            if path == "/api/domain.create":
+                return {"domainId": "domain-preview"}
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fake_fetch,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_PROJECT_NAME": "cm-pr-28"},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.sync_dokploy_compose_raw_source",
+            ) as sync_raw_source,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.update_dokploy_target_env",
+                side_effect=_fake_update_env,
+            ) as update_env,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.trigger_deployment",
+            ) as trigger_deployment,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.wait_for_target_deployment",
+            ) as wait_for_deployment,
+            patch(
+                "control_plane.workflows.generic_web_preview._wait_for_preview_health"
+            ) as wait_health,
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-05-09T15:00:00Z", "2026-05-09T15:00:05Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_refresh(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewRefreshRequest(
+                    product="odoo-tenant-cm",
+                    preview_slug="pr-28",
+                    preview_url="https://pr-28.cm-preview.shinycomputers.com",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    timeout_seconds=240,
+                ),
+            )
+
+        self.assertEqual(result.refresh_status, "pass")
+        self.assertEqual(result.application_id, "compose-cm-testing")
+        sync_raw_source.assert_called_once()
+        _, sync_kwargs = sync_raw_source.call_args
+        self.assertEqual(sync_kwargs["compose_id"], "compose-cm-testing")
+        self.assertIn(
+            "image: ghcr.io/cbusillo/odoo-tenant-cm:sha",
+            str(sync_kwargs["compose_file"]),
+        )
+        update_env.assert_called_once()
+        self.assertEqual(len(env_updates), 1)
+        self.assertIn("ODOO_DB_NAME=cm_preview", env_updates[0])
+        self.assertIn("ODOO_PROJECT_NAME=cm-pr-28", env_updates[0])
+        self.assertIn("ODOO_INSTALL_MODULES=cm_custom,cm_website", env_updates[0])
+        self.assertIn(
+            "WEB_BASE_URL=https://pr-28.cm-preview.shinycomputers.com", env_updates[0]
+        )
+        self.assertIn(
+            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-cm:sha", env_updates[0]
+        )
+        self.assertEqual(
+            [request["path"] for request in domain_requests],
+            ["/api/domain.byComposeId", "/api/domain.create"],
+        )
+        self.assertEqual(
+            domain_requests[1]["payload"],
+            {
+                "host": "pr-28.cm-preview.shinycomputers.com",
+                "path": "/",
+                "internalPath": "/",
+                "port": 8069,
+                "https": True,
+                "applicationId": None,
+                "certificateType": "none",
+                "customCertResolver": None,
+                "composeId": "compose-cm-testing",
+                "serviceName": "web",
+                "domainType": "compose",
+                "previewDeploymentId": None,
+                "stripPath": False,
+            },
+        )
+        trigger_deployment.assert_called_once_with(
+            host="https://dokploy.example",
+            token="token",
+            target_type="compose",
+            target_id="compose-cm-testing",
+            no_cache=False,
+        )
+        wait_for_deployment.assert_called_once()
+        _, wait_kwargs = wait_for_deployment.call_args
+        self.assertEqual(wait_kwargs["timeout_seconds"], 120)
+        wait_health.assert_called_once_with(
+            preview_url="https://pr-28.cm-preview.shinycomputers.com",
+            health_path="/web/health",
+            timeout_seconds=120,
+        )
 
     def test_execute_generic_web_preview_refresh_allows_preview_safe_copied_secret_key(
         self,

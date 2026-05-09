@@ -74,6 +74,7 @@ jobs:
       LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: ${{ secrets.LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN }}
       LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_SUBJECT }}
       LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL }}
+      ODOO_CM_TESTING_DOKPLOY_TARGET_ID: ${{ vars.ODOO_CM_TESTING_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
     steps:
@@ -738,6 +739,83 @@ jobs:
             return 1
           }
 
+          apply_odoo_cm_onboarding() {
+            local idempotency_suffix="odoo-cm-preview-profile"
+            local request_payload response_file status_code
+            local target_id="${ODOO_CM_TESTING_DOKPLOY_TARGET_ID:-}"
+
+            request_payload="$({
+              jq -n \
+                --arg target_id "$target_id" \
+                '{
+                  schema_version: 1,
+                  product: "launchplane",
+                  manifest: {
+                    product: "odoo-tenant-cm",
+                    display_name: "Odoo CM",
+                    repository: "cbusillo/odoo-tenant-cm",
+                    driver_id: "odoo",
+                    image_repository: "ghcr.io/cbusillo/odoo-tenant-cm",
+                    runtime_port: 8069,
+                    health_path: "/web/health",
+                    lanes: [
+                      {
+                        instance: "testing",
+                        context: "cm"
+                      }
+                    ],
+                    preview: {
+                      enabled: true,
+                      context: "cm",
+                      enable_label: "preview",
+                      slug_template: "pr-{number}",
+                      app_name_prefix: "cm-odoo-preview",
+                      template_instance: "testing",
+                      override_env: {
+                        ODOO_INSTALL_MODULES: "cm_custom,cm_website"
+                      },
+                      preview_url_env_keys: ["WEB_BASE_URL"],
+                      data_transport_mode: "bootstrap"
+                    },
+                    dokploy_targets: (
+                      if ($target_id | length) > 0 then
+                        [
+                          {
+                            context: "cm",
+                            instance: "testing",
+                            target_id: $target_id,
+                            target_type: "application",
+                            target_name: "cm-testing",
+                            healthcheck_path: "/web/health",
+                            healthcheck_enabled: true,
+                            deploy_timeout_seconds: 900
+                          }
+                        ]
+                      else [] end
+                    ),
+                    source_label: "deploy:odoo-cm-product-onboarding"
+                  }
+                }'
+            })"
+            response_file="$(mktemp)"
+            status_code="$(curl -sS \
+              -o "$response_file" \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: launchplane-product-onboarding:${idempotency_suffix}:${target_id}:${GITHUB_SHA}" \
+              --data "$request_payload" \
+              "${{ steps.service.outputs.service_url }}/v1/product-onboarding/apply")"
+            if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+              cat "$response_file"
+              return 0
+            fi
+            cat "$response_file" >&2
+            echo "Launchplane Odoo CM product onboarding request failed with HTTP ${status_code}." >&2
+            return 1
+          }
+
           apply_runtime_key_safety_policy() {
             local idempotency_suffix="$1"
             local request_payload response_file status_code
@@ -868,8 +946,27 @@ jobs:
               "syo-preview-destroy-manual-${suffix}"
           }
 
+          post_odoo_cm_preview_grant() {
+            local product_name="$1"
+            local action_name="$2"
+            local source_label="$3"
+            local idempotency_suffix="$4"
+            local event_name="${5:-pull_request}"
+            post_grant \
+              cbusillo/odoo-tenant-cm \
+              odoo-preview.yml \
+              "$product_name" \
+              cm \
+              "$action_name" \
+              "$source_label" \
+              "$idempotency_suffix" \
+              "$event_name" \
+              '*'
+          }
+
           apply_product_onboarding \
             discord-blue
+          apply_odoo_cm_onboarding
           post_grant \
             cbusillo/discord-blue \
             main.yml \
@@ -985,3 +1082,29 @@ jobs:
           post_syo_preview_grants \
             sellyouroutboard \
             canonical-context
+          post_odoo_cm_preview_grant \
+            odoo \
+            odoo_artifact_publish_inputs.read \
+            deploy:odoo-cm-preview-artifact-publish-inputs-grant \
+            odoo-cm-preview-artifact-publish-inputs
+          post_odoo_cm_preview_grant \
+            odoo \
+            odoo_artifact_publish.write \
+            deploy:odoo-cm-preview-artifact-publish-grant \
+            odoo-cm-preview-artifact-publish
+          post_odoo_cm_preview_grant \
+            odoo-tenant-cm \
+            preview_refresh.execute \
+            deploy:odoo-cm-preview-refresh-grant \
+            odoo-cm-preview-refresh
+          post_odoo_cm_preview_grant \
+            odoo-tenant-cm \
+            preview_destroy.execute \
+            deploy:odoo-cm-preview-destroy-pr-grant \
+            odoo-cm-preview-destroy-pr
+          post_odoo_cm_preview_grant \
+            odoo-tenant-cm \
+            preview_destroy.execute \
+            deploy:odoo-cm-preview-destroy-manual-grant \
+            odoo-cm-preview-destroy-manual \
+            workflow_dispatch
