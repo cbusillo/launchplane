@@ -153,6 +153,7 @@ def _odoo_compose_profile() -> LaunchplaneProductProfileRecord:
             slug_template="pr-{number}",
             app_name_prefix="cm-odoo-preview",
             template_instance="testing",
+            override_env={"ODOO_INSTALL_MODULES": "cm_custom,cm_website"},
             preview_url_env_keys=("WEB_BASE_URL",),
             data_transport_mode="bootstrap",
         ),
@@ -1091,6 +1092,7 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(len(env_updates), 1)
         self.assertIn("ODOO_DB_NAME=cm_preview", env_updates[0])
         self.assertIn("ODOO_PROJECT_NAME=cm-pr-28", env_updates[0])
+        self.assertIn("ODOO_INSTALL_MODULES=cm_custom,cm_website", env_updates[0])
         self.assertIn(
             "WEB_BASE_URL=https://pr-28.cm-preview.shinycomputers.com", env_updates[0]
         )
