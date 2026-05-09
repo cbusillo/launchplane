@@ -1584,7 +1584,7 @@ def execute_generic_web_preview_inventory(
             profile=resolved_profile,
             target_definition=target_definition,
         ):
-            preview_items = []
+            compose_preview_items: list[GenericWebPreviewInventoryItem] = []
             for domain in _compose_preview_domains(
                 host=host,
                 token=token,
@@ -1592,7 +1592,7 @@ def execute_generic_web_preview_inventory(
                 profile=resolved_profile,
             ):
                 domain_host = str(domain.get("host") or "").strip()
-                preview_items.append(
+                compose_preview_items.append(
                     GenericWebPreviewInventoryItem(
                         applicationId=target_definition.target_id,
                         applicationName=target_definition.target_name,
@@ -1610,7 +1610,9 @@ def execute_generic_web_preview_inventory(
                 context=resolved_profile.preview.context,
                 source=request.source,
                 app_name_prefix=app_name_prefix,
-                previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
+                previews=tuple(
+                    sorted(compose_preview_items, key=lambda item: item.previewSlug)
+                ),
             )
 
     raw_projects = control_plane_dokploy.dokploy_request(
@@ -1683,7 +1685,7 @@ def execute_generic_web_preview_destroy(
             profile=resolved_profile,
             target_definition=target_definition,
         ):
-            cleanup_errors: list[str] = []
+            compose_cleanup_errors: list[str] = []
             deleted_domain_ids: list[str] = []
             for domain in _compose_preview_domains(
                 host=host,
@@ -1707,9 +1709,9 @@ def execute_generic_web_preview_destroy(
                     _delete_domain(host=host, token=token, domain_id=domain_id)
                     deleted_domain_ids.append(domain_id)
                 except click.ClickException as exc:
-                    cleanup_errors.append(f"domain cleanup failed: {exc}")
+                    compose_cleanup_errors.append(f"domain cleanup failed: {exc}")
             finished_at = utc_now_timestamp()
-            if cleanup_errors:
+            if compose_cleanup_errors:
                 return GenericWebPreviewDestroyResult(
                     destroy_status="fail",
                     destroy_started_at=started_at,
@@ -1721,7 +1723,7 @@ def execute_generic_web_preview_destroy(
                     application_id=target_definition.target_id,
                     provider_type="compose-domain",
                     domain_ids=tuple(deleted_domain_ids),
-                    error_message="; ".join(cleanup_errors),
+                    error_message="; ".join(compose_cleanup_errors),
                 )
             return GenericWebPreviewDestroyResult(
                 destroy_status="pass",
@@ -1753,10 +1755,10 @@ def execute_generic_web_preview_destroy(
             )
             if isinstance(raw_domains, list):
                 for raw_domain in raw_domains:
-                    domain = control_plane_dokploy.as_json_object(raw_domain)
-                    if domain is None:
+                    application_domain = control_plane_dokploy.as_json_object(raw_domain)
+                    if application_domain is None:
                         continue
-                    domain_id = str(domain.get("domainId") or "").strip()
+                    domain_id = str(application_domain.get("domainId") or "").strip()
                     if domain_id:
                         _delete_domain(host=host, token=token, domain_id=domain_id)
         except click.ClickException as exc:
