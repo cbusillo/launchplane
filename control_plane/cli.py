@@ -211,6 +211,7 @@ _RUNTIME_CONTRACT_ENV_KEYS = (
 )
 _DATABASE_URL_ENV_KEYS = ("LAUNCHPLANE_DATABASE_URL",)
 _EVERY_CODE_WORKER_TOKEN_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN"
+_EVERY_CODE_WEBHOOK_URL_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_WEBHOOK_URL"
 _MERGE_TRAIN_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
 _MASTER_ENCRYPTION_KEY_ENV_KEYS = ("LAUNCHPLANE_MASTER_ENCRYPTION_KEY",)
 _LAUNCHPLANE_SERVICE_POLICY_ENV_KEYS = (
@@ -10167,8 +10168,12 @@ def every_code_reconcile_issue(
 @click.option("--topic", default="every-code", show_default=True)
 @click.option(
     "--webhook-url",
-    default=control_plane_every_code_webhooks.EVERY_CODE_WEBHOOK_URL,
-    show_default=True,
+    envvar=_EVERY_CODE_WEBHOOK_URL_ENV_KEY,
+    default="",
+    help=(
+        "Every Code GitHub webhook URL. Can also be supplied via "
+        f"{_EVERY_CODE_WEBHOOK_URL_ENV_KEY}."
+    ),
 )
 @click.option(
     "--webhook-secret-env",
@@ -10186,11 +10191,16 @@ def every_code_sync_webhooks(
     webhook_secret = os.environ.get(secret_env_key, "").strip()
     if not webhook_secret:
         raise click.ClickException(f"{secret_env_key} is required.")
+    resolved_webhook_url = webhook_url.strip()
+    if not resolved_webhook_url:
+        raise click.ClickException(
+            f"--webhook-url or {_EVERY_CODE_WEBHOOK_URL_ENV_KEY} is required."
+        )
     try:
         results = control_plane_every_code_webhooks.sync_every_code_webhooks(
             owner=resolved_owner,
             webhook_secret=webhook_secret,
-            webhook_url=webhook_url,
+            webhook_url=resolved_webhook_url,
             topic=topic,
         )
     except (ValueError, subprocess.CalledProcessError) as error:
@@ -10202,7 +10212,7 @@ def every_code_sync_webhooks(
                 "status": "error" if failed else "ok",
                 "owner": resolved_owner,
                 "topic": topic,
-                "webhook_url": webhook_url,
+                "webhook_url": resolved_webhook_url,
                 "events": list(control_plane_every_code_webhooks.EVERY_CODE_WEBHOOK_EVENTS),
                 "repositories": [result.as_payload() for result in results],
             },
