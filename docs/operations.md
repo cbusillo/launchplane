@@ -667,8 +667,10 @@ target, and records the requested PR URL as the preview generation. This is
 intentionally not generic compose preview support:
 generic-web application previews still require application template lanes, and
 stable deploy/promotion routes do not inherit Odoo's compose preview behavior.
-Destroy for the staged compose MVP is a record/cleanup handoff only and must not
-delete the shared compose target.
+Inventory and destroy for the staged compose MVP inspect compose-attached domains
+whose hostnames match the product preview slug template. Destroy deletes only the
+matching preview domain and must not delete the shared compose target or stable
+hostnames.
 
 The long-term Odoo preview target is isolated per-PR runtime state, either by a
 provider-supported compose clone/create/delete path or by a dedicated

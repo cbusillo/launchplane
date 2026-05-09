@@ -118,6 +118,9 @@ class GenericWebPreviewInventoryItem(BaseModel):
     applicationId: str
     applicationName: str
     previewSlug: str
+    providerType: Literal["application", "compose-domain"] = "application"
+    domainId: str = ""
+    domainHost: str = ""
 
 
 class GenericWebPreviewInventoryResult(BaseModel):
@@ -161,6 +164,8 @@ class GenericWebPreviewDestroyResult(BaseModel):
     preview_slug: str
     application_name: str
     application_id: str
+    provider_type: Literal["application", "compose-domain"] = "application"
+    domain_ids: tuple[str, ...] = ()
     error_message: str = ""
 
 
@@ -622,6 +627,48 @@ def _ensure_compose_domain(
     )
     created_domain = control_plane_dokploy.as_json_object(created)
     return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
+
+
+def _preview_slug_from_compose_domain(
+    *, profile: LaunchplaneProductProfileRecord, domain_host: str
+) -> str:
+    host = domain_host.strip().split(":", 1)[0]
+    slug_prefix = _preview_slug_prefix(profile.preview.slug_template)
+    if not host.startswith(slug_prefix):
+        return ""
+    slug = host.split(".", 1)[0]
+    if preview_pr_number_from_slug(
+        preview_slug=slug,
+        slug_template=profile.preview.slug_template,
+    ) is None:
+        return ""
+    return slug
+
+
+def _compose_preview_domains(
+    *, host: str, token: str, compose_id: str, profile: LaunchplaneProductProfileRecord
+) -> tuple[JsonObject, ...]:
+    raw_domains = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byComposeId",
+        query={"composeId": compose_id},
+    )
+    if not isinstance(raw_domains, list):
+        return ()
+    domains: list[JsonObject] = []
+    for raw_domain in raw_domains:
+        domain = control_plane_dokploy.as_json_object(raw_domain)
+        if domain is None:
+            continue
+        domain_host = str(domain.get("host") or "").strip()
+        domain_id = str(domain.get("domainId") or "").strip()
+        if domain_id and _preview_slug_from_compose_domain(
+            profile=profile,
+            domain_host=domain_host,
+        ):
+            domains.append(domain)
+    return tuple(domains)
 
 
 def _delete_application(*, host: str, token: str, application_id: str) -> None:
@@ -1522,6 +1569,50 @@ def execute_generic_web_preview_inventory(
         )
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    template_lane = _template_lane(profile=resolved_profile)
+    if template_lane is not None and _profile_allows_odoo_compose_stage_preview(
+        profile=resolved_profile
+    ):
+        target_definition, _template_payload, target_error = _read_template_payload(
+            control_plane_root=control_plane_root,
+            template_lane=template_lane,
+            allow_compose_template=True,
+        )
+        if target_error:
+            raise click.ClickException(target_error)
+        if target_definition is not None and _uses_odoo_compose_stage_preview(
+            profile=resolved_profile,
+            target_definition=target_definition,
+        ):
+            preview_items = []
+            for domain in _compose_preview_domains(
+                host=host,
+                token=token,
+                compose_id=target_definition.target_id,
+                profile=resolved_profile,
+            ):
+                domain_host = str(domain.get("host") or "").strip()
+                preview_items.append(
+                    GenericWebPreviewInventoryItem(
+                        applicationId=target_definition.target_id,
+                        applicationName=target_definition.target_name,
+                        previewSlug=_preview_slug_from_compose_domain(
+                            profile=resolved_profile,
+                            domain_host=domain_host,
+                        ),
+                        providerType="compose-domain",
+                        domainId=str(domain.get("domainId") or "").strip(),
+                        domainHost=domain_host,
+                    )
+                )
+            return GenericWebPreviewInventoryResult(
+                product=resolved_profile.product,
+                context=resolved_profile.preview.context,
+                source=request.source,
+                app_name_prefix=app_name_prefix,
+                previews=tuple(sorted(preview_items, key=lambda item: item.previewSlug)),
+            )
+
     raw_projects = control_plane_dokploy.dokploy_request(
         host=host,
         token=token,
@@ -1577,6 +1668,74 @@ def execute_generic_web_preview_destroy(
         preview_slug=request.preview_slug,
     )
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    template_lane = _template_lane(profile=resolved_profile)
+    if template_lane is not None and _profile_allows_odoo_compose_stage_preview(
+        profile=resolved_profile
+    ):
+        target_definition, _template_payload, target_error = _read_template_payload(
+            control_plane_root=control_plane_root,
+            template_lane=template_lane,
+            allow_compose_template=True,
+        )
+        if target_error:
+            raise click.ClickException(target_error)
+        if target_definition is not None and _uses_odoo_compose_stage_preview(
+            profile=resolved_profile,
+            target_definition=target_definition,
+        ):
+            cleanup_errors: list[str] = []
+            deleted_domain_ids: list[str] = []
+            for domain in _compose_preview_domains(
+                host=host,
+                token=token,
+                compose_id=target_definition.target_id,
+                profile=resolved_profile,
+            ):
+                domain_host = str(domain.get("host") or "").strip()
+                if (
+                    _preview_slug_from_compose_domain(
+                        profile=resolved_profile,
+                        domain_host=domain_host,
+                    )
+                    != request.preview_slug
+                ):
+                    continue
+                domain_id = str(domain.get("domainId") or "").strip()
+                if not domain_id:
+                    continue
+                try:
+                    _delete_domain(host=host, token=token, domain_id=domain_id)
+                    deleted_domain_ids.append(domain_id)
+                except click.ClickException as exc:
+                    cleanup_errors.append(f"domain cleanup failed: {exc}")
+            finished_at = utc_now_timestamp()
+            if cleanup_errors:
+                return GenericWebPreviewDestroyResult(
+                    destroy_status="fail",
+                    destroy_started_at=started_at,
+                    destroy_finished_at=finished_at,
+                    product=resolved_profile.product,
+                    context=resolved_profile.preview.context,
+                    preview_slug=request.preview_slug,
+                    application_name=application_name,
+                    application_id=target_definition.target_id,
+                    provider_type="compose-domain",
+                    domain_ids=tuple(deleted_domain_ids),
+                    error_message="; ".join(cleanup_errors),
+                )
+            return GenericWebPreviewDestroyResult(
+                destroy_status="pass",
+                destroy_started_at=started_at,
+                destroy_finished_at=finished_at,
+                product=resolved_profile.product,
+                context=resolved_profile.preview.context,
+                preview_slug=request.preview_slug,
+                application_name=application_name,
+                application_id=target_definition.target_id,
+                provider_type="compose-domain",
+                domain_ids=tuple(deleted_domain_ids),
+            )
+
     application = _find_application_by_name(
         host=host,
         token=token,

@@ -146,10 +146,12 @@ Odoo is the only current generic-web-based driver allowed to use the staged
 compose preview MVP: if its product profile uses `preview.data_transport_mode =
 "bootstrap"` and its template lane is a Dokploy `compose` target, preview refresh
 updates and deploys that configured compose target instead of creating a
-generic-web application. This exception is route-scoped to Odoo preview refresh
-and readiness; it does not grant Odoo products access to stable generic-web
-deploy or promotion routes, and it does not make compose templates valid for
-generic-web products.
+generic-web application. Odoo preview inventory and destroy read compose domains
+with `/api/domain.byComposeId` and delete only domains whose hostnames match the
+preview slug template. This exception is route-scoped to Odoo preview refresh,
+inventory, destroy, and readiness; it does not grant Odoo products access to
+stable generic-web deploy or promotion routes, and it does not make compose
+templates valid for generic-web products.
 
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call
