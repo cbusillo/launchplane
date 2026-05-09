@@ -4194,6 +4194,81 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_terminal_agent_read_token_can_read_agent_context(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "terminal_agents": [
+                    {
+                        "subjects": ["local-owner-agent"],
+                        "token_labels": ["local-owner-read"],
+                        "products": ["launchplane", "example-site"],
+                        "contexts": ["launchplane", "example-site"],
+                        "actions": [
+                            "product_environment.read",
+                            "work_graph.rank",
+                            "every_code_work_request.read",
+                            "every_code_preview_gate.read",
+                        ],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_generic_site_profile_payload())
+            )
+            store.write_every_code_preview_gate_record(
+                EveryCodePreviewGateRecord(
+                    gate_id="every-code-preview-gate-every-example-site-190-abcdef",
+                    request_id="every-code-every-example-site-190-test",
+                    repository="every/example-site",
+                    issue_number=190,
+                    issue_url="https://github.com/every/example-site/issues/190",
+                    pr_number=191,
+                    pr_url="https://github.com/every/example-site/pull/191",
+                    head_sha="abcdef1234567890",
+                    status="ready",
+                    created_at="2026-05-08T18:00:00Z",
+                    updated_at="2026-05-08T18:01:00Z",
+                    ready_at="2026-05-08T18:01:00Z",
+                    last_checked_at="2026-05-08T18:01:00Z",
+                )
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_identity(repository="cbusillo/launchplane")),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            with patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
+                    "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "local-owner-read",
+                },
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/agent/context",
+                    query_string="repository=every/example-site",
+                    authorization="Bearer terminal-read-token",
+                )
+
+        self.assertEqual(status_code, 200)
+        context = payload["context"]
+        self.assertEqual(context["repository"], "every/example-site")
+        sections = context["sections"]
+        self.assertEqual(sections["repo_product_mapping"]["status"], "available")
+        self.assertEqual(sections["work_graph_snapshot"]["status"], "available")
+        self.assertEqual(sections["every_code_summary"]["status"], "available")
+        self.assertEqual(sections["preview_readiness"]["status"], "available")
+
     def test_agent_context_marks_work_graph_unavailable_without_dropping_sections(
         self,
     ) -> None:
