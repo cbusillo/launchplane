@@ -1539,7 +1539,14 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.ensure_schema()
             record = _merge_train_run_record()
             store.write_merge_train_run_record(record)
+            store.write_merge_train_run_record(
+                _merge_train_run_record(recorded_at="2026-05-09T02:06:00Z")
+            )
             loaded_record = store.read_merge_train_run_record(record.run_id)
+            latest_record = store.latest_merge_train_run_record(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+            )
             listed_records = store.list_merge_train_run_records(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -1552,8 +1559,9 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(loaded_record.selected_pr_number, 42)
         self.assertEqual(loaded_record.selected_head_sha, "head-42")
         self.assertEqual(loaded_record.policy_key, "cbusillo/sellyouroutboard:main")
-        self.assertEqual(len(listed_records), 1)
-        self.assertEqual(listed_records[0].trace_id, "launchplane_req_merge_train_test")
+        self.assertEqual(latest_record.recorded_at if latest_record else "", "2026-05-09T02:06:00Z")
+        self.assertEqual(len(listed_records), 2)
+        self.assertEqual(listed_records[0].recorded_at, "2026-05-09T02:06:00Z")
 
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

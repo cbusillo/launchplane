@@ -1488,6 +1488,16 @@ class PostgresRecordStore(HumanSessionStore):
             filters=(LaunchplaneMergeTrainRunRow.run_id == run_id,),
         )
 
+    def latest_merge_train_run_record(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainRunRecord | None:
+        records = self.list_merge_train_run_records(
+            repository=repository,
+            base_branch=base_branch,
+            limit=1,
+        )
+        return records[0] if records else None
+
     def list_merge_train_run_records(
         self,
         *,
