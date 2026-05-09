@@ -1206,6 +1206,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "--preview-enabled",
                     "--preview-context",
                     "sellyouroutboard-testing",
+                    "--preview-enable-label",
+                    "preview",
                     "--updated-at",
                     "2026-04-30T22:00:00Z",
                     "--source-label",
@@ -1242,6 +1244,8 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertIn('"product": "sellyouroutboard"', list_result.output)
         self.assertEqual(show_result.exit_code, 0, show_result.output)
         self.assertIn('"preview_context": "sellyouroutboard-testing"', list_result.output)
+        self.assertIn('"preview_enable_label": "preview"', list_result.output)
+        self.assertIn('"enable_label": "preview"', show_result.output)
         self.assertIn('"health_path": "/api/health"', show_result.output)
 
     def test_preview_lifecycle_plan_records_round_trip(self) -> None:

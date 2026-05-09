@@ -160,7 +160,6 @@ from control_plane.workflows.launchplane import (
     launchplane_preview_label_enabled,
     DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL,
     LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
-    LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS,
     resolve_pull_request_event_manifest,
     resolve_launchplane_github_webhook_secret,
     verify_github_webhook_signature,
@@ -421,6 +420,7 @@ def _summarize_product_profile_record(record: LaunchplaneProductProfileRecord) -
         "lane_count": len(record.lanes),
         "preview_enabled": record.preview.enabled,
         "preview_context": record.preview.context,
+        "preview_enable_label": record.preview.enable_label,
         "updated_at": record.updated_at,
         "source": record.source,
     }
@@ -783,11 +783,22 @@ def _relative_href(*, from_file: Path, to_file: Path) -> str:
     return os.path.relpath(to_file, start=from_file.parent)
 
 
-def _launchplane_context_anchor_repo(*, context_name: str) -> str:
+def _launchplane_preview_profile_rows(record_store: FilesystemRecordStore) -> tuple[tuple[str, str], ...]:
+    rows: list[tuple[str, str]] = []
+    for profile in record_store.list_product_profile_records():
+        if not profile.preview.enabled or not profile.preview.context.strip():
+            continue
+        rows.append((profile.repository.strip().rsplit("/", maxsplit=1)[-1], profile.preview.context))
+    return tuple(sorted(rows))
+
+
+def _launchplane_context_anchor_repo_from_store(
+    *, record_store: FilesystemRecordStore, context_name: str
+) -> str:
     normalized_context = context_name.strip()
     if not normalized_context:
         return ""
-    for repo_name, repo_context in sorted(LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS.items()):
+    for repo_name, repo_context in _launchplane_preview_profile_rows(record_store):
         if repo_context == normalized_context:
             return repo_name
     return ""
@@ -1840,9 +1851,15 @@ def _build_launchplane_tenant_payload(
     resolved_context = context_name.strip()
     resolved_anchor_repo = anchor_repo.strip()
     if resolved_context and not resolved_anchor_repo:
-        resolved_anchor_repo = _launchplane_context_anchor_repo(context_name=resolved_context)
+        resolved_anchor_repo = _launchplane_context_anchor_repo_from_store(
+            record_store=record_store,
+            context_name=resolved_context,
+        )
     if resolved_anchor_repo and not resolved_context:
-        resolved_context = launchplane_anchor_repo_context(repo=resolved_anchor_repo)
+        resolved_context = launchplane_anchor_repo_context(
+            record_store=record_store,
+            repo=resolved_anchor_repo,
+        )
 
     if not resolved_context and not resolved_anchor_repo:
         return None
@@ -4072,6 +4089,7 @@ def _render_launchplane_preview_index_page_html(
 def _render_launchplane_preview_policy_page_html(
     payload: dict[str, object],
     *,
+    eligible_contexts: tuple[tuple[str, str], ...] = (),
     nav_links: dict[str, str] | None = None,
 ) -> str:
     context_name = str(payload.get("context", ""))
@@ -4124,7 +4142,7 @@ def _render_launchplane_preview_policy_page_html(
     """
     eligible_context_rows = "".join(
         f"<tr><td>{escape(repo)}</td><td>{escape(context)}</td></tr>"
-        for repo, context in sorted(LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS.items())
+        for repo, context in sorted(eligible_contexts)
     )
     companion_items = "".join(
         f"<li><code>{escape(repo)}</code></li>" for repo in LAUNCHPLANE_ALLOWED_COMPANION_REPOS
@@ -12155,7 +12173,9 @@ def _ingest_launchplane_github_webhook_payload(
     deliver_feedback: bool,
 ) -> dict[str, object]:
     control_plane_root = _control_plane_root()
+    record_store = _store(state_dir)
     signature_verification = _verify_launchplane_github_webhook_signature(
+        record_store=record_store,
         control_plane_root=control_plane_root,
         event_name=event_name,
         webhook_payload=webhook_payload,
@@ -12217,6 +12237,7 @@ def _load_github_webhook_replay_envelope(
 
 def _verify_launchplane_github_webhook_signature(
     *,
+    record_store: FilesystemRecordStore,
     control_plane_root: Path,
     event_name: str,
     webhook_payload: dict[str, object],
@@ -12232,6 +12253,7 @@ def _verify_launchplane_github_webhook_signature(
         }
 
     context_name = _resolve_launchplane_github_webhook_context(
+        record_store=record_store,
         event_name=event_name,
         webhook_payload=webhook_payload,
     )
@@ -12260,7 +12282,7 @@ def _verify_launchplane_github_webhook_signature(
 
 
 def _resolve_launchplane_github_webhook_context(
-    *, event_name: str, webhook_payload: dict[str, object]
+    *, record_store: FilesystemRecordStore, event_name: str, webhook_payload: dict[str, object]
 ) -> str:
     if event_name.strip() != "pull_request":
         return ""
@@ -12270,7 +12292,7 @@ def _resolve_launchplane_github_webhook_context(
     repo_name = repository_payload.get("name")
     if not isinstance(repo_name, str) or not repo_name.strip():
         return ""
-    return launchplane_anchor_repo_context(repo=repo_name)
+    return launchplane_anchor_repo_context(record_store=record_store, repo=repo_name)
 
 
 @launchplane_previews.command("list")
@@ -12351,11 +12373,15 @@ def launchplane_previews_render_policy_page(
     context_name: str,
     output_file: Path | None,
 ) -> None:
+    record_store = _store(state_dir)
     payload = build_preview_inventory_payload(
-        record_store=_store(state_dir),
+        record_store=record_store,
         context_name=context_name,
     )
-    html_output = _render_launchplane_preview_policy_page_html(payload)
+    html_output = _render_launchplane_preview_policy_page_html(
+        payload,
+        eligible_contexts=_launchplane_preview_profile_rows(record_store),
+    )
     if output_file is not None:
         output_file.write_text(html_output, encoding="utf-8")
         return
@@ -13679,6 +13705,12 @@ def product_profiles_audit_context_cutover(
 )
 @click.option("--preview-enabled/--preview-disabled", default=False, show_default=True)
 @click.option("--preview-context", default="", help="Preview context when previews are enabled.")
+@click.option(
+    "--preview-enable-label",
+    default=LAUNCHPLANE_PREVIEW_ENABLE_LABEL,
+    show_default=True,
+    help="Pull request label that opts this product into Launchplane previews.",
+)
 @click.option("--preview-slug-template", default="pr-{number}", show_default=True)
 @click.option("--updated-at", default="", help="Override updated timestamp.")
 @click.option("--source-label", default="cli:product-profiles:upsert", show_default=True)
@@ -13694,6 +13726,7 @@ def product_profiles_upsert(
     lanes_json: str,
     preview_enabled: bool,
     preview_context: str,
+    preview_enable_label: str,
     preview_slug_template: str,
     updated_at: str,
     source_label: str,
@@ -13711,6 +13744,7 @@ def product_profiles_upsert(
             preview=ProductPreviewProfile(
                 enabled=preview_enabled,
                 context=preview_context,
+                enable_label=preview_enable_label,
                 slug_template=preview_slug_template,
             ),
             updated_at=updated_at.strip() or utc_now_timestamp(),

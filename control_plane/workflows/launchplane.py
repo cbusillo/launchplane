@@ -38,25 +38,21 @@ from control_plane.contracts.preview_request_metadata import (
     LaunchplanePreviewRequestParseResult,
 )
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
+from control_plane.contracts.product_profile_record import (
+    PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
+    LaunchplaneProductProfileRecord,
+)
 from control_plane.contracts.promotion_record import ReleaseStatus
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
 RECENT_GENERATION_LIMIT = 3
 LAUNCHPLANE_PREVIEW_BASE_URL_ENV_KEYS = ("LAUNCHPLANE_PREVIEW_BASE_URL",)
-LAUNCHPLANE_PREVIEW_ENABLE_LABEL = "launchplane-preview"
+LAUNCHPLANE_PREVIEW_ENABLE_LABEL = PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
 LAUNCHPLANE_GITHUB_TOKEN_ENV_KEY = "GITHUB_TOKEN"
 LAUNCHPLANE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "GITHUB_WEBHOOK_SECRET"
 DEFAULT_LAUNCHPLANE_BASELINE_CHANNEL = "testing"
 LaunchplanePullRequestAction = str
-LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS: dict[str, str] = {
-    "sellyouroutboard": "sellyouroutboard-testing",
-    "tenant-cm": "cm",
-    "tenant-opw": "opw",
-}
-LAUNCHPLANE_TENANT_ANCHOR_PREVIEW_LABELS: dict[str, str] = {
-    "sellyouroutboard": "preview",
-}
 LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_PATTERN = re.compile(
     rf"```{re.escape(LAUNCHPLANE_PREVIEW_REQUEST_BLOCK_INFO_STRING)}[ \t]*\r?\n(?P<body>.*?)\r?\n```",
     flags=re.IGNORECASE | re.DOTALL,
@@ -80,6 +76,13 @@ class PreviewMutationRecordStore(Protocol):
     def list_preview_generation_records(
         self, *, preview_id: str = "", limit: int | None = None
     ) -> tuple[PreviewGenerationRecord, ...]: ...
+
+class ProductProfileListStore(Protocol):
+    def list_product_profile_records(
+        self,
+        *,
+        driver_id: str = "",
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
 
 class GitHubPullRequestReference(TypedDict):
@@ -110,19 +113,42 @@ def launchplane_preview_label_enabled(*, label_names: tuple[str, ...]) -> bool:
     return LAUNCHPLANE_PREVIEW_ENABLE_LABEL in {label_name.strip() for label_name in label_names}
 
 
-def launchplane_anchor_repo_context(*, repo: str) -> str:
-    return LAUNCHPLANE_TENANT_ANCHOR_CONTEXTS.get(repo.strip(), "")
-
-
-def launchplane_anchor_repo_eligible(*, repo: str) -> bool:
-    return bool(launchplane_anchor_repo_context(repo=repo))
-
-
-def launchplane_anchor_repo_preview_label(*, repo: str) -> str:
+def launchplane_anchor_repo_profile(
+    *, record_store: ProductProfileListStore, repo: str
+) -> LaunchplaneProductProfileRecord | None:
     repo_name = repo.strip()
-    if not launchplane_anchor_repo_eligible(repo=repo_name):
+    if not repo_name:
+        return None
+    for profile in record_store.list_product_profile_records():
+        if not profile.preview.enabled or not profile.preview.context.strip():
+            continue
+        repository = profile.repository.strip()
+        anchor_repo = repository.rsplit("/", maxsplit=1)[-1]
+        if repo_name in {repository, anchor_repo}:
+            return profile
+    return None
+
+
+def launchplane_anchor_repo_context(
+    *, record_store: ProductProfileListStore, repo: str
+) -> str:
+    profile = launchplane_anchor_repo_profile(record_store=record_store, repo=repo)
+    return profile.preview.context if profile is not None else ""
+
+
+def launchplane_anchor_repo_eligible(
+    *, record_store: ProductProfileListStore, repo: str
+) -> bool:
+    return bool(launchplane_anchor_repo_context(record_store=record_store, repo=repo))
+
+
+def launchplane_anchor_repo_preview_label(
+    *, record_store: ProductProfileListStore, repo: str
+) -> str:
+    profile = launchplane_anchor_repo_profile(record_store=record_store, repo=repo)
+    if profile is None:
         return ""
-    return LAUNCHPLANE_TENANT_ANCHOR_PREVIEW_LABELS.get(repo_name, LAUNCHPLANE_PREVIEW_ENABLE_LABEL)
+    return profile.preview.enable_label
 
 
 def classify_pull_request_event_for_launchplane(
@@ -985,7 +1011,7 @@ def resolve_pull_request_event_decision(
     record_store: FilesystemRecordStore,
     event: GitHubPullRequestEvent,
 ) -> tuple[LaunchplanePullRequestAction, str, PreviewRecord | None]:
-    resolved_context = launchplane_anchor_repo_context(repo=event.repo)
+    resolved_context = launchplane_anchor_repo_context(record_store=record_store, repo=event.repo)
     preview = find_preview_record(
         record_store=record_store,
         context_name="",

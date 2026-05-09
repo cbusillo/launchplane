@@ -18,6 +18,9 @@ from control_plane.contracts.every_code_preview_gate_record import EveryCodePrev
 from control_plane.contracts.every_code_preview_gate_record import build_every_code_preview_gate_id
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.every_code_work_request import requeue_every_code_work_request
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import ProductImageProfile
+from control_plane.contracts.product_profile_record import ProductPreviewProfile
 from control_plane.every_code_worker import (
     EveryCodeWorkerApiStore,
     apply_every_code_pr_feedback_for_host,
@@ -129,6 +132,42 @@ def _preview_gate_record(
         blocked_at="2026-05-06T20:03:00Z" if status == "blocked" else "",
         cancelled_at="2026-05-06T20:04:00Z" if status == "cancelled" else "",
         last_checked_at="2026-05-06T20:00:00Z",
+    )
+
+
+def _preview_product_profile(
+    *,
+    product: str,
+    repository: str,
+    preview_context: str,
+    enable_label: str = "launchplane-preview",
+) -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product=product,
+        display_name=product.title(),
+        repository=repository,
+        driver_id="generic-web",
+        image=ProductImageProfile(repository=f"ghcr.io/{repository}"),
+        runtime_port=3000,
+        health_path="/health",
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context=preview_context,
+            enable_label=enable_label,
+        ),
+        updated_at="2026-05-09T00:00:00Z",
+        source="test",
+    )
+
+
+def _write_sellyouroutboard_preview_profile(store: FilesystemRecordStore) -> None:
+    store.write_product_profile_record(
+        _preview_product_profile(
+            product="sellyouroutboard",
+            repository="cbusillo/sellyouroutboard",
+            preview_context="sellyouroutboard-testing",
+            enable_label="preview",
+        )
     )
 
 
@@ -283,6 +322,19 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "feedback": [record.model_dump(mode="json") for record in feedback_records],
+                },
+            )
+            return
+        if self.path.startswith("/v1/product-profiles"):
+            query = parse_qs(urlparse(self.path).query)
+            profile_records = self.store.list_product_profile_records(
+                driver_id=str((query.get("driver_id") or [""])[0])
+            )
+            self._write_json(
+                200,
+                {
+                    "status": "ok",
+                    "profiles": [record.model_dump(mode="json") for record in profile_records],
                 },
             )
             return
@@ -555,6 +607,36 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(gate_records[0].gate_id, _preview_gate_record().gate_id)
         self.assertEqual(listed_after_update[0].status, "blocked")
 
+    def test_api_store_lists_product_profiles_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            _EveryCodeApiHandler.store.write_product_profile_record(
+                _preview_product_profile(
+                    product="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                    preview_context="sellyouroutboard-testing",
+                    enable_label="preview",
+                )
+            )
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                profiles = store.list_product_profile_records(driver_id="generic-web")
+            finally:
+                server.shutdown()
+                server.server_close()
+
+        self.assertEqual(len(profiles), 1)
+        self.assertEqual(profiles[0].repository, "cbusillo/sellyouroutboard")
+        self.assertEqual(profiles[0].preview.enable_label, "preview")
+
     def test_api_store_reruns_terminal_request_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             temporary_root = Path(temporary_directory_name)
@@ -669,12 +751,22 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertIn("EVERY_CODE_ISSUE_URL=https://github.com/cbusillo/code/issues/123", command)
 
     def test_preview_label_request_labels_eligible_pull_request(self) -> None:
-        runner = _Runner()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(
+                _preview_product_profile(
+                    product="tenant-opw",
+                    repository="every/tenant-opw",
+                    preview_context="opw",
+                )
+            )
+            runner = _Runner()
 
-        summary = request_every_code_pr_preview_label(
-            result_pr_url="https://github.com/every/tenant-opw/pull/123",
-            runner=runner,
-        )
+            summary = request_every_code_pr_preview_label(
+                record_store=store,
+                result_pr_url="https://github.com/every/tenant-opw/pull/123",
+                runner=runner,
+            )
 
         self.assertIn("Requested Launchplane preview", summary)
         self.assertIn(
@@ -692,12 +784,23 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
 
     def test_preview_label_request_labels_sellyouroutboard_pull_request(self) -> None:
-        runner = _Runner()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(
+                _preview_product_profile(
+                    product="sellyouroutboard",
+                    repository="cbusillo/sellyouroutboard",
+                    preview_context="sellyouroutboard-testing",
+                    enable_label="preview",
+                )
+            )
+            runner = _Runner()
 
-        summary = request_every_code_pr_preview_label(
-            result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/71",
-            runner=runner,
-        )
+            summary = request_every_code_pr_preview_label(
+                record_store=store,
+                result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/71",
+                runner=runner,
+            )
 
         self.assertIn("Requested Launchplane preview", summary)
         self.assertIn(
@@ -715,12 +818,15 @@ class EveryCodeWorkerTests(unittest.TestCase):
         )
 
     def test_preview_label_request_skips_ineligible_pull_request(self) -> None:
-        runner = _Runner()
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            runner = _Runner()
 
-        summary = request_every_code_pr_preview_label(
-            result_pr_url="https://github.com/cbusillo/code/pull/123",
-            runner=runner,
-        )
+            summary = request_every_code_pr_preview_label(
+                record_store=store,
+                result_pr_url="https://github.com/cbusillo/code/pull/123",
+                runner=runner,
+            )
 
         self.assertEqual(summary, "")
         self.assertEqual(runner.calls, [])
@@ -728,6 +834,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_labels_done_pull_request_after_checks_pass(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -776,6 +883,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_waits_for_incomplete_checks(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -807,6 +915,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_blocks_stale_pending_checks_after_timeout(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -841,6 +950,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_blocks_failed_checks(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -872,6 +982,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_resets_when_pull_request_head_changes(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -909,6 +1020,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_cancels_closed_pull_request(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -937,6 +1049,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_cancels_when_source_issue_closed(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -969,6 +1082,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_skips_pull_request_with_preview_label(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -994,6 +1108,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_backfills_reviewer_for_existing_preview_label(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -1037,6 +1152,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_skips_reviewer_backfill_when_already_requested(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -1081,6 +1197,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_skips_reviewer_backfill_for_pr_author(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             store.write_every_code_work_request_record(
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
@@ -1122,6 +1239,7 @@ class EveryCodeWorkerTests(unittest.TestCase):
     def test_preview_gate_discovers_running_request_pull_request_by_branch(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            _write_sellyouroutboard_preview_profile(store)
             running_record = _queued_record().model_copy(
                 update={
                     "state": "running",

@@ -3,6 +3,9 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
+PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL = "launchplane-preview"
+
+
 class ProductImageProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -37,6 +40,7 @@ class ProductPreviewProfile(BaseModel):
 
     enabled: bool = False
     context: str = ""
+    enable_label: str = PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
     slug_template: str = "pr-{number}"
     app_name_prefix: str = ""
     template_instance: str = "testing"
@@ -55,6 +59,10 @@ class ProductPreviewProfile(BaseModel):
     def _validate_preview(self) -> "ProductPreviewProfile":
         if self.enabled and not self.context.strip():
             raise ValueError("enabled product preview profile requires context")
+        enable_label = self.enable_label.strip() or PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL
+        if self.enabled and not enable_label:
+            raise ValueError("enabled product preview profile requires enable_label")
+        self.enable_label = enable_label
         if self.enabled and "{number}" not in self.slug_template:
             raise ValueError("enabled product preview profile slug_template requires {number}")
         if self.enabled and not self.template_instance.strip():
