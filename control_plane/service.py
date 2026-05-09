@@ -1475,6 +1475,10 @@ class EveryCodePrFeedbackStatusEnvelope(BaseModel):
         return self
 
 
+class EveryCodePrFeedbackEnvelope(EveryCodePrFeedbackRecord):
+    pass
+
+
 class EveryCodePreviewGateEnvelope(EveryCodePreviewGateRecord):
     pass
 
@@ -1980,6 +1984,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
+        "/v1/every-code/pr-feedback",
         "/v1/every-code/pr-feedback/status",
         "/v1/every-code/preview-gates",
         "/v1/work-graph/rank",
@@ -2142,6 +2147,7 @@ def _every_code_trusted_manager_logins(repository: str) -> frozenset[str]:
         Path.home() / ".code" / "github-planning.json",
         Path.home() / ".codex" / "github-planning.json",
     )
+    managers: set[str] = set()
     for config_path in config_paths:
         try:
             payload = json.loads(config_path.read_text(encoding="utf-8"))
@@ -2152,7 +2158,6 @@ def _every_code_trusted_manager_logins(repository: str) -> frozenset[str]:
         workflow = payload.get("workflow")
         if not isinstance(workflow, dict):
             continue
-        managers: set[str] = set()
         default_manager = workflow.get("default_manager")
         if isinstance(default_manager, str) and default_manager.strip():
             managers.add(_github_login_normalized(default_manager))
@@ -2161,8 +2166,7 @@ def _every_code_trusted_manager_logins(repository: str) -> frozenset[str]:
             repo_manager = repo_managers.get(repository) or repo_managers.get(normalized_repository)
             if isinstance(repo_manager, str) and repo_manager.strip():
                 managers.add(_github_login_normalized(repo_manager))
-        return frozenset(manager for manager in managers if manager)
-    return frozenset()
+    return frozenset(manager for manager in managers if manager)
 
 
 def _every_code_feedback_actor_is_trusted(
@@ -3157,6 +3161,7 @@ def _accepted_payload(
                 "artifact_id",
                 "transition",
                 "request_id",
+                "feedback_id",
                 "state",
                 "merge_train_run_id",
             }
@@ -3450,6 +3455,7 @@ def _is_every_code_worker_route(*, method: str, path: str) -> bool:
         "/v1/every-code/work-requests/claim",
         "/v1/every-code/work-requests/rerun",
         "/v1/every-code/work-requests/status",
+        "/v1/every-code/pr-feedback",
         "/v1/every-code/pr-feedback/status",
         "/v1/every-code/preview-gates",
     }
@@ -3631,6 +3637,22 @@ def _handle_every_code_worker_write(
                     "status": gate_record.status,
                 },
                 driver_result={"gate": gate_record.model_dump(mode="json")},
+            ),
+        )
+    if path == "/v1/every-code/pr-feedback":
+        feedback_record = EveryCodePrFeedbackEnvelope.model_validate(payload)
+        every_code_store.write_every_code_pr_feedback_record(feedback_record)
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload=_accepted_payload(
+                trace_id=trace_id,
+                result={
+                    "request_id": feedback_record.request_id,
+                    "feedback_id": feedback_record.feedback_id,
+                    "status": feedback_record.status,
+                },
+                driver_result={"feedback": feedback_record.model_dump(mode="json")},
             ),
         )
     if path == "/v1/every-code/pr-feedback/status":
