@@ -25,6 +25,7 @@ from control_plane.contracts.authz_policy_record import (
 )
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
+from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
@@ -811,8 +812,9 @@ def _write_github_planning_config(
     *,
     repo_managers: dict[str, str] | None = None,
     default_manager: str = "@cellmechanic",
+    path: str = ".code/github-planning.json",
 ) -> Path:
-    config_path = root / ".code" / "github-planning.json"
+    config_path = root / Path(path)
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(
         json.dumps(
@@ -3210,6 +3212,94 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(feedback_response["records"]["request_id"], request_id)
         self.assertEqual(feedback_response["result"]["feedback"]["actor"], "Mbanks89")
 
+    def test_every_code_pr_comment_webhook_uses_second_planning_config_path(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=67,
+        )
+        comment_payload = _every_code_github_pr_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            pr_number=75,
+            issue_body="Closes #67",
+            sender="Mbanks89",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            tempfile.TemporaryDirectory() as home_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": home_directory_name,
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            _write_github_planning_config(Path(home_directory_name), repo_managers={})
+            _write_github_planning_config(
+                Path(home_directory_name),
+                path=".codex/github-planning.json",
+                repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue-second-config",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/75",
+                    "result_summary": "Opened PR.",
+                    "updated_at": "2026-05-07T12:40:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment-second-config",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 202, feedback_response)
+        self.assertEqual(feedback_response["records"]["request_id"], request_id)
+        self.assertEqual(feedback_response["result"]["feedback"]["actor"], "Mbanks89")
+
     def test_every_code_pr_comment_webhook_skips_untrusted_actor(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload(issue_number=67)
@@ -3556,6 +3646,58 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_response["result"]["feedback"]["status"], "applied")
         self.assertEqual(second_status, 409)
         self.assertEqual(second_response["error"]["code"], "feedback_already_final")
+
+    def test_every_code_worker_token_writes_pr_feedback_record(self) -> None:
+        feedback_record = EveryCodePrFeedbackRecord(
+            feedback_id="every-code-pr-feedback-cbusillo-code-26-check-failure-build",
+            request_id="every-code-cbusillo-code-123-test",
+            repository="cbusillo/code",
+            pr_number=26,
+            pr_url="https://github.com/cbusillo/code/pull/26",
+            feedback_kind="issue_comment",
+            github_delivery_id="check-failure-build",
+            github_id="check-failure-build",
+            actor="github-actions[bot]",
+            body="GitHub check build failed on the Every Code PR branch.",
+            html_url="https://github.com/cbusillo/code/actions/runs/1001/job/2002",
+            received_at="2026-05-06T19:00:00Z",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": "ignored",
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+            )
+            write_status, write_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/pr-feedback",
+                payload=feedback_record.model_dump(mode="json"),
+                authorization="Bearer dev-worker-token",
+            )
+            list_status, list_response = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/pr-feedback",
+                query_string=f"request_id={feedback_record.request_id}&status=pending",
+                authorization="Bearer dev-worker-token",
+            )
+
+        self.assertEqual(write_status, 202, write_response)
+        self.assertEqual(write_response["records"]["feedback_id"], feedback_record.feedback_id)
+        self.assertEqual(write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id)
+        self.assertEqual(list_status, 200, list_response)
+        self.assertEqual(len(list_response["feedback"]), 1)
+        self.assertEqual(list_response["feedback"][0]["feedback_id"], feedback_record.feedback_id)
 
     def test_every_code_worker_token_reruns_terminal_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

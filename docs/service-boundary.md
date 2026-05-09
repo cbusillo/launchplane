@@ -68,6 +68,11 @@ VeriReel product paths:
   - `POST /v1/every-code/work-requests/claim`
   - `POST /v1/every-code/work-requests/rerun`
   - `POST /v1/every-code/work-requests/status`
+  - `GET /v1/every-code/pr-feedback`
+  - `POST /v1/every-code/pr-feedback`
+  - `POST /v1/every-code/pr-feedback/status`
+  - `GET /v1/every-code/preview-gates`
+  - `POST /v1/every-code/preview-gates`
 - work graph chooser route:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
@@ -140,10 +145,14 @@ the Launchplane service and on the Mac worker host, then run the worker with
 `uv run launchplane every-code start --service-url https://...`. That token is
 scoped in code to Every Code work-request, PR-feedback, preview-gate, preview
 readiness routes, plus read-only `GET /v1/product-profiles` for preview
-readiness projection. It cannot create webhook requests, write product records,
-or access other Launchplane service routes. This keeps remote DB credentials on
-the Launchplane host while still allowing visible local Code/tmux work sessions
-to claim, rerun terminal requests, reconcile preview state, and report progress.
+readiness projection. The worker can create service-owned PR feedback records
+only for Launchplane-derived worker signals such as failed-check routing, while
+human PR feedback still enters through the signed webhook path and trusted-actor
+gate. It cannot create webhook requests, write product records, or access other
+Launchplane service routes. This keeps remote DB credentials on the Launchplane
+host while still allowing visible local Code/tmux work sessions to claim, rerun
+terminal requests, reconcile preview state, route failed checks, and report
+progress.
 
 Local terminal agents that need Launchplane context use a separate read-only
 bearer credential, not the browser OAuth session cookie and not

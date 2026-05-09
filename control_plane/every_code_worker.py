@@ -266,12 +266,8 @@ class EveryCodeWorkerApiStore:
     def write_every_code_pr_feedback_record(self, record: EveryCodePrFeedbackRecord) -> object:
         payload = self._request(
             "POST",
-            "/v1/every-code/pr-feedback/status",
-            body={
-                "feedback_id": record.feedback_id,
-                "request_id": record.request_id,
-                "status": record.status,
-            },
+            "/v1/every-code/pr-feedback",
+            body=record.model_dump(mode="json"),
             idempotency_key=f"every-code-pr-feedback-{record.feedback_id}-{record.status}",
         )
         return payload

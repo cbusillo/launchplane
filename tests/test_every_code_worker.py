@@ -380,6 +380,22 @@ class _EveryCodeApiHandler(BaseHTTPRequestHandler):
                 },
             )
             return
+        if self.path == "/v1/every-code/pr-feedback":
+            feedback_record = EveryCodePrFeedbackRecord.model_validate(payload)
+            self.store.write_every_code_pr_feedback_record(feedback_record)
+            self._write_json(
+                202,
+                {
+                    "status": "accepted",
+                    "records": {
+                        "request_id": feedback_record.request_id,
+                        "feedback_id": feedback_record.feedback_id,
+                        "status": feedback_record.status,
+                    },
+                    "result": {"feedback": feedback_record.model_dump(mode="json")},
+                },
+            )
+            return
         if self.path == "/v1/every-code/pr-feedback/status":
             feedback_records = self.store.list_every_code_pr_feedback_records(
                 request_id=str(payload["request_id"]),
@@ -581,6 +597,29 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(len(feedback_records), 1)
         self.assertEqual(feedback_records[0].feedback_id, _feedback_record().feedback_id)
         self.assertEqual(listed_after_update[0].status, "applied")
+
+    def test_api_store_creates_pr_feedback_via_service(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            _EveryCodeApiHandler.store = FilesystemRecordStore(state_dir=temporary_root / "state")
+            server = ThreadingHTTPServer(("127.0.0.1", 0), _EveryCodeApiHandler)
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            try:
+                store = EveryCodeWorkerApiStore(
+                    service_url=f"http://127.0.0.1:{server.server_port}",
+                    worker_token="worker-token",
+                )
+
+                store.write_every_code_pr_feedback_record(_feedback_record())
+                feedback_records = store.list_every_code_pr_feedback_records(status="pending")
+            finally:
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=5)
+
+        self.assertEqual(len(feedback_records), 1)
+        self.assertEqual(feedback_records[0].feedback_id, _feedback_record().feedback_id)
 
     def test_api_store_lists_and_writes_preview_gates_via_service(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
