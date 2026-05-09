@@ -72,6 +72,7 @@ VeriReel product paths:
   - `GET /v1/agent/context`
   - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
+  - `GET /v1/work-graph/merge-train/admission`
   - `POST /v1/work-graph/rank`
   - `POST /v1/work-graph/merge-train/run-once`
 - product driver routes:
@@ -201,6 +202,12 @@ same merge-train repository policy and `service_authz` scope as `run-once`, but
 performs no GitHub reads and no storage writes. Schedulers use this route to
 pace calls into `run-once`; execution still re-reads GitHub before any dry-run or
 mutation.
+
+`.github/workflows/merge-train-runner.yml` is the first external scheduler for
+this route. It mints a GitHub Actions OIDC token for the Launchplane service,
+reads admission, and calls `run-once` only when the decision is `admitted`.
+Repository and base-branch selection come from workflow inputs or repository
+variables, not service code.
 
 `GET /v1/repo-product-mapping` returns the repository ownership/awareness read
 model used by work graph and future agent context. The route requires

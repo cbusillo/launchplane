@@ -1,0 +1,205 @@
+---
+name: Merge Train Runner
+
+"on":
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      repository:
+        description: >-
+          owner/name repository to run through Launchplane merge train
+        required: false
+        default: ""
+      base_branch:
+        description: Base branch protected by the merge train
+        required: false
+        default: main
+      mutate:
+        description: Apply one worker mutation when admitted
+        type: boolean
+        required: false
+        default: true
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: >-
+    launchplane-merge-train
+  cancel-in-progress: false
+
+jobs:
+  run:
+    if: >-
+      github.event_name != 'schedule' ||
+      vars.LAUNCHPLANE_MERGE_TRAIN_REPOSITORY != ''
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      LAUNCHPLANE_URL: >-
+        ${{ vars.LAUNCHPLANE_PUBLIC_URL ||
+        'https://launchplane.shinycomputers.com' }}
+      MERGE_TRAIN_REPOSITORY: >-
+        ${{ inputs.repository || vars.LAUNCHPLANE_MERGE_TRAIN_REPOSITORY }}
+      MERGE_TRAIN_BASE_BRANCH: ${{ inputs.base_branch || 'main' }}
+      MERGE_TRAIN_MUTATE: ${{ inputs.mutate && 'true' || 'false' }}
+    steps:
+      - name: Request admission decision
+        id: admission
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${LAUNCHPLANE_URL:?Missing LAUNCHPLANE_PUBLIC_URL variable}"
+          : "${MERGE_TRAIN_REPOSITORY:?Set repository input or repo variable}"
+          : "${MERGE_TRAIN_BASE_BRANCH:?Missing base branch}"
+
+          service_origin="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.scheme or not parsed.netloc or not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must be an absolute URL.")
+          print(f"{parsed.scheme}://{parsed.netloc}")
+          PY
+          })"
+          service_audience="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlsplit
+
+          parsed = urlsplit(os.environ["LAUNCHPLANE_URL"].strip())
+          if not parsed.hostname:
+              raise SystemExit("LAUNCHPLANE_URL must include a hostname.")
+          print(parsed.hostname)
+          PY
+          })"
+          query_string="$({
+            python3 - <<'PY'
+          import os
+          from urllib.parse import urlencode
+
+          print(urlencode({
+              "repository": os.environ["MERGE_TRAIN_REPOSITORY"].strip(),
+              "base_branch": os.environ["MERGE_TRAIN_BASE_BRANCH"].strip(),
+          }))
+          PY
+          })"
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${service_audience}" \
+            | jq -r '.value'
+          })"
+
+          response_file="launchplane-merge-train-admission.json"
+          status_code="$(curl -sS \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            -H "Authorization: Bearer ${oidc_token}" \
+            "${service_origin}/v1/work-graph/merge-train/admission?${query_string}"
+          )"
+          if [ "$status_code" != "200" ]; then
+            cat "$response_file" >&2
+            echo "Merge-train admission failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+          jq . "$response_file"
+          admission_status="$(jq -r '.admission.status' "$response_file")"
+          reason_code="$(jq -r '.admission.reason_code' "$response_file")"
+          next_allowed_at="$(
+            jq -r '.admission.next_allowed_at' "$response_file"
+          )"
+          {
+            echo "service_origin=${service_origin}"
+            echo "service_audience=${service_audience}"
+            echo "admission_status=${admission_status}"
+            echo "reason_code=${reason_code}"
+            echo "next_allowed_at=${next_allowed_at}"
+          } >> "$GITHUB_OUTPUT"
+          {
+            echo '## Launchplane merge train admission'
+            echo
+            echo "- Repository: ${MERGE_TRAIN_REPOSITORY}"
+            echo "- Base branch: ${MERGE_TRAIN_BASE_BRANCH}"
+            echo "- Status: ${admission_status}"
+            echo "- Reason: ${reason_code}"
+            echo "- Next allowed: ${next_allowed_at}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run one merge-train pass
+        if: steps.admission.outputs.admission_status == 'admitted'
+        shell: bash
+        env:
+          SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
+          SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
+        run: |
+          set -euo pipefail
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          request_payload="$({
+            jq -n \
+              --arg repository "$MERGE_TRAIN_REPOSITORY" \
+              --arg base_branch "$MERGE_TRAIN_BASE_BRANCH" \
+              --argjson mutate "$MERGE_TRAIN_MUTATE" \
+              '{
+                schema_version: 1,
+                repository: $repository,
+                base_branch: $base_branch,
+                mutate: $mutate
+              }'
+          })"
+          response_file="launchplane-merge-train-run-once.json"
+          status_code="$(curl -sS \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Content-Type: application/json' \
+            --data "$request_payload" \
+            "${SERVICE_ORIGIN}/v1/work-graph/merge-train/run-once")"
+          if [ "$status_code" != "202" ]; then
+            cat "$response_file" >&2
+            echo "Merge-train run-once failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+          jq . "$response_file"
+          {
+            echo
+            echo '## Launchplane merge train run-once'
+            echo
+            echo "- Mode: $(jq -r '.result.mode' "$response_file")"
+            run_record="$(
+              jq -r '.records.merge_train_run_id // ""' "$response_file"
+            )"
+            next_action="$({
+              jq -r \
+                '.result.dry_run_result.intended_next_action //
+                 .result.intended_next_action // "unknown"' \
+                "$response_file"
+            })"
+            echo "- Run record: ${run_record}"
+            echo "- Next action: ${next_action}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Record deferred decision
+        if: steps.admission.outputs.admission_status != 'admitted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          next_allowed_at="${{ steps.admission.outputs.next_allowed_at }}"
+          reason_code="${{ steps.admission.outputs.reason_code }}"
+          echo \
+            "Merge train deferred until ${next_allowed_at}" \
+            "(${reason_code})."
