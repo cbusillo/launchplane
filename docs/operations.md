@@ -437,11 +437,14 @@ Current derived-state behavior:
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
   authenticated service API for operator UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
-  `product_config.apply` after review. The service response is redacted and the
-  route rejects nested runtime or secret targets that differ from the authorized
-  top-level context/instance. It fails closed when secret writes are requested
-  without the Launchplane master encryption key in the service runtime or when
-  no active runtime key-safety policy allows the requested binding.
+  `product_config.apply` after review. Signed-in GitHub human operators can use
+  this route when their session has the exact product/context/action grant;
+  terminal-agent bearer credentials stay read-only and cannot apply product
+  config. The service response is redacted and the route rejects nested runtime
+  or secret targets that differ from the authorized top-level context/instance.
+  It fails closed when secret writes are requested without the Launchplane master
+  encryption key in the service runtime or when no active runtime key-safety
+  policy allows the requested binding.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.
