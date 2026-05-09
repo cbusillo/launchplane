@@ -157,6 +157,15 @@ result. Unsupported repository/base pairs, missing token configuration, and
 denied authorization all fail closed. Generic service code must not contain
 product repository conditionals.
 
+Scheduler admission is a deterministic decision over the latest stored
+`launchplane_merge_train_runs` record for the repository/base branch. Dry-run
+records do not throttle the scheduler. Mutation records with `reread_required`
+are admitted immediately because the next pass must re-read GitHub before any
+new decision. Mutation records with `poll_required` defer until the configured
+poll interval elapses. Other mutation records defer until the configured backoff
+interval elapses. Admission decisions are scheduling hints only; every admitted
+worker pass still reads a fresh GitHub snapshot before choosing an action.
+
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed
 `head_sha` as the GitHub merge `sha` guard and the repository policy's
