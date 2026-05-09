@@ -1001,6 +1001,25 @@ class GenericWebPreviewTests(unittest.TestCase):
         def _fake_update_env(**kwargs: object) -> None:
             env_updates.append(str(kwargs["env_text"]))
 
+        domain_requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            domain_requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/domain.byComposeId":
+                return [
+                    {
+                        "domainId": "domain-testing",
+                        "host": "cm-testing.shinycomputers.com",
+                        "serviceName": "web",
+                        "port": 8069,
+                        "domainType": "compose",
+                    }
+                ]
+            if path == "/api/domain.create":
+                return {"domainId": "domain-preview"}
+            return {}
+
         with (
             patch(
                 "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
@@ -1025,6 +1044,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_preview.control_plane_dokploy.update_dokploy_target_env",
                 side_effect=_fake_update_env,
             ) as update_env,
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
             patch(
                 "control_plane.workflows.generic_web_preview.control_plane_dokploy.latest_deployment_for_target",
                 return_value={"deploymentId": "before"},
@@ -1073,6 +1096,28 @@ class GenericWebPreviewTests(unittest.TestCase):
         )
         self.assertIn(
             "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-cm:sha", env_updates[0]
+        )
+        self.assertEqual(
+            [request["path"] for request in domain_requests],
+            ["/api/domain.byComposeId", "/api/domain.create"],
+        )
+        self.assertEqual(
+            domain_requests[1]["payload"],
+            {
+                "host": "pr-28.cm-preview.shinycomputers.com",
+                "path": "/",
+                "internalPath": "/",
+                "port": 8069,
+                "https": True,
+                "applicationId": None,
+                "certificateType": "none",
+                "customCertResolver": None,
+                "composeId": "compose-cm-testing",
+                "serviceName": "web",
+                "domainType": "compose",
+                "previewDeploymentId": None,
+                "stripPath": False,
+            },
         )
         trigger_deployment.assert_called_once_with(
             host="https://dokploy.example",
