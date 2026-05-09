@@ -507,7 +507,11 @@ def _sqlite_database_url(database_path: Path) -> str:
 
 
 def _write_runtime_key_safety_policy(
-    *, database_url: str, context_name: str = "sellyouroutboard-prod", instance_name: str = "prod"
+    *,
+    database_url: str,
+    context_name: str = "sellyouroutboard-prod",
+    instance_name: str = "prod",
+    rules: tuple[RuntimeSecretSafetyRule, ...] | None = None,
 ) -> None:
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -518,7 +522,8 @@ def _write_runtime_key_safety_policy(
                 status="active",
                 source="test",
                 updated_at="2026-05-05T20:00:00Z",
-                rules=(
+                rules=rules
+                or (
                     RuntimeSecretSafetyRule(
                         binding_key="SMTP_PASSWORD",
                         secret_class="prod_only",
@@ -610,6 +615,32 @@ def _product_config_payload() -> dict[str, object]:
                 "value": "smtp-secret-value",
                 "scope": "context_instance",
                 "description": "SMTP password",
+            }
+        ],
+    }
+
+
+def _meta_product_config_payload(*, mode: str = "dry-run") -> dict[str, object]:
+    return {
+        "schema_version": 1,
+        "mode": mode,
+        "product": "sellyouroutboard",
+        "context": "sellyouroutboard",
+        "instance": "prod",
+        "source_label": "product-config-ui-test",
+        "runtime_env": {
+            "scope": "instance",
+            "env": {
+                "NEXT_PUBLIC_META_PIXEL_ID": "123456789012345",
+            },
+        },
+        "secrets": [
+            {
+                "name": "META_CONVERSIONS_API_TOKEN",
+                "binding_key": "META_CONVERSIONS_API_TOKEN",
+                "value": "meta-conversions-api-secret-value",
+                "scope": "context_instance",
+                "description": "Meta conversions API token",
             }
         ],
     }
@@ -7229,6 +7260,258 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(len(secret_records), 1)
         self.assertEqual(secret_records[0].name, "SMTP_PASSWORD")
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
+
+    def test_product_config_api_human_admin_dry_run_returns_redacted_meta_plan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["product_config.plan"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            cookie = _signed_in_cookie(app)
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(),
+                    authorization="",
+                    headers={
+                        "Cookie": cookie,
+                        "Idempotency-Key": "product-config-human-dry-run-meta",
+                    },
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                runtime_records = store.list_runtime_environment_records()
+                secret_records = store.list_secret_records()
+            finally:
+                store.close()
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(
+            payload["result"]["runtime_environment"]["changed_keys"],
+            ["NEXT_PUBLIC_META_PIXEL_ID"],
+        )
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertEqual(
+            payload["result"]["secrets"][0]["binding_key"],
+            "META_CONVERSIONS_API_TOKEN",
+        )
+        self.assertEqual(payload["result"]["runtime_key_safety"]["status"], "pass")
+        self.assertNotIn("123456789012345", response_text)
+        self.assertNotIn("meta-conversions-api-secret-value", response_text)
+        self.assertEqual(runtime_records, ())
+        self.assertEqual(secret_records, ())
+
+    def test_product_config_api_human_admin_apply_writes_meta_config(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["admin"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="admin")),  # type: ignore[arg-type]
+            )
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+            cookie = _signed_in_cookie(app)
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(mode="apply"),
+                    authorization="",
+                    headers={
+                        "Cookie": cookie,
+                        "Idempotency-Key": "product-config-human-apply-meta",
+                    },
+                )
+                store = PostgresRecordStore(database_url=database_url)
+                store.ensure_schema()
+                try:
+                    runtime_records = store.list_runtime_environment_records()
+                    secret_records = store.list_secret_records()
+                    secret_binding = store.list_secret_bindings(limit=None)[0]
+                finally:
+                    store.close()
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("123456789012345", response_text)
+        self.assertNotIn("meta-conversions-api-secret-value", response_text)
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(runtime_records[0].context, "sellyouroutboard")
+        self.assertEqual(runtime_records[0].instance, "prod")
+        self.assertEqual(runtime_records[0].env["NEXT_PUBLIC_META_PIXEL_ID"], "123456789012345")
+        self.assertEqual(len(secret_records), 1)
+        self.assertEqual(secret_records[0].name, "META_CONVERSIONS_API_TOKEN")
+        self.assertEqual(secret_binding.binding_key, "META_CONVERSIONS_API_TOKEN")
+
+    def test_product_config_api_human_read_only_cannot_apply_product_config(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_humans": [
+                        {
+                            "logins": ["alice"],
+                            "roles": ["read_only"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=_StubGitHubOAuthClient(_human_identity(role="read_only")),  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-config/apply",
+                payload=_meta_product_config_payload(mode="apply"),
+                authorization="",
+                headers={
+                    "Cookie": cookie,
+                    "Idempotency-Key": "product-config-human-read-only-apply",
+                },
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_product_config_api_terminal_agent_remains_read_only(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "terminal_agents": [
+                        {
+                            "subjects": ["local-owner-agent"],
+                            "token_labels": ["local-owner-read"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(mode="apply"),
+                    authorization="Bearer terminal-read-token",
+                    headers={"Idempotency-Key": "product-config-terminal-denied"},
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(
+            payload["error"]["message"],
+            "Terminal agent credentials can only read redacted Launchplane context.",
+        )
 
     def test_product_config_api_rejects_missing_master_key_for_secret_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

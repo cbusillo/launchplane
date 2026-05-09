@@ -562,16 +562,19 @@ Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
-authorizes the top-level product/context/instance target and rejects nested
-runtime or secret targets that try to broaden or change that authorized target.
-It reuses the same planner/writer as `launchplane product-config apply`, returns
-only actions, keys, counts, actor/source metadata, and secret IDs, uses generic
-validation messages for rejected requests, and fails closed when a secret bundle
-is submitted without `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted
-Launchplane runtime or without an active runtime key-safety policy that allows
-the requested managed secret binding for the target runtime class. Request
-bodies for this route must not be copied into logs, issues, docs, or workflow
-artifacts because they can contain plaintext secret values.
+accepts GitHub Actions OIDC callers and signed-in GitHub human sessions, but
+terminal-agent bearer credentials remain read-only and cannot execute the
+mutation. The route authorizes the top-level product/context/instance target and
+rejects nested runtime or secret targets that try to broaden or change that
+authorized target. It reuses the same planner/writer as
+`launchplane product-config apply`, returns only actions, keys, counts,
+actor/source metadata, and secret IDs, uses generic validation messages for
+rejected requests, and fails closed when a secret bundle is submitted without
+`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime or without
+an active runtime key-safety policy that allows the requested managed secret
+binding for the target runtime class. Request bodies for this route must not be
+copied into logs, issues, docs, or workflow artifacts because they can contain
+plaintext secret values.
 
 Runtime key-safety policy reconciliation uses
 `POST /v1/runtime-key-safety/policies/apply`. The route is restricted to
