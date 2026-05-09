@@ -108,10 +108,12 @@ from control_plane.every_code_worker import (
     EveryCodeWorkerApiError,
     EveryCodeWorkerApiStore,
     EveryCodeWorkerStore,
+    apply_every_code_pr_feedback_for_host,
     build_every_code_worker_daemon_spec,
     every_code_worker_daemon_status,
     finish_every_code_work_request,
     request_ready_every_code_pr_preview_labels,
+    route_every_code_pr_check_failures,
     run_every_code_worker_loop,
     run_every_code_worker_once,
     start_every_code_worker_daemon,
@@ -9675,6 +9677,32 @@ def every_code_run_once(
         worker_token_env=worker_token_env,
     )
     try:
+        apply_every_code_pr_feedback_for_host(
+            record_store=record_store,
+            host=resolved_host,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+            tmux_binary=tmux_binary,
+        )
+        request_ready_every_code_pr_preview_labels(
+            record_store=record_store,
+            repository=repository,
+        )
+        route_every_code_pr_check_failures(
+            record_store=record_store,
+            repository=repository,
+        )
+        apply_every_code_pr_feedback_for_host(
+            record_store=record_store,
+            host=resolved_host,
+            state_dir=state_dir,
+            database_url=database_url,
+            service_url=service_url,
+            worker_token_env=worker_token_env,
+            tmux_binary=tmux_binary,
+        )
         result = run_every_code_worker_once(
             record_store=record_store,
             host=resolved_host,

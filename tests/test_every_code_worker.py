@@ -839,6 +839,10 @@ class EveryCodeWorkerTests(unittest.TestCase):
                 _done_record(
                     repository="cbusillo/sellyouroutboard",
                     result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                ).model_copy(
+                    update={
+                        "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/123"
+                    }
                 )
             )
             runner = _Runner(
@@ -2310,6 +2314,76 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(payload["iterations"], 1)
         self.assertEqual(payload["empty"], 1)
         self.assertEqual(payload["stopped_reason"], "max_iterations")
+
+    def test_cli_run_once_reconciles_ready_preview_gate(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            state_dir = temporary_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _write_sellyouroutboard_preview_profile(store)
+            store.write_every_code_work_request_record(
+                _done_record(
+                    repository="cbusillo/sellyouroutboard",
+                    result_pr_url="https://github.com/cbusillo/sellyouroutboard/pull/86",
+                ).model_copy(
+                    update={
+                        "issue_url": "https://github.com/cbusillo/sellyouroutboard/issues/123"
+                    }
+                )
+            )
+            runner = _Runner(
+                pr_view_payload={
+                    "state": "OPEN",
+                    "headRefOid": "abcdef1234567890",
+                    "labels": [],
+                    "statusCheckRollup": [
+                        {
+                            "name": "static_checks",
+                            "status": "COMPLETED",
+                            "conclusion": "SUCCESS",
+                        },
+                    ],
+                }
+            )
+            with patch("control_plane.every_code_worker._run_subprocess", runner):
+                result = CliRunner().invoke(
+                    main,
+                    [
+                        "every-code",
+                        "run-once",
+                        "--state-dir",
+                        str(state_dir),
+                        "--workspace-root",
+                        str(temporary_root / "Developer"),
+                        "--host",
+                        "Chris-Studio",
+                        "--repository",
+                        "cbusillo/sellyouroutboard",
+                    ],
+                )
+            gate_records = store.list_every_code_preview_gate_records(
+                request_id="every-code-cbusillo-code-123-test",
+                pr_number=86,
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["status"], "empty")
+        self.assertEqual(len(gate_records), 1)
+        self.assertEqual(gate_records[0].status, "labeled")
+        self.assertIn(
+            (
+                "gh",
+                "pr",
+                "edit",
+                "86",
+                "--repo",
+                "cbusillo/sellyouroutboard",
+                "--add-label",
+                "preview",
+            ),
+            runner.calls,
+        )
 
     def test_cli_api_mode_requires_worker_token_env(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

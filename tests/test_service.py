@@ -4,6 +4,7 @@ import hmac
 import io
 import json
 import os
+import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path
@@ -679,6 +680,8 @@ def _every_code_github_pr_comment_payload(
     body: str = "Please tighten this wording before merge.",
     comment_id: int = 1001,
     issue_body: str = "",
+    sender: str = "cbusillo",
+    sender_type: str = "User",
 ) -> dict[str, object]:
     return {
         "action": "created",
@@ -695,8 +698,9 @@ def _every_code_github_pr_comment_payload(
             "html_url": f"https://github.com/{repository}/pull/{pr_number}#issuecomment-{comment_id}",
             "body": body,
             "author_association": "OWNER",
+            "user": {"login": sender, "type": sender_type},
         },
-        "sender": {"login": "cbusillo"},
+        "sender": {"login": sender, "type": sender_type},
     }
 
 
@@ -724,8 +728,9 @@ def _every_code_github_issue_comment_payload(
             "html_url": f"https://github.com/{repository}/issues/{issue_number}#issuecomment-{comment_id}",
             "body": body,
             "author_association": "CONTRIBUTOR",
+            "user": {"login": sender, "type": "User"},
         },
-        "sender": {"login": sender},
+        "sender": {"login": sender, "type": "User"},
     }
 
 
@@ -799,6 +804,28 @@ def _invoke_app(
     response_payload = json.loads(response_body.decode("utf-8"))
     assert isinstance(response_payload, dict)
     return int(captured_status.split(" ", 1)[0]), cast(dict[str, Any], response_payload)
+
+
+def _write_github_planning_config(
+    root: Path,
+    *,
+    repo_managers: dict[str, str] | None = None,
+    default_manager: str = "@cellmechanic",
+) -> Path:
+    config_path = root / ".code" / "github-planning.json"
+    config_path.parent.mkdir(parents=True, exist_ok=True)
+    config_path.write_text(
+        json.dumps(
+            {
+                "workflow": {
+                    "default_manager": default_manager,
+                    "repo_managers": repo_managers or {},
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return config_path
 
 
 def _invoke_raw_app(
@@ -2761,6 +2788,167 @@ class LaunchplaneServiceTests(unittest.TestCase):
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
 
+    def test_every_code_preview_ok_allows_repo_owner_override(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+        )
+        comment_payload = _every_code_github_issue_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+            issue_author="Mbanks89",
+            sender="cbusillo",
+            body="/preview ok",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+            patch(
+                "control_plane.service.resolve_launchplane_github_token",
+                return_value="github-token",
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.github_api_request",
+                side_effect=[
+                    [{"name": "preview-approved"}],
+                    {},
+                    {},
+                    [{"name": "ready-to-merge"}],
+                    {"owner": {"login": "cbusillo", "type": "User"}},
+                    {"assignees": [{"login": "cbusillo"}]},
+                ],
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.find_github_issue_comment_by_marker",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.preview_pr_feedback.create_github_issue_comment",
+                return_value={"id": 987},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "done",
+                    "result_pr_url": "https://github.com/cbusillo/sellyouroutboard/pull/88",
+                    "result_summary": "Opened PR.",
+                    "updated_at": "2026-05-07T12:40:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            ok_status, ok_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-preview-owner-ok",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(ok_status, 202, ok_response)
+        self.assertEqual(ok_response["result"]["preview_validation"]["command"], "ok")
+
+    def test_every_code_preview_comment_skips_untrusted_actor(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+        )
+        comment_payload = _every_code_github_issue_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=82,
+            issue_author="Mbanks89",
+            sender="random-user",
+            body="/preview ok",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _issue_status, _issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            ok_status, ok_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-preview-untrusted-ok",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(ok_status, 202, ok_response)
+        self.assertTrue(ok_response["skipped"])
+        self.assertEqual(ok_response["reason"], "untrusted_actor")
+
     def test_every_code_preview_changes_routes_feedback_to_session(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload(
@@ -2936,6 +3124,245 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(feedback["request_id"], request_id)
         self.assertEqual(feedback["pr_number"], 75)
         self.assertEqual(feedback["pr_url"], "https://github.com/cbusillo/code/pull/75")
+
+    def test_every_code_pr_comment_webhook_allows_configured_manager(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(
+            repository="cbusillo/sellyouroutboard",
+            issue_number=67,
+        )
+        comment_payload = _every_code_github_pr_comment_payload(
+            repository="cbusillo/sellyouroutboard",
+            pr_number=75,
+            issue_body="Closes #67",
+            sender="Mbanks89",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            tempfile.TemporaryDirectory() as home_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": home_directory_name,
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            _write_github_planning_config(
+                Path(home_directory_name),
+                repo_managers={"cbusillo/sellyouroutboard": "@Mbanks89"},
+            )
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "running",
+                    "result_summary": "Visible tmux session.",
+                    "updated_at": "2026-05-06T16:00:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment-manager",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 202, feedback_response)
+        self.assertEqual(feedback_response["records"]["request_id"], request_id)
+        self.assertEqual(feedback_response["result"]["feedback"]["actor"], "Mbanks89")
+
+    def test_every_code_pr_comment_webhook_skips_untrusted_actor(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(issue_number=67)
+        comment_payload = _every_code_github_pr_comment_payload(
+            pr_number=75,
+            issue_body="Closes #67",
+            sender="random-user",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            tempfile.TemporaryDirectory() as home_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "HOME": home_directory_name,
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            _write_github_planning_config(Path(home_directory_name), repo_managers={})
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment-untrusted",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+            list_status, list_response = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/pr-feedback",
+                query_string=f"request_id={request_id}",
+                authorization="Bearer dev-worker-token",
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 202, feedback_response)
+        self.assertEqual(list_status, 200, list_response)
+        self.assertTrue(feedback_response["skipped"])
+        self.assertEqual(feedback_response["reason"], "untrusted_actor")
+        self.assertEqual(list_response["feedback"], [])
+
+    def test_every_code_pr_comment_webhook_ignores_bot_feedback(self) -> None:
+        secret = "launchplane-every-code-webhook-secret"
+        issue_payload = _every_code_github_issue_labeled_payload(issue_number=67)
+        comment_payload = _every_code_github_pr_comment_payload(
+            pr_number=75,
+            issue_body="Closes #67",
+            body="Odoo preview refresh started for PR #75.",
+            sender="github-actions[bot]",
+            sender_type="Bot",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {
+                    "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET": secret,
+                    "LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "dev-worker-token",
+                },
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            issue_status, issue_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=issue_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issues",
+                    "X-GitHub-Delivery": "delivery-issue",
+                    "X-Hub-Signature-256": _github_webhook_signature(issue_payload, secret),
+                },
+            )
+            request_id = issue_response["records"]["request_id"]
+            _claim_status, _claim_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer dev-worker-token",
+            )
+            _running_status, _running_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "running",
+                    "result_summary": "Visible tmux session.",
+                    "updated_at": "2026-05-06T16:00:00Z",
+                },
+                authorization="Bearer dev-worker-token",
+            )
+            feedback_status, feedback_response = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/github-webhook",
+                payload=comment_payload,
+                authorization="",
+                headers={
+                    "X-GitHub-Event": "issue_comment",
+                    "X-GitHub-Delivery": "delivery-comment-bot",
+                    "X-Hub-Signature-256": _github_webhook_signature(comment_payload, secret),
+                },
+            )
+
+            list_status, list_response = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/every-code/pr-feedback",
+                query_string=f"request_id={request_id}",
+                authorization="Bearer dev-worker-token",
+            )
+
+        self.assertEqual(issue_status, 202)
+        self.assertEqual(feedback_status, 202, feedback_response)
+        self.assertEqual(list_status, 200, list_response)
+        self.assertTrue(feedback_response["skipped"])
+        self.assertEqual(feedback_response["reason"], "automation_actor")
+        self.assertEqual(list_response["feedback"], [])
 
     def test_every_code_pr_comment_webhook_dedupes_feedback(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
