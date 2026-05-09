@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from click.testing import CliRunner
 
@@ -176,6 +177,118 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(payload["mode"], "dry-run")
         self.assertEqual(payload["queue_order"], [22])
         self.assertEqual(payload["selected_pr"]["number"], 22)
+
+    def test_cli_merge_train_run_once_reads_live_snapshot_without_mutation(self) -> None:
+        snapshot_reader = _FakeSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(23),),
+            )
+        )
+
+        with (
+            patch(
+                "control_plane.cli.UrllibMergeTrainGitHubTransport",
+                return_value=object(),
+            ) as transport_class,
+            patch(
+                "control_plane.cli.GitHubMergeTrainSnapshotReader",
+                return_value=snapshot_reader,
+            ) as reader_class,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+        ):
+            result = CliRunner().invoke(
+                main,
+                ["work-graph", "merge-train-run-once"],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "dry-run")
+        self.assertEqual(payload["repository"], "cbusillo/sellyouroutboard")
+        self.assertEqual(payload["base_branch"], "main")
+        self.assertEqual(payload["dry_run_result"]["intended_next_action"], "merge")
+        self.assertEqual(snapshot_reader.reads, [("cbusillo/sellyouroutboard", "main")])
+        transport_class.assert_called_once_with(
+            token="token", api_base_url="https://api.github.com"
+        )
+        reader_class.assert_called_once()
+
+    def test_cli_merge_train_run_once_mutates_one_worker_step_when_requested(self) -> None:
+        snapshot_reader = _FakeSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(_pull_request(24, required_checks_status="fail"),),
+            )
+        )
+        label_client = _FakeLabelClient()
+
+        class _FakeGitHubClient:
+            def __init__(self, *, transport: object) -> None:
+                self.transport = transport
+
+            def add_pull_request_label(
+                self, *, repository: str, pull_request_number: int, label: str
+            ) -> None:
+                label_client.add_pull_request_label(
+                    repository=repository,
+                    pull_request_number=pull_request_number,
+                    label=label,
+                )
+
+            def update_pull_request_branch(
+                self, *, repository: str, pull_request_number: int, expected_head_sha: str
+            ) -> None:
+                raise AssertionError("block path should not update branches")
+
+            def merge_pull_request(
+                self,
+                *,
+                repository: str,
+                pull_request_number: int,
+                head_sha: str,
+                merge_method: str,
+            ) -> str:
+                raise AssertionError("block path should not merge")
+
+        with (
+            patch(
+                "control_plane.cli.UrllibMergeTrainGitHubTransport",
+                return_value=object(),
+            ),
+            patch(
+                "control_plane.cli.GitHubMergeTrainSnapshotReader",
+                return_value=snapshot_reader,
+            ),
+            patch("control_plane.cli.GitHubMergeTrainClient", _FakeGitHubClient),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+        ):
+            result = CliRunner().invoke(
+                main,
+                ["work-graph", "merge-train-run-once", "--mutate"],
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output)
+        payload = json.loads(result.output)
+        self.assertEqual(payload["mode"], "mutate")
+        self.assertEqual(payload["status"], "blocked")
+        self.assertEqual(payload["block_result"]["pull_request_number"], 24)
+        self.assertEqual(
+            label_client.applied_labels,
+            [("cbusillo/sellyouroutboard", 24, "merge-blocked")],
+        )
+
+    def test_cli_merge_train_run_once_requires_github_token(self) -> None:
+        with patch.dict("os.environ", {}, clear=True):
+            result = CliRunner().invoke(
+                main,
+                ["work-graph", "merge-train-run-once"],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Missing GitHub token", result.output)
 
 
 class MergeTrainBlockIntentTests(unittest.TestCase):
