@@ -329,6 +329,70 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.app_name_prefix, "syo-preview")
         self.assertEqual([item.previewSlug for item in result.previews], ["preview-42-site"])
 
+    def test_execute_generic_web_preview_inventory_lists_odoo_compose_domains(self) -> None:
+        store = _GenericWebPreviewStore(_odoo_compose_profile())
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/domain.byComposeId":
+                return [
+                    {
+                        "domainId": "domain-stable",
+                        "host": "cm-testing.shinycomputers.com",
+                    },
+                    {
+                        "domainId": "domain-preview",
+                        "host": "pr-28.cm-preview.shinycomputers.com",
+                    },
+                ]
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "composeId": "compose-cm-testing",
+                    "name": "cm-testing",
+                    "env": "ODOO_DB_NAME=cm\nODOO_DB_USER=odoo\nODOO_DB_PASSWORD=password\nODOO_DATA_VOLUME=data\nODOO_LOG_VOLUME=logs\nODOO_DB_VOLUME=db\nODOO_MASTER_PASSWORD=master\nODOO_ADMIN_PASSWORD=admin\n",
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=DokploySourceOfTruth(
+                    schema_version=1,
+                    targets=(
+                        DokployTargetDefinition(
+                            context="cm",
+                            instance="testing",
+                            target_type="compose",
+                            target_id="compose-cm-testing",
+                            target_name="cm-testing",
+                        ),
+                    ),
+                ),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+        ):
+            result = execute_generic_web_preview_inventory(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewInventoryRequest(product="odoo-tenant-cm"),
+            )
+
+        self.assertEqual([item.previewSlug for item in result.previews], ["pr-28"])
+        self.assertEqual(result.previews[0].providerType, "compose-domain")
+        self.assertEqual(result.previews[0].domainId, "domain-preview")
+        self.assertEqual([request["path"] for request in requests], ["/api/domain.byComposeId"])
+
     def test_evaluate_generic_web_preview_readiness_passes_with_template_contract(self) -> None:
         store = _GenericWebPreviewStore(_profile())
         source = DokploySourceOfTruth(
@@ -1312,6 +1376,87 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "/api/application.delete",
             ],
         )
+
+    def test_execute_generic_web_preview_destroy_deletes_odoo_compose_domain(self) -> None:
+        store = _GenericWebPreviewStore(_odoo_compose_profile())
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/domain.byComposeId":
+                return [
+                    {
+                        "domainId": "domain-stable",
+                        "host": "cm-testing.shinycomputers.com",
+                    },
+                    {
+                        "domainId": "domain-pr-28",
+                        "host": "pr-28.cm-preview.shinycomputers.com",
+                    },
+                    {
+                        "domainId": "domain-pr-29",
+                        "host": "pr-29.cm-preview.shinycomputers.com",
+                    },
+                ]
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "composeId": "compose-cm-testing",
+                    "name": "cm-testing",
+                    "env": "ODOO_DB_NAME=cm\nODOO_DB_USER=odoo\nODOO_DB_PASSWORD=password\nODOO_DATA_VOLUME=data\nODOO_LOG_VOLUME=logs\nODOO_DB_VOLUME=db\nODOO_MASTER_PASSWORD=master\nODOO_ADMIN_PASSWORD=admin\n",
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=DokploySourceOfTruth(
+                    schema_version=1,
+                    targets=(
+                        DokployTargetDefinition(
+                            context="cm",
+                            instance="testing",
+                            target_type="compose",
+                            target_id="compose-cm-testing",
+                            target_name="cm-testing",
+                        ),
+                    ),
+                ),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-05-09T22:00:00Z", "2026-05-09T22:00:01Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewDestroyRequest(
+                    product="odoo-tenant-cm",
+                    preview_slug="pr-28",
+                    destroy_reason="test",
+                ),
+            )
+
+        self.assertEqual(result.destroy_status, "pass")
+        self.assertEqual(result.provider_type, "compose-domain")
+        self.assertEqual(result.application_id, "compose-cm-testing")
+        self.assertEqual(result.domain_ids, ("domain-pr-28",))
+        delete_requests = [
+            request for request in requests if request["path"] == "/api/domain.delete"
+        ]
+        self.assertEqual(len(delete_requests), 1)
+        self.assertEqual(delete_requests[0]["payload"], {"domainId": "domain-pr-28"})
 
 
 if __name__ == "__main__":
