@@ -150,9 +150,12 @@ policy. Request payloads name `repository`, `base_branch`, and optional
 `mutate`; the service finds the repository/base policy before any GitHub call,
 authorizes the caller through `service_authz`, resolves the GitHub token from
 `github_token.env_var`, reads a fresh snapshot, and either returns the dry-run
-result or applies exactly one worker step. Unsupported repository/base pairs,
-missing token configuration, and denied authorization all fail closed. Generic
-service code must not contain product repository conditionals.
+result or applies exactly one worker step. Accepted calls write a
+`launchplane_merge_train_runs` record with the policy digest, fresh snapshot,
+dry-run decision, selected pull request metadata, and optional worker mutation
+result. Unsupported repository/base pairs, missing token configuration, and
+denied authorization all fail closed. Generic service code must not contain
+product repository conditionals.
 
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed

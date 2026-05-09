@@ -1010,19 +1010,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
             event_name="workflow_dispatch",
         )
 
-        with TemporaryDirectory() as temporary_directory_name:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+        ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
-            with (
-                patch(
-                    "control_plane.service.GitHubMergeTrainSnapshotReader",
-                    _FakeMergeTrainSnapshotReader,
-                ),
-                patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
             ):
                 status_code, payload = _invoke_app(
                     app,
@@ -1034,12 +1034,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "base_branch": "main",
                     },
                 )
+            run_id = payload["records"]["merge_train_run_id"]
+            loaded_record = FilesystemRecordStore(
+                Path(temporary_directory_name) / "state"
+            ).read_merge_train_run_record(run_id)
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "dry-run")
         self.assertEqual(payload["result"]["repository"], "cbusillo/sellyouroutboard")
         self.assertEqual(payload["result"]["base_branch"], "main")
         self.assertEqual(payload["result"]["dry_run_result"]["intended_next_action"], "merge")
+        self.assertEqual(loaded_record.mode, "dry_run")
+        self.assertEqual(loaded_record.status, "merge")
+        self.assertEqual(loaded_record.selected_pr_number, 1)
+        self.assertEqual(loaded_record.selected_head_sha, "head-1")
+        self.assertEqual(loaded_record.policy_key, "cbusillo/sellyouroutboard:main")
+        self.assertEqual(loaded_record.worker_step_result, None)
 
     def test_merge_train_run_once_service_mutates_one_worker_step(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -1064,7 +1074,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             event_name="workflow_dispatch",
         )
 
-        with TemporaryDirectory() as temporary_directory_name:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+        ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(identity),
@@ -1077,7 +1090,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _FakeMergeTrainSnapshotReader,
                 ),
                 patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
-                patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
             ):
                 status_code, payload = _invoke_app(
                     app,
@@ -1090,11 +1102,20 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "mutate": True,
                     },
                 )
+            run_id = payload["records"]["merge_train_run_id"]
+            loaded_record = FilesystemRecordStore(
+                Path(temporary_directory_name) / "state"
+            ).read_merge_train_run_record(run_id)
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["status"], "merged")
         self.assertEqual(payload["result"]["intended_next_action"], "merge")
         self.assertEqual(payload["result"]["selected_pr_number"], 1)
+        self.assertEqual(loaded_record.mode, "mutate")
+        self.assertEqual(loaded_record.status, "merged")
+        self.assertTrue(loaded_record.reread_required)
+        self.assertFalse(loaded_record.poll_required)
+        self.assertIsNotNone(loaded_record.worker_step_result)
 
     def test_merge_train_run_once_service_rejects_unauthorized_identity(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate({"github_actions": []})

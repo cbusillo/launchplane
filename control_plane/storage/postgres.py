@@ -37,6 +37,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -554,6 +555,36 @@ class LaunchplaneAgentWriteIntentRow(Base):
     authz_action: Mapped[str] = mapped_column(String, nullable=False)
     product: Mapped[str] = mapped_column(String, nullable=False)
     context: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainRunRow(Base):
+    __tablename__ = "launchplane_merge_train_runs"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_runs_repository_base_idx",
+            "repository",
+            "base_branch",
+            desc("recorded_at"),
+        ),
+        Index(
+            "launchplane_merge_train_runs_status_idx",
+            "status",
+            desc("recorded_at"),
+        ),
+    )
+
+    run_id: Mapped[str] = mapped_column(String, primary_key=True)
+    recorded_at: Mapped[str] = mapped_column(String, nullable=False)
+    trace_id: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    mode: Mapped[str] = mapped_column(String, nullable=False)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    intended_next_action: Mapped[str] = mapped_column(String, nullable=False)
+    selected_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    policy_key: Mapped[str] = mapped_column(String, nullable=False)
+    policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1427,6 +1458,62 @@ class PostgresRecordStore(HumanSessionStore):
             order_by=(
                 LaunchplaneAgentWriteIntentRow.recorded_at.desc(),
                 LaunchplaneAgentWriteIntentRow.record_id.desc(),
+            ),
+            limit=limit,
+            offset=offset,
+        )
+
+    def write_merge_train_run_record(self, record: MergeTrainRunRecord) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainRunRow(
+                run_id=record.run_id,
+                recorded_at=record.recorded_at,
+                trace_id=record.trace_id,
+                repository=record.repository,
+                base_branch=record.base_branch,
+                mode=record.mode,
+                status=record.status,
+                intended_next_action=record.intended_next_action,
+                selected_pr_number=record.selected_pr_number,
+                policy_key=record.policy_key,
+                policy_sha256=record.policy_sha256,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def read_merge_train_run_record(self, run_id: str) -> MergeTrainRunRecord:
+        return self._read_model(
+            model_type=MergeTrainRunRecord,
+            orm_model=LaunchplaneMergeTrainRunRow,
+            filters=(LaunchplaneMergeTrainRunRow.run_id == run_id,),
+        )
+
+    def list_merge_train_run_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        mode: str = "",
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[MergeTrainRunRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeTrainRunRow.repository == repository)
+        if base_branch:
+            filters.append(LaunchplaneMergeTrainRunRow.base_branch == base_branch)
+        if mode:
+            filters.append(LaunchplaneMergeTrainRunRow.mode == mode)
+        if status:
+            filters.append(LaunchplaneMergeTrainRunRow.status == status)
+        return self._list_models(
+            model_type=MergeTrainRunRecord,
+            orm_model=LaunchplaneMergeTrainRunRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainRunRow.recorded_at.desc(),
+                LaunchplaneMergeTrainRunRow.run_id.desc(),
             ),
             limit=limit,
             offset=offset,
@@ -2327,6 +2414,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_pr_feedback": 0,
             "every_code_preview_gates": 0,
             "agent_write_intents": 0,
+            "merge_train_runs": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
         }
@@ -2391,6 +2479,10 @@ class PostgresRecordStore(HumanSessionStore):
             for intent_record in filesystem_store.list_agent_write_intent_records():
                 self.write_agent_write_intent_record(intent_record)
                 counts["agent_write_intents"] += 1
+        if hasattr(filesystem_store, "list_merge_train_run_records"):
+            for run_record in filesystem_store.list_merge_train_run_records():
+                self.write_merge_train_run_record(run_record)
+                counts["merge_train_runs"] += 1
         for release_tuple_record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1

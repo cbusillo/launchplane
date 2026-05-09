@@ -32,6 +32,18 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.merge_train_policy import (
+    build_sellyouroutboard_main_merge_train_policy,
+)
+from control_plane.contracts.merge_train_run_record import (
+    MergeTrainRunRecord,
+    build_merge_train_run_record,
+)
+from control_plane.merge_train import (
+    MergeTrainDryRunSnapshot,
+    MergeTrainPullRequestSnapshot,
+    build_merge_train_dry_run_result,
+)
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
@@ -494,6 +506,38 @@ def _agent_write_intent_record(
         idempotency_key="intent-eval-1",
         request=request,
         evaluation=evaluation,
+    )
+
+
+def _merge_train_run_record(
+    *, recorded_at: str = "2026-05-09T02:05:00Z"
+) -> MergeTrainRunRecord:
+    policy = build_sellyouroutboard_main_merge_train_policy()
+    snapshot = MergeTrainDryRunSnapshot(
+        repository="cbusillo/sellyouroutboard",
+        base_branch="main",
+        pull_requests=(
+            MergeTrainPullRequestSnapshot(
+                number=42,
+                url="https://github.com/cbusillo/sellyouroutboard/pull/42",
+                title="Ready merge train PR",
+                created_at="2026-05-09T01:00:00Z",
+                labels=("ready-to-merge",),
+                actor_role="repo_admin",
+                head_sha="head-42",
+                base_sha="base-main",
+                mergeable="mergeable",
+                required_checks_status="pass",
+            ),
+        ),
+    )
+    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    return build_merge_train_run_record(
+        recorded_at=recorded_at,
+        trace_id="launchplane_req_merge_train_test",
+        policy_sha256=policy.policy_sha256,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
     )
 
 
@@ -1485,6 +1529,32 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(listed_records[0].trace_id, "launchplane_req_test_write_intent")
         self.assertEqual(listed_records[0].evaluation.audit.reason_code, "authorized")
 
+    def test_merge_train_run_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            record = _merge_train_run_record()
+            store.write_merge_train_run_record(record)
+            loaded_record = store.read_merge_train_run_record(record.run_id)
+            listed_records = store.list_merge_train_run_records(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                mode="dry_run",
+                status="merge",
+            )
+            store.close()
+
+        self.assertEqual(loaded_record.run_id, record.run_id)
+        self.assertEqual(loaded_record.selected_pr_number, 42)
+        self.assertEqual(loaded_record.selected_head_sha, "head-42")
+        self.assertEqual(loaded_record.policy_key, "cbusillo/sellyouroutboard:main")
+        self.assertEqual(len(listed_records), 1)
+        self.assertEqual(listed_records[0].trace_id, "launchplane_req_merge_train_test")
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1872,6 +1942,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     ),
                 )
             )
+            filesystem_store.write_merge_train_run_record(_merge_train_run_record())
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
             self.assertEqual(
@@ -1894,6 +1965,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_pr_feedback": 1,
                     "every_code_preview_gates": 0,
                     "agent_write_intents": 0,
+                    "merge_train_runs": 1,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
                 },
