@@ -133,10 +133,11 @@ JSONB until they graduate into normal product behavior.
 Product profile records are DB-backed Launchplane configuration for product
 identity and driver selection. They hold product key, display name, owning repo,
 driver id, image repository, runtime port, health path, stable lane bindings,
-and preview context policy. Generic-web preview policy can also name the source
-template lane, required template env keys, copied or omitted settings, preview
-URL/domain env keys, required provider fields, and the declared data transport
-mode so readiness can fail before Launchplane mutates a provider.
+preview context policy, and the pull-request label that enables previews for the
+product. Generic-web preview policy can also name the source template lane,
+required template env keys, copied or omitted settings, preview URL/domain env
+keys, required provider fields, and the declared data transport mode so
+readiness can fail before Launchplane mutates a provider.
 
 Product profiles may also declare expected config requirements for stable lanes:
 runtime-environment key names and managed secret binding keys by context and

@@ -23,6 +23,9 @@ from control_plane.contracts.preview_generation_record import (
     PreviewSourceRecord,
 )
 from control_plane.contracts.preview_record import PreviewRecord, PreviewState
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import ProductImageProfile
+from control_plane.contracts.product_profile_record import ProductPreviewProfile
 from control_plane.contracts.preview_request_metadata import (
     LaunchplaneCompanionPullRequestReference,
     LaunchplanePreviewRequestParseStatus,
@@ -104,6 +107,56 @@ def _preview_record(
         latest_generation_id=latest_generation_id,
         latest_manifest_fingerprint=latest_manifest_fingerprint,
     )
+
+
+def _preview_product_profile(
+    *,
+    product: str,
+    repository: str,
+    preview_context: str,
+    enable_label: str = "launchplane-preview",
+) -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product=product,
+        display_name=product.title(),
+        repository=repository,
+        driver_id="generic-web",
+        image=ProductImageProfile(repository=f"ghcr.io/{repository}"),
+        runtime_port=3000,
+        health_path="/health",
+        preview=ProductPreviewProfile(
+            enabled=True,
+            context=preview_context,
+            enable_label=enable_label,
+        ),
+        updated_at="2026-05-09T00:00:00Z",
+        source="test",
+    )
+
+
+def _write_opw_preview_product_profile(store: FilesystemRecordStore) -> None:
+    store.write_product_profile_record(
+        _preview_product_profile(
+            product="tenant-opw",
+            repository="every/tenant-opw",
+            preview_context="opw",
+        )
+    )
+
+
+def _write_cm_preview_product_profile(store: FilesystemRecordStore) -> None:
+    store.write_product_profile_record(
+        _preview_product_profile(
+            product="tenant-cm",
+            repository="every/tenant-cm",
+            preview_context="cm",
+        )
+    )
+
+
+def _write_default_preview_product_profiles(store: FilesystemRecordStore) -> None:
+    _write_opw_preview_product_profile(store)
+    _write_cm_preview_product_profile(store)
 
 
 def _generation_record(
@@ -302,6 +355,9 @@ def _promotion_record(
 
 
 def _write_release_tuples_file(control_plane_root: Path) -> None:
+    _write_default_preview_product_profiles(
+        FilesystemRecordStore(state_dir=control_plane_root / "state")
+    )
     database_url = _runtime_environments_database_url(control_plane_root)
     store = PostgresRecordStore(database_url=database_url)
     store.ensure_schema()
@@ -702,12 +758,33 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertFalse(launchplane_preview_label_enabled(label_names=("bug", "needs-review")))
 
     def test_launchplane_anchor_repo_resolution_accepts_tenant_repos_only(self) -> None:
-        self.assertEqual(launchplane_anchor_repo_context(repo="tenant-opw"), "opw")
-        self.assertEqual(launchplane_anchor_repo_context(repo="tenant-cm"), "cm")
-        self.assertTrue(launchplane_anchor_repo_eligible(repo="tenant-opw"))
-        self.assertTrue(launchplane_anchor_repo_eligible(repo="tenant-cm"))
-        self.assertFalse(launchplane_anchor_repo_eligible(repo="shared-addons"))
-        self.assertFalse(launchplane_anchor_repo_eligible(repo="control-plane"))
+        with TemporaryDirectory() as temporary_directory_name:
+            store = FilesystemRecordStore(state_dir=Path(temporary_directory_name) / "state")
+            store.write_product_profile_record(
+                _preview_product_profile(
+                    product="tenant-opw",
+                    repository="every/tenant-opw",
+                    preview_context="opw",
+                )
+            )
+            store.write_product_profile_record(
+                _preview_product_profile(
+                    product="tenant-cm",
+                    repository="every/tenant-cm",
+                    preview_context="cm",
+                )
+            )
+
+            self.assertEqual(
+                launchplane_anchor_repo_context(record_store=store, repo="tenant-opw"), "opw"
+            )
+            self.assertEqual(
+                launchplane_anchor_repo_context(record_store=store, repo="tenant-cm"), "cm"
+            )
+            self.assertTrue(launchplane_anchor_repo_eligible(record_store=store, repo="tenant-opw"))
+            self.assertTrue(launchplane_anchor_repo_eligible(record_store=store, repo="tenant-cm"))
+            self.assertFalse(launchplane_anchor_repo_eligible(record_store=store, repo="shared-addons"))
+            self.assertFalse(launchplane_anchor_repo_eligible(record_store=store, repo="control-plane"))
 
     def test_classify_pull_request_event_for_launchplane_enables_preview_when_label_added(
         self,
@@ -1063,6 +1140,7 @@ ODOO_DB_PASSWORD = "local-secret"
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             store.write_environment_inventory(
                 _environment_inventory(
                     instance="testing",
@@ -1229,6 +1307,7 @@ ODOO_DB_PASSWORD = "local-secret"
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
+            _write_opw_preview_product_profile(FilesystemRecordStore(state_dir=state_dir))
             input_file = Path(temporary_directory_name) / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -1321,6 +1400,7 @@ ODOO_DB_PASSWORD = "local-secret"
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
+            _write_opw_preview_product_profile(FilesystemRecordStore(state_dir=state_dir))
             input_file = Path(temporary_directory_name) / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -1994,6 +2074,7 @@ ODOO_DB_PASSWORD = "local-secret"
             state_dir = Path(temporary_directory_name) / "state"
             output_file = Path(temporary_directory_name) / "launchplane-policy.html"
             store = FilesystemRecordStore(state_dir=state_dir)
+            _write_default_preview_product_profiles(store)
             store.write_preview_record(
                 _preview_record(
                     preview_id="hpr_live",
@@ -2046,6 +2127,7 @@ ODOO_DB_PASSWORD = "local-secret"
             state_dir = Path(temporary_directory_name) / "state"
             output_file = Path(temporary_directory_name) / "launchplane-policy-all.html"
             store = FilesystemRecordStore(state_dir=state_dir)
+            _write_default_preview_product_profiles(store)
             store.write_preview_record(
                 _preview_record(
                     preview_id="hpr_opw",
@@ -3707,6 +3789,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
             state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -3788,6 +3872,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
             store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             store.write_preview_record(_preview_record(preview_id="hpr_01jabc", state="active"))
             store.write_preview_generation_record(
                 _generation_record(
@@ -3866,6 +3951,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
             state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -3922,6 +4009,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
             state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -4127,6 +4216,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             _write_release_tuples_file(control_plane_root)
             _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -4202,6 +4293,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
             _write_release_tuples_file(control_plane_root)
             _write_runtime_environments_file(control_plane_root)
             state_dir = control_plane_root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            _write_opw_preview_product_profile(store)
             input_file = control_plane_root / "pr-event.json"
             input_file.write_text(
                 json.dumps(
@@ -4685,6 +4778,7 @@ ENV_OVERRIDE_DISABLE_CRON = true
             control_plane_root = Path(temporary_directory_name)
             _write_release_tuples_file(control_plane_root)
             _write_runtime_environments_file(control_plane_root)
+            state_dir = control_plane_root / "state"
             input_file = control_plane_root / "github-webhook.json"
             webhook_payload = _github_pull_request_webhook_payload()
             input_file.write_text(json.dumps(webhook_payload), encoding="utf-8")
@@ -4695,6 +4789,8 @@ ENV_OVERRIDE_DISABLE_CRON = true
                     [
                         "launchplane-previews",
                         "ingest-github-webhook",
+                        "--state-dir",
+                        str(state_dir),
                         "--input-file",
                         str(input_file),
                         "--signature-256",

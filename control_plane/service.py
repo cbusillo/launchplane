@@ -2393,7 +2393,10 @@ def _handle_every_code_preview_validation_webhook(
     if not comment_body.strip().lower().startswith("/preview"):
         return None
     every_code_store = _every_code_work_request_store(record_store)
-    context_name = launchplane_anchor_repo_context(repo=repo)
+    context_name = launchplane_anchor_repo_context(
+        record_store=cast(FilesystemRecordStore, record_store),
+        repo=repo,
+    )
     if not context_name:
         context_name = f"{repo}-preview"
     try:

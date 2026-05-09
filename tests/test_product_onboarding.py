@@ -40,6 +40,7 @@ def _manifest_payload() -> dict[str, object]:
         "preview": {
             "enabled": True,
             "context": "example-site-preview",
+            "enable_label": "preview-requested",
             "slug_template": "pr-{number}",
         },
         "dokploy_targets": [
@@ -127,6 +128,7 @@ class ProductOnboardingTests(unittest.TestCase):
         self.assertEqual(profile.driver_id, "generic-web")
         self.assertEqual(profile.lanes[0].health_url, "https://testing.example.invalid/api/health")
         self.assertEqual(profile.lanes[1].health_url, "https://example.invalid/status")
+        self.assertEqual(profile.preview.enable_label, "preview-requested")
         self.assertEqual(profile.expected_config.runtime_environment_keys[0].key, "PUBLIC_BASE_URL")
         self.assertEqual(
             profile.expected_config.managed_secret_bindings[0].binding_key,

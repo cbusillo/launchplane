@@ -30,6 +30,7 @@ from control_plane.contracts.every_code_work_request import (
     apply_every_code_work_request_status,
     resume_every_code_work_request,
 )
+from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
 from control_plane.workflows.launchplane import (
     github_pull_request_reference,
     launchplane_anchor_repo_preview_label,
@@ -96,6 +97,12 @@ class EveryCodeWorkerStore(Protocol):
     def write_every_code_preview_gate_record(
         self, record: EveryCodePreviewGateRecord
     ) -> object: ...
+
+    def list_product_profile_records(
+        self,
+        *,
+        driver_id: str = "",
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]: ...
 
 
 Runner = Callable[[Sequence[str]], subprocess.CompletedProcess[str]]
@@ -298,6 +305,21 @@ class EveryCodeWorkerApiStore:
             idempotency_key=f"every-code-preview-gate-{record.gate_id}-{record.updated_at}",
         )
         return payload
+
+    def list_product_profile_records(
+        self,
+        *,
+        driver_id: str = "",
+    ) -> tuple[LaunchplaneProductProfileRecord, ...]:
+        query: dict[str, object] = {}
+        if driver_id.strip():
+            query["driver_id"] = driver_id.strip()
+        suffix = f"?{urlencode(query)}" if query else ""
+        payload = self._request("GET", f"/v1/product-profiles{suffix}")
+        profiles = payload.get("profiles", [])
+        if not isinstance(profiles, list):
+            raise EveryCodeWorkerApiError("Launchplane product profile list response is invalid")
+        return tuple(LaunchplaneProductProfileRecord.model_validate(item) for item in profiles)
 
     def _request(
         self,
@@ -1865,6 +1887,7 @@ def request_ready_every_code_pr_preview_labels(
         if gate_reset:
             reset += 1
         readiness = every_code_pr_preview_readiness_from_payload(
+            record_store=record_store,
             repository=record.repository,
             payload=payload,
         )
@@ -1884,6 +1907,7 @@ def request_ready_every_code_pr_preview_labels(
             )
             record_store.write_every_code_preview_gate_record(ready_gate)
             summary = request_every_code_pr_preview_label(
+                record_store=record_store,
                 result_pr_url=result_pr_url,
                 runner=run,
             )
@@ -1982,7 +2006,10 @@ def request_ready_every_code_pr_preview_labels(
         else:
             if readiness == "skipped" and _github_pr_payload_has_label(
                 payload,
-                launchplane_anchor_repo_preview_label(repo=reference["repo"]),
+                launchplane_anchor_repo_preview_label(
+                    record_store=record_store,
+                    repo=reference["repo"],
+                ),
             ):
                 reviewer_backfilled += _backfill_every_code_preview_reviewer(
                     record=record,
@@ -2422,13 +2449,17 @@ def route_every_code_pr_check_failures(
 
 def every_code_pr_preview_readiness(
     *,
+    record_store: EveryCodeWorkerStore,
     result_pr_url: str,
     runner: Runner | None = None,
 ) -> Literal["ready", "pending", "blocked", "skipped", "cancelled"]:
     reference = github_pull_request_reference(pr_url=result_pr_url.strip())
     if reference is None:
         return "skipped"
-    preview_label = launchplane_anchor_repo_preview_label(repo=reference["repo"])
+    preview_label = launchplane_anchor_repo_preview_label(
+        record_store=record_store,
+        repo=reference["repo"],
+    )
     if not preview_label:
         return "skipped"
     payload = _github_pr_view_payload(
@@ -2440,6 +2471,7 @@ def every_code_pr_preview_readiness(
     if payload is None:
         return "blocked"
     return every_code_pr_preview_readiness_from_payload(
+        record_store=record_store,
         repository=f"{reference['owner']}/{reference['repo']}",
         payload=payload,
     )
@@ -2447,11 +2479,15 @@ def every_code_pr_preview_readiness(
 
 def every_code_pr_preview_readiness_from_payload(
     *,
+    record_store: EveryCodeWorkerStore,
     repository: str,
     payload: dict[str, object],
 ) -> Literal["ready", "pending", "blocked", "skipped", "cancelled"]:
     reference_repo = repository.strip().split("/", 1)[-1]
-    preview_label = launchplane_anchor_repo_preview_label(repo=reference_repo)
+    preview_label = launchplane_anchor_repo_preview_label(
+        record_store=record_store,
+        repo=reference_repo,
+    )
     if not preview_label:
         return "skipped"
     if str(payload.get("state") or "").upper() != "OPEN":
@@ -2847,13 +2883,17 @@ def _github_pr_payload_has_label(payload: dict[str, object], label_name: str) ->
 
 def request_every_code_pr_preview_label(
     *,
+    record_store: EveryCodeWorkerStore,
     result_pr_url: str,
     runner: Runner | None = None,
 ) -> str:
     reference = github_pull_request_reference(pr_url=result_pr_url.strip())
     if reference is None:
         return ""
-    preview_label = launchplane_anchor_repo_preview_label(repo=reference["repo"])
+    preview_label = launchplane_anchor_repo_preview_label(
+        record_store=record_store,
+        repo=reference["repo"],
+    )
     if not preview_label:
         return ""
     run = runner or _run_subprocess
