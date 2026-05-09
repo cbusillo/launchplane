@@ -646,6 +646,15 @@ Any exported release-tuple catalog is seed/reference material now, not live
 runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
 
+The `Dokploy Legacy Dev Cleanup` workflow is a narrow one-time maintenance
+surface for retiring old provider targets that predate PR-based previews. It
+uses the emergency Dokploy repository secrets because those legacy targets are
+not Launchplane-owned records. Run it without `apply` first; apply requires the
+exact comma-separated target names from that dry-run and the confirmation phrase
+`delete legacy cm dev targets`. The cleanup code only selects names ending in
+`-dev` and refuses stable or PR-preview-shaped names such as `cm-testing`,
+`cm-prod`, and `pr-*`.
+
 Odoo PR previews use Odoo-shaped Launchplane driver routes over the same
 generic-web preview lifecycle. Product workflows call
 `POST /v1/drivers/odoo/preview-refresh` with a preview slug, preview URL, and
