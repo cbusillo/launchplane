@@ -3534,6 +3534,88 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_status, 202)
         self.assertEqual(status_payload["result"]["request"]["state"], "done")
 
+    def test_every_code_worker_token_can_list_product_profiles_read_only(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["product_profile.write"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            FilesystemRecordStore(state_dir=state_dir).write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            list_status, list_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles",
+                query_string="driver_id=generic-web",
+                authorization="Bearer worker-token",
+            )
+            show_status, show_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/product-profiles/sellyouroutboard",
+                authorization="Bearer worker-token",
+            )
+            write_with_worker_status, write_with_worker_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/product-profiles",
+                payload=_product_profile_payload("verireel"),
+                authorization="Bearer worker-token",
+            )
+            unrelated_status, unrelated_payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/products",
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(list_status, 200)
+        self.assertEqual(list_payload["driver_id"], "generic-web")
+        self.assertEqual(
+            [profile["product"] for profile in list_payload["profiles"]],
+            ["sellyouroutboard"],
+        )
+        self.assertEqual(show_status, 401)
+        self.assertEqual(show_payload["error"]["code"], "authentication_required")
+        self.assertEqual(write_with_worker_status, 400)
+        self.assertEqual(
+            write_with_worker_payload["error"]["code"],
+            "invalid_request",
+        )
+        self.assertEqual(unrelated_status, 401)
+        self.assertEqual(unrelated_payload["error"]["code"], "authentication_required")
+
     def test_every_code_worker_token_can_rerun_terminal_request(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {

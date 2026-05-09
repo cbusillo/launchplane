@@ -103,6 +103,7 @@ from control_plane.contracts.preview_pr_feedback_record import (
 from control_plane.contracts.preview_readiness_read_model import (
     build_preview_readiness_read_model,
 )
+from control_plane.contracts.product_environment_read_model import ProductReadModelStore
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -3303,6 +3304,8 @@ def _terminal_agent_identity_from_bearer(
 
 
 def _is_every_code_worker_route(*, method: str, path: str) -> bool:
+    if method == "GET" and path == "/v1/product-profiles":
+        return True
     if method == "GET" and path == "/v1/previews/readiness":
         return True
     if method == "GET" and path == "/v1/every-code/summary":
@@ -3352,8 +3355,14 @@ def _every_code_read_payload(
     path: str,
     query: dict[str, list[str]],
 ) -> dict[str, object]:
-    every_code_store = _every_code_work_request_store(record_store)
     segments = [segment for segment in path.split("/") if segment]
+    if path == "/v1/product-profiles":
+        driver_id_filter = str((query.get("driver_id") or [""])[0] or "").strip()
+        return control_plane_product_read_service.build_product_profile_list_service_payload(
+            record_store=cast(ProductReadModelStore, record_store),
+            driver_id=driver_id_filter,
+        )
+    every_code_store = _every_code_work_request_store(record_store)
     if path == "/v1/previews/readiness":
         repository_filter = str((query.get("repository") or [""])[0] or "").strip()
         pr_number_value = str((query.get("pr_number") or [""])[0] or "").strip()
