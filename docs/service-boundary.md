@@ -138,14 +138,12 @@ The Every Code worker read, claim, and status routes also accept a dedicated
 local-worker bearer token. Configure `LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN` on
 the Launchplane service and on the Mac worker host, then run the worker with
 `uv run launchplane every-code start --service-url https://...`. That token is
-scoped in code to `GET /v1/every-code/work-requests`,
-`GET /v1/every-code/work-requests/{request_id}`,
-`POST /v1/every-code/work-requests/claim`,
-`POST /v1/every-code/work-requests/rerun`, and
-`POST /v1/every-code/work-requests/status`. It cannot create webhook requests,
-write product records, or access other Launchplane service routes. This keeps
-remote DB credentials on the Launchplane host while still allowing visible local
-Code/tmux work sessions to claim, rerun terminal requests, and report progress.
+scoped in code to Every Code work-request, PR-feedback, preview-gate, preview
+readiness routes, plus read-only `GET /v1/product-profiles` for preview
+readiness projection. It cannot create webhook requests, write product records,
+or access other Launchplane service routes. This keeps remote DB credentials on
+the Launchplane host while still allowing visible local Code/tmux work sessions
+to claim, rerun terminal requests, reconcile preview state, and report progress.
 
 Local terminal agents that need Launchplane context use a separate read-only
 bearer credential, not the browser OAuth session cookie and not

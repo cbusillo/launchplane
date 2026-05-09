@@ -119,6 +119,17 @@ class EveryCodeWorkerApiError(RuntimeError):
     pass
 
 
+def _try_every_code_worker_maintenance(
+    description: str,
+    operation: Callable[[], object],
+) -> str:
+    try:
+        operation()
+    except EveryCodeWorkerApiError as error:
+        return f"{description} failed: {error}"
+    return ""
+
+
 @dataclass(frozen=True)
 class EveryCodeWorkerApiStore:
     service_url: str
@@ -370,6 +381,22 @@ class EveryCodeWorkerHandoffResult:
     checkout_root: str = ""
     worktree_root: str = ""
     worktree_branch: str = ""
+
+    def with_detail_suffix(self, suffix: str) -> EveryCodeWorkerHandoffResult:
+        normalized_suffix = suffix.strip()
+        if not normalized_suffix:
+            return self
+        return self.__class__(
+            status=self.status,
+            detail=f"{self.detail} Maintenance warning: {normalized_suffix}",
+            request_id=self.request_id,
+            repository=self.repository,
+            issue_number=self.issue_number,
+            session_name=self.session_name,
+            checkout_root=self.checkout_root,
+            worktree_root=self.worktree_root,
+            worktree_branch=self.worktree_branch,
+        )
 
     def as_payload(self) -> dict[str, object]:
         return {
@@ -1165,35 +1192,53 @@ def run_every_code_worker_loop(
             tmux_binary=tmux_binary,
             runner=runner,
         )
-        apply_every_code_pr_feedback_for_host(
-            record_store=record_store,
-            host=host,
-            state_dir=state_dir,
-            database_url=database_url,
-            service_url=service_url,
-            worker_token_env=worker_token_env,
-            tmux_binary=tmux_binary,
-            runner=runner,
-        )
-        request_ready_every_code_pr_preview_labels(
-            record_store=record_store,
-            repository=repository,
-            runner=runner,
-        )
-        route_every_code_pr_check_failures(
-            record_store=record_store,
-            repository=repository,
-            runner=runner,
-        )
-        apply_every_code_pr_feedback_for_host(
-            record_store=record_store,
-            host=host,
-            state_dir=state_dir,
-            database_url=database_url,
-            service_url=service_url,
-            worker_token_env=worker_token_env,
-            tmux_binary=tmux_binary,
-            runner=runner,
+        maintenance_errors = tuple(
+            error
+            for error in (
+                _try_every_code_worker_maintenance(
+                    "Every Code PR feedback maintenance",
+                    lambda: apply_every_code_pr_feedback_for_host(
+                        record_store=record_store,
+                        host=host,
+                        state_dir=state_dir,
+                        database_url=database_url,
+                        service_url=service_url,
+                        worker_token_env=worker_token_env,
+                        tmux_binary=tmux_binary,
+                        runner=runner,
+                    ),
+                ),
+                _try_every_code_worker_maintenance(
+                    "Every Code preview readiness maintenance",
+                    lambda: request_ready_every_code_pr_preview_labels(
+                        record_store=record_store,
+                        repository=repository,
+                        runner=runner,
+                    ),
+                ),
+                _try_every_code_worker_maintenance(
+                    "Every Code check-failure maintenance",
+                    lambda: route_every_code_pr_check_failures(
+                        record_store=record_store,
+                        repository=repository,
+                        runner=runner,
+                    ),
+                ),
+                _try_every_code_worker_maintenance(
+                    "Every Code PR feedback follow-up maintenance",
+                    lambda: apply_every_code_pr_feedback_for_host(
+                        record_store=record_store,
+                        host=host,
+                        state_dir=state_dir,
+                        database_url=database_url,
+                        service_url=service_url,
+                        worker_token_env=worker_token_env,
+                        tmux_binary=tmux_binary,
+                        runner=runner,
+                    ),
+                ),
+            )
+            if error
         )
         last_result = run_every_code_worker_once(
             record_store=record_store,
@@ -1210,6 +1255,8 @@ def run_every_code_worker_loop(
             tmux_binary=tmux_binary,
             runner=runner,
         )
+        if maintenance_errors:
+            last_result = last_result.with_detail_suffix("; ".join(maintenance_errors))
         if last_result.status == "running":
             handed_off += 1
         elif last_result.status == "blocked":
