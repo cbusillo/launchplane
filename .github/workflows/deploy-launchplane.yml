@@ -771,6 +771,9 @@ jobs:
                       slug_template: "pr-{number}",
                       app_name_prefix: "cm-odoo-preview",
                       template_instance: "testing",
+                      override_env: {
+                        ODOO_INSTALL_MODULES: "cm_custom,cm_website"
+                      },
                       preview_url_env_keys: ["WEB_BASE_URL"],
                       data_transport_mode: "bootstrap"
                     },

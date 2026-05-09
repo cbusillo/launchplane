@@ -661,7 +661,8 @@ the product profile uses `driver_id="odoo"` and `preview.data_transport_mode` is
 renders the Odoo raw compose file for the requested immutable image, overlays
 runtime-environment records when present, requires the Odoo raw-compose safety
 env keys already present on the live target, including non-default Odoo master
-and admin password values, applies preview URL env keys, deploys the compose
+and admin password values, applies profile-owned preview override env such as
+`ODOO_INSTALL_MODULES`, applies preview URL env keys, deploys the compose
 target, and records the requested PR URL as the preview generation. This is
 intentionally not generic compose preview support:
 generic-web application previews still require application template lanes, and
