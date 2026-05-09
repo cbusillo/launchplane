@@ -8,6 +8,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 DelegatedExecutor = Literal["control-plane.dokploy"]
 
@@ -43,6 +44,7 @@ class DeploymentRecord(BaseModel):
     delegated_executor: DelegatedExecutor = "control-plane.dokploy"
     resolved_target: ResolvedTargetEvidence | None = None
     runtime_source: dict[str, str] = Field(default_factory=dict)
+    runtime_identity: RuntimeIdentity | None = None
     deploy: DeploymentEvidence
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)

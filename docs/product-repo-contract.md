@@ -202,7 +202,9 @@ When creating a new website repo for Launchplane:
 
 - Build the app as a normal product repo first.
 - Add a health endpoint that returns enough non-secret version data for
-  Launchplane to verify the deployed artifact.
+  Launchplane to verify the deployed artifact. New products should expose the
+  Launchplane runtime identity env payload from `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`
+  or the equivalent discrete env keys.
 - Publish immutable container images or artifacts from GitHub Actions.
 - Apply an operator-owned Launchplane product onboarding manifest to seed the
   product profile, lane profiles, target records, runtime environment, disabled

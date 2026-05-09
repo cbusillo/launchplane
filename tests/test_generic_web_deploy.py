@@ -148,6 +148,18 @@ class GenericWebDeployTests(unittest.TestCase):
             store.inventories[0].deployment_record_id,
             store.deployments[0].record_id,
         )
+        runtime_identity = store.deployments[0].runtime_identity
+        assert runtime_identity is not None
+        self.assertEqual(runtime_identity.product, "sellyouroutboard")
+        self.assertEqual(runtime_identity.context, "sellyouroutboard-testing")
+        self.assertEqual(runtime_identity.instance, "testing")
+        self.assertEqual(runtime_identity.deployment_record_id, store.deployments[0].record_id)
+        self.assertEqual(
+            runtime_identity.artifact_id,
+            "ghcr.io/cbusillo/sellyouroutboard@sha256:abc123",
+        )
+        self.assertEqual(runtime_identity.source_git_ref, "abc123")
+        self.assertEqual(store.inventories[0].runtime_identity, runtime_identity)
         artifact_identity = store.deployments[0].artifact_identity
         assert artifact_identity is not None
         self.assertEqual(
@@ -159,6 +171,10 @@ class GenericWebDeployTests(unittest.TestCase):
         assert resolved_target is not None
         self.assertEqual(resolved_target.target_name, "sellyouroutboard-testing-app")
         deploy.assert_called_once()
+        self.assertEqual(
+            deploy.call_args.kwargs["runtime_identity"].deployment_record_id,
+            store.deployments[0].record_id,
+        )
 
     def test_execute_generic_web_deploy_uses_qualified_bare_tag(self) -> None:
         store = _GenericWebDeployStore(_profile())

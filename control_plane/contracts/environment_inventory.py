@@ -6,6 +6,7 @@ from control_plane.contracts.promotion_record import (
     HealthcheckEvidence,
 )
 from control_plane.contracts.promotion_record import PostDeployUpdateEvidence
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 
 class EnvironmentInventory(BaseModel):
@@ -17,6 +18,7 @@ class EnvironmentInventory(BaseModel):
     artifact_identity: ArtifactIdentityReference | None = None
     source_git_ref: str
     deploy: DeploymentEvidence
+    runtime_identity: RuntimeIdentity | None = None
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     updated_at: str

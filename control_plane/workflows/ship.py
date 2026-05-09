@@ -10,6 +10,7 @@ from control_plane.contracts.promotion_record import (
     PostDeployUpdateEvidence,
     ReleaseStatus,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 
 
@@ -91,6 +92,7 @@ def build_deployment_record(
     resolved_target: ResolvedTargetEvidence | None = None,
     delegated_executor: DelegatedExecutor = "control-plane.dokploy",
     runtime_source: dict[str, str] | None = None,
+    runtime_identity: RuntimeIdentity | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
 ) -> DeploymentRecord:
@@ -110,6 +112,7 @@ def build_deployment_record(
         delegated_executor=delegated_executor,
         resolved_target=resolved_target,
         runtime_source=runtime_source or {},
+        runtime_identity=runtime_identity,
         deploy=DeploymentEvidence(
             target_name=request.target_name,
             target_type=request.target_type,
