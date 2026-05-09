@@ -133,6 +133,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
 )
+from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.factory import build_record_store, resolve_database_url
@@ -9554,6 +9555,50 @@ def work_graph_merge_train_run_once(
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
+
+
+@work_graph.command("runner-inventory")
+@click.option(
+    "--repository",
+    required=True,
+    help="owner/name repository whose self-hosted runner lanes should be listed.",
+)
+@click.option(
+    "--github-token-env",
+    default="GITHUB_TOKEN",
+    show_default=True,
+    help="Environment variable containing the GitHub token used for read-only runner inventory.",
+)
+@click.option(
+    "--github-api-base-url",
+    default="https://api.github.com",
+    show_default=True,
+    help="GitHub API base URL.",
+)
+def work_graph_runner_inventory(
+    repository: str, github_token_env: str, github_api_base_url: str
+) -> None:
+    try:
+        token_env = github_token_env.strip()
+        if not token_env:
+            raise click.ClickException("runner inventory requires --github-token-env.")
+        token = os.environ.get(token_env, "").strip()
+        if not token:
+            raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
+        transport = UrllibMergeTrainGitHubTransport(
+            token=token, api_base_url=github_api_base_url
+        )
+        inventory = GitHubRunnerLaneInventoryReader(
+            transport=transport
+        ).read_runner_lane_inventory(repository=repository)
+    except MergeTrainGitHubError as error:
+        detail = str(error)
+        if error.status_code is not None:
+            detail = f"{detail} (HTTP {error.status_code})"
+        raise click.ClickException(f"GitHub runner inventory request failed: {detail}") from error
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+    click.echo(json.dumps(inventory.model_dump(mode="json"), indent=2, sort_keys=True))
 
 
 @every_code.command("run-once")

@@ -211,6 +211,11 @@ Dokploy-hosted.
   and the CI container scan pulls Trivy from GHCR so self-hosted runners do not
   fail closed on Docker Hub anonymous pull limits before Launchplane code is
   built or scanned.
+- Before adding or controlling self-hosted runner lanes, use
+  `uv run launchplane work-graph runner-inventory --repository owner/name` to
+  read GitHub's current repository runner list. The command is read-only and
+  reports lane count, online/busy/idle/offline counts, labels, host hints, and a
+  capacity-constrained heuristic from the observation timestamp.
 - Deploy verification should probe Launchplane's live health endpoint, currently
   `GET /v1/health`, after the Dokploy update.
 - When rollout health fails, deploy automation should restore the previous
