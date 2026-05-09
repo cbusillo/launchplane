@@ -1,4 +1,5 @@
 import unittest
+from typing import Any
 from unittest.mock import patch
 
 from control_plane.contracts.runtime_identity import RuntimeIdentity
@@ -7,7 +8,7 @@ from control_plane.workflows.dokploy_deploy import update_dokploy_target_artifac
 
 class DokployDeployTests(unittest.TestCase):
     def test_update_application_injects_runtime_identity_env(self) -> None:
-        requests: list[dict[str, object]] = []
+        requests: list[dict[str, Any]] = []
 
         def _fake_request(**kwargs: object) -> object:
             requests.append(dict(kwargs))
