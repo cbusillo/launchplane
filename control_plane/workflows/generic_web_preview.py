@@ -563,6 +563,66 @@ def _delete_domain(*, host: str, token: str, domain_id: str) -> None:
     )
 
 
+def _ensure_compose_domain(
+    *, host: str, token: str, compose_id: str, preview_host: str, runtime_port: int
+) -> tuple[str, tuple[str, ...]]:
+    raw_domains = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byComposeId",
+        query={"composeId": compose_id},
+    )
+    domains = raw_domains if isinstance(raw_domains, list) else []
+    existing: JsonObject | None = None
+    stale_domain_ids: list[str] = []
+    for raw_domain in domains:
+        domain = control_plane_dokploy.as_json_object(raw_domain)
+        if domain is None:
+            continue
+        domain_host = str(domain.get("host") or "").strip()
+        domain_id = str(domain.get("domainId") or "").strip()
+        if domain_host == preview_host and domain_id:
+            existing = domain
+            continue
+        if domain_id:
+            stale_domain_ids.append(domain_id)
+    payload: JsonObject = {
+        "host": preview_host,
+        "path": "/",
+        "internalPath": "/",
+        "port": runtime_port,
+        "https": True,
+        "applicationId": None,
+        "certificateType": "none",
+        "customCertResolver": None,
+        "composeId": compose_id,
+        "serviceName": "web",
+        "domainType": "compose",
+        "previewDeploymentId": None,
+        "stripPath": False,
+    }
+    if existing is not None:
+        existing_domain_id = str(existing.get("domainId") or "").strip()
+        update_payload: JsonObject = {"domainId": existing_domain_id, **payload}
+        control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/domain.update",
+            method="POST",
+            payload=update_payload,
+        )
+        return "", tuple(stale_domain_ids)
+    created = control_plane_dokploy.dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.create",
+        method="POST",
+        payload=payload,
+    )
+    created_domain = control_plane_dokploy.as_json_object(created)
+    return str((created_domain or {}).get("domainId") or "").strip(), tuple(stale_domain_ids)
+
+
 def _delete_application(*, host: str, token: str, application_id: str) -> None:
     control_plane_dokploy.dokploy_request(
         host=host,
@@ -1372,6 +1432,13 @@ def _execute_odoo_compose_stage_preview_refresh(
         target_id=target_definition.target_id,
         target_payload=template_payload,
         env_text=env_text,
+    )
+    _ensure_compose_domain(
+        host=host,
+        token=token,
+        compose_id=target_definition.target_id,
+        preview_host=_preview_host(request.preview_url),
+        runtime_port=profile.runtime_port,
     )
     latest_before = control_plane_dokploy.latest_deployment_for_target(
         host=host,
