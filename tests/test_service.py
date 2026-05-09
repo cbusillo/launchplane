@@ -27,6 +27,9 @@ from control_plane.contracts.every_code_preview_gate_record import EveryCodePrev
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.merge_train_policy import build_sellyouroutboard_main_merge_train_policy
+from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -53,6 +56,8 @@ from control_plane.contracts.runtime_key_safety_policy import (
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
 from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
+from control_plane.merge_train import MergeTrainCheckStatus
+from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -81,6 +86,8 @@ from control_plane.workflows.verireel_app_maintenance import VeriReelAppMaintena
 from control_plane.workflows.verireel_prod_backup_gate import VeriReelProdBackupGateResult
 from control_plane.workflows.verireel_prod_promotion import VeriReelProdPromotionResult
 from control_plane.workflows.verireel_prod_rollback import VeriReelProdRollbackResult
+from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
+from control_plane.workflows.merge_train_worker import run_merge_train_worker_step
 from control_plane.workflows.verireel_stable_deploy import VeriReelStableDeployResult
 from control_plane.workflows.verireel_environment import VeriReelStableEnvironmentResult
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
@@ -179,6 +186,28 @@ class _FakeMergeTrainGitHubClient:
         return f"merge-{pull_request_number}"
 
 
+class _NoopMergeTrainGitHubClient:
+    def add_pull_request_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> None:
+        return None
+
+    def update_pull_request_branch(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> None:
+        return None
+
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: str,
+    ) -> str:
+        return f"merge-{pull_request_number}"
+
+
 class _FakeMergeTrainSnapshotReader:
     def __init__(self, *, transport: object) -> None:
         self.transport = transport
@@ -204,6 +233,81 @@ class _FakeMergeTrainSnapshotReader:
                 ),
             ),
         )
+
+
+def _merge_train_service_policy() -> LaunchplaneAuthzPolicy:
+    return LaunchplaneAuthzPolicy.model_validate(
+        {
+            "github_actions": [
+                {
+                    "repository": "cbusillo/launchplane",
+                    "workflow_refs": [
+                        "cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main"
+                    ],
+                    "event_names": ["workflow_dispatch"],
+                    "products": ["launchplane"],
+                    "contexts": ["launchplane"],
+                    "actions": ["merge_train.run_once"],
+                }
+            ]
+        }
+    )
+
+
+def _merge_train_service_identity() -> GitHubActionsIdentity:
+    return _identity(
+        repository="cbusillo/launchplane",
+        workflow_ref="cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main",
+        event_name="workflow_dispatch",
+    )
+
+
+def _merge_train_run_record(
+    *,
+    recorded_at: str,
+    required_checks_status: MergeTrainCheckStatus = "pass",
+    mutate: bool = False,
+) -> MergeTrainRunRecord:
+    policy = build_sellyouroutboard_main_merge_train_policy()
+    snapshot = MergeTrainDryRunSnapshot(
+        repository="cbusillo/sellyouroutboard",
+        base_branch="main",
+        pull_requests=(
+            MergeTrainPullRequestSnapshot(
+                number=1,
+                url="https://github.com/cbusillo/sellyouroutboard/pull/1",
+                title="Ready PR",
+                created_at="2026-05-08T10:00:00Z",
+                labels=("ready-to-merge",),
+                actor_role="repo_admin",
+                head_sha="head-1",
+                base_sha="base-main",
+                mergeable="mergeable",
+                required_checks_status=required_checks_status,
+            ),
+        ),
+    )
+    dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
+    worker_step_result = None
+    if mutate:
+        noop_client = _NoopMergeTrainGitHubClient()
+        worker_step_result = run_merge_train_worker_step(
+            policy=policy,
+            snapshot=snapshot,
+            clients=MergeTrainWorkerClients(
+                label_client=noop_client,
+                branch_client=noop_client,
+                merge_client=noop_client,
+            ),
+        )
+    return build_merge_train_run_record(
+        recorded_at=recorded_at,
+        trace_id="launchplane_req_merge_train_service_test",
+        policy_sha256=policy.policy_sha256,
+        snapshot=snapshot,
+        dry_run_result=dry_run_result,
+        worker_step_result=worker_step_result,
+    )
 
 
 def _identity(
@@ -1223,6 +1327,80 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_merge_train_admission_service_admits_without_prior_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                side_effect=AssertionError("admission must not read GitHub"),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="GET",
+                    path="/v1/work-graph/merge-train/admission",
+                    query_string=(
+                        "repository=cbusillo/sellyouroutboard&base_branch=main"
+                    ),
+                )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["admission"]["status"], "admitted")
+        self.assertEqual(payload["admission"]["reason_code"], "no_prior_run")
+        self.assertEqual(payload["admission"]["latest_run_id"], "")
+
+    def test_merge_train_admission_service_defers_recent_wait_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            store = FilesystemRecordStore(state_dir)
+            wait_record = _merge_train_run_record(
+                recorded_at="2999-01-01T00:00:00Z",
+                required_checks_status="pending",
+                mutate=True,
+            )
+            store.write_merge_train_run_record(wait_record)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/merge-train/admission",
+                query_string="repository=cbusillo/sellyouroutboard&base_branch=main",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["admission"]["status"], "deferred")
+        self.assertEqual(payload["admission"]["reason_code"], "poll_interval_pending")
+        self.assertEqual(payload["admission"]["latest_run_id"], wait_record.run_id)
+        self.assertEqual(payload["admission"]["latest_run_status"], "waiting")
+        self.assertEqual(payload["admission"]["next_allowed_at"], "2999-01-01T00:01:00Z")
+
+    def test_merge_train_admission_service_rejects_unauthorized_identity(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/merge-train/admission",
+                query_string="repository=cbusillo/sellyouroutboard&base_branch=main",
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_every_code_github_webhook_creates_work_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
