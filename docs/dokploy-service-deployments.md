@@ -101,6 +101,13 @@ deploys. If a later slice adds generic artifact-manifest resolution for this
 path, the manifest must still resolve to the same `repository@sha256:digest`
 identity before Dokploy is mutated.
 
+Launchplane also injects a non-secret runtime identity into Dokploy env during
+Launchplane-owned deploys. The standard keys are
+`LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
+`LAUNCHPLANE_ARTIFACT_ID`, and `LAUNCHPLANE_SOURCE_GIT_REF`. Product health
+endpoints should expose that identity when adopted so Launchplane can compare
+expected inventory against observed runtime state.
+
 ## Config, Secrets, And Volumes
 
 Non-secret runtime settings belong in Launchplane runtime-environment records.

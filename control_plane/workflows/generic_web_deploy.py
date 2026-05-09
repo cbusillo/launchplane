@@ -16,6 +16,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
 )
 from control_plane.contracts.promotion_record import HealthcheckEvidence
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
 from control_plane.workflows.inventory import build_environment_inventory
@@ -121,6 +122,27 @@ def normalize_generic_web_artifact_id(
             f"{image_repository!r}, or be a bare image tag."
         )
     return f"{image_repository}:{normalized_artifact_id}"
+
+
+def _build_runtime_identity(
+    *,
+    profile: LaunchplaneProductProfileRecord,
+    lane: ProductLaneProfile,
+    ship_request: ShipRequest,
+    deployment_record_id: str,
+    deployed_at: str = "",
+) -> RuntimeIdentity:
+    return RuntimeIdentity(
+        product=profile.product,
+        context=lane.context,
+        instance=lane.instance,
+        environment_kind="stable",
+        deployment_record_id=deployment_record_id,
+        artifact_id=ship_request.artifact_id,
+        source_git_ref=ship_request.source_git_ref,
+        image_reference=ship_request.artifact_id,
+        deployed_at=deployed_at,
+    )
 
 
 def _fallback_ship_request(
@@ -280,6 +302,12 @@ def execute_generic_web_deploy(
             ship_request=ship_request,
             resolved_target=resolved_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
+            runtime_identity=_build_runtime_identity(
+                profile=resolved_profile,
+                lane=resolved_lane,
+                ship_request=ship_request,
+                deployment_record_id=record_id,
+            ),
         )
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
@@ -317,6 +345,13 @@ def execute_generic_web_deploy(
         started_at=started_at,
         finished_at=finished_at,
         resolved_target=resolved_target,
+        runtime_identity=_build_runtime_identity(
+            profile=resolved_profile,
+            lane=resolved_lane,
+            ship_request=ship_request,
+            deployment_record_id=record_id,
+            deployed_at=finished_at,
+        ),
     )
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(

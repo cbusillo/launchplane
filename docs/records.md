@@ -75,13 +75,15 @@ an ORM column/table or remains only in the evidence payload.
   `created_at`, and `status`. Concrete backup paths and provider-specific backup
   evidence stay payload-only.
 - Deployment: modeled fields are `record_id`, `context`, `instance`,
-  `artifact_id`, `source_git_ref`, and deploy timestamps. Resolved provider
-  evidence, health detail, and post-deploy product facts stay payload-only.
+  `artifact_id`, `source_git_ref`, deploy timestamps, and an optional structured
+  runtime identity. Resolved provider evidence, health detail, and post-deploy
+  product facts stay payload-only.
 - Promotion: modeled fields are `record_id`, `context`, `from_instance`,
   `to_instance`, `artifact_id`, and deploy timestamps. Rollback annotations,
   backup evidence detail, and provider health envelopes stay payload-only.
 - Inventory: modeled fields are `context`, `instance`, `artifact_id`,
-  `source_git_ref`, `updated_at`, and linked deployment/promotion ids. Full
+  `source_git_ref`, `updated_at`, linked deployment/promotion ids, and the
+  expected runtime identity copied from the current deployment record. Full
   deploy evidence and product-specific live facts stay payload-only.
 - Preview: modeled fields are `preview_id`, `context`, `anchor_repo`,
   `anchor_pr_number`, `state`, and `updated_at`. Canonical URLs, lifecycle

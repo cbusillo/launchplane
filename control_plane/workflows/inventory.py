@@ -19,6 +19,7 @@ def build_environment_inventory(
         artifact_identity=deployment_record.artifact_identity,
         source_git_ref=deployment_record.source_git_ref,
         deploy=deployment_record.deploy,
+        runtime_identity=deployment_record.runtime_identity,
         post_deploy_update=deployment_record.post_deploy_update,
         destination_health=deployment_record.destination_health,
         updated_at=updated_at,
