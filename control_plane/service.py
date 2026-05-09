@@ -2126,6 +2126,81 @@ def _github_webhook_string(mapping: dict[str, object] | None, key: str) -> str:
     return value.strip() if isinstance(value, str) else ""
 
 
+def _github_login_normalized(login: str) -> str:
+    return login.strip().lstrip("@").casefold()
+
+
+def _github_actor_login(payload: dict[str, object]) -> str:
+    return _github_webhook_string(_github_webhook_mapping(payload, "sender"), "login")
+
+
+def _every_code_trusted_manager_logins(repository: str) -> frozenset[str]:
+    normalized_repository = repository.strip().casefold()
+    if not normalized_repository:
+        return frozenset()
+    config_paths = (
+        Path.home() / ".code" / "github-planning.json",
+        Path.home() / ".codex" / "github-planning.json",
+    )
+    for config_path in config_paths:
+        try:
+            payload = json.loads(config_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        workflow = payload.get("workflow")
+        if not isinstance(workflow, dict):
+            continue
+        managers: set[str] = set()
+        default_manager = workflow.get("default_manager")
+        if isinstance(default_manager, str) and default_manager.strip():
+            managers.add(_github_login_normalized(default_manager))
+        repo_managers = workflow.get("repo_managers")
+        if isinstance(repo_managers, dict):
+            repo_manager = repo_managers.get(repository) or repo_managers.get(normalized_repository)
+            if isinstance(repo_manager, str) and repo_manager.strip():
+                managers.add(_github_login_normalized(repo_manager))
+        return frozenset(manager for manager in managers if manager)
+    return frozenset()
+
+
+def _every_code_feedback_actor_is_trusted(
+    *,
+    repository: str,
+    actor: str,
+    source_issue_author: str = "",
+) -> bool:
+    normalized_actor = _github_login_normalized(actor)
+    if not normalized_actor:
+        return False
+    repository_owner = repository.strip().split("/", 1)[0]
+    trusted = {_github_login_normalized(repository_owner)}
+    if source_issue_author.strip():
+        trusted.add(_github_login_normalized(source_issue_author))
+    trusted.update(_every_code_trusted_manager_logins(repository))
+    return normalized_actor in trusted
+
+
+def _every_code_untrusted_feedback_response(
+    *,
+    start_response: _StartResponse,
+    trace_id: str,
+    delivery_id: str,
+) -> list[bytes]:
+    return _json_response(
+        start_response=start_response,
+        status_code=202,
+        payload={
+            "status": "accepted",
+            "trace_id": trace_id,
+            "skipped": True,
+            "reason": "untrusted_actor",
+            "github_delivery_id": delivery_id,
+        },
+    )
+
+
 def _handle_every_code_github_webhook(
     *,
     environ: dict[str, object],
@@ -2547,12 +2622,23 @@ def _handle_every_code_preview_validation_webhook(
         return None
     issue_author_payload = _github_webhook_mapping(issue_payload, "user")
     issue_author = _github_webhook_string(issue_author_payload, "login")
+    actor = _github_actor_login(payload)
     comment_payload = _github_webhook_mapping(payload, "comment")
     if comment_payload is None:
         return None
     comment_body = _github_webhook_string(comment_payload, "body")
     if not comment_body.strip().lower().startswith("/preview"):
         return None
+    if not _every_code_feedback_actor_is_trusted(
+        repository=repository,
+        actor=actor,
+        source_issue_author=issue_author,
+    ):
+        return _every_code_untrusted_feedback_response(
+            start_response=start_response,
+            trace_id=trace_id,
+            delivery_id=delivery_id,
+        )
     every_code_store = _every_code_work_request_store(record_store)
     context_name = launchplane_anchor_repo_context(
         record_store=cast(FilesystemRecordStore, record_store),
@@ -2572,7 +2658,7 @@ def _handle_every_code_preview_validation_webhook(
             issue_number=issue_number_value,
             issue_url=_github_webhook_string(issue_payload, "html_url"),
             issue_author=issue_author,
-            actor=_github_webhook_string(_github_webhook_mapping(payload, "sender"), "login"),
+            actor=actor,
             comment_body=comment_body,
             comment_id=str(comment_payload.get("id") or ""),
             comment_node_id=_github_webhook_string(comment_payload, "node_id"),
@@ -2725,14 +2811,38 @@ def _handle_every_code_pr_feedback_webhook(
             },
         )
 
+    sender_payload = _github_webhook_mapping(payload, "sender")
+    body_payload = _every_code_feedback_body_payload(event_name=event_name, payload=payload)
+    if _every_code_feedback_actor_is_automation(
+        sender_payload=sender_payload,
+        body_payload=body_payload,
+    ):
+        return _json_response(
+            start_response=start_response,
+            status_code=202,
+            payload={
+                "status": "accepted",
+                "trace_id": trace_id,
+                "skipped": True,
+                "reason": "automation_actor",
+                "github_delivery_id": delivery_id,
+            },
+        )
+
     repository_payload = _github_webhook_mapping(payload, "repository")
     repository = _github_webhook_string(repository_payload, "full_name")
+    actor = _github_webhook_string(sender_payload, "login")
+    if not _every_code_feedback_actor_is_trusted(repository=repository, actor=actor):
+        return _every_code_untrusted_feedback_response(
+            start_response=start_response,
+            trace_id=trace_id,
+            delivery_id=delivery_id,
+        )
     pr_number, pr_url = _every_code_feedback_pr_reference(
         event_name=event_name,
         payload=payload,
         repository=repository,
     )
-    body_payload = _every_code_feedback_body_payload(event_name=event_name, payload=payload)
     body = _github_webhook_string(body_payload, "body")
     if not body.strip():
         return _json_response(
@@ -2800,7 +2910,6 @@ def _handle_every_code_pr_feedback_webhook(
             },
         )
 
-    sender_payload = _github_webhook_mapping(payload, "sender")
     github_node_id = _github_webhook_string(body_payload, "node_id")
     github_id_value = body_payload.get("id") if body_payload is not None else ""
     github_id = str(github_id_value) if github_id_value is not None else ""
@@ -2844,7 +2953,7 @@ def _handle_every_code_pr_feedback_webhook(
         github_delivery_id=delivery_id,
         github_node_id=github_node_id,
         github_id=github_id,
-        actor=_github_webhook_string(sender_payload, "login"),
+        actor=actor,
         author_association=_github_webhook_string(body_payload, "author_association"),
         body=body,
         html_url=_github_webhook_string(body_payload, "html_url"),
@@ -2873,6 +2982,25 @@ def _every_code_pr_feedback_action_supported(*, event_name: str, action: str) ->
         return action == "submitted"
     if event_name == "pull_request_review_comment":
         return action == "created"
+    return False
+
+
+def _every_code_feedback_actor_is_automation(
+    *,
+    sender_payload: dict[str, object] | None,
+    body_payload: dict[str, object],
+) -> bool:
+    actors = [sender_payload]
+    user_payload = _github_webhook_mapping(body_payload, "user")
+    if user_payload is not None:
+        actors.append(user_payload)
+    for actor_payload in actors:
+        if actor_payload is None:
+            continue
+        actor_type = _github_webhook_string(actor_payload, "type").lower()
+        actor_login = _github_webhook_string(actor_payload, "login").lower()
+        if actor_type == "bot" or actor_login.endswith("[bot]"):
+            return True
     return False
 
 
