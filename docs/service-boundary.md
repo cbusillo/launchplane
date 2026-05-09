@@ -905,6 +905,12 @@ GitHub Actions grants must include both scopes for
 tenant product lets preview mutation through but blocks the earlier build input
 resolution step.
 
+The CM preview workflow also needs `preview_pr_feedback.write` for product
+`odoo-tenant-cm` and context `cm` before it can retire tenant-side preview
+comment rendering. Normal refresh and destroy outcomes can reuse lifecycle
+grants, but unsupported/fork and Dependabot notices sit outside those mutation
+paths and require the explicit feedback grant.
+
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel testing verification driver:

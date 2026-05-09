@@ -13810,6 +13810,69 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
 
+    def test_preview_pr_feedback_endpoint_accepts_odoo_cm_unsupported_feedback_grant(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/odoo-tenant-cm",
+                            "workflow_refs": [
+                                "cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml@refs/pull/27/merge"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["preview_pr_feedback.write"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/odoo-tenant-cm",
+                        workflow_ref=(
+                            "cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml"
+                            "@refs/pull/27/merge"
+                        ),
+                        event_name="pull_request",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/pr-feedback",
+                payload={
+                    "product": "odoo-tenant-cm",
+                    "context": "cm",
+                    "source": "odoo-preview-unsupported",
+                    "repository": "cbusillo/odoo-tenant-cm",
+                    "anchor_repo": "odoo-tenant-cm",
+                    "anchor_pr_number": 27,
+                    "anchor_pr_url": "https://github.com/cbusillo/odoo-tenant-cm/pull/27",
+                    "status": "unsupported",
+                    "run_url": "https://github.com/cbusillo/odoo-tenant-cm/actions/runs/123",
+                    "failure_summary": "Preview automation is unavailable for forked pull requests.",
+                },
+            )
+
+            feedback_records = FilesystemRecordStore(
+                state_dir=root / "state"
+            ).list_preview_pr_feedback_records(context_name="cm")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["status"], "accepted")
+        self.assertEqual(feedback_records[0].product, "odoo-tenant-cm")
+        self.assertEqual(feedback_records[0].status, "unsupported")
+        self.assertIn("preview automation is unavailable", payload["result"]["comment_markdown"])
+
     def test_preview_pr_feedback_endpoint_rejects_unauthorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
