@@ -22,6 +22,7 @@ from control_plane.contracts.product_profile_record import LaunchplaneProductPro
 from control_plane.contracts.product_profile_record import ProductImageProfile
 from control_plane.contracts.product_profile_record import ProductPreviewProfile
 from control_plane.every_code_worker import (
+    EveryCodeWorkerApiError,
     EveryCodeWorkerApiStore,
     apply_every_code_pr_feedback_for_host,
     build_every_code_worker_daemon_spec,
@@ -284,6 +285,13 @@ class _GoneSessionWithWorktreeProcessRunner(_GoneSessionRunner):
 class _Process:
     def __init__(self, pid: int) -> None:
         self.pid = pid
+
+
+class _MaintenanceFailingStore(FilesystemRecordStore):
+    def list_every_code_pr_feedback_records(self, **kwargs: object) -> tuple[EveryCodePrFeedbackRecord, ...]:
+        if kwargs.get("status") == "pending":
+            raise EveryCodeWorkerApiError("Launchplane API request failed with HTTP 401")
+        return super().list_every_code_pr_feedback_records(**kwargs)  # type: ignore[arg-type]
 
 
 class _EveryCodeApiHandler(BaseHTTPRequestHandler):
@@ -2276,6 +2284,34 @@ class EveryCodeWorkerTests(unittest.TestCase):
         self.assertEqual(result.blocked, 0)
         self.assertEqual(result.stopped_reason, "max_iterations")
         self.assertEqual(sleeps, [2.5])
+
+    def test_run_loop_claims_request_when_pr_feedback_maintenance_fails(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_root = Path(temporary_directory_name)
+            checkout_root = temporary_root / "Developer" / "code"
+            checkout_root.mkdir(parents=True)
+            (checkout_root / ".git").mkdir()
+            store = _MaintenanceFailingStore(state_dir=temporary_root / "state")
+            store.write_every_code_work_request_record(_queued_record())
+            result = run_every_code_worker_loop(
+                record_store=store,
+                host="Chris-Studio",
+                workspace_root=temporary_root / "Developer",
+                state_dir=temporary_root / "worker-state",
+                interval_seconds=0,
+                max_iterations=1,
+                runner=_Runner(),
+                sleeper=lambda _seconds: None,
+            )
+            record = store.read_every_code_work_request_record(
+                "every-code-cbusillo-code-123-test"
+            )
+
+        self.assertEqual(result.handed_off, 1)
+        self.assertEqual(result.blocked, 0)
+        self.assertEqual(record.state, "running")
+        self.assertIn("Maintenance warning", result.last_result.detail)
+        self.assertIn("HTTP 401", result.last_result.detail)
 
     def test_run_loop_rejects_negative_interval(self) -> None:
         with self.assertRaises(ValueError):

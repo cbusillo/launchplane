@@ -1036,6 +1036,30 @@ jobs:
             product_environment.read \
             deploy:syo-terminal-agent-product-environment-read-grant \
             syo-terminal-agent-product-environment-read
+          post_terminal_agent_grant \
+            launchplane \
+            launchplane \
+            product_environment.read \
+            deploy:terminal-agent-agent-context-product-read-grant \
+            terminal-agent-agent-context-product-read
+          post_terminal_agent_grant \
+            launchplane \
+            launchplane \
+            work_graph.rank \
+            deploy:terminal-agent-agent-context-work-graph-grant \
+            terminal-agent-agent-context-work-graph
+          post_terminal_agent_grant \
+            launchplane \
+            launchplane \
+            every_code_work_request.read \
+            deploy:terminal-agent-agent-context-every-code-grant \
+            terminal-agent-agent-context-every-code
+          post_terminal_agent_grant \
+            launchplane \
+            launchplane \
+            every_code_preview_gate.read \
+            deploy:terminal-agent-agent-context-preview-grant \
+            terminal-agent-agent-context-preview
           post_grant \
             "$GITHUB_REPOSITORY" \
             live-target-runtime.yml \
