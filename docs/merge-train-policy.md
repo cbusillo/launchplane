@@ -166,6 +166,12 @@ poll interval elapses. Other mutation records defer until the configured backoff
 interval elapses. Admission decisions are scheduling hints only; every admitted
 worker pass still reads a fresh GitHub snapshot before choosing an action.
 
+External schedulers can read the same decision from
+`GET /v1/work-graph/merge-train/admission?repository=owner/name&base_branch=main`.
+The route is policy-backed and authorized through the repository policy's
+`service_authz`, but it is store-only: it does not require a GitHub token, does
+not read GitHub, and does not write run records.
+
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed
 `head_sha` as the GitHub merge `sha` guard and the repository policy's

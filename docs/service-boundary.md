@@ -195,6 +195,13 @@ repository policy, resolves its GitHub token from that policy's
 policy or token is available. The route is dry-run by default; `mutate: true`
 applies at most one worker transition from one fresh snapshot.
 
+`GET /v1/work-graph/merge-train/admission` returns the stored-history scheduler
+admission decision for a requested `repository` and `base_branch`. It uses the
+same merge-train repository policy and `service_authz` scope as `run-once`, but
+performs no GitHub reads and no storage writes. Schedulers use this route to
+pace calls into `run-once`; execution still re-reads GitHub before any dry-run or
+mutation.
+
 `GET /v1/repo-product-mapping` returns the repository ownership/awareness read
 model used by work graph and future agent context. The route requires
 `product_environment.read` for product/context `launchplane`, performs no

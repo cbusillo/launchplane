@@ -80,6 +80,7 @@ from control_plane.contracts.merge_train_policy import (
     build_sellyouroutboard_main_merge_train_policy,
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
+from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -305,6 +306,7 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
+_MERGE_TRAIN_ADMISSION_ROUTE = "/v1/work-graph/merge-train/admission"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
 
@@ -329,6 +331,25 @@ class MergeTrainRunOnceEnvelope(BaseModel):
             raise ValueError("merge train repository must be owner/name")
         if not self.base_branch:
             raise ValueError("merge train run-once requires base_branch")
+        return self
+
+
+class MergeTrainAdmissionEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    repository: str
+    base_branch: str = "main"
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "MergeTrainAdmissionEnvelope":
+        self.repository = self.repository.strip()
+        self.base_branch = self.base_branch.strip()
+        if not self.repository:
+            raise ValueError("merge train admission requires repository")
+        if "/" not in self.repository:
+            raise ValueError("merge train repository must be owner/name")
+        if not self.base_branch:
+            raise ValueError("merge train admission requires base_branch")
         return self
 _GITHUB_CLOSING_REFERENCE_PATTERN = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+([^\n\r]+)", re.IGNORECASE
@@ -1776,6 +1797,8 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "operations.read", {"context": segments[2]}
     if len(segments) == 3 and segments == ["v1", "service", "runtime"]:
         return "launchplane_service.read", {}
+    if path == _MERGE_TRAIN_ADMISSION_ROUTE:
+        return "merge_train.admission", {}
     if len(segments) == 3 and segments == ["v1", "work-graph", "snapshot"]:
         return "work_graph.rank", {}
     if len(segments) == 2 and segments == ["v1", "repo-product-mapping"]:
@@ -5217,6 +5240,51 @@ def create_launchplane_service_app(
                         utc_now=_utc_now_timestamp,
                         json_response=_json_response,
                         start_response=start_response,
+                    )
+                if action == "merge_train.admission":
+                    admission_request = MergeTrainAdmissionEnvelope.model_validate(
+                        {
+                            "repository": str((query.get("repository") or [""])[0] or ""),
+                            "base_branch": str((query.get("base_branch") or ["main"])[0] or ""),
+                        }
+                    )
+                    policy = build_sellyouroutboard_main_merge_train_policy()
+                    repository_policy = policy.find_repository_policy(
+                        repository=admission_request.repository,
+                        base_branch=admission_request.base_branch,
+                    )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=repository_policy.service_authz.action,
+                        product=repository_policy.service_authz.product,
+                        context=repository_policy.service_authz.context,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read the requested merge train admission decision.",
+                                },
+                            },
+                        )
+                    admission_decision = evaluate_merge_train_admission_from_store(
+                        store=record_store,
+                        repository=admission_request.repository,
+                        base_branch=admission_request.base_branch,
+                        requested_at=_utc_now_timestamp(),
+                    )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "admission": admission_decision.model_dump(mode="json"),
+                        },
                     )
                 if action == "product_profile.read":
                     if "product" in params:
