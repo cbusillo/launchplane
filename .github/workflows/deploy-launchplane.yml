@@ -906,6 +906,14 @@ jobs:
             work-graph-snapshot-validate
           post_grant \
             "$GITHUB_REPOSITORY" \
+            merge-train-runner.yml \
+            launchplane \
+            launchplane \
+            merge_train.run_once \
+            deploy:merge-train-runner-grant \
+            merge-train-runner
+          post_grant \
+            "$GITHUB_REPOSITORY" \
             deploy-launchplane.yml \
             launchplane \
             launchplane \
