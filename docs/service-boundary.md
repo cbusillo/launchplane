@@ -888,6 +888,16 @@ so authz and driver views remain product-specific, while Launchplane still write
 the shared preview and preview-generation records from DB-backed product profile
 preview configuration.
 
+The CM tenant preview workflow uses two product scopes deliberately. Artifact
+publish input and publish evidence requests use product `odoo` for context `cm`,
+because the publish handoff is an Odoo driver contract. Preview refresh and
+destroy requests use product `odoo-tenant-cm`, because preview lifecycle records
+and product profile configuration are tenant-product scoped. Deploy-maintained
+GitHub Actions grants must include both scopes for
+`cbusillo/odoo-tenant-cm/.github/workflows/odoo-preview.yml`; granting only the
+tenant product lets preview mutation through but blocks the earlier build input
+resolution step.
+
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
 - VeriReel testing verification driver:
