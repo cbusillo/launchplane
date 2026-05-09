@@ -23,6 +23,10 @@ Each repository policy contains:
 - `enqueue`: Requirements for who may enqueue.
 - `merge_identity`: Token or workload identity allowed to update branches and
   merge pull requests.
+- `service_authz`: Launchplane authz action/product/context required before the
+  service endpoint may run the policy.
+- `github_token`: Launchplane service-host token source used for live GitHub
+  API calls.
 
 The initial enqueue policy is intentionally narrow: the enqueue label must be
 present and the enqueue action must come from a repo owner or repo admin. That
@@ -58,6 +62,14 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 [policies.merge_identity]
 kind = "github_actions_oidc"
 name = "launchplane-merge-train"
+
+[policies.service_authz]
+action = "merge_train.run_once"
+product = "launchplane"
+context = "launchplane"
+
+[policies.github_token]
+env_var = "GITHUB_TOKEN"
 ```
 
 ## Discoverability
@@ -132,6 +144,15 @@ A worker pass applies at most one transition from one fresh snapshot. It may add
 the block label, request a branch refresh, record a wait boundary, perform one
 guarded merge, or report an idle queue; it must not chain follow-up reads or
 mutations in the same pass.
+
+The service endpoint `POST /v1/work-graph/merge-train/run-once` uses the same
+policy. Request payloads name `repository`, `base_branch`, and optional
+`mutate`; the service finds the repository/base policy before any GitHub call,
+authorizes the caller through `service_authz`, resolves the GitHub token from
+`github_token.env_var`, reads a fresh snapshot, and either returns the dry-run
+result or applies exactly one worker step. Unsupported repository/base pairs,
+missing token configuration, and denied authorization all fail closed. Generic
+service code must not contain product repository conditionals.
 
 The merge step is allowed only from a fresh dry-run result whose next action is
 `merge`. The merge request must use the selected pull request's observed

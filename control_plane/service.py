@@ -76,6 +76,9 @@ from control_plane.contracts.every_code_summary_read_model import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.merge_train_policy import (
+    build_sellyouroutboard_main_merge_train_policy,
+)
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -175,6 +178,17 @@ from control_plane.work_graph_http import (
     handle_work_graph_snapshot_read,
     rank_work_graph_snapshot,
     work_graph_rank_denied_response,
+)
+from control_plane.merge_train import build_merge_train_dry_run_result
+from control_plane.merge_train_github import (
+    GitHubMergeTrainClient,
+    GitHubMergeTrainSnapshotReader,
+    MergeTrainGitHubError,
+    UrllibMergeTrainGitHubTransport,
+)
+from control_plane.workflows.merge_train_worker import (
+    MergeTrainWorkerClients,
+    run_merge_train_worker_step,
 )
 from control_plane.workflows.evidence_ingestion import (
     apply_deployment_evidence,
@@ -290,7 +304,31 @@ from control_plane.workflows.verireel_preview_driver import (
 
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
+_MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
+
+
+class MergeTrainRunOnceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    repository: str
+    base_branch: str = "main"
+    mutate: bool = False
+    github_api_base_url: str = "https://api.github.com"
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "MergeTrainRunOnceEnvelope":
+        self.repository = self.repository.strip()
+        self.base_branch = self.base_branch.strip()
+        self.github_api_base_url = self.github_api_base_url.strip() or "https://api.github.com"
+        if not self.repository:
+            raise ValueError("merge train run-once requires repository")
+        if "/" not in self.repository:
+            raise ValueError("merge train repository must be owner/name")
+        if not self.base_branch:
+            raise ValueError("merge train run-once requires base_branch")
+        return self
 _GITHUB_CLOSING_REFERENCE_PATTERN = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+([^\n\r]+)", re.IGNORECASE
 )
@@ -1814,6 +1852,7 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
+        _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
         "/v1/every-code/work-requests/create",
         "/v1/every-code/work-requests/claim",
@@ -5546,6 +5585,93 @@ def create_launchplane_service_app(
                 every_code_store.write_every_code_work_request_record(record)
                 result = {"request_id": record.request_id, "state": record.state}
                 driver_result = {"request": record.model_dump(mode="json")}
+            elif path == _MERGE_TRAIN_RUN_ONCE_ROUTE:
+                merge_train_request = MergeTrainRunOnceEnvelope.model_validate(payload)
+                policy = build_sellyouroutboard_main_merge_train_policy()
+                repository_policy = policy.find_repository_policy(
+                    repository=merge_train_request.repository,
+                    base_branch=merge_train_request.base_branch,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action=repository_policy.service_authz.action,
+                    product=repository_policy.service_authz.product,
+                    context=repository_policy.service_authz.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot run the requested merge train policy.",
+                            },
+                        },
+                    )
+                token_env = repository_policy.github_token.env_var
+                if not token_env:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_token_not_configured",
+                                "message": "Merge train policy does not define a GitHub token environment variable.",
+                            },
+                        },
+                    )
+                token = os.environ.get(token_env, "").strip()
+                if not token:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_token_not_configured",
+                                "message": "Configured merge train GitHub token is not available.",
+                            },
+                        },
+                    )
+                transport = UrllibMergeTrainGitHubTransport(
+                    token=token,
+                    api_base_url=merge_train_request.github_api_base_url,
+                )
+                snapshot = GitHubMergeTrainSnapshotReader(
+                    transport=transport
+                ).read_merge_train_snapshot(
+                    repository=merge_train_request.repository,
+                    base_branch=merge_train_request.base_branch,
+                )
+                dry_run_result = build_merge_train_dry_run_result(
+                    policy=policy, snapshot=snapshot
+                )
+                result = {
+                    "repository": merge_train_request.repository,
+                    "base_branch": merge_train_request.base_branch,
+                    "mode": "mutate" if merge_train_request.mutate else "dry-run",
+                    "dry_run_result": dry_run_result.model_dump(mode="json"),
+                }
+                if merge_train_request.mutate:
+                    github_client = GitHubMergeTrainClient(transport=transport)
+                    worker_step_result = run_merge_train_worker_step(
+                        policy=policy,
+                        snapshot=snapshot,
+                        clients=MergeTrainWorkerClients(
+                            label_client=github_client,
+                            branch_client=github_client,
+                            merge_client=github_client,
+                        ),
+                    )
+                    result["worker_step_result"] = worker_step_result.model_dump(mode="json")
+                    driver_result = worker_step_result
+                else:
+                    driver_result = result
             elif path == "/v1/agent/write-intents/evaluate":
                 intent_request = AgentWriteIntentRequest.model_validate(payload)
                 intent_authz_action = authz_action_for_agent_write_intent(
@@ -8104,6 +8230,19 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "product_driver_mismatch",
                         "message": "Product is not configured for the requested driver route.",
+                    },
+                },
+            )
+        except MergeTrainGitHubError:
+            return _json_response(
+                start_response=start_response,
+                status_code=502,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "github_request_failed",
+                        "message": "GitHub merge train request failed; retry after upstream recovers.",
                     },
                 },
             )

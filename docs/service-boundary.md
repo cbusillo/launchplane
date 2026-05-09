@@ -73,6 +73,7 @@ VeriReel product paths:
   - `GET /v1/repo-product-mapping`
   - `GET /v1/work-graph/snapshot`
   - `POST /v1/work-graph/rank`
+  - `POST /v1/work-graph/merge-train/run-once`
 - product driver routes:
   - `POST /v1/drivers/generic-web/deploy`
   - `POST /v1/drivers/generic-web/prod-promotion`
@@ -185,6 +186,14 @@ returns the queue payload under `result.queue`. The route requires the
 `work_graph.rank` action for product/context `launchplane`, performs no storage
 writes, and does not make Launchplane authoritative for copied GitHub or Code
 Plans state.
+
+`POST /v1/work-graph/merge-train/run-once` executes one policy-backed
+merge-train pass for a requested repository/base branch. It requires the
+`service_authz` action/product/context declared by the matching merge-train
+repository policy, resolves its GitHub token from that policy's
+`github_token.env_var`, and fails closed before GitHub calls when no matching
+policy or token is available. The route is dry-run by default; `mutate: true`
+applies at most one worker transition from one fresh snapshot.
 
 `GET /v1/repo-product-mapping` returns the repository ownership/awareness read
 model used by work graph and future agent context. The route requires

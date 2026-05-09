@@ -30,6 +30,10 @@ class MergeTrainPolicyTests(unittest.TestCase):
         )
         self.assertEqual(repository_policy.merge_identity.kind, "github_actions_oidc")
         self.assertEqual(repository_policy.merge_identity.name, "launchplane-merge-train")
+        self.assertEqual(repository_policy.service_authz.action, "merge_train.run_once")
+        self.assertEqual(repository_policy.service_authz.product, "launchplane")
+        self.assertEqual(repository_policy.service_authz.context, "launchplane")
+        self.assertEqual(repository_policy.github_token.env_var, "GITHUB_TOKEN")
         self.assertEqual(len(policy.policy_sha256), 64)
 
     def test_parse_rejects_duplicate_repository_branch_policy(self) -> None:

@@ -52,6 +52,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
 )
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.contracts.work_graph_read_model import WorkGraphPlanningIssueFacts
+from control_plane.merge_train import MergeTrainDryRunSnapshot, MergeTrainPullRequestSnapshot
 from control_plane.service import create_launchplane_service_app
 from control_plane.service_auth import (
     GitHubActionsIdentity,
@@ -151,6 +152,58 @@ class _FakeOAuth2Session:
     def get(self, url: str) -> _FakeGitHubResponse:
         self.requested_urls.append(url)
         return _FakeGitHubResponse(self.payloads[url])
+
+
+class _FakeMergeTrainGitHubClient:
+    def __init__(self, *, transport: object) -> None:
+        self.transport = transport
+
+    def add_pull_request_label(
+        self, *, repository: str, pull_request_number: int, label: str
+    ) -> None:
+        return None
+
+    def update_pull_request_branch(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> None:
+        return None
+
+    def merge_pull_request(
+        self,
+        *,
+        repository: str,
+        pull_request_number: int,
+        head_sha: str,
+        merge_method: str,
+    ) -> str:
+        return f"merge-{pull_request_number}"
+
+
+class _FakeMergeTrainSnapshotReader:
+    def __init__(self, *, transport: object) -> None:
+        self.transport = transport
+
+    def read_merge_train_snapshot(
+        self, *, repository: str, base_branch: str
+    ) -> MergeTrainDryRunSnapshot:
+        return MergeTrainDryRunSnapshot(
+            repository=repository,
+            base_branch=base_branch,
+            pull_requests=(
+                MergeTrainPullRequestSnapshot(
+                    number=1,
+                    url=f"https://github.com/{repository}/pull/1",
+                    title="Ready PR",
+                    created_at="2026-05-08T10:00:00Z",
+                    labels=("ready-to-merge",),
+                    actor_role="repo_admin",
+                    head_sha="head-1",
+                    base_sha="base-main",
+                    mergeable="mergeable",
+                    required_checks_status="pass",
+                ),
+            ),
+        )
 
 
 def _identity(
@@ -934,6 +987,222 @@ class GitHubHumanAuthTests(unittest.TestCase):
 
 
 class LaunchplaneServiceTests(unittest.TestCase):
+    def test_merge_train_run_once_service_returns_dry_run_from_policy(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["merge_train.run_once"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["repository"], "cbusillo/sellyouroutboard")
+        self.assertEqual(payload["result"]["base_branch"], "main")
+        self.assertEqual(payload["result"]["dry_run_result"]["intended_next_action"], "merge")
+
+    def test_merge_train_run_once_service_mutates_one_worker_step(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["merge_train.run_once"],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/merge-train.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient),
+                patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "merged")
+        self.assertEqual(payload["result"]["intended_next_action"], "merge")
+        self.assertEqual(payload["result"]["selected_pr_number"], 1)
+
+    def test_merge_train_run_once_service_rejects_unauthorized_identity(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate({"github_actions": []})
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with (
+                patch(
+                    "control_plane.service.GitHubMergeTrainSnapshotReader",
+                    _FakeMergeTrainSnapshotReader,
+                ),
+                patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_merge_train_run_once_service_rejects_missing_token(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["merge_train.run_once"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch.dict("os.environ", {}, clear=True):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "github_token_not_configured")
+
+    def test_merge_train_run_once_service_rejects_unsupported_policy(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["merge_train.run_once"],
+                    }
+                ]
+            }
+        )
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/other",
+                    "base_branch": "main",
+                },
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
+
     def test_every_code_github_webhook_creates_work_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         policy = LaunchplaneAuthzPolicy.model_validate(

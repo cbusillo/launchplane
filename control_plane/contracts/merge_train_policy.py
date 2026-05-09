@@ -41,6 +41,38 @@ class MergeTrainIdentity(BaseModel):
         return self
 
 
+class MergeTrainServiceAuthz(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    action: str = "merge_train.run_once"
+    product: str = "launchplane"
+    context: str = "launchplane"
+
+    @model_validator(mode="after")
+    def _validate_service_authz(self) -> "MergeTrainServiceAuthz":
+        self.action = _normalize_required_value(
+            self.action, "merge train service authz requires action"
+        )
+        self.product = _normalize_required_value(
+            self.product, "merge train service authz requires product"
+        )
+        self.context = _normalize_required_value(
+            self.context, "merge train service authz requires context"
+        )
+        return self
+
+
+class MergeTrainGitHubTokenSource(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    env_var: str = ""
+
+    @model_validator(mode="after")
+    def _validate_token_source(self) -> "MergeTrainGitHubTokenSource":
+        self.env_var = self.env_var.strip()
+        return self
+
+
 class MergeTrainRepositoryPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -52,6 +84,10 @@ class MergeTrainRepositoryPolicy(BaseModel):
     failure_policy: MergeTrainFailurePolicy
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
+    service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
+    github_token: MergeTrainGitHubTokenSource = Field(
+        default_factory=MergeTrainGitHubTokenSource
+    )
 
     @model_validator(mode="after")
     def _validate_repository_policy(self) -> "MergeTrainRepositoryPolicy":
@@ -137,6 +173,14 @@ allowed_actor_roles = ["repo_owner", "repo_admin"]
 [policies.merge_identity]
 kind = "github_actions_oidc"
 name = "launchplane-merge-train"
+
+[policies.service_authz]
+action = "merge_train.run_once"
+product = "launchplane"
+context = "launchplane"
+
+[policies.github_token]
+env_var = "GITHUB_TOKEN"
 """
 
 
