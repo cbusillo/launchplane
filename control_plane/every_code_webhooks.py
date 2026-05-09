@@ -13,7 +13,6 @@ EVERY_CODE_WEBHOOK_EVENTS = (
     "pull_request_review",
     "pull_request_review_comment",
 )
-EVERY_CODE_WEBHOOK_URL = "https://launchplane.shinycomputers.com/v1/every-code/github-webhook"
 
 
 @dataclass(frozen=True)
@@ -86,7 +85,7 @@ def sync_every_code_webhooks(
     *,
     owner: str,
     webhook_secret: str,
-    webhook_url: str = EVERY_CODE_WEBHOOK_URL,
+    webhook_url: str,
     topic: str = "every-code",
     events: tuple[str, ...] = EVERY_CODE_WEBHOOK_EVENTS,
     runner: Runner | None = None,
@@ -97,6 +96,8 @@ def sync_every_code_webhooks(
         raise ValueError("Every Code webhook sync requires owner")
     if not normalized_secret:
         raise ValueError("Every Code webhook sync requires webhook_secret")
+    if not webhook_url.strip():
+        raise ValueError("Every Code webhook sync requires webhook_url")
     run = runner or _run_gh
     repos = _topic_repositories(owner=normalized_owner, topic=topic, runner=run)
     results: list[EveryCodeWebhookSyncResult] = []
