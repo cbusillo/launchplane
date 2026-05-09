@@ -145,7 +145,54 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
                 "/repos/cbusillo/sellyouroutboard/pulls/42",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/status",
-                "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100",
+                "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
+            ],
+        )
+
+    def test_snapshot_reader_downgrades_missing_collaborator_permission_to_unknown(
+        self,
+    ) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [_github_pull_request(15, author_association="CONTRIBUTOR")],
+                _github_pull_request(15, author_association="CONTRIBUTOR"),
+                MergeTrainGitHubError("permission not found", status_code=404),
+                {"state": "success"},
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(snapshot.pull_requests[0].actor_role, "unknown")
+
+    def test_snapshot_reader_paginates_check_runs_before_computing_status(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                [_github_pull_request(16)],
+                _github_pull_request(16),
+                {"permission": "admin"},
+                {"state": "success"},
+                {
+                    "total_count": 101,
+                    "check_runs": [_check_run("completed", "success") for _ in range(100)],
+                },
+                {"total_count": 101, "check_runs": [_check_run("completed", "failure")]},
+            )
+        )
+
+        snapshot = GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
+            repository="cbusillo/sellyouroutboard", base_branch="main"
+        )
+
+        self.assertEqual(snapshot.pull_requests[0].required_checks_status, "fail")
+        self.assertEqual(
+            [request.path for request in transport.requests if "check-runs" in request.path],
+            [
+                "/repos/cbusillo/sellyouroutboard/commits/head-16/check-runs?per_page=100&page=1",
+                "/repos/cbusillo/sellyouroutboard/commits/head-16/check-runs?per_page=100&page=2",
             ],
         )
 

@@ -130,6 +130,7 @@ from control_plane.merge_train import (
 from control_plane.merge_train_github import (
     GitHubMergeTrainClient,
     GitHubMergeTrainSnapshotReader,
+    MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
 )
 from control_plane.service import serve_launchplane_service
@@ -9545,6 +9546,11 @@ def work_graph_merge_train_run_once(
                 "snapshot": snapshot.model_dump(mode="json"),
                 "dry_run_result": dry_run_result.model_dump(mode="json"),
             }
+    except MergeTrainGitHubError as error:
+        detail = str(error)
+        if error.status_code is not None:
+            detail = f"{detail} (HTTP {error.status_code})"
+        raise click.ClickException(f"GitHub merge train request failed: {detail}") from error
     except (OSError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
     click.echo(json.dumps(payload, indent=2, sort_keys=True))

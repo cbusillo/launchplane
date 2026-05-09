@@ -21,6 +21,7 @@ from control_plane.merge_train import (
     build_merge_train_wait_result,
     reread_merge_train_after_branch_update,
 )
+from control_plane.merge_train_github import MergeTrainGitHubError
 
 
 class _FakeLabelClient:
@@ -62,14 +63,21 @@ class _FakeMergeClient:
 
 
 class _FakeSnapshotReader:
-    def __init__(self, snapshot: MergeTrainDryRunSnapshot) -> None:
+    def __init__(
+        self,
+        snapshot: MergeTrainDryRunSnapshot,
+        error: Exception | None = None,
+    ) -> None:
         self.snapshot = snapshot
+        self.error = error
         self.reads: list[tuple[str, str]] = []
 
     def read_merge_train_snapshot(
         self, *, repository: str, base_branch: str
     ) -> MergeTrainDryRunSnapshot:
         self.reads.append((repository, base_branch))
+        if self.error is not None:
+            raise self.error
         return self.snapshot
 
 
@@ -289,6 +297,37 @@ class MergeTrainDryRunTests(unittest.TestCase):
 
         self.assertNotEqual(result.exit_code, 0)
         self.assertIn("Missing GitHub token", result.output)
+
+    def test_cli_merge_train_run_once_reports_github_transport_error(self) -> None:
+        snapshot_reader = _FakeSnapshotReader(
+            MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(),
+            ),
+            error=MergeTrainGitHubError("rate limited", status_code=403),
+        )
+
+        with (
+            patch(
+                "control_plane.cli.UrllibMergeTrainGitHubTransport",
+                return_value=object(),
+            ),
+            patch(
+                "control_plane.cli.GitHubMergeTrainSnapshotReader",
+                return_value=snapshot_reader,
+            ),
+            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+        ):
+            result = CliRunner().invoke(
+                main,
+                ["work-graph", "merge-train-run-once"],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("GitHub merge train request failed", result.output)
+        self.assertIn("rate limited", result.output)
+        self.assertIn("HTTP 403", result.output)
 
 
 class MergeTrainBlockIntentTests(unittest.TestCase):

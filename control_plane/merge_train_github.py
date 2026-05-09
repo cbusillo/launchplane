@@ -230,13 +230,18 @@ class GitHubMergeTrainSnapshotReader:
     ) -> str:
         if author_association.upper() == "OWNER":
             return "repo_owner"
-        payload = _json_object(
-            self.transport.request(
-                method="GET",
-                path=f"/repos/{repository_path}/collaborators/{quote(username, safe='')}/permission",
-            ),
-            "GitHub collaborator permission response",
-        )
+        try:
+            payload = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=f"/repos/{repository_path}/collaborators/{quote(username, safe='')}/permission",
+                ),
+                "GitHub collaborator permission response",
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code == 404:
+                return "unknown"
+            raise
         return "repo_admin" if str(payload.get("permission") or "") == "admin" else "unknown"
 
     def _required_checks_status(
@@ -249,16 +254,41 @@ class GitHubMergeTrainSnapshotReader:
             ),
             "GitHub combined status response",
         )
-        check_runs_payload = _json_object(
-            self.transport.request(
-                method="GET",
-                path=f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?per_page=100",
-            ),
-            "GitHub check runs response",
+        check_runs_payload = self._list_check_runs(
+            repository_path=repository_path, encoded_head_sha=encoded_head_sha
         )
         return _combine_check_statuses(
             _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
         )
+
+    def _list_check_runs(
+        self, *, repository_path: str, encoded_head_sha: str
+    ) -> dict[str, object]:
+        check_runs: list[object] = []
+        page = 1
+        total_count: int | None = None
+        while True:
+            query = urlencode({"per_page": "100", "page": str(page)})
+            payload = _json_object(
+                self.transport.request(
+                    method="GET",
+                    path=(
+                        f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"
+                    ),
+                ),
+                "GitHub check runs response",
+            )
+            raw_check_runs = payload.get("check_runs")
+            if not isinstance(raw_check_runs, list):
+                raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
+            raw_total_count = payload.get("total_count")
+            if isinstance(raw_total_count, int):
+                total_count = raw_total_count
+            check_runs.extend(raw_check_runs)
+            if len(raw_check_runs) < 100:
+                break
+            page += 1
+        return {"total_count": total_count if total_count is not None else len(check_runs), "check_runs": check_runs}
 
 
 class MergeTrainGitHubRequest(BaseModel):
