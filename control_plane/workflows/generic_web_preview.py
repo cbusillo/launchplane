@@ -49,7 +49,8 @@ _ODOO_COMPOSE_STAGE_PREVIEW_REQUIRED_ENV_KEYS = (
     "ODOO_MASTER_PASSWORD",
     "ODOO_ADMIN_PASSWORD",
 )
-_ODOO_COMPOSE_STAGE_PREVIEW_MIN_HEALTH_TIMEOUT_SECONDS = 30
+_ODOO_COMPOSE_STAGE_PREVIEW_MIN_DEPLOY_TIMEOUT_SECONDS = 30
+_ODOO_COMPOSE_STAGE_PREVIEW_HEALTH_TIMEOUT_SECONDS = 120
 
 
 class GenericWebPreviewProfileStore(Protocol):
@@ -1453,9 +1454,13 @@ def _execute_odoo_compose_stage_preview_refresh(
         target_id=target_definition.target_id,
         no_cache=request.no_cache,
     )
+    health_timeout_seconds = min(
+        request.timeout_seconds,
+        _ODOO_COMPOSE_STAGE_PREVIEW_HEALTH_TIMEOUT_SECONDS,
+    )
     deployment_timeout_seconds = max(
-        _ODOO_COMPOSE_STAGE_PREVIEW_MIN_HEALTH_TIMEOUT_SECONDS,
-        request.timeout_seconds - _ODOO_COMPOSE_STAGE_PREVIEW_MIN_HEALTH_TIMEOUT_SECONDS,
+        _ODOO_COMPOSE_STAGE_PREVIEW_MIN_DEPLOY_TIMEOUT_SECONDS,
+        request.timeout_seconds - health_timeout_seconds,
     )
     control_plane_dokploy.wait_for_target_deployment(
         host=host,
@@ -1468,10 +1473,7 @@ def _execute_odoo_compose_stage_preview_refresh(
     _wait_for_preview_health(
         preview_url=request.preview_url,
         health_path=profile.health_path,
-        timeout_seconds=min(
-            request.timeout_seconds,
-            _ODOO_COMPOSE_STAGE_PREVIEW_MIN_HEALTH_TIMEOUT_SECONDS,
-        ),
+        timeout_seconds=health_timeout_seconds,
     )
     return target_definition.target_id
 

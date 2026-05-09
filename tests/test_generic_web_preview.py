@@ -1130,11 +1130,11 @@ class GenericWebPreviewTests(unittest.TestCase):
         )
         wait_for_deployment.assert_called_once()
         _, wait_kwargs = wait_for_deployment.call_args
-        self.assertEqual(wait_kwargs["timeout_seconds"], 210)
+        self.assertEqual(wait_kwargs["timeout_seconds"], 120)
         wait_health.assert_called_once_with(
             preview_url="https://pr-28.cm-preview.shinycomputers.com",
             health_path="/web/health",
-            timeout_seconds=30,
+            timeout_seconds=120,
         )
 
     def test_execute_generic_web_preview_refresh_allows_preview_safe_copied_secret_key(
