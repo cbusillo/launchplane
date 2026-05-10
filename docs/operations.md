@@ -764,6 +764,9 @@ plan/apply requests must set the matching `data_source_mode`, confirmation, and
 `allow_empty_data=true` before Launchplane treats absent Odoo data/log/database
 volume keys as intentional. Unknown lanes, mismatched target proof, missing issue
 approval, or plain `prod` names still fail closed.
+During OPW prelaunch, the prod proof follows the temporary Dokploy host
+`opw-prod.shinycomputers.com`; update the issue-backed policy to the final
+public hostname only after the live target actually exposes that domain.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress

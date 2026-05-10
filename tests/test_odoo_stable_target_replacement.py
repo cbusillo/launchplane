@@ -133,7 +133,7 @@ def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductPr
                     data_source_mode="upstream_restore",
                     confirmation="restore opw upstream" if enabled else "",
                     expected_target_name="opw-prod" if enabled else "",
-                    expected_domains=("openwater.pro",) if enabled else (),
+                    expected_domains=("opw-prod.shinycomputers.com",) if enabled else (),
                 ),
             ),
         ),
@@ -161,7 +161,7 @@ def _opw_target_record() -> DokployTargetRecord:
         project_name="odoo",
         target_type="compose",
         target_name="opw-prod",
-        domains=("openwater.pro",),
+        domains=("opw-prod.shinycomputers.com",),
         updated_at="2026-05-10T00:00:00Z",
     )
 
@@ -223,7 +223,7 @@ def _request(path: str, query: object | None = None, **_: object) -> JsonValue:
     if path == "/api/domain.byComposeId" and query == {"composeId": "compose-cm-testing"}:
         return [{"host": "cm-testing.shinycomputers.com", "domainId": "domain-cm"}]
     if path == "/api/domain.byComposeId" and query == {"composeId": "compose-opw-prod"}:
-        return [{"host": "openwater.pro", "domainId": "domain-opw"}]
+        return [{"host": "opw-prod.shinycomputers.com", "domainId": "domain-opw"}]
     return []
 
 
