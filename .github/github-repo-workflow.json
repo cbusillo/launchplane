@@ -8,6 +8,7 @@
     "serviceBoundary": "docs/service-boundary.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "driverDescriptors": "docs/driver-descriptors.md",
+    "previewWorkflowContract": "docs/preview-workflow-contract.md",
     "operatorExperience": "docs/operator-experience.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
