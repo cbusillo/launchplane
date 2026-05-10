@@ -21,6 +21,7 @@ from control_plane.workflows.odoo_stable_bootstrap import (
     ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
     OdooStableBootstrapRequest,
     execute_odoo_stable_bootstrap,
+    _run_verification_with_retry,
 )
 
 
@@ -249,6 +250,28 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertIn("schedule failed", result.error_message)
         self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
         self.assertEqual(store.environment_inventories, [])
+
+    def test_verification_retry_allows_transient_startup_failure(self) -> None:
+        attempts = 0
+
+        def flaky_verification() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise click.ClickException("temporary health 404")
+
+        with patch(
+            "control_plane.workflows.odoo_stable_bootstrap.time.sleep",
+            side_effect=lambda _seconds: None,
+        ) as sleep_mock:
+            _run_verification_with_retry(
+                flaky_verification,
+                timeout_seconds=30,
+                retry_interval_seconds=5,
+            )
+
+        self.assertEqual(attempts, 2)
+        sleep_mock.assert_called_once()
 
 
 if __name__ == "__main__":
