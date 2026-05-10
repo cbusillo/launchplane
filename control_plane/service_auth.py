@@ -75,8 +75,6 @@ AgentConsumerActionSafety = Literal[
 ]
 AgentAuthzDecision = Literal["allowed", "denied"]
 LOCAL_OPERATOR_ALLOWED_ACTIONS = frozenset({"product_config.plan", "product_config.apply"})
-LOCAL_OPERATOR_DEFAULT_SUBJECT = "local-owner-agent"
-LOCAL_OPERATOR_DEFAULT_TOKEN_LABEL = "local-owner-write"
 
 
 class TokenVerifier(Protocol):
@@ -331,8 +329,8 @@ def limited_remote_user_action_allowed(action: str) -> bool:
 
 def local_operator_action_allowed(*, identity: LocalOperatorIdentity, action: str) -> bool:
     return (
-        identity.subject == LOCAL_OPERATOR_DEFAULT_SUBJECT
-        and identity.token_label == LOCAL_OPERATOR_DEFAULT_TOKEN_LABEL
+        bool(identity.subject.strip())
+        and bool(identity.token_label.strip())
         and action.strip() in LOCAL_OPERATOR_ALLOWED_ACTIONS
     )
 
