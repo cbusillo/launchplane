@@ -7728,6 +7728,55 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(secret_records[0].name, "META_CONVERSIONS_API_TOKEN")
         self.assertEqual(secret_binding.binding_key, "META_CONVERSIONS_API_TOKEN")
 
+    def test_product_config_api_local_operator_allows_configured_identity(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "configured-local-owner",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "configured-write-token",
+                },
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(
+                        reason="Dry-run SellYourOutBoard Meta config from terminal operator."
+                    ),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-configured-local-operator"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+
     def test_product_config_api_rejects_missing_master_key_for_secret_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)

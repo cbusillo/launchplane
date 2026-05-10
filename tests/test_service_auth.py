@@ -630,22 +630,25 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
-    def test_local_operator_action_requires_expected_subject_and_label(self) -> None:
+    def test_local_operator_action_allows_configured_subject_and_label(self) -> None:
         self.assertTrue(
             local_operator_action_allowed(
-                identity=_local_operator_identity(),
+                identity=_local_operator_identity(
+                    subject="configured-local-operator",
+                    token_label="configured-write-token",
+                ),
                 action="product_config.apply",
             )
         )
         self.assertFalse(
             local_operator_action_allowed(
-                identity=_local_operator_identity(subject="different-owner"),
+                identity=_local_operator_identity(subject="  "),
                 action="product_config.apply",
             )
         )
         self.assertFalse(
             local_operator_action_allowed(
-                identity=_local_operator_identity(token_label="other-write-token"),
+                identity=_local_operator_identity(token_label="  "),
                 action="product_config.apply",
             )
         )
