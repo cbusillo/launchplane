@@ -912,7 +912,10 @@ The CM preview workflow also needs `preview_pr_feedback.write` for product
 `odoo-tenant-cm` and context `cm` before it can retire tenant-side preview
 comment rendering. Normal refresh and destroy outcomes can reuse lifecycle
 grants, but unsupported/fork and Dependabot notices sit outside those mutation
-paths and require the explicit feedback grant.
+paths and require the explicit feedback grant. Fork and Dependabot notices run
+from the base branch through `pull_request_target`, so the deploy-maintained
+grant set includes both `pull_request` and `pull_request_target` feedback
+writers for the same workflow file.
 
 - VeriReel testing deploy driver:
   `verireel-testing-deploy:<product>:<context>:<instance>:<artifact_id>:<source_git_ref>`
