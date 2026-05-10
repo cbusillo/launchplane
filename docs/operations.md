@@ -237,6 +237,10 @@ Required GitHub configuration for that workflow:
   - optional `LAUNCHPLANE_IMAGE_REPOSITORY`
   - `DISCORD_BLUE_DOKPLOY_TARGET_ID` while this workflow seeds the Discord Blue
     onboarding bundle
+  - optional Odoo onboarding target IDs while the deploy workflow seeds tracked
+    prelaunch lane records: `ODOO_CM_TESTING_DOKPLOY_TARGET_ID`,
+    `ODOO_CM_PROD_DOKPLOY_TARGET_ID`, `ODOO_OPW_TESTING_DOKPLOY_TARGET_ID`, and
+    `ODOO_OPW_PROD_DOKPLOY_TARGET_ID`
 
 The workflow should use GitHub OIDC to call Launchplane's own service API and
 update the image digest plus known OAuth env only. DB-backed authz policy records
