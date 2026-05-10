@@ -186,6 +186,8 @@ class OdooStableBootstrapTests(unittest.TestCase):
             )
 
         self.assertEqual(result.bootstrap_status, "pass")
+        self.assertEqual(result.bootstrap_run_status, "pass")
+        self.assertEqual(result.readiness_status, "pass")
         self.assertEqual(result.post_deploy_status, "pass")
         self.assertEqual(result.health_status, "pass")
         self.assertEqual(result.canonical_status, "pass")
@@ -210,12 +212,19 @@ class OdooStableBootstrapTests(unittest.TestCase):
         )
         logo_mock.assert_called_once()
         self.assertEqual(len(store.deployment_records), 2)
+        self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
+        self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "pass")
         self.assertEqual(store.deployment_records[-1].deploy.status, "pass")
         self.assertEqual(len(store.environment_inventories), 1)
         self.assertEqual(
             store.environment_inventories[0].deployment_record_id,
             "deployment-cm-testing-bootstrap",
         )
+        self.assertEqual(
+            store.environment_inventories[0].bootstrap_record_id,
+            "deployment-cm-testing-bootstrap",
+        )
+        self.assertEqual(store.environment_inventories[0].bootstrap.run_status, "pass")
 
     def test_execute_refuses_lane_without_bootstrap_policy(self) -> None:
         store = _Store()
@@ -371,9 +380,148 @@ class OdooStableBootstrapTests(unittest.TestCase):
             )
 
         self.assertEqual(result.bootstrap_status, "fail")
+        self.assertEqual(result.bootstrap_run_status, "fail")
+        self.assertEqual(result.readiness_status, "fail")
         self.assertIn("schedule failed", result.error_message)
         self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
-        self.assertEqual(store.environment_inventories, [])
+        self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "fail")
+        self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "fail")
+        self.assertEqual(len(store.environment_inventories), 1)
+        self.assertEqual(
+            store.environment_inventories[0].deployment_record_id,
+            "deployment-cm-testing-old",
+        )
+        self.assertEqual(
+            store.environment_inventories[0].bootstrap_record_id,
+            "deployment-cm-testing-bootstrap",
+        )
+
+    def test_execute_records_bootstrap_success_when_post_deploy_fails(self) -> None:
+        store = _Store()
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="fail",
+                    error_message="override failed",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
+                side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.generate_deployment_record_id",
+                return_value="deployment-cm-testing-bootstrap",
+            ),
+        ):
+            result = execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertEqual(result.bootstrap_status, "fail")
+        self.assertEqual(result.bootstrap_run_status, "pass")
+        self.assertEqual(result.readiness_status, "fail")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
+        self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "fail")
+        self.assertEqual(len(store.environment_inventories), 1)
+        self.assertEqual(
+            store.environment_inventories[0].deployment_record_id,
+            "deployment-cm-testing-old",
+        )
+        self.assertEqual(
+            store.environment_inventories[0].bootstrap_record_id,
+            "deployment-cm-testing-bootstrap",
+        )
+
+    def test_execute_records_verification_failure_without_hiding_bootstrap_success(self) -> None:
+        store = _Store()
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap._verify_health_url",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url",
+                side_effect=click.ClickException("canonical failed"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
+                side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.generate_deployment_record_id",
+                return_value="deployment-cm-testing-bootstrap",
+            ),
+        ):
+            result = execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertEqual(result.bootstrap_status, "fail")
+        self.assertEqual(result.bootstrap_run_status, "pass")
+        self.assertEqual(result.readiness_status, "verification_failed")
+        self.assertEqual(result.health_status, "pass")
+        self.assertEqual(result.canonical_status, "fail")
+        self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
+        self.assertEqual(
+            store.deployment_records[-1].bootstrap.readiness_status,
+            "verification_failed",
+        )
+        self.assertEqual(len(store.environment_inventories), 1)
+        self.assertEqual(
+            store.environment_inventories[0].deployment_record_id,
+            "deployment-cm-testing-old",
+        )
+        self.assertEqual(
+            store.environment_inventories[0].bootstrap_record_id,
+            "deployment-cm-testing-bootstrap",
+        )
 
     def test_verification_retry_allows_transient_startup_failure(self) -> None:
         attempts = 0
