@@ -466,6 +466,16 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("odoo_instance_override",),
         ),
         _action(
+            "config_parameter_override",
+            "Write config parameter override",
+            "Write an allowed typed Odoo config-parameter override before post-deploy applies it.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/odoo/config-parameter-override",
+            authz_action="odoo_config_parameter_override.write",
+            writes_records=("odoo_instance_override",),
+        ),
+        _action(
             "preview_desired_state",
             "Discover desired previews",
             "Discover labeled Odoo pull requests and record desired preview state.",

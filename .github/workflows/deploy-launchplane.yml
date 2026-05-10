@@ -1107,6 +1107,14 @@ jobs:
             odoo_target_replacement_apply.execute \
             deploy:odoo-cm-target-replacement-apply-grant \
             odoo-cm-target-replacement-apply
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            odoo-config-parameter-override.yml \
+            odoo-tenant-cm \
+            cm \
+            odoo_config_parameter_override.write \
+            deploy:odoo-cm-config-parameter-override-grant \
+            odoo-cm-config-parameter-override
           post_syo_preview_grants \
             sellyouroutboard-testing \
             legacy-context

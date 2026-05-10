@@ -560,6 +560,10 @@ context only, and `context_instance` has both context and instance.
   a rollback proceed; write or import the real Launchplane records first.
 - `odoo-overrides put-config-param` writes a typed Odoo `ir.config_parameter`
   override for a context and instance.
+- For shared/live targets, use the trusted `Odoo Config Parameter Override`
+  workflow instead of local CLI writes. It calls
+  `POST /v1/drivers/odoo/config-parameter-override` with GitHub Actions OIDC and
+  is currently limited to the non-secret `web.base.url` key for `cm/testing`.
 - `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
   such as Authentik or Shopify settings for a context and instance.
 - Secret-shaped override names, including `*_TOKEN`, `*_PASSWORD`, and
