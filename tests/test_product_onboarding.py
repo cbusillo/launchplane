@@ -159,6 +159,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "    case \"$idempotency_key\" in\n"
                 "      *launchplane-product-onboarding:odoo-cm-preview-profile*)\n"
                 "        printf '%s' \"$request_payload\" > \"$CAPTURED_REQUEST_PAYLOAD\"\n"
+                "        printf '%s' \"${idempotency_key#Idempotency-Key: }\" > \"$CAPTURED_IDEMPOTENCY_KEY\"\n"
                 "        ;;\n"
                 "    esac\n"
                 "    if [ -n \"$output_file\" ]; then\n"
@@ -175,6 +176,8 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             (captured_bin_directory / "curl").chmod(0o755)
             (captured_bin_directory / "mktemp").chmod(0o755)
             captured_curl_args = temporary_directory / "curl-args.txt"
+            captured_idempotency_key = temporary_directory / "idempotency-key.txt"
+            captured_idempotency_key.touch()
             captured_response_file = temporary_directory / "response.json"
             env = {
                 **os.environ,
@@ -188,6 +191,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
                 "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
                 "CAPTURED_REQUEST_PAYLOAD": str(captured_curl_args),
+                "CAPTURED_IDEMPOTENCY_KEY": str(captured_idempotency_key),
                 "CAPTURED_RESPONSE_FILE": str(captured_response_file),
                 "CAPTURED_BIN_DIR": str(captured_bin_directory),
             }
@@ -203,6 +207,7 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
 
             self.assertEqual(result.returncode, 0, result.stderr)
             request_payload = json.loads(captured_curl_args.read_text())
+            idempotency_key = captured_idempotency_key.read_text().strip()
 
         manifest = ProductOnboardingManifest.model_validate(request_payload["manifest"])
 
@@ -224,6 +229,13 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
         self.assertEqual(policies["prod"].expected_target_name, "cm-prod")
         self.assertEqual(policies["prod"].expected_domains, ("cellmechanic.com",))
         self.assertEqual(
+            [tuple(target.domains) for target in manifest.dokploy_targets],
+            [
+                ("cm-testing.shinycomputers.com",),
+                ("cm-prod.shinycomputers.com",),
+            ],
+        )
+        self.assertEqual(
             [
                 (target.context, target.instance, target.target_type, target.target_id)
                 for target in manifest.dokploy_targets
@@ -233,6 +245,73 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
                 ("cm", "prod", "compose", "compose-cm-prod"),
             ],
         )
+        self.assertEqual(
+            idempotency_key,
+            "launchplane-product-onboarding:odoo-cm-preview-profile:compose-cm-testing:compose-cm-prod:test-sha",
+        )
+
+    def test_deploy_odoo_cm_onboarding_manifest_requires_prod_target_id(self) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$*\" in\n"
+                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                "  *) printf '200' ;;\n"
+                "esac\n"
+                "output_file=''\n"
+                "while [ \"$#\" -gt 0 ]; do\n"
+                "  case \"$1\" in\n"
+                "    -o)\n"
+                "      shift\n"
+                "      output_file=\"$1\"\n"
+                "      ;;\n"
+                "  esac\n"
+                "  shift || true\n"
+                "done\n"
+                "if [ -n \"$output_file\" ]; then\n"
+                "  printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                "fi\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
+                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("ODOO_CM_PROD_DOKPLOY_TARGET_ID is required", result.stderr)
 
     def test_deploy_odoo_opw_onboarding_manifest_encodes_upstream_restore_policy(
         self,

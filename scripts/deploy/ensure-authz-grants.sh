@@ -210,6 +210,15 @@ apply_odoo_cm_onboarding() {
   local target_id="${ODOO_CM_TESTING_DOKPLOY_TARGET_ID:-}"
   local prod_target_id="${ODOO_CM_PROD_DOKPLOY_TARGET_ID:-}"
 
+  if [ -z "$target_id" ]; then
+    echo "ODOO_CM_TESTING_DOKPLOY_TARGET_ID is required before Odoo CM onboarding." >&2
+    return 1
+  fi
+  if [ -z "$prod_target_id" ]; then
+    echo "ODOO_CM_PROD_DOKPLOY_TARGET_ID is required before Odoo CM onboarding." >&2
+    return 1
+  fi
+
   request_payload="$({
     jq -n \
       --arg target_id "$target_id" \
@@ -279,6 +288,7 @@ apply_odoo_cm_onboarding() {
                   target_id: $target_id,
                   target_type: "compose",
                   target_name: "cm-testing",
+                  domains: ["cm-testing.shinycomputers.com"],
                   healthcheck_path: "/web/health",
                   healthcheck_enabled: true,
                   deploy_timeout_seconds: 900
@@ -293,6 +303,7 @@ apply_odoo_cm_onboarding() {
                   target_id: $prod_target_id,
                   target_type: "compose",
                   target_name: "cm-prod",
+                  domains: ["cm-prod.shinycomputers.com"],
                   healthcheck_path: "/web/health",
                   healthcheck_enabled: true,
                   deploy_timeout_seconds: 900
@@ -311,7 +322,7 @@ apply_odoo_cm_onboarding() {
     -X POST \
     -H "Authorization: Bearer ${oidc_token}" \
     -H 'Content-Type: application/json' \
-    -H "Idempotency-Key: launchplane-product-onboarding:${idempotency_suffix}:${target_id}:${GITHUB_SHA}" \
+    -H "Idempotency-Key: launchplane-product-onboarding:${idempotency_suffix}:${target_id}:${prod_target_id}:${GITHUB_SHA}" \
     --data "$request_payload" \
     "${LAUNCHPLANE_SERVICE_URL}/v1/product-onboarding/apply")"
   if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
