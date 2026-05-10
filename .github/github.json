@@ -86,7 +86,21 @@
     "cbusillo/odoo-tenant-cm",
     "cbusillo/odoo-tenant-opw"
   ],
-  "validatedThrough": [],
+  "validatedThrough": [
+    {
+      "date": "2026-05-10",
+      "source": "cbusillo/launchplane#575",
+      "checks": [
+        "jq empty .github/github.json",
+        "rg github-repo-workflow\\.json",
+        "codex-skills github-repo-snapshot.sh --json",
+        "GitHub Actions CI, Security, and CodeQL checks from config-path migration"
+      ],
+      "caveats": [
+        "Container/runtime deployment gates were not triggered for this metadata-only change."
+      ]
+    }
+  ],
   "githubSignals": {
     "postMerge": {
       "waitForActions": true,

@@ -14,7 +14,7 @@ Treat this file as the launch checklist for every Codex session in
 - This repo owns control-plane contracts, persisted records, and promotion/
   deploy orchestration.
 - This repo does not own addon code, Odoo business logic, or local Odoo DX.
-- Use `.github/github-repo-workflow.json` for repo commands and quality gates;
+- Use `.github/github.json` for repo commands and quality gates;
   do not rely on system Python directly.
 - Persist runtime records under `state/` or another explicit state directory,
   not in git-tracked history.
@@ -45,7 +45,7 @@ Treat this file as the launch checklist for every Codex session in
 
 ## Quality Gates
 
-- Use `.github/github-repo-workflow.json` for the current test, lint,
+- Use `.github/github.json` for the current test, lint,
   typecheck, build, inspection, and docs-freshness gates.
 - Add targeted tests whenever contract or storage behavior changes.
 
