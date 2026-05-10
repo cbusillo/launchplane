@@ -2119,7 +2119,9 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
     def test_render_odoo_raw_compose_file_pins_artifact_image_and_services(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
-            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
         )
 
         self.assertIn("image: ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123", compose_file)
@@ -2129,6 +2131,23 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         self.assertIn("\n  database:", compose_file)
         self.assertIn("\n  script-runner:", compose_file)
         self.assertIn("name: ${ODOO_PROJECT_NAME:-odoo}", compose_file)
+        self.assertIn("dokploy-network:", compose_file)
+        self.assertIn('traefik.enable=true', compose_file)
+        self.assertIn(
+            "traefik.http.routers.launchplane-odoo-web-cm-testing-shinycomputers-com-",
+            compose_file,
+        )
+        self.assertIn(".rule=Host(`cm-testing.shinycomputers.com`)", compose_file)
+        self.assertIn(".entrypoints=websecure", compose_file)
+        self.assertIn(".loadbalancer.server.port=8069", compose_file)
+
+    def test_render_odoo_raw_compose_file_omits_traefik_labels_without_domains(self) -> None:
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123"
+        )
+
+        self.assertNotIn("traefik.http.routers", compose_file)
+        self.assertIn("dokploy-network:", compose_file)
 
     def test_sync_dokploy_compose_raw_source_updates_and_verifies_hash(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(

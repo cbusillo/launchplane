@@ -340,6 +340,10 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
             ) as sync_source,
             patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.render_odoo_raw_compose_file",
+                return_value="services:\n  web:\n",
+            ) as render_compose,
+            patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
             ) as ensure_domain,
             patch(
@@ -385,6 +389,11 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(
             result.image_reference,
             "ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+        )
+        render_compose.assert_called_once_with(
+            image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:artifact",
+            domain_hosts=("cm-testing.shinycomputers.com",),
+            runtime_port=8069,
         )
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
