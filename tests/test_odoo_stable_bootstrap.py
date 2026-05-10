@@ -51,6 +51,7 @@ class _Store:
             project_name="odoo",
             target_type="compose",
             target_name="cm-testing",
+            domains=("cm-testing.shinycomputers.com",),
             deploy_timeout_seconds=900,
             healthcheck_timeout_seconds=30,
             updated_at="2026-05-10T00:00:00Z",
@@ -179,7 +180,15 @@ class OdooStableBootstrapTests(unittest.TestCase):
         post_deploy_mock.assert_called_once()
         self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "manual")
         health_mock.assert_called_once()
+        self.assertEqual(
+            health_mock.call_args.kwargs["health_url"],
+            "https://cm-testing.shinycomputers.com/web/health",
+        )
         canonical_mock.assert_called_once()
+        self.assertEqual(
+            canonical_mock.call_args.kwargs["base_url"],
+            "https://cm-testing.shinycomputers.com",
+        )
         logo_mock.assert_called_once()
         self.assertEqual(len(store.deployment_records), 2)
         self.assertEqual(store.deployment_records[-1].deploy.status, "pass")

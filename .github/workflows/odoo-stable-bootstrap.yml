@@ -162,6 +162,31 @@ jobs:
             echo "Launchplane Odoo stable bootstrap failed with HTTP ${status_code}." >&2
             exit 1
           fi
+          bootstrap_status="$(jq -r '.result.bootstrap_status // ""' odoo-stable-bootstrap.json)"
+          post_deploy_status="$(jq -r '.result.post_deploy_status // ""' odoo-stable-bootstrap.json)"
+          health_status="$(jq -r '.result.health_status // ""' odoo-stable-bootstrap.json)"
+          canonical_status="$(jq -r '.result.canonical_status // ""' odoo-stable-bootstrap.json)"
+          logo_status="$(jq -r '.result.logo_status // ""' odoo-stable-bootstrap.json)"
+          if [ "$bootstrap_status" != "pass" ] || [ "$post_deploy_status" != "pass" ]; then
+            echo "Launchplane Odoo stable bootstrap did not pass: bootstrap=${bootstrap_status} post_deploy=${post_deploy_status}." >&2
+            jq -r '.result.error_message // ""' odoo-stable-bootstrap.json >&2
+            exit 1
+          fi
+          if [ "$VERIFY_HEALTH" = "true" ] && [ "$health_status" != "pass" ]; then
+            echo "Launchplane Odoo stable bootstrap health verification did not pass: ${health_status}." >&2
+            jq -r '.result.error_message // ""' odoo-stable-bootstrap.json >&2
+            exit 1
+          fi
+          if [ "$VERIFY_CANONICAL" = "true" ] && [ "$canonical_status" != "pass" ]; then
+            echo "Launchplane Odoo stable bootstrap canonical verification did not pass: ${canonical_status}." >&2
+            jq -r '.result.error_message // ""' odoo-stable-bootstrap.json >&2
+            exit 1
+          fi
+          if [ "$VERIFY_LOGO" = "true" ] && [ "$logo_status" != "pass" ]; then
+            echo "Launchplane Odoo stable bootstrap logo verification did not pass: ${logo_status}." >&2
+            jq -r '.result.error_message // ""' odoo-stable-bootstrap.json >&2
+            exit 1
+          fi
 
       - name: Upload bootstrap result
         uses: actions/upload-artifact@v5
