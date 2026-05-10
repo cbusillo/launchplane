@@ -25,6 +25,8 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
 from control_plane.workflows.odoo_stable_target_replacement import (
+    DokployRequest,
+    _domains_for_target,
     _read_lane,
     _target_base_url,
     _target_health_url,
@@ -120,6 +122,8 @@ def _assert_bootstrap_policy_allows_request(
     request: OdooStableBootstrapRequest,
     lane: ProductLaneProfile,
     target_record: DokployTargetRecord,
+    domain_hosts: tuple[str, ...],
+    check_domains: bool = True,
 ) -> None:
     policy = lane.odoo_stable_bootstrap
     if not policy.enabled:
@@ -139,17 +143,18 @@ def _assert_bootstrap_policy_allows_request(
             "Odoo stable bootstrap target proof failed: expected target "
             f"{policy.expected_target_name!r}, observed {target_record.target_name!r}."
         )
-    target_domains = {
-        _normalize_domain(domain) for domain in target_record.domains if domain.strip()
-    }
-    missing_domains = tuple(
-        domain for domain in policy.expected_domains if domain not in target_domains
-    )
-    if missing_domains:
-        raise click.ClickException(
-            "Odoo stable bootstrap target proof failed: missing expected domain(s) "
-            + ", ".join(missing_domains)
+    if check_domains:
+        target_domains = {
+            _normalize_domain(domain) for domain in domain_hosts if domain.strip()
+        }
+        missing_domains = tuple(
+            domain for domain in policy.expected_domains if domain not in target_domains
         )
+        if missing_domains:
+            raise click.ClickException(
+                "Odoo stable bootstrap target proof failed: missing expected domain(s) "
+                + ", ".join(missing_domains)
+            )
     if policy.require_health_verification and not request.verify_health:
         raise click.ClickException("Odoo stable bootstrap policy requires health verification.")
     if policy.require_canonical_verification and not request.verify_canonical:
@@ -319,6 +324,7 @@ def execute_odoo_stable_bootstrap(
     record_store: OdooStableBootstrapStore,
     request: OdooStableBootstrapRequest,
     env_file: Path | None = None,
+    dokploy_request: DokployRequest = control_plane_dokploy.dokploy_request,
 ) -> OdooStableBootstrapResult:
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
@@ -334,7 +340,13 @@ def execute_odoo_stable_bootstrap(
     )
     if target_record.target_type != "compose":
         raise click.ClickException("Odoo stable bootstrap requires a compose target.")
-    _assert_bootstrap_policy_allows_request(request=request, lane=lane, target_record=target_record)
+    _assert_bootstrap_policy_allows_request(
+        request=request,
+        lane=lane,
+        target_record=target_record,
+        domain_hosts=target_record.domains,
+        check_domains=False,
+    )
     inventory = _read_bootstrap_inventory(
         record_store=record_store, context=request.context, instance=request.instance
     )
@@ -347,6 +359,22 @@ def execute_odoo_stable_bootstrap(
         raise click.ClickException(
             "Odoo stable bootstrap requires inventory source git ref evidence."
         )
+
+    host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
+    domain_hosts = _domains_for_target(
+        host=host,
+        token=token,
+        target_type=target_record.target_type,
+        target_id=target_id_record.target_id,
+        request=dokploy_request,
+    )
+    resolved_domains = domain_hosts or target_record.domains
+    _assert_bootstrap_policy_allows_request(
+        request=request,
+        lane=lane,
+        target_record=target_record,
+        domain_hosts=resolved_domains,
+    )
 
     deployment_record_id = generate_deployment_record_id(
         context_name=request.context, instance_name=request.instance
@@ -386,9 +414,6 @@ def execute_odoo_stable_bootstrap(
     )
 
     try:
-        host, token = control_plane_dokploy.read_dokploy_config(
-            control_plane_root=control_plane_root
-        )
         target_definition = control_plane_dokploy.DokployTargetDefinition(
             context=request.context,
             instance=request.instance,
@@ -525,8 +550,8 @@ def execute_odoo_stable_bootstrap(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    base_url = _target_base_url(lane=lane, domains=target_record.domains)
-    health_url = _target_health_url(profile=profile, lane=lane, domains=target_record.domains)
+    base_url = _target_base_url(lane=lane, domains=resolved_domains)
+    health_url = _target_health_url(profile=profile, lane=lane, domains=resolved_domains)
     health_timeout_seconds = (
         request.health_timeout_seconds
         or target_record.healthcheck_timeout_seconds

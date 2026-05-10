@@ -23,9 +23,24 @@ from control_plane.workflows.odoo_stable_bootstrap import (
     execute_odoo_stable_bootstrap,
     _run_verification_with_retry,
 )
+from control_plane.workflows.odoo_stable_target_replacement import DokployRequest
 
 
 _BOOTSTRAP_CONFIRMATION = "bootstrap cm testing"
+
+
+def _dokploy_request(path: str, query: object | None = None, **_: object) -> object:
+    if path == "/api/domain.byComposeId" and query == {"composeId": "compose-cm-testing"}:
+        return [{"host": "cm-testing.shinycomputers.com", "domainId": "domain-cm"}]
+    return []
+
+
+def _mismatched_dokploy_request(
+    path: str, query: object | None = None, **_: object
+) -> object:
+    if path == "/api/domain.byComposeId" and query == {"composeId": "compose-cm-testing"}:
+        return [{"host": "cm-prod.shinycomputers.com", "domainId": "domain-cm"}]
+    return []
 
 
 class _Store:
@@ -184,6 +199,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertEqual(result.bootstrap_status, "pass")
@@ -225,6 +241,55 @@ class OdooStableBootstrapTests(unittest.TestCase):
             store.environment_inventories[0].bootstrap_record_id,
             "deployment-cm-testing-bootstrap",
         )
+
+    def test_execute_proves_bootstrap_domain_from_live_target(self) -> None:
+        store = _Store()
+        store.target_record = store.target_record.model_copy(
+            update={"domains": ("cellmechanic.com",)}
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap._verify_health_url",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap._verify_logo_route",
+                side_effect=lambda **_kwargs: None,
+            ),
+        ):
+            result = execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
+            )
+
+        self.assertEqual(result.bootstrap_status, "pass")
         self.assertEqual(store.environment_inventories[0].bootstrap.run_status, "pass")
 
     def test_execute_refuses_lane_without_bootstrap_policy(self) -> None:
@@ -251,6 +316,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertIn("not enabled", str(raised_error.exception))
@@ -295,6 +361,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertIn("target proof failed", str(raised_error.exception))
@@ -304,7 +371,13 @@ class OdooStableBootstrapTests(unittest.TestCase):
         store.target_record = store.target_record.model_copy(
             update={"domains": ("cm-prod.shinycomputers.com",)}
         )
-        with self.assertRaises(click.ClickException) as raised_error:
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            self.assertRaises(click.ClickException) as raised_error,
+        ):
             execute_odoo_stable_bootstrap(
                 control_plane_root=Path("/tmp/launchplane"),
                 record_store=store,
@@ -314,6 +387,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _mismatched_dokploy_request),
             )
 
         self.assertIn("missing expected domain", str(raised_error.exception))
@@ -389,6 +463,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertEqual(result.bootstrap_status, "fail")
@@ -447,6 +522,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertEqual(result.bootstrap_status, "fail")
@@ -499,6 +575,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertEqual(result.bootstrap_status, "fail")
@@ -566,6 +643,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     instance="testing",
                     confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
             )
 
         self.assertEqual(result.bootstrap_status, "fail")
