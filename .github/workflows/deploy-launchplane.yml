@@ -1112,6 +1112,12 @@ jobs:
             odoo-cm-preview-pr-feedback
           post_odoo_cm_preview_grant \
             odoo-tenant-cm \
+            preview_pr_feedback.write \
+            deploy:odoo-cm-preview-unsupported-feedback-grant \
+            odoo-cm-preview-unsupported-feedback \
+            pull_request_target
+          post_odoo_cm_preview_grant \
+            odoo-tenant-cm \
             preview_destroy.execute \
             deploy:odoo-cm-preview-destroy-pr-grant \
             odoo-cm-preview-destroy-pr
