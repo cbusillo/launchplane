@@ -3754,6 +3754,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_every_code_worker_token_reruns_terminal_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.rerun"],
+                    }
+                ]
+            }
+        )
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
@@ -3767,7 +3783,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
             _issue_status, issue_response = _invoke_app(
@@ -3803,15 +3819,34 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="Bearer dev-worker-token",
             )
+            intent_status, intent_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "apply",
+                    "product": "launchplane",
+                    "context": "launchplane",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "reason": "Approved rerun for blocked Every Code request.",
+                },
+            )
+            intent_record_id = intent_payload["result"]["record"]["record_id"]
 
             rerun_status, rerun_response = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/every-code/work-requests/rerun",
-                payload={"request_id": request_id, "trigger_actor": "ops"},
+                payload={
+                    "request_id": request_id,
+                    "trigger_actor": "ops",
+                    "agent_write_intent_record_id": intent_record_id,
+                },
                 authorization="Bearer dev-worker-token",
             )
 
+        self.assertEqual(intent_status, 202)
         self.assertEqual(rerun_status, 202)
         request = rerun_response["result"]["request"]
         self.assertEqual(request["state"], "queued")
@@ -3822,6 +3857,22 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_every_code_worker_token_cannot_rerun_active_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"
         issue_payload = _every_code_github_issue_labeled_payload()
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "every/verireel",
+                        "workflow_refs": [
+                            "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                        ],
+                        "event_names": ["pull_request"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["every_code_work_request.rerun"],
+                    }
+                ]
+            }
+        )
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict(
@@ -3835,7 +3886,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
                 verifier=_StubVerifier(_identity()),
-                authz_policy=LaunchplaneAuthzPolicy(),
+                authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
             )
             _issue_status, issue_response = _invoke_app(
@@ -3851,15 +3902,34 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             )
             request_id = issue_response["records"]["request_id"]
+            intent_status, intent_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "apply",
+                    "product": "launchplane",
+                    "context": "launchplane",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "reason": "Approved rerun for active Every Code request.",
+                },
+            )
+            intent_record_id = intent_payload["result"]["record"]["record_id"]
 
             rerun_status, rerun_response = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/every-code/work-requests/rerun",
-                payload={"request_id": request_id, "trigger_actor": "ops"},
+                payload={
+                    "request_id": request_id,
+                    "trigger_actor": "ops",
+                    "agent_write_intent_record_id": intent_record_id,
+                },
                 authorization="Bearer dev-worker-token",
             )
 
+        self.assertEqual(intent_status, 202)
         self.assertEqual(rerun_status, 400)
         self.assertEqual(rerun_response["error"]["code"], "invalid_payload")
 
@@ -4080,7 +4150,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "event_names": ["workflow_dispatch"],
                         "products": ["launchplane"],
                         "contexts": ["launchplane"],
-                        "actions": ["every_code_work_request.write"],
+                        "actions": [
+                            "every_code_work_request.write",
+                            "every_code_work_request.rerun",
+                        ],
                     }
                 ]
             }
@@ -4249,7 +4322,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "event_names": ["workflow_dispatch"],
                         "products": ["launchplane"],
                         "contexts": ["launchplane"],
-                        "actions": ["every_code_work_request.write"],
+                        "actions": [
+                            "every_code_work_request.write",
+                            "every_code_work_request.rerun",
+                        ],
                     }
                 ]
             }
@@ -4310,21 +4386,301 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
                 authorization="Bearer worker-token",
             )
+            intent_status, intent_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "apply",
+                    "product": "launchplane",
+                    "context": "launchplane",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "reason": "Approved rerun for blocked Every Code request.",
+                },
+                headers={"Idempotency-Key": "every-code-rerun-intent:123"},
+            )
+            intent_record_id = intent_payload["result"]["record"]["record_id"]
             rerun_status, rerun_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={
+                    "request_id": request_id,
+                    "trigger_actor": "cbusillo",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "agent_write_intent_record_id": intent_record_id,
+                },
+                authorization="Bearer worker-token",
+                headers={"Idempotency-Key": "every-code-rerun-intent:123"},
+            )
+
+        self.assertEqual(create_status, 202)
+        self.assertEqual(intent_status, 202)
+        self.assertEqual(rerun_status, 202)
+        self.assertEqual(
+            rerun_payload["records"]["agent_write_intent_record_id"], intent_record_id
+        )
+        self.assertEqual(rerun_payload["records"]["state"], "queued")
+        self.assertEqual(rerun_payload["result"]["request"]["trigger_actor"], "cbusillo")
+        self.assertEqual(rerun_payload["result"]["request"]["claimed_by_host"], "")
+        self.assertEqual(rerun_payload["result"]["request"]["result_pr_url"], "")
+        self.assertEqual(rerun_payload["result"]["request"]["error_message"], "")
+
+    def test_every_code_rerun_requires_matching_write_intent_evidence(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": [
+                            "every_code_work_request.write",
+                            "every_code_work_request.rerun",
+                        ],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/code",
+                    "issue_number": 123,
+                    "issue_url": "https://github.com/cbusillo/code/issues/123",
+                    "issue_title": "Wire local automation",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-05T22:00:00Z",
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "blocked",
+                    "error_message": "Needs another pass.",
+                    "updated_at": "2026-05-05T22:05:00Z",
+                },
+                authorization="Bearer worker-token",
+            )
+
+            missing_status, missing_payload = _invoke_app(
                 app,
                 method="POST",
                 path="/v1/every-code/work-requests/rerun",
                 payload={"request_id": request_id, "trigger_actor": "cbusillo"},
                 authorization="Bearer worker-token",
             )
+            wrong_source_status, wrong_source_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "apply",
+                    "product": "launchplane",
+                    "context": "launchplane",
+                    "source_url": "https://github.com/cbusillo/code/issues/999",
+                    "reason": "Approved rerun for a different Every Code request.",
+                },
+            )
+            wrong_source_record_id = wrong_source_payload["result"]["record"]["record_id"]
+            mismatched_status, mismatched_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={
+                    "request_id": request_id,
+                    "trigger_actor": "cbusillo",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "agent_write_intent_record_id": wrong_source_record_id,
+                },
+                authorization="Bearer worker-token",
+            )
 
-        self.assertEqual(create_status, 202)
-        self.assertEqual(rerun_status, 202)
-        self.assertEqual(rerun_payload["records"]["state"], "queued")
-        self.assertEqual(rerun_payload["result"]["request"]["trigger_actor"], "cbusillo")
-        self.assertEqual(rerun_payload["result"]["request"]["claimed_by_host"], "")
-        self.assertEqual(rerun_payload["result"]["request"]["result_pr_url"], "")
-        self.assertEqual(rerun_payload["result"]["request"]["error_message"], "")
+        self.assertEqual(missing_status, 409)
+        self.assertEqual(
+            missing_payload["error"]["code"], "agent_write_intent_required"
+        )
+        self.assertEqual(wrong_source_status, 202)
+        self.assertEqual(mismatched_status, 409)
+        self.assertEqual(
+            mismatched_payload["error"]["code"], "agent_write_intent_source_mismatch"
+        )
+
+    def test_every_code_rerun_rejects_stale_and_wrong_context_write_intents(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_actions": [
+                    {
+                        "repository": "cbusillo/launchplane",
+                        "workflow_refs": [
+                            "cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main"
+                        ],
+                        "event_names": ["workflow_dispatch"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane", "other-context"],
+                        "actions": [
+                            "every_code_work_request.write",
+                            "every_code_work_request.rerun",
+                        ],
+                    }
+                ]
+            }
+        )
+        identity = _identity(
+            repository="cbusillo/launchplane",
+            workflow_ref="cbusillo/launchplane/.github/workflows/every-code-worker.yml@refs/heads/main",
+            event_name="workflow_dispatch",
+        )
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN": "worker-token"},
+            ),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            _create_status, create_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/create",
+                payload={
+                    "repository": "cbusillo/code",
+                    "issue_number": 123,
+                    "issue_url": "https://github.com/cbusillo/code/issues/123",
+                    "issue_title": "Wire local automation",
+                    "trigger_actor": "cbusillo",
+                    "source": "manual",
+                    "queued_at": "2026-05-05T22:00:00Z",
+                },
+            )
+            request_id = str(create_payload["records"]["request_id"])
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/claim",
+                payload={"request_id": request_id, "host": "Chris-Studio"},
+                authorization="Bearer worker-token",
+            )
+            _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/status",
+                payload={
+                    "request_id": request_id,
+                    "host": "Chris-Studio",
+                    "state": "blocked",
+                    "error_message": "Needs another pass.",
+                    "updated_at": "2026-05-05T22:05:00Z",
+                },
+                authorization="Bearer worker-token",
+            )
+            _wrong_context_status, wrong_context_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "apply",
+                    "product": "launchplane",
+                    "context": "other-context",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "reason": "Approved rerun in the wrong context.",
+                },
+            )
+            wrong_context_record_id = wrong_context_payload["result"]["record"]["record_id"]
+            wrong_context_status, wrong_context_rerun_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={
+                    "request_id": request_id,
+                    "agent_write_intent_record_id": wrong_context_record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+
+            _intent_status, intent_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/agent/write-intents/evaluate",
+                payload={
+                    "intent": "every_code_rerun",
+                    "mode": "apply",
+                    "product": "launchplane",
+                    "context": "launchplane",
+                    "source_url": "https://github.com/cbusillo/code/issues/123",
+                    "reason": "Approved rerun for a blocked Every Code request.",
+                },
+            )
+            stale_record_id = intent_payload["result"]["record"]["record_id"]
+            store = FilesystemRecordStore(state_dir)
+            stale_record = store.read_agent_write_intent_record(stale_record_id)
+            store.write_agent_write_intent_record(
+                stale_record.model_copy(update={"recorded_at": "2026-01-01T00:00:00Z"})
+            )
+            stale_status, stale_payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/every-code/work-requests/rerun",
+                payload={
+                    "request_id": request_id,
+                    "agent_write_intent_record_id": stale_record_id,
+                },
+                authorization="Bearer worker-token",
+            )
+
+        self.assertEqual(wrong_context_status, 409)
+        self.assertEqual(
+            wrong_context_rerun_payload["error"]["code"],
+            "agent_write_intent_scope_mismatch",
+        )
+        self.assertEqual(stale_status, 409)
+        self.assertEqual(stale_payload["error"]["code"], "agent_write_intent_stale")
 
     def test_every_code_worker_token_is_required_for_unauthenticated_request(self) -> None:
         with (
@@ -6645,7 +7001,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["pull_request"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["every_code_work_request.write"],
+                            "actions": ["every_code_work_request.rerun"],
                         }
                     ]
                 }
@@ -6679,7 +7035,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         intent = payload["result"]["intent"]
         self.assertEqual(intent["status"], "allowed")
-        self.assertEqual(intent["authz_action"], "every_code_work_request.write")
+        self.assertEqual(intent["authz_action"], "every_code_work_request.rerun")
         self.assertFalse(intent["safe_to_execute"])
         self.assertEqual(intent["reason_code"], "authorized")
         self.assertEqual(intent["audit"]["decision"], "allowed")
@@ -6705,7 +7061,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "event_names": ["pull_request"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["every_code_work_request.write"],
+                            "actions": ["every_code_work_request.rerun"],
                         }
                     ]
                 }
@@ -6797,7 +7153,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "token_labels": ["local-owner-read"],
                             "products": ["launchplane"],
                             "contexts": ["launchplane"],
-                            "actions": ["every_code_work_request.write"],
+                            "actions": ["every_code_work_request.rerun"],
                         }
                     ]
                 }
