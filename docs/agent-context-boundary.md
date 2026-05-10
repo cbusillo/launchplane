@@ -95,9 +95,14 @@ caller, applies dry-run-first and secret-backed evidence rules, persists a
 record id. The evaluation route does not execute product/runtime mutations and
 does not return reusable credentials.
 
-Follow-on execution routes should require a route-specific policy action. They
-should link back to the durable write-intent record rather than treating the
-record as a bearer capability.
+Follow-on execution routes require a route-specific policy action. They may
+consume the durable write-intent record as evidence, but the record is not a
+bearer capability: execution routes must revalidate the intent family, mode,
+allowed status, safe-to-execute decision, product, context, route action,
+freshness, and any route-specific source or idempotency binding before mutating.
+For example, Every Code rerun execution consumes an approved `every_code_rerun`
+record and still requires `every_code_work_request.rerun` authorization before
+requeueing the work request.
 
 ## Redaction And Provenance
 

@@ -24,7 +24,7 @@ AgentWriteIntentStatus = Literal["allowed", "denied"]
 AgentWriteIntentSecretStatus = Literal["not_required", "pass", "fail", "unavailable"]
 
 _INTENT_AUTHZ_ACTIONS: dict[AgentWriteIntentKind, str] = {
-    "every_code_rerun": "every_code_work_request.write",
+    "every_code_rerun": "every_code_work_request.rerun",
     "preview_refresh": "preview_refresh.execute",
     "preview_cleanup": "preview_lifecycle.cleanup",
     "preview_request": "preview_generation.write",

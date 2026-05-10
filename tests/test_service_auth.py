@@ -368,7 +368,7 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
 
         self.assertEqual(
             authz_action_for_agent_write_intent("every_code_rerun"),
-            "every_code_work_request.write",
+            "every_code_work_request.rerun",
         )
         self.assertEqual(
             authz_action_for_agent_write_intent("preview_refresh"),
