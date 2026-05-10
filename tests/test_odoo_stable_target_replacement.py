@@ -166,6 +166,18 @@ def _opw_target_record() -> DokployTargetRecord:
     )
 
 
+def _opw_target_record_with_stale_domain() -> DokployTargetRecord:
+    return DokployTargetRecord(
+        context="opw",
+        instance="prod",
+        project_name="odoo",
+        target_type="compose",
+        target_name="opw-prod",
+        domains=("openwater.pro",),
+        updated_at="2026-05-10T00:00:00Z",
+    )
+
+
 def _opw_target_id_record() -> DokployTargetIdRecord:
     return DokployTargetIdRecord(
         context="opw",
@@ -272,6 +284,50 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         self.assertEqual(
             plan.approval_issue_url,
             "https://github.com/cbusillo/launchplane/issues/573",
+        )
+
+    def test_build_plan_proves_prelaunch_domain_from_live_target(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "opw-prod",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "",
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-opw", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(
+                    profile=_opw_profile_with_prelaunch_policy(enabled=True),
+                    target_record=_opw_target_record_with_stale_domain(),
+                    target_id_record=_opw_target_id_record(),
+                ),
+                request=OdooStableTargetReplacementRequest(
+                    product="odoo-tenant-opw",
+                    instance="prod",
+                    allow_empty_data=True,
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(plan.plan_status, "ready")
+        self.assertEqual(
+            plan.expected_domain_hosts,
+            ("opw-prod.shinycomputers.com",),
         )
 
     def test_build_plan_blocks_upstream_restore_without_issue_backed_policy(self) -> None:

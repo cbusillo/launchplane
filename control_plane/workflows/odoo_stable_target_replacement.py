@@ -392,7 +392,8 @@ def _assert_prelaunch_rebuild_policy_allows_request(
     *,
     request: OdooStableTargetReplacementRequest,
     lane: ProductLaneProfile,
-    target_record: DokployTargetRecord,
+    target_name: str,
+    domain_hosts: tuple[str, ...],
 ) -> str:
     if request.data_source_mode == "existing":
         return ""
@@ -410,14 +411,12 @@ def _assert_prelaunch_rebuild_policy_allows_request(
         raise click.ClickException(
             f"Odoo prelaunch rebuild requires confirmation {policy.confirmation!r}."
         )
-    if target_record.target_name != policy.expected_target_name:
+    if target_name != policy.expected_target_name:
         raise click.ClickException(
             "Odoo prelaunch rebuild target proof failed: expected target "
-            f"{policy.expected_target_name!r}, observed {target_record.target_name!r}."
+            f"{policy.expected_target_name!r}, observed {target_name!r}."
         )
-    target_domains = {
-        _normalize_domain(domain) for domain in target_record.domains if domain.strip()
-    }
+    target_domains = {_normalize_domain(domain) for domain in domain_hosts if domain.strip()}
     missing_domains = tuple(
         domain for domain in policy.expected_domains if domain not in target_domains
     )
@@ -647,15 +646,6 @@ def build_odoo_stable_target_replacement_plan(
     if isinstance(target_record, DokployTargetRecord) and target_record.target_type != "compose":
         blockers.append("Odoo stable replacement currently requires a compose target.")
     approval_issue_url = ""
-    if isinstance(target_record, DokployTargetRecord):
-        try:
-            approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(
-                request=request,
-                lane=lane,
-                target_record=target_record,
-            )
-        except click.ClickException as error:
-            blockers.append(str(error))
     if request.data_source_mode != "existing" and not request.allow_empty_data:
         blockers.append(
             "Odoo prelaunch rebuild requests must explicitly set allow_empty_data."
@@ -673,6 +663,15 @@ def build_odoo_stable_target_replacement_plan(
             target_id_record=target_id_record,
             request=dokploy_request,
         )
+        try:
+            approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(
+                request=request,
+                lane=lane,
+                target_name=current_target.target_name,
+                domain_hosts=current_target.domain_hosts,
+            )
+        except click.ClickException as error:
+            blockers.append(str(error))
         if current_target.required_volume_keys_missing and not request.allow_empty_data:
             blockers.append(
                 "Current target is missing required Odoo volume env keys: "
@@ -682,6 +681,16 @@ def build_odoo_stable_target_replacement_plan(
             blockers.append("Current target has no discoverable Dokploy domains to cut over.")
         if not current_target.runtime_identity_present:
             warnings.append("Current target does not expose a Launchplane runtime identity yet.")
+    elif isinstance(target_record, DokployTargetRecord):
+        try:
+            approval_issue_url = _assert_prelaunch_rebuild_policy_allows_request(
+                request=request,
+                lane=lane,
+                target_name=target_record.target_name,
+                domain_hosts=target_record.domains,
+            )
+        except click.ClickException as error:
+            blockers.append(str(error))
     expected_artifact_id = ""
     expected_source_git_ref = ""
     if isinstance(inventory, EnvironmentInventory):
