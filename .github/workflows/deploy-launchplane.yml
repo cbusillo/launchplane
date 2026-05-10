@@ -1084,6 +1084,14 @@ jobs:
             odoo_target_replacement_plan.read \
             deploy:odoo-cm-target-replacement-plan-grant \
             odoo-cm-target-replacement-plan
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            odoo-target-replacement-apply.yml \
+            odoo-tenant-cm \
+            cm \
+            odoo_target_replacement_apply.execute \
+            deploy:odoo-cm-target-replacement-apply-grant \
+            odoo-cm-target-replacement-apply
           post_syo_preview_grants \
             sellyouroutboard-testing \
             legacy-context

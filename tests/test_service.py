@@ -29,7 +29,9 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.merge_train_policy import build_sellyouroutboard_main_merge_train_policy
+from control_plane.contracts.merge_train_policy import (
+    build_sellyouroutboard_main_merge_train_policy,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -99,6 +101,7 @@ from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResu
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementPlan,
 )
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
@@ -1436,9 +1439,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     app,
                     method="GET",
                     path="/v1/work-graph/merge-train/admission",
-                    query_string=(
-                        "repository=cbusillo/sellyouroutboard&base_branch=main"
-                    ),
+                    query_string=("repository=cbusillo/sellyouroutboard&base_branch=main"),
                 )
 
         self.assertEqual(status_code, 200)
@@ -2819,8 +2820,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         preview_validation = ok_response["result"]["preview_validation"]
         self.assertEqual(preview_validation["command"], "ok")
         self.assertEqual(preview_validation["merge_owner"], "cbusillo")
-        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"labels": ["ready-to-merge"]})
-        self.assertEqual(github_request.call_args_list[5].kwargs["body"], {"assignees": ["cbusillo"]})
+        self.assertEqual(
+            github_request.call_args_list[3].kwargs["body"], {"labels": ["ready-to-merge"]}
+        )
+        self.assertEqual(
+            github_request.call_args_list[5].kwargs["body"], {"assignees": ["cbusillo"]}
+        )
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
 
@@ -3728,7 +3733,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(write_status, 202, write_response)
         self.assertEqual(write_response["records"]["feedback_id"], feedback_record.feedback_id)
-        self.assertEqual(write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id)
+        self.assertEqual(
+            write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id
+        )
         self.assertEqual(list_status, 200, list_response)
         self.assertEqual(len(list_response["feedback"]), 1)
         self.assertEqual(list_response["feedback"][0]["feedback_id"], feedback_record.feedback_id)
@@ -4991,9 +4998,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         sections = payload["context"]["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
         self.assertEqual(sections["work_graph_snapshot"]["status"], "unavailable")
-        self.assertEqual(
-            sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable"
-        )
+        self.assertEqual(sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable")
         self.assertEqual(sections["every_code_summary"]["status"], "available")
 
     def test_health_endpoint_reports_storage_backend(self) -> None:
@@ -5900,8 +5905,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             item["key"]: item["status"] for item in config_status["runtime_settings"]
         }
         secret_statuses = {
-            item["binding_key"]: item["status"]
-            for item in config_status["managed_secrets"]
+            item["binding_key"]: item["status"] for item in config_status["managed_secrets"]
         }
         self.assertEqual(
             runtime_statuses,
@@ -6574,9 +6578,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertTrue(payload["authz"]["agent_consumer"]["read_only_context"])
         self.assertFalse(payload["authz"]["agent_consumer"]["approval_capable"])
         self.assertEqual(payload["authz"]["agent_audit"]["decision"], "denied")
-        self.assertEqual(
-            payload["authz"]["agent_audit"]["reason_code"], "authorization_denied"
-        )
+        self.assertEqual(payload["authz"]["agent_audit"]["reason_code"], "authorization_denied")
         self.assertEqual(payload["authz"]["agent_audit"]["subject"]["action_safety"], "read")
         self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
 
@@ -6673,7 +6675,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
         self.assertEqual(record.evaluation.status, "allowed")
         self.assertEqual(record.evaluation.intent, "every_code_rerun")
-        self.assertEqual(record.request.source_url, "https://github.com/cbusillo/launchplane/issues/386")
+        self.assertEqual(
+            record.request.source_url, "https://github.com/cbusillo/launchplane/issues/386"
+        )
         self.assertEqual(record.trace_id, payload["trace_id"])
 
     def test_agent_write_intent_evaluate_denies_ungranted_intent(self) -> None:
@@ -9314,8 +9318,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/odoo-tenant-cm",
                         workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml"
-                            "@refs/heads/main"
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
                         ),
                     )
                 ),
@@ -9382,8 +9385,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/odoo-tenant-cm",
                         workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml"
-                            "@refs/heads/main"
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
                         ),
                     )
                 ),
@@ -11141,13 +11143,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["changed"], True)
-        self.assertEqual(
-            payload["result"]["diff"]["new_github_humans_rule_count"], 2
+        self.assertEqual(payload["result"]["diff"]["new_github_humans_rule_count"], 2)
+        self.assertEqual(payload["result"]["audit"]["requested_grant_summary"]["login_count"], 1)
+        self.assertNotIn(
+            "alice",
+            json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True),
         )
-        self.assertEqual(
-            payload["result"]["audit"]["requested_grant_summary"]["login_count"], 1
-        )
-        self.assertNotIn("alice", json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True))
         self.assertEqual(repeat_status_code, 202)
         self.assertEqual(repeat_payload["result"]["changed"], False)
         self.assertTrue(
@@ -11350,12 +11351,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["changed"], True)
-        self.assertEqual(
-            payload["result"]["diff"]["new_terminal_agents_rule_count"], 1
-        )
-        self.assertEqual(
-            payload["result"]["audit"]["requested_grant_summary"]["subject_count"], 1
-        )
+        self.assertEqual(payload["result"]["diff"]["new_terminal_agents_rule_count"], 1)
+        self.assertEqual(payload["result"]["audit"]["requested_grant_summary"]["subject_count"], 1)
         self.assertNotIn(
             "local-owner-agent",
             json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True),
@@ -14282,12 +14279,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["authz"]["request"]["product"], "verireel")
         self.assertEqual(payload["authz"]["request"]["context"], "verireel-testing")
         self.assertEqual(payload["authz"]["agent_audit"]["decision"], "denied")
-        self.assertEqual(
-            payload["authz"]["agent_audit"]["reason_code"], "authorization_denied"
-        )
-        self.assertEqual(
-            payload["authz"]["agent_audit"]["subject"]["action_safety"], "safe_write"
-        )
+        self.assertEqual(payload["authz"]["agent_audit"]["reason_code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["agent_audit"]["subject"]["action_safety"], "safe_write")
         self.assertEqual(payload["authz"]["agent_audit"]["source_kind"], "authz_policy")
         self.assertIn("policy_sha256", payload["authz"])
         self.assertIn("policy_source", payload["authz"])
@@ -15082,6 +15075,145 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "instance": "testing",
                     },
                 },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_odoo_target_replacement_apply_driver_runs_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_target_replacement_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_stable_target_replacement_apply",
+                return_value=OdooStableTargetReplacementApplyResult(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    strategy="recreate-in-place",
+                    deployment_record_id="deployment-cm-testing",
+                    deploy_status="pass",
+                    post_deploy_status="pass",
+                    health_status="pass",
+                    canonical_status="pass",
+                    logo_status="pass",
+                    runtime_identity_injected=True,
+                ),
+            ) as apply_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "replacement": {
+                            "product": "odoo-tenant-cm",
+                            "instance": "testing",
+                            "strategy": "recreate-in-place",
+                            "allow_empty_data": False,
+                            "verify_health": True,
+                            "verify_canonical": True,
+                            "verify_logo": True,
+                        },
+                    },
+                    headers={"Idempotency-Key": "apply-cm-testing"},
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["deployment_record_id"], "deployment-cm-testing")
+            apply_mock.assert_called_once()
+            request = apply_mock.call_args.kwargs["request"]
+            self.assertTrue(request.verify_health)
+            self.assertFalse(request.allow_empty_data)
+
+    def test_odoo_target_replacement_apply_driver_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "workflow_refs": [
+                                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo-tenant-cm"],
+                                "contexts": ["cm"],
+                                "actions": ["odoo_target_replacement_plan.read"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/target-replacement-apply",
+                payload={
+                    "product": "odoo-tenant-cm",
+                    "replacement": {
+                        "product": "odoo-tenant-cm",
+                        "instance": "testing",
+                    },
+                },
+                headers={"Idempotency-Key": "apply-cm-testing"},
             )
 
             self.assertEqual(status_code, 403)
