@@ -1711,6 +1711,59 @@ class GenericWebPreviewTests(unittest.TestCase):
             ],
         )
 
+    def test_execute_generic_web_preview_destroy_fails_when_application_missing(self) -> None:
+        store = _GenericWebPreviewStore(_profile())
+        requests: list[dict[str, object]] = []
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            path = kwargs["path"]
+            if path == "/api/project.all":
+                return [
+                    {
+                        "environments": [
+                            {
+                                "applications": [
+                                    {
+                                        "applicationId": "app-99",
+                                        "name": "syo-preview-preview-99-site",
+                                    }
+                                ]
+                            }
+                        ]
+                    }
+                ]
+            return {}
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=["2026-04-30T21:00:00Z", "2026-04-30T21:00:02Z"],
+            ),
+        ):
+            result = execute_generic_web_preview_destroy(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewDestroyRequest(
+                    product="sellyouroutboard",
+                    preview_slug="preview-42-site",
+                    destroy_reason="test",
+                ),
+            )
+
+        self.assertEqual(result.destroy_status, "fail")
+        self.assertEqual(result.application_id, "")
+        self.assertIn("syo-preview-preview-42-site", result.error_message)
+        self.assertEqual([request["path"] for request in requests], ["/api/project.all"])
+
     def test_execute_generic_web_preview_destroy_deletes_odoo_compose_domain(self) -> None:
         store = _GenericWebPreviewStore(_odoo_compose_profile())
         requests: list[dict[str, object]] = []

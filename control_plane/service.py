@@ -840,6 +840,26 @@ class PreviewLifecycleCleanupEnvelope(BaseModel):
         return self
 
 
+class PreviewLifecycleSweepEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    source: str = "launchplane-preview-lifecycle"
+    product: str = ""
+    apply: bool = False
+    destroy_reason: str = "launchplane_preview_lifecycle_cleanup"
+    timeout_seconds: int = Field(default=300, ge=1)
+    max_pages: int = Field(default=10, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "PreviewLifecycleSweepEnvelope":
+        if not self.source.strip():
+            raise ValueError("preview lifecycle sweep requires source")
+        if not self.destroy_reason.strip():
+            raise ValueError("preview lifecycle sweep requires destroy_reason")
+        return self
+
+
 class PreviewPrFeedbackEnvelope(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2163,6 +2183,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/previews/pr-feedback",
         "/v1/previews/lifecycle-cleanup",
         "/v1/previews/lifecycle-plan",
+        "/v1/previews/lifecycle-sweep",
         "/v1/product-profiles",
         "/v1/evidence/promotions",
         "/v1/drivers/launchplane/self-deploy",
@@ -4757,6 +4778,183 @@ def _latest_preview_lifecycle_plan(
         limit=None,
     )
     return next((record for record in records if record.plan_id == plan_id), None)
+
+
+def _preview_lifecycle_cleanup_driver_id(profile: LaunchplaneProductProfileRecord) -> str:
+    if profile.driver_id == "verireel":
+        return "verireel"
+    try:
+        generic_web_compatible = _product_driver_compatible(
+            profile=profile,
+            expected_driver_id="generic-web",
+        )
+    except FileNotFoundError:
+        generic_web_compatible = False
+    if generic_web_compatible:
+        return "generic-web"
+    return ""
+
+
+def _preview_lifecycle_sweep_profiles(
+    *, record_store: object, product: str = ""
+) -> tuple[LaunchplaneProductProfileRecord, ...]:
+    if not hasattr(record_store, "list_product_profile_records"):
+        return ()
+    records = getattr(record_store, "list_product_profile_records")()
+    requested_product = product.strip()
+    profiles: list[LaunchplaneProductProfileRecord] = []
+    for record in records:
+        profile = LaunchplaneProductProfileRecord.model_validate(record)
+        if requested_product and profile.product != requested_product:
+            continue
+        if not profile.preview.enabled:
+            continue
+        if not profile.preview.context.strip():
+            continue
+        profiles.append(profile)
+    return tuple(sorted(profiles, key=lambda profile: profile.product))
+
+
+def _build_preview_lifecycle_sweep(
+    *,
+    control_plane_root: Path,
+    record_store: object,
+    request: PreviewLifecycleSweepEnvelope,
+) -> dict[str, object]:
+    profiles = _preview_lifecycle_sweep_profiles(
+        record_store=record_store,
+        product=request.product,
+    )
+    entries: list[dict[str, object]] = []
+    for profile in profiles:
+        cleanup_driver_id = _preview_lifecycle_cleanup_driver_id(profile)
+        entry: dict[str, object] = {
+            "product": profile.product,
+            "context": profile.preview.context,
+            "driver_id": profile.driver_id,
+            "cleanup_driver_id": cleanup_driver_id,
+        }
+        if not cleanup_driver_id:
+            entry.update(
+                {
+                    "status": "skipped",
+                    "error_message": (
+                        "Preview lifecycle cleanup is not implemented for this product driver."
+                    ),
+                }
+            )
+            entries.append(entry)
+            continue
+        if cleanup_driver_id == "verireel":
+            verireel_inventory_result = execute_verireel_preview_inventory(
+                control_plane_root=control_plane_root,
+                request=VeriReelPreviewInventoryRequest(context=profile.preview.context),
+            )
+            inventory_context = verireel_inventory_result.context
+            inventory_source = request.source
+            inventory_slugs = tuple(
+                item.previewSlug for item in verireel_inventory_result.previews
+            )
+        else:
+            generic_web_inventory_result = execute_generic_web_preview_inventory(
+                control_plane_root=control_plane_root,
+                record_store=cast(GenericWebPreviewProfileStore, record_store),
+                request=GenericWebPreviewInventoryRequest(
+                    product=profile.product,
+                    source=request.source,
+                ),
+                profile=profile,
+            )
+            inventory_context = generic_web_inventory_result.context
+            inventory_source = generic_web_inventory_result.source
+            inventory_slugs = tuple(
+                item.previewSlug for item in generic_web_inventory_result.previews
+            )
+        inventory_scan_id = _write_preview_inventory_scan_if_supported(
+            record_store=record_store,
+            context=inventory_context,
+            source=inventory_source,
+            preview_slugs=inventory_slugs,
+        )
+        desired_state = discover_generic_web_preview_desired_state(
+            control_plane_root=control_plane_root,
+            record_store=cast(GenericWebPreviewProfileStore, record_store),
+            request=GenericWebPreviewDesiredStateRequest(
+                product=profile.product,
+                source=request.source,
+                label=profile.preview.enable_label,
+                max_pages=request.max_pages,
+            ),
+            discovered_at=_utc_now_timestamp(),
+            profile=profile,
+        )
+        desired_state_id = _write_preview_desired_state_if_supported(
+            record_store=record_store,
+            record=desired_state,
+        )
+        lifecycle_plan = build_preview_lifecycle_plan(
+            product=profile.product,
+            context=profile.preview.context,
+            planned_at=_utc_now_timestamp(),
+            source=request.source,
+            desired_previews=desired_state.desired_previews,
+            desired_state_id=desired_state_id,
+            latest_inventory_scan=_latest_preview_inventory_scan(
+                record_store=record_store,
+                context_name=profile.preview.context,
+            ),
+        )
+        lifecycle_plan_id = _write_preview_lifecycle_plan_if_supported(
+            record_store=record_store,
+            record=lifecycle_plan,
+        )
+        cleanup_record = build_preview_lifecycle_cleanup_record(
+            plan=lifecycle_plan,
+            requested_at=_utc_now_timestamp(),
+            source=request.source,
+            apply=request.apply,
+            destroy_reason=request.destroy_reason,
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            timeout_seconds=request.timeout_seconds,
+            driver_id=cleanup_driver_id,
+            preview_slug_template=profile.preview.slug_template,
+        )
+        cleanup_id = _write_preview_lifecycle_cleanup_if_supported(
+            record_store=record_store,
+            record=cleanup_record,
+        )
+        entry.update(
+            {
+                "status": cleanup_record.status,
+                "preview_inventory_scan_id": inventory_scan_id,
+                "preview_desired_state_id": desired_state_id,
+                "preview_lifecycle_plan_id": lifecycle_plan_id,
+                "preview_lifecycle_cleanup_id": cleanup_id,
+                "desired_count": desired_state.desired_count,
+                "actual_count": len(lifecycle_plan.actual_slugs),
+                "orphaned_slugs": lifecycle_plan.orphaned_slugs,
+                "missing_slugs": lifecycle_plan.missing_slugs,
+                "destroyed_slugs": cleanup_record.destroyed_slugs,
+                "failed_slugs": cleanup_record.failed_slugs,
+                "blocked_slugs": cleanup_record.blocked_slugs,
+                "error_message": cleanup_record.error_message,
+            }
+        )
+        entries.append(entry)
+    status = "pass"
+    for entry in entries:
+        if entry.get("status") in {"fail", "blocked"}:
+            status = "fail"
+            break
+        if entry.get("status") == "skipped" and status != "fail":
+            status = "partial"
+    return {
+        "status": status,
+        "apply": request.apply,
+        "profile_count": len(entries),
+        "profiles": entries,
+    }
 
 
 def _write_preview_lifecycle_cleanup_if_supported(
@@ -9220,6 +9418,87 @@ def create_launchplane_service_app(
                     record=driver_result,
                 )
                 result = {"preview_lifecycle_cleanup_id": preview_lifecycle_cleanup_id}
+            elif path == "/v1/previews/lifecycle-sweep":
+                preview_lifecycle_sweep_request = PreviewLifecycleSweepEnvelope.model_validate(
+                    payload
+                )
+                requested_sweep_profiles = _preview_lifecycle_sweep_profiles(
+                    record_store=record_store,
+                    product=preview_lifecycle_sweep_request.product,
+                )
+                if preview_lifecycle_sweep_request.product.strip() and not requested_sweep_profiles:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=404,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "not_found",
+                                "message": "Preview lifecycle sweep found no enabled preview profile for the requested product.",
+                            },
+                        },
+                    )
+                denied_profile = next(
+                    (
+                        profile
+                        for profile in requested_sweep_profiles
+                        if not authz_policy.allows(
+                            identity=identity,
+                            action="preview_lifecycle.plan",
+                            product=profile.product,
+                            context=profile.preview.context,
+                        )
+                        or not authz_policy.allows(
+                            identity=identity,
+                            action="preview_lifecycle.cleanup",
+                            product=profile.product,
+                            context=profile.preview.context,
+                        )
+                    ),
+                    None,
+                )
+                if denied_profile is not None:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": (
+                                    "Workflow cannot sweep preview lifecycle for one or more"
+                                    " enabled product profiles."
+                                ),
+                            },
+                            "authz": _authz_diagnostic_payload(
+                                identity=identity,
+                                authz_policy_sha256_value=resolved_authz_policy_sha256,
+                                authz_policy_source=resolved_authz_policy_source,
+                                action="preview_lifecycle.cleanup",
+                                product=denied_profile.product,
+                                context=denied_profile.preview.context,
+                            ),
+                        },
+                    )
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = _build_preview_lifecycle_sweep(
+                    control_plane_root=resolved_root,
+                    record_store=record_store,
+                    request=preview_lifecycle_sweep_request,
+                )
+                result = {}
             else:
                 preview_destroyed_request = PreviewDestroyedEvidenceEnvelope.model_validate(payload)
                 if not authz_policy.allows(

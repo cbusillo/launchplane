@@ -405,19 +405,17 @@ allowed actions:
   - preview_destroyed.write
 ```
 
-Janitor backstop example:
+Launchplane preview lifecycle sweep example:
 
 ```text
-repository: example-org/verireel
-workflow_ref: example-org/verireel/.github/workflows/preview-janitor.yml@refs/heads/main
+repository: example-org/launchplane
+workflow_ref: example-org/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main
 event_name: schedule or workflow_dispatch
-allowed product: verireel
-allowed contexts: verireel-testing
+allowed products: all preview-enabled products
+allowed contexts: each preview-enabled product preview context
 allowed actions:
   - preview_lifecycle.plan
   - preview_lifecycle.cleanup
-  - verireel_preview_destroy.execute
-  - preview_destroyed.write
 ```
 
 Stable-lane examples:

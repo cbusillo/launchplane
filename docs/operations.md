@@ -751,19 +751,19 @@ live preview URL from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that
 returned URL with generation status and cleanup outcome.
 
 Launchplane now owns the preview lifecycle planning boundary. The scheduled
-Launchplane `Preview Lifecycle` workflow discovers desired preview anchors from
-GitHub PR label state through `POST /v1/previews/desired-state`, refreshes the
-provider inventory, calls `POST /v1/previews/lifecycle-plan`, then records
-cleanup through `POST /v1/previews/lifecycle-cleanup`. Cleanup defaults to
-report-only and destructive provider cleanup still requires explicit
-`apply=true` from an authorized GitHub Actions workflow. PR feedback goes
-through `POST /v1/previews/pr-feedback`; Launchplane renders and upserts the
-anchored PR comment when runtime GitHub credentials are available, then records
-delivery status. Refresh-capable workflows can publish neutral pending feedback
-before preview publish/provision/verify outcomes are known, then replace it with
-ready or failed feedback after the actual result. Product repos remain thin
-adapters for labels, artifact build facts, and product-specific health/config
-hints.
+Launchplane `Preview Lifecycle` workflow calls `POST /v1/previews/lifecycle-sweep`;
+the service derives the participating products from product profiles where
+`preview.enabled=true`, refreshes provider inventory, discovers desired preview
+anchors from GitHub PR label state, writes lifecycle plans, and records cleanup
+results. Cleanup defaults to report-only and destructive provider cleanup still
+requires explicit `apply=true` from an authorized GitHub Actions workflow.
+Preview-disabled products are excluded from the sweep. PR feedback goes through
+`POST /v1/previews/pr-feedback`; Launchplane renders and upserts the anchored PR
+comment when runtime GitHub credentials are available, then records delivery
+status. Refresh-capable workflows can publish neutral pending feedback before
+preview publish/provision/verify outcomes are known, then replace it with ready
+or failed feedback after the actual result. Product repos remain thin adapters
+for labels, artifact build facts, and product-specific health/config hints.
 
 ### VeriReel Preview Evidence Handoff
 
