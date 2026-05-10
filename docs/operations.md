@@ -719,9 +719,13 @@ call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
 existing compose target, domains, and explicit Odoo volume env keys; it re-syncs
 the Launchplane-rendered compose source, injects the runtime identity breadcrumb,
 triggers Dokploy deploy, runs Odoo post-deploy, verifies health/canonical/logo,
-and writes deployment plus inventory records. Do not manually delete canonical
-stable targets as a replacement shortcut; add the missing Launchplane apply
-coverage first, then use the service-backed workflow.
+and writes deployment plus inventory records. By default it deploys the artifact
+already recorded in current inventory. Operators may supply both `artifact_id`
+and `source_git_ref` to deploy a newly published stored artifact before it has
+become inventory; the service refuses mismatches against the stored artifact
+manifest. Do not manually delete canonical stable targets as a replacement
+shortcut; add the missing Launchplane apply coverage first, then use the
+service-backed workflow.
 
 Target replacement only reconciles the provider target and runtime envelope. If
 an intentionally empty CM testing lane needs its Odoo database and filestore

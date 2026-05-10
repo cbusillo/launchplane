@@ -44,12 +44,16 @@ class _Store:
         target_id_record: DokployTargetIdRecord | None = None,
         inventory: EnvironmentInventory | None = None,
         artifact_manifest: ArtifactIdentityManifest | None = None,
+        artifact_manifests: tuple[ArtifactIdentityManifest, ...] = (),
     ) -> None:
         self.profile = profile or _profile()
         self.target_record = target_record
         self.target_id_record = target_id_record
         self.inventory = inventory
-        self.artifact_manifest = artifact_manifest or _artifact_manifest()
+        self.artifact_manifests = {
+            manifest.artifact_id: manifest
+            for manifest in (artifact_manifests or (artifact_manifest or _artifact_manifest(),))
+        }
         self.deployment_records: list[DeploymentRecord] = []
         self.environment_inventories: list[EnvironmentInventory] = []
 
@@ -80,9 +84,9 @@ class _Store:
         return self.inventory
 
     def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest:
-        if artifact_id != self.artifact_manifest.artifact_id:
+        if artifact_id not in self.artifact_manifests:
             raise FileNotFoundError(artifact_id)
-        return self.artifact_manifest
+        return self.artifact_manifests[artifact_id]
 
     def write_deployment_record(self, record: DeploymentRecord) -> None:
         self.deployment_records.append(record)
@@ -145,14 +149,19 @@ def _inventory() -> EnvironmentInventory:
     )
 
 
-def _artifact_manifest() -> ArtifactIdentityManifest:
+def _artifact_manifest(
+    *,
+    artifact_id: str = "artifact-cm-testing",
+    source_commit: str = "abc123",
+    digest: str = "sha256:artifact",
+) -> ArtifactIdentityManifest:
     return ArtifactIdentityManifest(
-        artifact_id="artifact-cm-testing",
-        source_commit="abc123",
+        artifact_id=artifact_id,
+        source_commit=source_commit,
         enterprise_base_digest="sha256:enterprise",
         image=ArtifactImageReference(
             repository="ghcr.io/cbusillo/odoo-tenant-cm",
-            digest="sha256:artifact",
+            digest=digest,
             tags=("testing",),
         ),
     )
@@ -401,6 +410,156 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             store.environment_inventories[0].deployment_record_id,
             final_deployment.record_id,
         )
+
+    def test_apply_can_deploy_explicit_stored_artifact(self) -> None:
+        fresh_manifest = _artifact_manifest(
+            artifact_id="artifact-cm-fresh",
+            source_commit="fresh-sha",
+            digest="sha256:fresh",
+        )
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+            artifact_manifests=(_artifact_manifest(), fresh_manifest),
+        )
+        persisted_env = ""
+
+        def _fetch_target_payload(**_: object) -> JsonValue:
+            return {
+                "name": "cm-testing",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "services: {}",
+                "env": persisted_env
+                or "\n".join(
+                    (
+                        "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                        "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                        "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                    )
+                ),
+            }
+
+        def _update_env(*, env_text: str, **_: object) -> None:
+            nonlocal persisted_env
+            persisted_env = env_text
+
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fetch_target_payload,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={},
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
+            ) as sync_source,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
+                side_effect=_update_env,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.trigger_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.wait_for_target_deployment"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement._verify_health_url"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement._verify_canonical_url"
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement._verify_logo_route"
+            ),
+        ):
+            result = execute_odoo_stable_target_replacement_apply(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=OdooStableTargetReplacementApplyRequest(
+                    product="odoo-tenant-cm",
+                    instance="testing",
+                    artifact_id="artifact-cm-fresh",
+                    source_git_ref="fresh-sha",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(result.deploy_status, "pass")
+        self.assertEqual(result.artifact_id, "artifact-cm-fresh")
+        self.assertEqual(
+            result.image_reference,
+            "ghcr.io/cbusillo/odoo-tenant-cm@sha256:fresh",
+        )
+        self.assertIn("LAUNCHPLANE_ARTIFACT_ID=artifact-cm-fresh", persisted_env)
+        final_deployment = store.deployment_records[-1]
+        self.assertEqual(final_deployment.source_git_ref, "fresh-sha")
+        assert final_deployment.runtime_identity is not None
+        self.assertEqual(final_deployment.runtime_identity.artifact_id, "artifact-cm-fresh")
+        self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
+
+    def test_apply_refuses_explicit_artifact_source_mismatch(self) -> None:
+        store = _Store(
+            target_record=_target_record(),
+            target_id_record=_target_id_record(),
+            inventory=_inventory(),
+        )
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "cm-testing",
+                    "env": "\n".join(
+                        (
+                            "ODOO_DATA_VOLUME=cm_testing_odoo_data",
+                            "ODOO_LOG_VOLUME=cm_testing_odoo_logs",
+                            "ODOO_DB_VOLUME=cm_testing_odoo_db",
+                        )
+                    ),
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-123", "status": "success"},
+            ),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "source ref does not match"):
+                execute_odoo_stable_target_replacement_apply(
+                    control_plane_root=Path("."),
+                    record_store=store,
+                    request=OdooStableTargetReplacementApplyRequest(
+                        product="odoo-tenant-cm",
+                        instance="testing",
+                        artifact_id="artifact-cm-testing",
+                        source_git_ref="wrong-sha",
+                    ),
+                    dokploy_request=cast(DokployRequest, _request),
+                )
 
     def test_apply_refuses_blocked_plan(self) -> None:
         with self.assertRaises(click.ClickException):

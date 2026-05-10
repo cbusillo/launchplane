@@ -129,6 +129,8 @@ class OdooStableTargetReplacementPlan(BaseModel):
 
 
 class OdooStableTargetReplacementApplyRequest(OdooStableTargetReplacementRequest):
+    artifact_id: str = ""
+    source_git_ref: str = ""
     verify_health: bool = True
     verify_canonical: bool = True
     verify_logo: bool = True
@@ -138,9 +140,15 @@ class OdooStableTargetReplacementApplyRequest(OdooStableTargetReplacementRequest
 
     @model_validator(mode="after")
     def _validate_apply_request(self) -> "OdooStableTargetReplacementApplyRequest":
+        self.artifact_id = self.artifact_id.strip()
+        self.source_git_ref = self.source_git_ref.strip()
         if self.strategy != "recreate-in-place":
             raise ValueError(
                 "Odoo target replacement apply currently supports recreate-in-place only."
+            )
+        if bool(self.artifact_id) != bool(self.source_git_ref):
+            raise ValueError(
+                "Odoo target replacement apply requires artifact_id and source_git_ref together."
             )
         return self
 
@@ -691,7 +699,14 @@ def execute_odoo_stable_target_replacement_apply(
             "Odoo target replacement apply requires inventory source git ref evidence."
         )
 
-    artifact_manifest = record_store.read_artifact_manifest(plan.expected_artifact_id)
+    artifact_id = request.artifact_id or plan.expected_artifact_id
+    source_git_ref = request.source_git_ref or plan.expected_source_git_ref
+    artifact_manifest = record_store.read_artifact_manifest(artifact_id)
+    if artifact_manifest.source_commit != source_git_ref:
+        raise click.ClickException(
+            "Odoo target replacement apply source ref does not match stored artifact manifest. "
+            f"Request={source_git_ref} manifest={artifact_manifest.source_commit}."
+        )
     image_reference = _artifact_image_reference(artifact_manifest)
     target_name = (
         plan.current_target.target_name
@@ -711,8 +726,8 @@ def execute_odoo_stable_target_replacement_apply(
     ship_request = _build_ship_request(
         plan=plan,
         target_name=target_name,
-        artifact_id=plan.expected_artifact_id,
-        source_git_ref=plan.expected_source_git_ref,
+        artifact_id=artifact_id,
+        source_git_ref=source_git_ref,
         timeout_seconds=deploy_timeout_seconds,
         no_cache=request.no_cache,
     )
@@ -728,7 +743,7 @@ def execute_odoo_stable_target_replacement_apply(
     runtime_identity = _build_runtime_identity(
         plan=plan,
         deployment_record_id=deployment_record_id,
-        artifact_id=plan.expected_artifact_id,
+        artifact_id=artifact_id,
         image_reference=image_reference,
     )
 
@@ -755,7 +770,7 @@ def execute_odoo_stable_target_replacement_apply(
         deployment_record_id=deployment_record_id,
         target_id=target_id_record.target_id,
         target_name=resolved_target.target_name,
-        artifact_id=plan.expected_artifact_id,
+        artifact_id=artifact_id,
         image_reference=image_reference,
     )
 
