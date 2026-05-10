@@ -437,11 +437,14 @@ Current derived-state behavior:
 - `POST /v1/product-config/apply` exposes the same planner/writer through the
   authenticated service API for operator UI use. Submit `mode: "dry-run"` to
   preview with `product_config.plan`, then `mode: "apply"` with
-  `product_config.apply` after review. The service response is redacted and the
-  route rejects nested runtime or secret targets that differ from the authorized
-  top-level context/instance. It fails closed when secret writes are requested
-  without the Launchplane master encryption key in the service runtime or when
-  no active runtime key-safety policy allows the requested binding.
+  `product_config.apply` after review. Signed-in GitHub human operators can use
+  this route when their session has the exact product/context/action grant;
+  terminal-agent bearer credentials stay read-only and cannot apply product
+  config. The service response is redacted and the route rejects nested runtime
+  or secret targets that differ from the authorized top-level context/instance.
+  It fails closed when secret writes are requested without the Launchplane master
+  encryption key in the service runtime or when no active runtime key-safety
+  policy allows the requested binding.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.
@@ -646,15 +649,6 @@ Any exported release-tuple catalog is seed/reference material now, not live
 runtime authority. Pull requests flow through Launchplane preview records
 instead of a tracked long-lived `dev` tuple lane.
 
-The `Dokploy Legacy Dev Cleanup` workflow is a narrow one-time maintenance
-surface for retiring old provider targets that predate PR-based previews. It
-uses the emergency Dokploy repository secrets because those legacy targets are
-not Launchplane-owned records. Run it without `apply` first; apply requires the
-exact comma-separated target names from that dry-run and the confirmation phrase
-`delete legacy cm dev targets`. The cleanup code only selects names ending in
-`-dev` and refuses stable or PR-preview-shaped names such as `cm-testing`,
-`cm-prod`, and `pr-*`.
-
 Odoo PR previews use Odoo-shaped Launchplane driver routes over the same
 generic-web preview lifecycle. Product workflows call
 `POST /v1/drivers/odoo/preview-refresh` with a preview slug, preview URL, and
@@ -687,6 +681,23 @@ application-backed template if Odoo can be safely reduced to an application
 shape. Until that follow-up lands, CM previews are a single active staged target
 behind pre-existing DNS/nginx routing and are intended to make the client-visible
 Odoo system usable before full ephemeral preview infrastructure exists.
+
+For stable Odoo target replacement planning, use the read-only dry-run command
+before considering any provider mutation:
+
+```sh
+uv run launchplane odoo-targets replacement-plan \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --product odoo-tenant-cm \
+  --instance testing
+```
+
+The plan reads the product profile, Launchplane Dokploy target/id records,
+current inventory, live Dokploy target payload, domains, volume env keys, latest
+deployment, and expected runtime identity. It does not create, delete, deploy,
+or change routes. Later apply workflows must build on this plan and keep the
+same explicit volume, route, post-deploy, health, canonical URL, logo, and
+runtime identity checks.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
