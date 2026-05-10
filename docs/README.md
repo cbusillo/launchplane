@@ -15,6 +15,8 @@ Use these docs as the source of truth for `launchplane`.
   website or service repo operated by Launchplane.
 - [product-repo-contract.md](product-repo-contract.md) — thin product repo
   approval gate and new website repo checklist.
+- [preview-workflow-contract.md](preview-workflow-contract.md) — reusable thin
+  preview workflow event, idempotency, feedback, and migration contract.
 - [driver-descriptors.md](driver-descriptors.md) — provider-neutral driver
   descriptor, action safety, registry, and read-model endpoint contract.
 - [driver-development.md](driver-development.md) — when and how to add a new
