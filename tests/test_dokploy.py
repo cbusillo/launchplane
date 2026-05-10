@@ -2124,6 +2124,8 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
         self.assertIn("image: ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123", compose_file)
         self.assertIn("\n  web:", compose_file)
+        self.assertIn('- "${ODOO_WEB_HOST_PORT:-8069}:8069"', compose_file)
+        self.assertIn('- "${ODOO_LONGPOLL_HOST_PORT:-8072}:8072"', compose_file)
         self.assertIn("\n  database:", compose_file)
         self.assertIn("\n  script-runner:", compose_file)
         self.assertIn("name: ${ODOO_PROJECT_NAME:-odoo}", compose_file)
