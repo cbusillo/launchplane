@@ -944,6 +944,24 @@ jobs:
               pull_request \
               '*'
             post_syo_grant \
+              preview-control-plane.yml \
+              sellyouroutboard \
+              "$context_name" \
+              preview_pr_feedback.write \
+              "deploy:syo-preview-pr-feedback-${suffix}-grant" \
+              "syo-preview-pr-feedback-${suffix}" \
+              pull_request \
+              '*'
+            post_syo_grant \
+              preview-control-plane.yml \
+              sellyouroutboard \
+              "$context_name" \
+              preview_pr_feedback.write \
+              "deploy:syo-preview-unsupported-feedback-${suffix}-grant" \
+              "syo-preview-unsupported-feedback-${suffix}" \
+              pull_request_target \
+              '*'
+            post_syo_grant \
               preview-cleanup.yml \
               sellyouroutboard \
               "$context_name" \
