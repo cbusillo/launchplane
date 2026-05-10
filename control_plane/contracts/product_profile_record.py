@@ -22,6 +22,7 @@ class ProductOdooStableBootstrapPolicy(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
+    approval_issue_url: str = ""
     data_source_mode: Literal["empty"] = "empty"
     confirmation: str = ""
     expected_target_name: str = ""
@@ -32,6 +33,7 @@ class ProductOdooStableBootstrapPolicy(BaseModel):
 
     @model_validator(mode="after")
     def _validate_policy(self) -> "ProductOdooStableBootstrapPolicy":
+        self.approval_issue_url = self.approval_issue_url.strip()
         self.confirmation = self.confirmation.strip().lower()
         self.expected_target_name = self.expected_target_name.strip()
         normalized_domains: list[str] = []
@@ -51,6 +53,10 @@ class ProductOdooStableBootstrapPolicy(BaseModel):
                 normalized_domains.append(domain)
         self.expected_domains = tuple(normalized_domains)
         if self.enabled:
+            if not self.approval_issue_url:
+                raise ValueError(
+                    "enabled Odoo stable bootstrap policy requires approval_issue_url"
+                )
             if not self.confirmation:
                 raise ValueError("enabled Odoo stable bootstrap policy requires confirmation")
             if not self.expected_target_name:
