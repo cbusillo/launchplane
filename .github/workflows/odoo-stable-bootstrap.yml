@@ -157,11 +157,12 @@ jobs:
               --data "$payload" \
               "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/stable-bootstrap"
           })"
-          jq . odoo-stable-bootstrap.json
           if [ "$status_code" != "202" ]; then
             echo "Launchplane Odoo stable bootstrap failed with HTTP ${status_code}." >&2
+            cat odoo-stable-bootstrap.json >&2
             exit 1
           fi
+          jq . odoo-stable-bootstrap.json
           bootstrap_status="$(jq -r '.result.bootstrap_status // ""' odoo-stable-bootstrap.json)"
           post_deploy_status="$(jq -r '.result.post_deploy_status // ""' odoo-stable-bootstrap.json)"
           health_status="$(jq -r '.result.health_status // ""' odoo-stable-bootstrap.json)"
