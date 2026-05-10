@@ -844,9 +844,9 @@ jobs:
                     },
                     {
                       binding_key: "RESEND_API_KEY",
-                      secret_class: "prod_only",
+                      secret_class: "shared_safe",
                       allowed_contexts: ["sellyouroutboard"],
-                      allowed_instances: ["prod"]
+                      allowed_instances: ["testing", "prod"]
                     },
                     {
                       binding_key: "SMTP_PASSWORD",
