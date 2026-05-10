@@ -340,6 +340,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
             ) as sync_source,
             patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+            ) as ensure_domain,
+            patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
                 side_effect=_update_env,
             ) as update_env,
@@ -385,6 +388,13 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         )
         sync_source.assert_called_once()
         self.assertEqual(sync_source.call_args.kwargs["compose_name"], "cm-testing")
+        ensure_domain.assert_called_once_with(
+            host="host",
+            token="token",
+            compose_id="compose-cm-testing",
+            domain_host="cm-testing.shinycomputers.com",
+            runtime_port=8069,
+        )
         update_env.assert_called_once()
         trigger_deploy.assert_called_once()
         wait_deploy.assert_called_once()
@@ -465,6 +475,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.sync_dokploy_compose_raw_source"
             ) as sync_source,
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.ensure_compose_web_domain_route"
+            ),
             patch(
                 "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.update_dokploy_target_env",
                 side_effect=_update_env,
