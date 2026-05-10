@@ -1,0 +1,99 @@
+---
+name: Odoo Target Replacement Plan
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Odoo product profile key.
+        required: true
+        default: odoo-tenant-cm
+        type: string
+      instance:
+        description: Stable Odoo instance to inspect.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+          - prod
+      strategy:
+        description: Future replacement strategy to plan around.
+        required: true
+        default: recreate-in-place
+        type: choice
+        options:
+          - recreate-in-place
+          - replace-and-cutover
+      allow_empty_data:
+        description: Allow missing volume env keys for intentionally empty targets.
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: odoo-target-replacement-plan-${{ inputs.product }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  plan:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      PRODUCT: ${{ inputs.product }}
+      INSTANCE: ${{ inputs.instance }}
+      STRATEGY: ${{ inputs.strategy }}
+      ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
+      LAUNCHPLANE_DATABASE_URL: ${{ secrets.LAUNCHPLANE_DATABASE_URL }}
+      DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
+      DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+
+      - name: Install Python
+        run: uv python install 3.13
+
+      - name: Validate runtime inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRODUCT:?Missing product input}"
+          : "${INSTANCE:?Missing instance input}"
+          : "${STRATEGY:?Missing strategy input}"
+          if [ -z "${LAUNCHPLANE_DATABASE_URL:-}" ]; then
+            echo 'Missing LAUNCHPLANE_DATABASE_URL repository secret.' >&2
+            exit 1
+          fi
+          if [ -z "${DOKPLOY_HOST:-}" ] || [ -z "${DOKPLOY_TOKEN:-}" ]; then
+            echo 'Missing Launchplane emergency Dokploy repository secrets.' >&2
+            exit 1
+          fi
+
+      - name: Build replacement plan
+        shell: bash
+        run: |
+          set -euo pipefail
+          args=(
+            --product "$PRODUCT"
+            --instance "$INSTANCE"
+            --strategy "$STRATEGY"
+          )
+          if [ "$ALLOW_EMPTY_DATA" = "true" ]; then
+            args+=(--allow-empty-data)
+          fi
+          uv run launchplane odoo-targets replacement-plan "${args[@]}" \
+            | tee odoo-target-replacement-plan.json
+
+      - name: Upload replacement plan
+        uses: actions/upload-artifact@v5
+        with:
+          name: odoo-target-replacement-plan-${{ inputs.product }}-${{ inputs.instance }}
+          path: odoo-target-replacement-plan.json
