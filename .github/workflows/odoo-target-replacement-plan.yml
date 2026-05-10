@@ -33,6 +33,7 @@ name: Odoo Target Replacement Plan
 
 permissions:
   contents: read
+  id-token: write
 
 concurrency:
   group: odoo-target-replacement-plan-${{ inputs.product }}-${{ inputs.instance }}
@@ -48,19 +49,9 @@ jobs:
       INSTANCE: ${{ inputs.instance }}
       STRATEGY: ${{ inputs.strategy }}
       ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
-      LAUNCHPLANE_DATABASE_URL: ${{ secrets.LAUNCHPLANE_DATABASE_URL }}
-      DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
-      DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
     steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v7
-
-      - name: Install Python
-        run: uv python install 3.13
-
       - name: Validate runtime inputs
         shell: bash
         run: |
@@ -68,12 +59,8 @@ jobs:
           : "${PRODUCT:?Missing product input}"
           : "${INSTANCE:?Missing instance input}"
           : "${STRATEGY:?Missing strategy input}"
-          if [ -z "${LAUNCHPLANE_DATABASE_URL:-}" ]; then
-            echo 'Missing LAUNCHPLANE_DATABASE_URL repository secret.' >&2
-            exit 1
-          fi
-          if [ -z "${DOKPLOY_HOST:-}" ] || [ -z "${DOKPLOY_TOKEN:-}" ]; then
-            echo 'Missing Launchplane emergency Dokploy repository secrets.' >&2
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2
             exit 1
           fi
 
@@ -81,16 +68,46 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          args=(
-            --product "$PRODUCT"
-            --instance "$INSTANCE"
-            --strategy "$STRATEGY"
-          )
-          if [ "$ALLOW_EMPTY_DATA" = "true" ]; then
-            args+=(--allow-empty-data)
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          payload="$({
+            jq -n \
+              --arg product "$PRODUCT" \
+              --arg instance "$INSTANCE" \
+              --arg strategy "$STRATEGY" \
+              --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
+              '{
+                schema_version: 1,
+                product: $product,
+                replacement: {
+                  schema_version: 1,
+                  product: $product,
+                  instance: $instance,
+                  strategy: $strategy,
+                  allow_empty_data: $allow_empty_data
+                }
+              }'
+          })"
+          status_code="$({
+            curl -sS \
+              -o odoo-target-replacement-plan.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:${STRATEGY}:${ALLOW_EMPTY_DATA}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              --data "$payload" \
+              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/target-replacement-plan"
+          })"
+          jq . odoo-target-replacement-plan.json
+          if [ "$status_code" != "202" ]; then
+            echo "Launchplane Odoo target replacement plan failed with HTTP ${status_code}." >&2
+            exit 1
           fi
-          uv run launchplane odoo-targets replacement-plan "${args[@]}" \
-            | tee odoo-target-replacement-plan.json
 
       - name: Upload replacement plan
         uses: actions/upload-artifact@v5

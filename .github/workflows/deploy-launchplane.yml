@@ -1076,6 +1076,14 @@ jobs:
             live_target_runtime.apply \
             deploy:syo-live-target-runtime-apply-grant \
             syo-live-target-runtime-apply
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            odoo-target-replacement-plan.yml \
+            odoo-tenant-cm \
+            cm \
+            odoo_target_replacement_plan.read \
+            deploy:odoo-cm-target-replacement-plan-grant \
+            odoo-cm-target-replacement-plan
           post_syo_preview_grants \
             sellyouroutboard-testing \
             legacy-context
