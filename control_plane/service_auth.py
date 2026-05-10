@@ -46,8 +46,18 @@ class TerminalAgentIdentity:
     token_label: str
 
 
-LaunchplaneIdentity = GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity
-AgentConsumerSubjectType = Literal["github_actions", "github_human", "terminal_agent"]
+@dataclass(frozen=True)
+class LocalOperatorIdentity:
+    subject: str
+    token_label: str
+
+
+LaunchplaneIdentity = (
+    GitHubActionsIdentity | GitHubHumanIdentity | TerminalAgentIdentity | LocalOperatorIdentity
+)
+AgentConsumerSubjectType = Literal[
+    "github_actions", "github_human", "terminal_agent", "local_operator"
+]
 AgentConsumerAccessProfile = Literal[
     "automation_worker",
     "human_admin",
@@ -269,7 +279,7 @@ class AgentConsumerSubject(BaseModel):
     subject: str
     display_label: str
     access_profile: AgentConsumerAccessProfile
-    role: Literal["read_only", "admin", "worker"] = "read_only"
+    role: Literal["read_only", "admin", "worker", "operator"] = "read_only"
     product: str = ""
     context: str = ""
     action: str = ""
@@ -348,6 +358,20 @@ def agent_consumer_subject(
             read_only_context=True,
             approval_capable=False,
         )
+    if isinstance(identity, LocalOperatorIdentity):
+        return AgentConsumerSubject(
+            subject_type="local_operator",
+            subject=identity.subject,
+            display_label=identity.token_label,
+            access_profile="owner_local_agent",
+            role="operator",
+            product=product,
+            context=context,
+            action=action,
+            action_safety=safety,
+            read_only_context=safety == "read",
+            approval_capable=safety in {"mutation", "prod", "destructive", "secret_backed"},
+        )
     return AgentConsumerSubject(
         subject_type="github_actions",
         subject=identity.subject or identity.workflow_ref,
@@ -359,7 +383,8 @@ def agent_consumer_subject(
         action=action,
         action_safety=safety,
         read_only_context=safety == "read",
-        approval_capable=safety in {"mutation", "prod", "destructive", "secret_backed", "policy_admin"},
+        approval_capable=safety
+        in {"mutation", "prod", "destructive", "secret_backed", "policy_admin"},
     )
 
 
@@ -414,6 +439,8 @@ class LaunchplaneAuthzPolicy(BaseModel):
                 rule.allows(identity=identity, action=action, product=product, context=context)
                 for rule in self.terminal_agents
             )
+        if isinstance(identity, LocalOperatorIdentity):
+            return action_safety(action) != "policy_admin"
         return any(
             rule.allows(identity=identity, action=action, product=product, context=context)
             for rule in self.github_actions

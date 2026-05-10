@@ -14,6 +14,7 @@ from control_plane.service_auth import (
     GitHubHumanPolicyRule,
     GitHubOidcVerifier,
     LaunchplaneAuthzPolicy,
+    LocalOperatorIdentity,
     TerminalAgentIdentity,
     TerminalAgentPolicyRule,
     action_safety,
@@ -89,6 +90,18 @@ def _terminal_agent_identity(**overrides: object) -> TerminalAgentIdentity:
     }
     values.update(overrides)
     return TerminalAgentIdentity(
+        subject=str(values["subject"]),
+        token_label=str(values["token_label"]),
+    )
+
+
+def _local_operator_identity(**overrides: object) -> LocalOperatorIdentity:
+    values: dict[str, object] = {
+        "subject": "local-owner-agent",
+        "token_label": "local-owner-write",
+    }
+    values.update(overrides)
+    return LocalOperatorIdentity(
         subject=str(values["subject"]),
         token_label=str(values["token_label"]),
     )
@@ -182,6 +195,23 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         self.assertEqual(subject.action_safety, "read")
         self.assertTrue(subject.read_only_context)
         self.assertFalse(subject.approval_capable)
+
+    def test_agent_consumer_subject_classifies_local_operator_as_approval_capable(
+        self,
+    ) -> None:
+        subject = agent_consumer_subject(
+            identity=_local_operator_identity(),
+            action="product_config.apply",
+            product="sellyouroutboard",
+            context="sellyouroutboard",
+        )
+
+        self.assertEqual(subject.subject_type, "local_operator")
+        self.assertEqual(subject.access_profile, "owner_local_agent")
+        self.assertEqual(subject.role, "operator")
+        self.assertEqual(subject.action_safety, "mutation")
+        self.assertFalse(subject.read_only_context)
+        self.assertTrue(subject.approval_capable)
 
     def test_agent_consumer_subject_classifies_human_admin_as_approval_capable(self) -> None:
         subject = agent_consumer_subject(
@@ -483,11 +513,35 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
         denied_cases = (
-            ("subject", _terminal_agent_identity(subject="other-agent"), "sellyouroutboard", "sellyouroutboard-testing", "product_environment.read"),
-            ("token_label", _terminal_agent_identity(token_label="write-token"), "sellyouroutboard", "sellyouroutboard-testing", "product_environment.read"),
-            ("product", identity, "other-product", "sellyouroutboard-testing", "product_environment.read"),
+            (
+                "subject",
+                _terminal_agent_identity(subject="other-agent"),
+                "sellyouroutboard",
+                "sellyouroutboard-testing",
+                "product_environment.read",
+            ),
+            (
+                "token_label",
+                _terminal_agent_identity(token_label="write-token"),
+                "sellyouroutboard",
+                "sellyouroutboard-testing",
+                "product_environment.read",
+            ),
+            (
+                "product",
+                identity,
+                "other-product",
+                "sellyouroutboard-testing",
+                "product_environment.read",
+            ),
             ("context", identity, "sellyouroutboard", "other-context", "product_environment.read"),
-            ("action", identity, "sellyouroutboard", "sellyouroutboard-testing", "generic_web_prod_promotion.execute"),
+            (
+                "action",
+                identity,
+                "sellyouroutboard",
+                "sellyouroutboard-testing",
+                "generic_web_prod_promotion.execute",
+            ),
         )
         for name, case_identity, product, context, action in denied_cases:
             with self.subTest(name=name):
@@ -527,6 +581,27 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
                 action="product_environment.read",
                 product="sellyouroutboard",
                 context="sellyouroutboard-testing",
+            )
+        )
+
+    def test_local_operator_policy_allows_non_policy_admin_actions(self) -> None:
+        policy = LaunchplaneAuthzPolicy()
+        identity = _local_operator_identity()
+
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="product_config.apply",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="authz_policy.grant_terminal_agent",
+                product="launchplane",
+                context="launchplane",
             )
         )
         self.assertFalse(

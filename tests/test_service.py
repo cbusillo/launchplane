@@ -29,7 +29,9 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.merge_train_policy import build_sellyouroutboard_main_merge_train_policy
+from control_plane.contracts.merge_train_policy import (
+    build_sellyouroutboard_main_merge_train_policy,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -620,8 +622,10 @@ def _product_config_payload() -> dict[str, object]:
     }
 
 
-def _meta_product_config_payload(*, mode: str = "dry-run") -> dict[str, object]:
-    return {
+def _meta_product_config_payload(
+    *, mode: str = "dry-run", reason: str | None = None
+) -> dict[str, object]:
+    payload: dict[str, object] = {
         "schema_version": 1,
         "mode": mode,
         "product": "sellyouroutboard",
@@ -644,6 +648,9 @@ def _meta_product_config_payload(*, mode: str = "dry-run") -> dict[str, object]:
             }
         ],
     }
+    if reason is not None:
+        payload["reason"] = reason
+    return payload
 
 
 def _github_webhook_signature(payload: Mapping[str, object], secret: str) -> str:
@@ -1433,9 +1440,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     app,
                     method="GET",
                     path="/v1/work-graph/merge-train/admission",
-                    query_string=(
-                        "repository=cbusillo/sellyouroutboard&base_branch=main"
-                    ),
+                    query_string=("repository=cbusillo/sellyouroutboard&base_branch=main"),
                 )
 
         self.assertEqual(status_code, 200)
@@ -2816,8 +2821,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         preview_validation = ok_response["result"]["preview_validation"]
         self.assertEqual(preview_validation["command"], "ok")
         self.assertEqual(preview_validation["merge_owner"], "cbusillo")
-        self.assertEqual(github_request.call_args_list[3].kwargs["body"], {"labels": ["ready-to-merge"]})
-        self.assertEqual(github_request.call_args_list[5].kwargs["body"], {"assignees": ["cbusillo"]})
+        self.assertEqual(
+            github_request.call_args_list[3].kwargs["body"], {"labels": ["ready-to-merge"]}
+        )
+        self.assertEqual(
+            github_request.call_args_list[5].kwargs["body"], {"assignees": ["cbusillo"]}
+        )
         create_comment.assert_called_once()
         self.assertIn("@cbusillo", create_comment.call_args.kwargs["body"])
 
@@ -3725,7 +3734,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(write_status, 202, write_response)
         self.assertEqual(write_response["records"]["feedback_id"], feedback_record.feedback_id)
-        self.assertEqual(write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id)
+        self.assertEqual(
+            write_response["result"]["feedback"]["feedback_id"], feedback_record.feedback_id
+        )
         self.assertEqual(list_status, 200, list_response)
         self.assertEqual(len(list_response["feedback"]), 1)
         self.assertEqual(list_response["feedback"][0]["feedback_id"], feedback_record.feedback_id)
@@ -4988,9 +4999,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         sections = payload["context"]["sections"]
         self.assertEqual(sections["repo_product_mapping"]["status"], "available")
         self.assertEqual(sections["work_graph_snapshot"]["status"], "unavailable")
-        self.assertEqual(
-            sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable"
-        )
+        self.assertEqual(sections["work_graph_snapshot"]["reason_code"], "work_graph_unavailable")
         self.assertEqual(sections["every_code_summary"]["status"], "available")
 
     def test_health_endpoint_reports_storage_backend(self) -> None:
@@ -5897,8 +5906,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             item["key"]: item["status"] for item in config_status["runtime_settings"]
         }
         secret_statuses = {
-            item["binding_key"]: item["status"]
-            for item in config_status["managed_secrets"]
+            item["binding_key"]: item["status"] for item in config_status["managed_secrets"]
         }
         self.assertEqual(
             runtime_statuses,
@@ -6571,9 +6579,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertTrue(payload["authz"]["agent_consumer"]["read_only_context"])
         self.assertFalse(payload["authz"]["agent_consumer"]["approval_capable"])
         self.assertEqual(payload["authz"]["agent_audit"]["decision"], "denied")
-        self.assertEqual(
-            payload["authz"]["agent_audit"]["reason_code"], "authorization_denied"
-        )
+        self.assertEqual(payload["authz"]["agent_audit"]["reason_code"], "authorization_denied")
         self.assertEqual(payload["authz"]["agent_audit"]["subject"]["action_safety"], "read")
         self.assertEqual(payload["authz"]["policy_source"], "bootstrap_seeded_store")
 
@@ -6670,7 +6676,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(intent["audit"]["subject"]["action_safety"], "safe_write")
         self.assertEqual(record.evaluation.status, "allowed")
         self.assertEqual(record.evaluation.intent, "every_code_rerun")
-        self.assertEqual(record.request.source_url, "https://github.com/cbusillo/launchplane/issues/386")
+        self.assertEqual(
+            record.request.source_url, "https://github.com/cbusillo/launchplane/issues/386"
+        )
         self.assertEqual(record.trace_id, payload["trace_id"])
 
     def test_agent_write_intent_evaluate_denies_ungranted_intent(self) -> None:
@@ -7512,6 +7520,208 @@ class LaunchplaneServiceTests(unittest.TestCase):
             payload["error"]["message"],
             "Terminal agent credentials can only read redacted Launchplane context.",
         )
+
+    def test_product_config_api_local_operator_dry_run_returns_redacted_meta_plan(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
+                },
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(
+                        reason="Dry-run SellYourOutBoard Meta config from terminal operator."
+                    ),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-local-operator-dry-run"},
+                )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            try:
+                runtime_records = store.list_runtime_environment_records()
+                secret_records = store.list_secret_records()
+            finally:
+                store.close()
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry-run")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("123456789012345", response_text)
+        self.assertNotIn("meta-conversions-api-secret-value", response_text)
+        self.assertEqual(runtime_records, ())
+        self.assertEqual(secret_records, ())
+
+    def test_product_config_api_local_operator_apply_requires_reason(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(mode="apply"),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-local-operator-no-reason"},
+                )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "reason_required")
+
+    def test_product_config_api_local_operator_apply_requires_matching_dry_run(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+
+            with patch.dict(
+                os.environ,
+                {"LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(
+                        mode="apply",
+                        reason="Apply reviewed SellYourOutBoard Meta config from terminal operator.",
+                    ),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-local-operator-no-dry-run"},
+                )
+
+        self.assertEqual(status_code, 409)
+        self.assertEqual(payload["error"]["code"], "matching_dry_run_required")
+
+    def test_product_config_api_local_operator_apply_writes_meta_config_after_dry_run(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=LaunchplaneAuthzPolicy(),
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            _write_runtime_key_safety_policy(
+                database_url=database_url,
+                rules=(
+                    RuntimeSecretSafetyRule(
+                        binding_key="META_CONVERSIONS_API_TOKEN",
+                        secret_class="prod_only",
+                        allowed_contexts=("sellyouroutboard",),
+                        allowed_instances=("prod",),
+                    ),
+                ),
+            )
+
+            with patch.dict(
+                os.environ,
+                {
+                    control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key",
+                    "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                },
+                clear=True,
+            ):
+                dry_run_status_code, dry_run_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(
+                        reason="Dry-run SellYourOutBoard Meta config from terminal operator."
+                    ),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-local-operator-apply-dry-run"},
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=_meta_product_config_payload(
+                        mode="apply",
+                        reason="Apply reviewed SellYourOutBoard Meta config from terminal operator.",
+                    ),
+                    authorization="Bearer local-operator-token",
+                    headers={"Idempotency-Key": "product-config-local-operator-apply"},
+                )
+                store = PostgresRecordStore(database_url=database_url)
+                store.ensure_schema()
+                try:
+                    runtime_records = store.list_runtime_environment_records()
+                    secret_records = store.list_secret_records()
+                    secret_binding = store.list_secret_bindings(limit=None)[0]
+                finally:
+                    store.close()
+
+        response_text = json.dumps(payload, sort_keys=True)
+        self.assertEqual(dry_run_status_code, 202)
+        self.assertEqual(dry_run_payload["result"]["mode"], "dry-run")
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["runtime_environment"]["action"], "created")
+        self.assertEqual(payload["result"]["secrets"][0]["action"], "created")
+        self.assertNotIn("123456789012345", response_text)
+        self.assertNotIn("meta-conversions-api-secret-value", response_text)
+        self.assertEqual(len(runtime_records), 1)
+        self.assertEqual(runtime_records[0].env["NEXT_PUBLIC_META_PIXEL_ID"], "123456789012345")
+        self.assertEqual(len(secret_records), 1)
+        self.assertEqual(secret_records[0].name, "META_CONVERSIONS_API_TOKEN")
+        self.assertEqual(secret_binding.binding_key, "META_CONVERSIONS_API_TOKEN")
 
     def test_product_config_api_rejects_missing_master_key_for_secret_bundle(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9311,8 +9521,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/odoo-tenant-cm",
                         workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml"
-                            "@refs/heads/main"
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
                         ),
                     )
                 ),
@@ -9379,8 +9588,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     _identity(
                         repository="cbusillo/odoo-tenant-cm",
                         workflow_ref=(
-                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml"
-                            "@refs/heads/main"
+                            "cbusillo/odoo-tenant-cm/.github/workflows/preview.yml@refs/heads/main"
                         ),
                     )
                 ),
@@ -11138,13 +11346,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["changed"], True)
-        self.assertEqual(
-            payload["result"]["diff"]["new_github_humans_rule_count"], 2
+        self.assertEqual(payload["result"]["diff"]["new_github_humans_rule_count"], 2)
+        self.assertEqual(payload["result"]["audit"]["requested_grant_summary"]["login_count"], 1)
+        self.assertNotIn(
+            "alice",
+            json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True),
         )
-        self.assertEqual(
-            payload["result"]["audit"]["requested_grant_summary"]["login_count"], 1
-        )
-        self.assertNotIn("alice", json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True))
         self.assertEqual(repeat_status_code, 202)
         self.assertEqual(repeat_payload["result"]["changed"], False)
         self.assertTrue(
@@ -11347,12 +11554,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["changed"], True)
-        self.assertEqual(
-            payload["result"]["diff"]["new_terminal_agents_rule_count"], 1
-        )
-        self.assertEqual(
-            payload["result"]["audit"]["requested_grant_summary"]["subject_count"], 1
-        )
+        self.assertEqual(payload["result"]["diff"]["new_terminal_agents_rule_count"], 1)
+        self.assertEqual(payload["result"]["audit"]["requested_grant_summary"]["subject_count"], 1)
         self.assertNotIn(
             "local-owner-agent",
             json.dumps(payload["result"]["audit"]["requested_grant_summary"], sort_keys=True),
@@ -14216,12 +14419,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["authz"]["request"]["product"], "verireel")
         self.assertEqual(payload["authz"]["request"]["context"], "verireel-testing")
         self.assertEqual(payload["authz"]["agent_audit"]["decision"], "denied")
-        self.assertEqual(
-            payload["authz"]["agent_audit"]["reason_code"], "authorization_denied"
-        )
-        self.assertEqual(
-            payload["authz"]["agent_audit"]["subject"]["action_safety"], "safe_write"
-        )
+        self.assertEqual(payload["authz"]["agent_audit"]["reason_code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["agent_audit"]["subject"]["action_safety"], "safe_write")
         self.assertEqual(payload["authz"]["agent_audit"]["source_kind"], "authz_policy")
         self.assertIn("policy_sha256", payload["authz"])
         self.assertIn("policy_source", payload["authz"])
