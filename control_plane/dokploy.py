@@ -139,6 +139,9 @@ services:
     volumes:
       - odoo_data:/volumes/data
       - odoo_logs:/volumes/logs
+    ports:
+      - "${{ODOO_WEB_HOST_PORT:-8069}}:8069"
+      - "${{ODOO_LONGPOLL_HOST_PORT:-8072}}:8072"
     environment:
       <<: *odoo-env
     healthcheck:
