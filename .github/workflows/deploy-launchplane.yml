@@ -853,6 +853,12 @@ jobs:
                       secret_class: "prod_only",
                       allowed_contexts: ["sellyouroutboard"],
                       allowed_instances: ["prod"]
+                    },
+                    {
+                      binding_key: "META_CONVERSIONS_API_TOKEN",
+                      secret_class: "shared_safe",
+                      allowed_contexts: ["sellyouroutboard"],
+                      allowed_instances: ["testing", "prod"]
                     }
                   ]
                 }'
