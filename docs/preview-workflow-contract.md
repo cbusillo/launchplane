@@ -97,6 +97,13 @@ Preview refresh routes receive only product-local facts:
 - run URL
 - primitive smoke/readiness facts when the check is product-specific
 
+Odoo CM is the exception where Launchplane now owns the stage-preview smoke
+contract after refresh: `/web/health`, `/cm-website/health`, `/cell-mechanic`,
+artifact/revision evidence, and module install/update evidence. Product
+workflows should treat the Odoo refresh route's `refresh_status="pass"` as the
+ready-to-comment signal instead of independently deciding readiness from raw
+health checks.
+
 Preview destroy routes receive the PR number, source/run metadata, and an
 explicit destroy reason such as `pull_request_closed`, `preview_label_removed`,
 or `manual_destroy_requested`.

@@ -4651,7 +4651,12 @@ def _apply_generic_web_preview_refresh_records(
     )
     finished_at = driver_result.refresh_finished_at.strip() or requested_at
     refresh_passed = driver_result.refresh_status == "pass"
+    smoke = driver_result.smoke
+    smoke_passed = smoke is not None and smoke.smoke_status == "pass"
+    smoke_failed = smoke is not None and smoke.smoke_status == "fail"
     failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
+    if smoke is not None and smoke_failed and smoke.failure_summary.strip():
+        failure_summary = smoke.failure_summary.strip()
     preview_request = PreviewMutationRequest(
         context=profile.preview.context,
         anchor_repo=_generic_web_preview_anchor_repo(profile),
@@ -4662,7 +4667,7 @@ def _apply_generic_web_preview_refresh_records(
             anchor_pr_number=anchor_pr_number,
         ),
         canonical_url=driver_result.preview_url.strip() or request.preview_url.strip(),
-        state="pending" if refresh_passed else "failed",
+        state=("active" if smoke_passed else "pending" if refresh_passed else "failed"),
         created_at=requested_at,
         updated_at=finished_at,
         eligible_at=requested_at,
@@ -4673,18 +4678,35 @@ def _apply_generic_web_preview_refresh_records(
         anchor_pr_number=anchor_pr_number,
         anchor_pr_url=preview_request.anchor_pr_url,
         anchor_head_sha=_generic_web_preview_anchor_head_sha(request),
-        state="verifying" if refresh_passed else "failed",
+        state=("ready" if smoke_passed else "verifying" if refresh_passed else "failed"),
         requested_reason="external_preview_refresh",
         requested_at=requested_at,
         started_at=requested_at,
-        finished_at="" if refresh_passed else finished_at,
-        failed_at="" if refresh_passed else finished_at,
+        ready_at=finished_at if smoke_passed else "",
+        finished_at=finished_at if smoke_passed or not refresh_passed else "",
+        failed_at=finished_at if not refresh_passed else "",
         resolved_manifest_fingerprint=_generic_web_preview_manifest_fingerprint(request),
         artifact_id=request.image_reference,
-        deploy_status="pass" if refresh_passed else "fail",
-        verify_status="pending" if refresh_passed else "skipped",
-        overall_health_status="pending" if refresh_passed else "fail",
-        failure_stage="" if refresh_passed else "provision",
+        deploy_status="pass" if refresh_passed or smoke_failed else "fail",
+        verify_status=(
+            "pass"
+            if smoke_passed
+            else "fail"
+            if smoke_failed
+            else "pending"
+            if refresh_passed
+            else "skipped"
+        ),
+        overall_health_status=(
+            "pass"
+            if smoke_passed
+            else "fail"
+            if smoke_failed
+            else "pending"
+            if refresh_passed
+            else "fail"
+        ),
+        failure_stage="" if refresh_passed else "verify" if smoke_failed else "provision",
         failure_summary="" if refresh_passed else failure_summary,
     )
     typed_record_store = cast(FilesystemRecordStore, record_store)
@@ -7618,8 +7640,8 @@ def create_launchplane_service_app(
                     ),
                 }
             elif path == _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path:
-                odoo_bootstrap_request = (
-                    _ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(payload)
+                odoo_bootstrap_request = _ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(
+                    payload
                 )
                 _, authorization_response = _resolve_and_authorize_descriptor_route(
                     route_metadata=_ODOO_STABLE_BOOTSTRAP_ROUTE,

@@ -155,6 +155,13 @@ preview slug template. This exception is route-scoped to Odoo preview refresh,
 inventory, destroy, and readiness; it does not grant Odoo products access to
 stable generic-web deploy or promotion routes, and it does not make compose
 templates valid for generic-web products.
+For the CM staged preview contract, Odoo preview refresh also runs Launchplane-
+owned smoke before reporting `refresh_status="pass"`: image artifact evidence,
+source revision evidence, module install/update evidence from rendered Odoo env,
+`/web/health`, `/cm-website/health`, and `/cell-mechanic`. Passing smoke records
+the preview generation as `ready` with deploy, verify, and overall health status
+`pass`; failed smoke records a concise verification failure so PR feedback does
+not advertise ready before the checks pass.
 
 Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
 instance-scoped action. The first implementation is policy-limited to CM testing
