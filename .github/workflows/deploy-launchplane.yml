@@ -979,6 +979,49 @@ jobs:
               "syo-preview-destroy-manual-${suffix}"
           }
 
+          post_launchplane_preview_lifecycle_grant() {
+            local product_name="$1"
+            local context_name="$2"
+            local event_name="$3"
+            local suffix="$4"
+            post_grant \
+              "$GITHUB_REPOSITORY" \
+              preview-lifecycle.yml \
+              "$product_name" \
+              "$context_name" \
+              preview_lifecycle.plan \
+              "deploy:preview-lifecycle-plan-${suffix}-grant" \
+              "preview-lifecycle-plan-${suffix}" \
+              "$event_name" \
+              refs/heads/main
+            post_grant \
+              "$GITHUB_REPOSITORY" \
+              preview-lifecycle.yml \
+              "$product_name" \
+              "$context_name" \
+              preview_lifecycle.cleanup \
+              "deploy:preview-lifecycle-cleanup-${suffix}-grant" \
+              "preview-lifecycle-cleanup-${suffix}" \
+              "$event_name" \
+              refs/heads/main
+          }
+
+          post_launchplane_preview_lifecycle_grants() {
+            local product_name="$1"
+            local context_name="$2"
+            local suffix="$3"
+            post_launchplane_preview_lifecycle_grant \
+              "$product_name" \
+              "$context_name" \
+              workflow_dispatch \
+              "${suffix}-manual"
+            post_launchplane_preview_lifecycle_grant \
+              "$product_name" \
+              "$context_name" \
+              schedule \
+              "${suffix}-schedule"
+          }
+
           post_verireel_preview_grant() {
             local workflow_file="$1"
             local action_name="$2"
@@ -1165,6 +1208,22 @@ jobs:
           post_syo_preview_grants \
             sellyouroutboard \
             canonical-context
+          post_launchplane_preview_lifecycle_grants \
+            sellyouroutboard \
+            sellyouroutboard-testing \
+            syo-legacy-context
+          post_launchplane_preview_lifecycle_grants \
+            sellyouroutboard \
+            sellyouroutboard \
+            syo-canonical-context
+          post_launchplane_preview_lifecycle_grants \
+            verireel \
+            verireel-testing \
+            verireel-testing
+          post_launchplane_preview_lifecycle_grants \
+            odoo-tenant-cm \
+            cm \
+            odoo-cm
           post_verireel_preview_grant \
             preview-control-plane.yml \
             preview_pr_feedback.write \
