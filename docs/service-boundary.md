@@ -171,6 +171,22 @@ Policy still scopes which redacted read actions and product/context pairs the
 agent can access, such as `product_environment.read` for product environment and
 config-status diagnostics.
 
+Trusted owner terminals that need to make Launchplane-owned product config
+changes can use a separate local-operator bearer credential instead of a
+browser OAuth session. Configure `LAUNCHPLANE_LOCAL_OPERATOR_TOKEN` on the
+service and provide the same secret to trusted local agents through
+`~/.config/launchplane/local-operator.env`. Optional
+`LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT` and
+`LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL` values identify the actor in audit and
+idempotency records; the defaults are `local-owner-agent` and
+`local-owner-write`. Local-operator product-config requests must include a
+non-empty `reason`; apply is rejected until the service has recorded a matching
+local-operator dry-run for the same product config payload. These requests still
+use Launchplane records, redacted responses, runtime key-safety policy, and
+managed secret storage. The local-operator identity is not accepted for authz
+policy administration, so the credential cannot rewrite its own permission
+model.
+
 `GET /v1/every-code/summary` returns a compact agent-safe projection of Every
 Code work requests. It requires `every_code_work_request.read` for
 product/context `launchplane` and supports `repository`, `issue_number`,
@@ -466,6 +482,10 @@ subject model before diagnostics or downstream intent contracts consume them:
   read bearer token. These subjects are always read-only context consumers and
   cannot use POST routes, product mutations, authz policy changes, destructive
   cleanup, or secret-backed actions even if a policy rule is too broad.
+- `local_operator`: trusted owner terminal agents authenticated by the dedicated
+  write bearer token. These subjects can use Launchplane mutation routes such as
+  product-config apply from a trusted shell with a required reason, but cannot
+  administer authz policy.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
@@ -563,9 +583,12 @@ Product config writes use `POST /v1/product-config/apply`. The request carries
 `mode: "dry-run"` or `mode: "apply"`, product/context/instance, non-secret
 runtime values, and write-only managed secret values. Dry-run requires the
 `product_config.plan` action; apply requires `product_config.apply`. The route
-accepts GitHub Actions OIDC callers and signed-in GitHub human sessions, but
-terminal-agent bearer credentials remain read-only and cannot execute the
-mutation. The route authorizes the top-level product/context/instance target and
+accepts GitHub Actions OIDC callers, signed-in GitHub human sessions, and the
+dedicated local-operator bearer credential with a non-empty `reason`, but
+terminal-agent read bearer credentials remain read-only and cannot execute the
+mutation. Local-operator apply requests additionally require a previously
+recorded matching local-operator dry-run. The route authorizes the top-level
+product/context/instance target and
 rejects nested runtime or secret targets that try to broaden or change that
 authorized target. It reuses the same planner/writer as
 `launchplane product-config apply`, returns only actions, keys, counts,
