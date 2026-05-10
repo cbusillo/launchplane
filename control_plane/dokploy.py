@@ -1071,6 +1071,85 @@ def sync_dokploy_compose_raw_source(
     )
 
 
+def ensure_compose_web_domain_route(
+    *,
+    host: str,
+    token: str,
+    compose_id: str,
+    domain_host: str,
+    runtime_port: int,
+) -> str:
+    normalized_compose_id = compose_id.strip()
+    normalized_domain_host = domain_host.strip()
+    if not normalized_compose_id:
+        raise click.ClickException("Compose domain route reconciliation requires a compose id.")
+    if not normalized_domain_host:
+        raise click.ClickException("Compose domain route reconciliation requires a domain host.")
+    if runtime_port <= 0:
+        raise click.ClickException("Compose domain route reconciliation requires a positive port.")
+
+    raw_domains = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.byComposeId",
+        query={"composeId": normalized_compose_id},
+    )
+    domains = raw_domains if isinstance(raw_domains, list) else []
+    existing: JsonObject | None = None
+    for raw_domain in domains:
+        domain = as_json_object(raw_domain)
+        if domain is None:
+            continue
+        if str(domain.get("host") or "").strip() == normalized_domain_host:
+            existing = domain
+            break
+
+    payload: JsonObject = {
+        "host": normalized_domain_host,
+        "path": "/",
+        "internalPath": "/",
+        "port": runtime_port,
+        "https": True,
+        "applicationId": None,
+        "certificateType": "none",
+        "customCertResolver": None,
+        "composeId": normalized_compose_id,
+        "serviceName": "web",
+        "domainType": "compose",
+        "previewDeploymentId": None,
+        "stripPath": False,
+    }
+    if existing is not None:
+        domain_id = str(existing.get("domainId") or "").strip()
+        if not domain_id:
+            raise click.ClickException(
+                f"Dokploy domain {normalized_domain_host} is missing domainId."
+            )
+        dokploy_request(
+            host=host,
+            token=token,
+            path="/api/domain.update",
+            method="POST",
+            payload={"domainId": domain_id, **payload},
+        )
+        return domain_id
+
+    created = dokploy_request(
+        host=host,
+        token=token,
+        path="/api/domain.create",
+        method="POST",
+        payload=payload,
+    )
+    created_domain = as_json_object(created)
+    domain_id = str((created_domain or {}).get("domainId") or "").strip()
+    if not domain_id:
+        raise click.ClickException(
+            f"Dokploy domain create returned no domainId for {normalized_domain_host}."
+        )
+    return domain_id
+
+
 def _build_raw_compose_evidence(
     *, source_type: str, compose_file: str, changed: bool
 ) -> dict[str, str]:

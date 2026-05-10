@@ -802,6 +802,15 @@ def execute_odoo_stable_target_replacement_apply(
             target_payload=target_payload,
             compose_file=compose_file,
         )
+        runtime_port = profile.runtime_port or 8069
+        for domain_host in plan.expected_domain_hosts:
+            control_plane_dokploy.ensure_compose_web_domain_route(
+                host=host,
+                token=token,
+                compose_id=target_id_record.target_id,
+                domain_host=domain_host,
+                runtime_port=runtime_port,
+            )
         current_env_map = control_plane_dokploy.parse_dokploy_env_text(
             str(target_payload.get("env") or "")
         )

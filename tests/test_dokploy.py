@@ -2180,6 +2180,74 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
         )
         self.assertEqual(evidence["changed"], "true")
 
+    def test_ensure_compose_web_domain_route_updates_existing_route(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byComposeId":
+                return [
+                    {
+                        "domainId": "domain-cm-testing",
+                        "host": "cm-testing.shinycomputers.com",
+                        "serviceName": "old-service",
+                        "port": 3000,
+                    }
+                ]
+            return {"domainId": "domain-cm-testing"}
+
+        with patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request):
+            domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
+                host="https://dokploy.example.com",
+                token="token-123",
+                compose_id="compose-cm-testing",
+                domain_host="cm-testing.shinycomputers.com",
+                runtime_port=8069,
+            )
+
+        self.assertEqual(domain_id, "domain-cm-testing")
+        self.assertEqual(
+            [request["path"] for request in requests],
+            ["/api/domain.byComposeId", "/api/domain.update"],
+        )
+        update_payload = cast("dict[str, object]", requests[1]["payload"])
+        self.assertEqual(update_payload["domainId"], "domain-cm-testing")
+        self.assertEqual(update_payload["composeId"], "compose-cm-testing")
+        self.assertEqual(update_payload["domainType"], "compose")
+        self.assertEqual(update_payload["serviceName"], "web")
+        self.assertEqual(update_payload["port"], 8069)
+        self.assertEqual(update_payload["path"], "/")
+        self.assertEqual(update_payload["internalPath"], "/")
+
+    def test_ensure_compose_web_domain_route_creates_missing_route(self) -> None:
+        requests: list[dict[str, object]] = []
+
+        def fake_dokploy_request(**kwargs: object) -> object:
+            requests.append(dict(kwargs))
+            if kwargs["path"] == "/api/domain.byComposeId":
+                return []
+            return {"domainId": "domain-created"}
+
+        with patch("control_plane.dokploy.dokploy_request", side_effect=fake_dokploy_request):
+            domain_id = control_plane_dokploy.ensure_compose_web_domain_route(
+                host="https://dokploy.example.com",
+                token="token-123",
+                compose_id="compose-cm-testing",
+                domain_host="cm-testing.shinycomputers.com",
+                runtime_port=8069,
+            )
+
+        self.assertEqual(domain_id, "domain-created")
+        self.assertEqual(
+            [request["path"] for request in requests],
+            ["/api/domain.byComposeId", "/api/domain.create"],
+        )
+        create_payload = cast("dict[str, object]", requests[1]["payload"])
+        self.assertEqual(create_payload["host"], "cm-testing.shinycomputers.com")
+        self.assertEqual(create_payload["composeId"], "compose-cm-testing")
+        self.assertEqual(create_payload["serviceName"], "web")
+        self.assertEqual(create_payload["port"], 8069)
+
     def test_service_render_authz_policy_uses_explicit_policy_source(self) -> None:
         runner = CliRunner()
         with TemporaryDirectory() as temporary_directory_name:
