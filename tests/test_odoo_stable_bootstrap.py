@@ -454,6 +454,60 @@ class OdooStableBootstrapTests(unittest.TestCase):
             "deployment-cm-testing-bootstrap",
         )
 
+    def test_execute_records_bootstrap_success_when_post_deploy_raises(self) -> None:
+        store = _Store()
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                side_effect=click.ClickException("post-deploy exploded"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
+                side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.generate_deployment_record_id",
+                return_value="deployment-cm-testing-bootstrap",
+            ),
+        ):
+            result = execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertEqual(result.bootstrap_status, "fail")
+        self.assertEqual(result.bootstrap_run_status, "pass")
+        self.assertEqual(result.readiness_status, "fail")
+        self.assertEqual(result.post_deploy_status, "fail")
+        self.assertIn("post-deploy exploded", result.error_message)
+        self.assertEqual(store.deployment_records[-1].deploy.status, "fail")
+        self.assertEqual(store.deployment_records[-1].bootstrap.run_status, "pass")
+        self.assertEqual(store.deployment_records[-1].bootstrap.readiness_status, "fail")
+        self.assertEqual(store.deployment_records[-1].post_deploy_update.status, "fail")
+        self.assertEqual(len(store.environment_inventories), 1)
+        self.assertEqual(
+            store.environment_inventories[0].deployment_record_id,
+            "deployment-cm-testing-old",
+        )
+        self.assertEqual(
+            store.environment_inventories[0].bootstrap_record_id,
+            "deployment-cm-testing-bootstrap",
+        )
+
     def test_execute_records_verification_failure_without_hiding_bootstrap_success(self) -> None:
         store = _Store()
         with (

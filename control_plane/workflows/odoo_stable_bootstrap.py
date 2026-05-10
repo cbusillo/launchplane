@@ -438,13 +438,53 @@ def execute_odoo_stable_bootstrap(
             error_message=str(error),
         )
 
-    post_deploy_result = execute_odoo_post_deploy(
-        control_plane_root=control_plane_root,
-        record_store=record_store,
-        request=OdooPostDeployRequest(
-            context=request.context, instance=request.instance, phase="deploy"
-        ),
-    )
+    try:
+        post_deploy_result = execute_odoo_post_deploy(
+            control_plane_root=control_plane_root,
+            record_store=record_store,
+            request=OdooPostDeployRequest(
+                context=request.context, instance=request.instance, phase="deploy"
+            ),
+        )
+    except click.ClickException as error:
+        post_deploy_evidence = PostDeployUpdateEvidence(
+            attempted=True,
+            status="fail",
+            detail=str(error),
+        )
+        _write_failed_bootstrap_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            bootstrap=BootstrapEvidence(
+                attempted=True,
+                run_status="pass",
+                readiness_status="fail",
+                detail=str(error),
+            ),
+            post_deploy_update=post_deploy_evidence,
+            destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        _write_bootstrap_inventory_pointer(
+            record_store=record_store,
+            inventory=inventory,
+            bootstrap_record_id=deployment_record_id,
+        )
+        return _base_result(
+            request=request,
+            deployment_record_id=deployment_record_id,
+            target_record=target_record,
+            target_id_record=target_id_record,
+            inventory=inventory,
+            bootstrap_status="fail",
+            bootstrap_run_status="pass",
+            readiness_status="fail",
+            post_deploy_status="fail",
+            error_message=str(error),
+        )
+
     post_deploy_evidence = PostDeployUpdateEvidence(
         attempted=True,
         status=post_deploy_result.post_deploy_status,
