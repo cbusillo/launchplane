@@ -143,6 +143,7 @@ from control_plane.service_auth import (
     GitHubHumanIdentity,
     LaunchplaneAuthzPolicy,
     LaunchplaneIdentity,
+    LocalOperatorIdentity,
     TerminalAgentIdentity,
     TokenVerifier,
     agent_authz_audit,
@@ -359,6 +360,8 @@ class MergeTrainAdmissionEnvelope(BaseModel):
         if not self.base_branch:
             raise ValueError("merge train admission requires base_branch")
         return self
+
+
 _GITHUB_CLOSING_REFERENCE_PATTERN = re.compile(
     r"\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s+([^\n\r]+)", re.IGNORECASE
 )
@@ -2111,7 +2114,9 @@ class _EveryCodeWorkRequestStore(Protocol):
         offset: int = 0,
     ) -> tuple[EveryCodePrFeedbackRecord, ...]: ...
 
-    def write_every_code_preview_gate_record(self, record: EveryCodePreviewGateRecord) -> object: ...
+    def write_every_code_preview_gate_record(
+        self, record: EveryCodePreviewGateRecord
+    ) -> object: ...
 
     def list_every_code_preview_gate_records(
         self,
@@ -2738,7 +2743,9 @@ def _handle_every_code_preview_validation_webhook(
         return None
     accepted_payload = _accepted_payload(
         trace_id=trace_id,
-        result={"preview_validation": {key: value for key, value in result.items() if key != "handled"}},
+        result={
+            "preview_validation": {key: value for key, value in result.items() if key != "handled"}
+        },
         driver_result={"preview_validation": dict(result)},
     )
     if bool(result.get("skipped")):
@@ -3119,6 +3126,8 @@ def _idempotency_key(environ: dict[str, object]) -> str:
 def _identity_actor(identity: LaunchplaneIdentity) -> str:
     if isinstance(identity, GitHubHumanIdentity):
         return f"github:{identity.login}"
+    if isinstance(identity, LocalOperatorIdentity):
+        return f"local-operator:{identity.subject}"
     if isinstance(identity, TerminalAgentIdentity):
         return f"terminal-agent:{identity.subject}"
     return (
@@ -3129,6 +3138,8 @@ def _identity_actor(identity: LaunchplaneIdentity) -> str:
 def _idempotency_scope(identity: LaunchplaneIdentity) -> str:
     if isinstance(identity, GitHubHumanIdentity):
         return "|".join(("github-human", identity.login, str(identity.github_id)))
+    if isinstance(identity, LocalOperatorIdentity):
+        return "|".join(("local-operator", identity.subject, identity.token_label))
     if isinstance(identity, TerminalAgentIdentity):
         return "|".join(("terminal-agent", identity.subject, identity.token_label))
     workflow_ref = identity.workflow_ref or identity.job_workflow_ref or ""
@@ -3161,6 +3172,22 @@ def _canonical_request_payload_for_idempotency(
 def _idempotency_request_fingerprint(*, route_path: str, payload: dict[str, object]) -> str:
     return _request_fingerprint(
         _canonical_request_payload_for_idempotency(route_path=route_path, payload=payload)
+    )
+
+
+def _local_operator_product_config_continuity_payload(
+    *, payload: dict[str, object]
+) -> dict[str, object]:
+    canonical_payload = json.loads(json.dumps(payload))
+    if isinstance(canonical_payload, dict):
+        canonical_payload.pop("mode", None)
+        canonical_payload.pop("reason", None)
+    return cast(dict[str, object], canonical_payload)
+
+
+def _local_operator_product_config_dry_run_key(*, payload: dict[str, object]) -> str:
+    return "local-operator-product-config-dry-run:" + _request_fingerprint(
+        _local_operator_product_config_continuity_payload(payload=payload)
     )
 
 
@@ -3331,6 +3358,44 @@ def _write_idempotency_record(
     )
 
 
+def _write_local_operator_product_config_dry_run_record(
+    *,
+    record_store: object,
+    scope: str,
+    request_payload: dict[str, object],
+    response_trace_id: str,
+    response_payload: dict[str, object],
+) -> None:
+    _write_idempotency_record(
+        record_store=record_store,
+        scope=scope,
+        route_path="/v1/product-config/apply",
+        idempotency_key=_local_operator_product_config_dry_run_key(payload=request_payload),
+        request_fingerprint=_request_fingerprint(
+            _local_operator_product_config_continuity_payload(payload=request_payload)
+        ),
+        response_status_code=202,
+        response_trace_id=f"{response_trace_id}-local-operator-dry-run",
+        response_payload=response_payload,
+    )
+
+
+def _local_operator_product_config_dry_run_exists(
+    *, record_store: object, scope: str, request_payload: dict[str, object]
+) -> bool:
+    stored_record = _read_idempotency_record(
+        record_store=record_store,
+        scope=scope,
+        route_path="/v1/product-config/apply",
+        idempotency_key=_local_operator_product_config_dry_run_key(payload=request_payload),
+    )
+    if stored_record is None:
+        return False
+    return stored_record.request_fingerprint == _request_fingerprint(
+        _local_operator_product_config_continuity_payload(payload=request_payload)
+    )
+
+
 def _check_idempotent_request(
     *,
     record_store: object,
@@ -3469,8 +3534,37 @@ def _terminal_agent_token_label_from_env() -> str:
     return os.environ.get("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL", "local-owner-read").strip()
 
 
+def _local_operator_token_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN", "").strip()
+
+
+def _local_operator_subject_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT", "local-owner-agent").strip()
+
+
+def _local_operator_token_label_from_env() -> str:
+    return os.environ.get("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL", "local-owner-write").strip()
+
+
+def _local_operator_identity_from_bearer(
+    environ: dict[str, object],
+) -> LocalOperatorIdentity | None:
+    expected_token = _local_operator_token_from_env()
+    if not expected_token:
+        return None
+    try:
+        provided_token = _bearer_token(environ)
+    except PermissionError:
+        return None
+    if not secrets.compare_digest(provided_token, expected_token):
+        return None
+    subject = _local_operator_subject_from_env() or "local-owner-agent"
+    token_label = _local_operator_token_label_from_env() or "local-owner-write"
+    return LocalOperatorIdentity(subject=subject, token_label=token_label)
+
+
 def _terminal_agent_identity_from_bearer(
-    environ: dict[str, object]
+    environ: dict[str, object],
 ) -> TerminalAgentIdentity | None:
     expected_token = _terminal_agent_read_token_from_env()
     if not expected_token:
@@ -3860,6 +3954,9 @@ def _read_identity(
     human_identity = _session_identity(environ=environ, session_manager=session_manager)
     if human_identity is not None:
         return human_identity
+    local_operator_identity = _local_operator_identity_from_bearer(environ)
+    if local_operator_identity is not None:
+        return local_operator_identity
     terminal_agent_identity = _terminal_agent_identity_from_bearer(environ)
     if terminal_agent_identity is not None:
         return terminal_agent_identity
@@ -3903,6 +4000,12 @@ def _authz_diagnostic_payload(
     elif isinstance(identity, TerminalAgentIdentity):
         identity_payload = {
             "type": "terminal_agent",
+            "subject": identity.subject,
+            "token_label": identity.token_label,
+        }
+    elif isinstance(identity, LocalOperatorIdentity):
+        identity_payload = {
+            "type": "local_operator",
             "subject": identity.subject,
             "token_label": identity.token_label,
         }
@@ -5764,9 +5867,7 @@ def create_launchplane_service_app(
                                     },
                                 },
                             )
-                        repository_filter = str(
-                            (query.get("repository") or [""])[0] or ""
-                        ).strip()
+                        repository_filter = str((query.get("repository") or [""])[0] or "").strip()
                         agent_context = build_agent_context_service_payload(
                             generated_at=_utc_now_timestamp(),
                             repository=repository_filter,
@@ -6024,9 +6125,7 @@ def create_launchplane_service_app(
                     repository=merge_train_request.repository,
                     base_branch=merge_train_request.base_branch,
                 )
-                dry_run_result = build_merge_train_dry_run_result(
-                    policy=policy, snapshot=snapshot
-                )
+                dry_run_result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
                 result = {
                     "repository": merge_train_request.repository,
                     "base_branch": merge_train_request.base_branch,
@@ -6061,9 +6160,7 @@ def create_launchplane_service_app(
                 result["merge_train_run_id"] = run_record.run_id
             elif path == "/v1/agent/write-intents/evaluate":
                 intent_request = AgentWriteIntentRequest.model_validate(payload)
-                intent_authz_action = authz_action_for_agent_write_intent(
-                    intent_request.intent
-                )
+                intent_authz_action = authz_action_for_agent_write_intent(intent_request.intent)
                 authorized = authz_policy.allows(
                     identity=identity,
                     action=intent_authz_action,
@@ -6338,6 +6435,29 @@ def create_launchplane_service_app(
                 if product_config_response is not None:
                     return product_config_response
                 assert product_config_request is not None
+                if (
+                    isinstance(identity, LocalOperatorIdentity)
+                    and product_config_request.mode == "apply"
+                    and not _local_operator_product_config_dry_run_exists(
+                        record_store=record_store,
+                        scope=request_scope,
+                        request_payload=payload,
+                    )
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=409,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "matching_dry_run_required",
+                                "message": (
+                                    "Local operator product-config apply requires a prior matching dry-run."
+                                ),
+                            },
+                        },
+                    )
                 idempotent_response = _check_idempotent_request(
                     record_store=record_store,
                     scope=request_scope,
@@ -6366,6 +6486,21 @@ def create_launchplane_service_app(
                 if not isinstance(product_config_result, ProductConfigRouteResult):
                     return product_config_result
                 driver_result = product_config_result.driver_result
+                if (
+                    isinstance(identity, LocalOperatorIdentity)
+                    and product_config_request.mode == "dry-run"
+                ):
+                    _write_local_operator_product_config_dry_run_record(
+                        record_store=record_store,
+                        scope=request_scope,
+                        request_payload=payload,
+                        response_trace_id=request_trace_id,
+                        response_payload=_accepted_payload(
+                            trace_id=request_trace_id,
+                            result=result,
+                            driver_result=driver_result,
+                        ),
+                    )
             elif path == "/v1/authz-policies/github-actions/grants":
                 authz_grant_request = control_plane_authz_grant_service.AuthzPolicyGitHubActionsGrantEnvelope.model_validate(
                     payload

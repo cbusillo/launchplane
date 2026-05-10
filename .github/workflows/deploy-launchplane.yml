@@ -74,6 +74,9 @@ jobs:
       LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: ${{ secrets.LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN }}
       LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_SUBJECT }}
       LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL }}
+      LAUNCHPLANE_LOCAL_OPERATOR_TOKEN: ${{ secrets.LAUNCHPLANE_LOCAL_OPERATOR_TOKEN }}
+      LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT: ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT }}
+      LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: ${{ vars.LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL }}
       ODOO_CM_TESTING_DOKPLOY_TARGET_ID: ${{ vars.ODOO_CM_TESTING_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_HOST }}
       LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN: ${{ secrets.LAUNCHPLANE_EMERGENCY_DOKPLOY_TOKEN }}
@@ -250,6 +253,9 @@ jobs:
                 --arg terminal_agent_read_token "${LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN:-}" \
                 --arg terminal_agent_subject "${LAUNCHPLANE_TERMINAL_AGENT_SUBJECT:-}" \
                 --arg terminal_agent_token_label "${LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL:-}" \
+                --arg local_operator_token "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN:-}" \
+                --arg local_operator_subject "${LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT:-}" \
+                --arg local_operator_token_label "${LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL:-}" \
                 --argjson omit_every_code_env '${{ inputs.omit_every_code_env || false }}' \
                 --argjson omit_terminal_agent_env '${{ inputs.omit_terminal_agent_env != false }}' \
                 '(
@@ -266,7 +272,10 @@ jobs:
                       {
                         LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN: $terminal_agent_read_token,
                         LAUNCHPLANE_TERMINAL_AGENT_SUBJECT: $terminal_agent_subject,
-                        LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label
+                        LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL: $terminal_agent_token_label,
+                        LAUNCHPLANE_LOCAL_OPERATOR_TOKEN: $local_operator_token,
+                        LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT: $local_operator_subject,
+                        LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL: $local_operator_token_label
                       }
                     else
                       {}

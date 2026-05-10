@@ -9,7 +9,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
 from control_plane.product_config import ProductConfigStore
-from control_plane.service_auth import LaunchplaneAuthzPolicy, LaunchplaneIdentity
+from control_plane.service_auth import (
+    LaunchplaneAuthzPolicy,
+    LaunchplaneIdentity,
+    LocalOperatorIdentity,
+)
 
 
 JsonResponse = Callable[..., list[bytes]]
@@ -25,6 +29,7 @@ class ProductConfigApplyEnvelope(BaseModel):
     context: str = ""
     instance: str = ""
     source_label: str = "product-config-api"
+    reason: str = ""
     runtime_env: dict[str, object] | None = None
     runtime_environment: dict[str, object] | None = None
     secrets: list[dict[str, object]] = Field(default_factory=list)
@@ -43,6 +48,7 @@ class ProductConfigApplyEnvelope(BaseModel):
         self.context = self.context.strip()
         self.instance = self.instance.strip()
         self.source_label = self.source_label.strip() or "product-config-api"
+        self.reason = self.reason.strip()
         if not self.product:
             raise ValueError("Product config apply requires product.")
         return self
@@ -77,6 +83,19 @@ def validate_product_config_apply_request(
     start_response: StartResponse,
 ) -> tuple[ProductConfigApplyEnvelope | None, list[bytes] | None]:
     request = ProductConfigApplyEnvelope.model_validate(payload)
+    if isinstance(identity, LocalOperatorIdentity) and not request.reason:
+        return None, json_response(
+            start_response=start_response,
+            status_code=400,
+            payload={
+                "status": "rejected",
+                "trace_id": trace_id,
+                "error": {
+                    "code": "reason_required",
+                    "message": "Local operator product-config requests require a reason.",
+                },
+            },
+        )
     action = "product_config.apply" if request.mode == "apply" else "product_config.plan"
     if authz_policy.allows(
         identity=identity,
