@@ -208,10 +208,12 @@ apply_odoo_cm_onboarding() {
   local idempotency_suffix="odoo-cm-preview-profile"
   local request_payload response_file status_code
   local target_id="${ODOO_CM_TESTING_DOKPLOY_TARGET_ID:-}"
+  local prod_target_id="${ODOO_CM_PROD_DOKPLOY_TARGET_ID:-}"
 
   request_payload="$({
     jq -n \
       --arg target_id "$target_id" \
+      --arg prod_target_id "$prod_target_id" \
       '{
         schema_version: 1,
         product: "launchplane",
@@ -226,7 +228,33 @@ apply_odoo_cm_onboarding() {
           lanes: [
             {
               instance: "testing",
-              context: "cm"
+              context: "cm",
+              odoo_stable_bootstrap: {
+                enabled: true,
+                approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
+                data_source_mode: "empty",
+                confirmation: "bootstrap cm testing",
+                expected_target_name: "cm-testing",
+                expected_domains: ["cm-testing.shinycomputers.com"],
+                require_health_verification: true,
+                require_canonical_verification: true,
+                require_logo_verification: true
+              }
+            },
+            {
+              instance: "prod",
+              context: "cm",
+              odoo_stable_bootstrap: {
+                enabled: true,
+                approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
+                data_source_mode: "empty",
+                confirmation: "bootstrap cm prod",
+                expected_target_name: "cm-prod",
+                expected_domains: ["cellmechanic.com"],
+                require_health_verification: true,
+                require_canonical_verification: true,
+                require_logo_verification: true
+              }
             }
           ],
           preview: {
@@ -243,20 +271,34 @@ apply_odoo_cm_onboarding() {
             data_transport_mode: "bootstrap"
           },
           dokploy_targets: (
-            if ($target_id | length) > 0 then
+            (if ($target_id | length) > 0 then
               [
                 {
                   context: "cm",
                   instance: "testing",
                   target_id: $target_id,
-                  target_type: "application",
+                  target_type: "compose",
                   target_name: "cm-testing",
                   healthcheck_path: "/web/health",
                   healthcheck_enabled: true,
                   deploy_timeout_seconds: 900
                 }
               ]
-            else [] end
+            else [] end) +
+            (if ($prod_target_id | length) > 0 then
+              [
+                {
+                  context: "cm",
+                  instance: "prod",
+                  target_id: $prod_target_id,
+                  target_type: "compose",
+                  target_name: "cm-prod",
+                  healthcheck_path: "/web/health",
+                  healthcheck_enabled: true,
+                  deploy_timeout_seconds: 900
+                }
+              ]
+            else [] end)
           ),
           source_label: "deploy:odoo-cm-product-onboarding"
         }
