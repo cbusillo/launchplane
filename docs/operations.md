@@ -736,8 +736,12 @@ the Dokploy runner also refuses if the live compose name no longer matches the
 expected target. After proof passes, Launchplane runs the existing compose-local
 devkit data workflow in `--bootstrap` mode through a dedicated manual Dokploy
 schedule, then runs Odoo post-deploy and verifies health, canonical URL, and logo
-routes before writing deployment and inventory evidence. Do not use this path for
-prod until Launchplane has explicit backup/restore policy evidence for that lane.
+routes before writing deployment and inventory evidence. Bootstrap evidence keeps
+the destructive data workflow status separate from public readiness: if the
+bootstrap runs but post-deploy or verification fails, inventory keeps its prior
+current deployment pointer and records the failed attempt in `bootstrap_record_id`.
+Do not use this path for prod until Launchplane has explicit backup/restore
+policy evidence for that lane.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress

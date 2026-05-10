@@ -178,7 +178,9 @@ jobs:
           fi
 
       - name: Upload bootstrap result
+        if: always()
         uses: actions/upload-artifact@v5
         with:
           name: odoo-stable-bootstrap-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
           path: odoo-stable-bootstrap.json
+          if-no-files-found: ignore

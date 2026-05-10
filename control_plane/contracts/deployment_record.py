@@ -4,6 +4,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
+    BootstrapEvidence,
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
@@ -46,6 +47,7 @@ class DeploymentRecord(BaseModel):
     runtime_source: dict[str, str] = Field(default_factory=dict)
     runtime_identity: RuntimeIdentity | None = None
     deploy: DeploymentEvidence
+    bootstrap: BootstrapEvidence = Field(default_factory=BootstrapEvidence)
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
 
