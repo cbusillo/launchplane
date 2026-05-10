@@ -21,6 +21,7 @@ from control_plane.service_auth import (
     agent_authz_audit,
     agent_consumer_subject,
     limited_remote_user_action_allowed,
+    local_operator_action_allowed,
     parse_authz_policy_toml,
 )
 from control_plane.contracts.authz_policy_record import authz_policy_sha256
@@ -584,10 +585,18 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
             )
         )
 
-    def test_local_operator_policy_allows_non_policy_admin_actions(self) -> None:
+    def test_local_operator_policy_allows_only_product_config_actions(self) -> None:
         policy = LaunchplaneAuthzPolicy()
         identity = _local_operator_identity()
 
+        self.assertTrue(
+            policy.allows(
+                identity=identity,
+                action="product_config.plan",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
         self.assertTrue(
             policy.allows(
                 identity=identity,
@@ -599,11 +608,51 @@ class LaunchplaneAuthzPolicyBoundaryTests(unittest.TestCase):
         self.assertFalse(
             policy.allows(
                 identity=identity,
+                action="promotion.execute",
+                product="sellyouroutboard",
+                context="sellyouroutboard",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
+                action="preview_destroy.execute",
+                product="sellyouroutboard",
+                context="sellyouroutboard-testing",
+            )
+        )
+        self.assertFalse(
+            policy.allows(
+                identity=identity,
                 action="authz_policy.grant_terminal_agent",
                 product="launchplane",
                 context="launchplane",
             )
         )
+
+    def test_local_operator_action_requires_expected_subject_and_label(self) -> None:
+        self.assertTrue(
+            local_operator_action_allowed(
+                identity=_local_operator_identity(),
+                action="product_config.apply",
+            )
+        )
+        self.assertFalse(
+            local_operator_action_allowed(
+                identity=_local_operator_identity(subject="different-owner"),
+                action="product_config.apply",
+            )
+        )
+        self.assertFalse(
+            local_operator_action_allowed(
+                identity=_local_operator_identity(token_label="other-write-token"),
+                action="product_config.apply",
+            )
+        )
+
+    def test_local_operator_login_does_not_grant_human_access(self) -> None:
+        policy = LaunchplaneAuthzPolicy()
+
         self.assertFalse(
             policy.allows(
                 identity=_human_identity(login="local-owner-agent"),
