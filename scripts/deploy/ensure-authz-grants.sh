@@ -208,10 +208,12 @@ apply_odoo_cm_onboarding() {
   local idempotency_suffix="odoo-cm-preview-profile"
   local request_payload response_file status_code
   local target_id="${ODOO_CM_TESTING_DOKPLOY_TARGET_ID:-}"
+  local prod_target_id="${ODOO_CM_PROD_DOKPLOY_TARGET_ID:-}"
 
   request_payload="$({
     jq -n \
       --arg target_id "$target_id" \
+      --arg prod_target_id "$prod_target_id" \
       '{
         schema_version: 1,
         product: "launchplane",
@@ -226,7 +228,33 @@ apply_odoo_cm_onboarding() {
           lanes: [
             {
               instance: "testing",
-              context: "cm"
+              context: "cm",
+              odoo_stable_bootstrap: {
+                enabled: true,
+                approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
+                data_source_mode: "empty",
+                confirmation: "bootstrap cm testing",
+                expected_target_name: "cm-testing",
+                expected_domains: ["cm-testing.shinycomputers.com"],
+                require_health_verification: true,
+                require_canonical_verification: true,
+                require_logo_verification: true
+              }
+            },
+            {
+              instance: "prod",
+              context: "cm",
+              odoo_stable_bootstrap: {
+                enabled: true,
+                approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
+                data_source_mode: "empty",
+                confirmation: "bootstrap cm prod",
+                expected_target_name: "cm-prod",
+                expected_domains: ["cellmechanic.com"],
+                require_health_verification: true,
+                require_canonical_verification: true,
+                require_logo_verification: true
+              }
             }
           ],
           preview: {
@@ -243,20 +271,34 @@ apply_odoo_cm_onboarding() {
             data_transport_mode: "bootstrap"
           },
           dokploy_targets: (
-            if ($target_id | length) > 0 then
+            (if ($target_id | length) > 0 then
               [
                 {
                   context: "cm",
                   instance: "testing",
                   target_id: $target_id,
-                  target_type: "application",
+                  target_type: "compose",
                   target_name: "cm-testing",
                   healthcheck_path: "/web/health",
                   healthcheck_enabled: true,
                   deploy_timeout_seconds: 900
                 }
               ]
-            else [] end
+            else [] end) +
+            (if ($prod_target_id | length) > 0 then
+              [
+                {
+                  context: "cm",
+                  instance: "prod",
+                  target_id: $prod_target_id,
+                  target_type: "compose",
+                  target_name: "cm-prod",
+                  healthcheck_path: "/web/health",
+                  healthcheck_enabled: true,
+                  deploy_timeout_seconds: 900
+                }
+              ]
+            else [] end)
           ),
           source_label: "deploy:odoo-cm-product-onboarding"
         }
@@ -278,6 +320,106 @@ apply_odoo_cm_onboarding() {
   fi
   cat "$response_file" >&2
   echo "Launchplane Odoo CM product onboarding request failed with HTTP ${status_code}." >&2
+  return 1
+}
+
+apply_odoo_opw_onboarding() {
+  local idempotency_suffix="odoo-opw-prelaunch-profile"
+  local request_payload response_file status_code
+  local testing_target_id="${ODOO_OPW_TESTING_DOKPLOY_TARGET_ID:-}"
+  local prod_target_id="${ODOO_OPW_PROD_DOKPLOY_TARGET_ID:-}"
+
+  request_payload="$({
+    jq -n \
+      --arg testing_target_id "$testing_target_id" \
+      --arg prod_target_id "$prod_target_id" \
+      '{
+        schema_version: 1,
+        product: "launchplane",
+        manifest: {
+          product: "odoo-tenant-opw",
+          display_name: "Odoo OPW",
+          repository: "cbusillo/odoo-tenant-opw",
+          driver_id: "odoo",
+          image_repository: "ghcr.io/cbusillo/odoo-tenant-opw",
+          runtime_port: 8069,
+          health_path: "/web/health",
+          lanes: [
+            {
+              instance: "testing",
+              context: "opw",
+              odoo_prelaunch_rebuild: {
+                enabled: true,
+                approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
+                data_source_mode: "upstream_restore",
+                confirmation: "restore opw upstream",
+                expected_target_name: "opw-testing",
+                expected_domains: ["opw-testing.shinycomputers.com"]
+              }
+            },
+            {
+              instance: "prod",
+              context: "opw",
+              odoo_prelaunch_rebuild: {
+                enabled: true,
+                approval_issue_url: "https://github.com/cbusillo/launchplane/issues/573",
+                data_source_mode: "upstream_restore",
+                confirmation: "restore opw upstream",
+                expected_target_name: "opw-prod",
+                expected_domains: ["openwater.pro"]
+              }
+            }
+          ],
+          dokploy_targets: (
+            (if ($testing_target_id | length) > 0 then
+              [
+                {
+                  context: "opw",
+                  instance: "testing",
+                  target_id: $testing_target_id,
+                  target_type: "compose",
+                  target_name: "opw-testing",
+                  healthcheck_path: "/web/health",
+                  healthcheck_enabled: true,
+                  deploy_timeout_seconds: 900
+                }
+              ]
+            else [] end) +
+            (if ($prod_target_id | length) > 0 then
+              [
+                {
+                  context: "opw",
+                  instance: "prod",
+                  target_id: $prod_target_id,
+                  target_type: "compose",
+                  target_name: "opw-prod",
+                  healthcheck_path: "/web/health",
+                  healthcheck_enabled: true,
+                  deploy_timeout_seconds: 900
+                }
+              ]
+            else [] end)
+          ),
+          source_label: "deploy:odoo-opw-product-onboarding"
+        }
+      }'
+  })"
+  response_file="$(mktemp)"
+  status_code="$(curl -sS \
+    -o "$response_file" \
+    -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${oidc_token}" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: launchplane-product-onboarding:${idempotency_suffix}:${testing_target_id}:${prod_target_id}:${GITHUB_SHA}" \
+    --data "$request_payload" \
+    "${LAUNCHPLANE_SERVICE_URL}/v1/product-onboarding/apply")"
+  if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+    cat "$response_file"
+    return 0
+  fi
+  cat "$response_file" >&2
+  echo "Launchplane Odoo OPW product onboarding request failed with HTTP ${status_code}." >&2
   return 1
 }
 
@@ -517,6 +659,7 @@ post_odoo_cm_preview_grant() {
 apply_product_onboarding \
   discord-blue
 apply_odoo_cm_onboarding
+apply_odoo_opw_onboarding
 post_grant \
   cbusillo/discord-blue \
   main.yml \
@@ -636,12 +779,28 @@ post_grant \
   odoo-cm-target-replacement-plan
 post_grant \
   "$GITHUB_REPOSITORY" \
+  odoo-target-replacement-plan.yml \
+  odoo-tenant-opw \
+  opw \
+  odoo_target_replacement_plan.read \
+  deploy:odoo-opw-target-replacement-plan-grant \
+  odoo-opw-target-replacement-plan
+post_grant \
+  "$GITHUB_REPOSITORY" \
   odoo-target-replacement-apply.yml \
   odoo-tenant-cm \
   cm \
   odoo_target_replacement_apply.execute \
   deploy:odoo-cm-target-replacement-apply-grant \
   odoo-cm-target-replacement-apply
+post_grant \
+  "$GITHUB_REPOSITORY" \
+  odoo-target-replacement-apply.yml \
+  odoo-tenant-opw \
+  opw \
+  odoo_target_replacement_apply.execute \
+  deploy:odoo-opw-target-replacement-apply-grant \
+  odoo-opw-target-replacement-apply
 post_grant \
   "$GITHUB_REPOSITORY" \
   odoo-config-parameter-override.yml \

@@ -14358,6 +14358,18 @@ def odoo_targets() -> None:
     help="Allow missing volume env keys in the dry-run plan for an intentionally empty target.",
 )
 @click.option(
+    "--data-source-mode",
+    type=click.Choice(["existing", "empty", "upstream_restore"]),
+    default="existing",
+    show_default=True,
+    help="Prelaunch rebuild data authority for intentionally resettable targets.",
+)
+@click.option(
+    "--confirmation",
+    default="",
+    help="Confirmation phrase required by the lane prelaunch rebuild policy.",
+)
+@click.option(
     "--control-plane-root",
     type=click.Path(path_type=Path, file_okay=False),
     default=None,
@@ -14369,6 +14381,8 @@ def odoo_targets_replacement_plan(
     instance_name: str,
     strategy: str,
     allow_empty_data: bool,
+    data_source_mode: str,
+    confirmation: str,
     control_plane_root: Path | None,
 ) -> None:
     launchplane_root = control_plane_root or _control_plane_root()
@@ -14382,6 +14396,10 @@ def odoo_targets_replacement_plan(
                 instance=instance_name,
                 strategy=cast(Literal["recreate-in-place", "replace-and-cutover"], strategy),
                 allow_empty_data=allow_empty_data,
+                data_source_mode=cast(
+                    Literal["existing", "empty", "upstream_restore"], data_source_mode
+                ),
+                confirmation=confirmation,
             ),
         )
     finally:

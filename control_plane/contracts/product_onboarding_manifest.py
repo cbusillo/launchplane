@@ -5,6 +5,8 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.product_profile_record import (
     PRODUCT_PREVIEW_DEFAULT_ENABLE_LABEL,
+    ProductOdooPrelaunchRebuildPolicy,
+    ProductOdooStableBootstrapPolicy,
     ProductExpectedConfigProfile,
     ProductPreviewProfile,
     ProductPromotionWorkflowProfile,
@@ -20,6 +22,12 @@ class ProductOnboardingLaneManifest(BaseModel):
     context: str
     base_url: str = ""
     health_url: str = ""
+    odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy = Field(
+        default_factory=ProductOdooStableBootstrapPolicy
+    )
+    odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy = Field(
+        default_factory=ProductOdooPrelaunchRebuildPolicy
+    )
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductOnboardingLaneManifest":

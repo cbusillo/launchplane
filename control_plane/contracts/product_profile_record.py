@@ -68,6 +68,55 @@ class ProductOdooStableBootstrapPolicy(BaseModel):
         return self
 
 
+class ProductOdooPrelaunchRebuildPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    approval_issue_url: str = ""
+    data_source_mode: Literal["empty", "upstream_restore"] = "empty"
+    confirmation: str = ""
+    expected_target_name: str = ""
+    expected_domains: tuple[str, ...] = ()
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "ProductOdooPrelaunchRebuildPolicy":
+        self.approval_issue_url = self.approval_issue_url.strip()
+        self.confirmation = self.confirmation.strip().lower()
+        self.expected_target_name = self.expected_target_name.strip()
+        normalized_domains: list[str] = []
+        for raw_domain in self.expected_domains:
+            domain = (
+                raw_domain.strip()
+                .lower()
+                .removeprefix("https://")
+                .removeprefix("http://")
+                .rstrip("/")
+            )
+            if not domain:
+                raise ValueError(
+                    "Odoo prelaunch rebuild policy expected_domains values must be non-empty"
+                )
+            if domain not in normalized_domains:
+                normalized_domains.append(domain)
+        self.expected_domains = tuple(normalized_domains)
+        if self.enabled:
+            if not self.approval_issue_url:
+                raise ValueError(
+                    "enabled Odoo prelaunch rebuild policy requires approval_issue_url"
+                )
+            if not self.confirmation:
+                raise ValueError("enabled Odoo prelaunch rebuild policy requires confirmation")
+            if not self.expected_target_name:
+                raise ValueError(
+                    "enabled Odoo prelaunch rebuild policy requires expected_target_name"
+                )
+            if not self.expected_domains:
+                raise ValueError(
+                    "enabled Odoo prelaunch rebuild policy requires expected_domains"
+                )
+        return self
+
+
 class ProductLaneProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -77,6 +126,9 @@ class ProductLaneProfile(BaseModel):
     health_url: str = ""
     odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy = Field(
         default_factory=ProductOdooStableBootstrapPolicy
+    )
+    odoo_prelaunch_rebuild: ProductOdooPrelaunchRebuildPolicy = Field(
+        default_factory=ProductOdooPrelaunchRebuildPolicy
     )
 
     @model_validator(mode="after")

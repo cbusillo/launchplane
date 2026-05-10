@@ -752,6 +752,15 @@ current deployment pointer and records the failed attempt in `bootstrap_record_i
 Do not use this path for prod until Launchplane has explicit backup/restore
 policy evidence for that lane.
 
+For OPW prelaunch lanes that should be rebuilt from the current upstream
+non-Docker source, encode `odoo_prelaunch_rebuild` on the product profile lane
+with `data_source_mode="upstream_restore"`, the approval issue URL, expected
+target name, expected domains, and the confirmation phrase. Target replacement
+plan/apply requests must set the matching `data_source_mode`, confirmation, and
+`allow_empty_data=true` before Launchplane treats absent Odoo data/log/database
+volume keys as intentional. Unknown lanes, mismatched target proof, missing issue
+approval, or plain `prod` names still fail closed.
+
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
 payload shape. Generic-web, Odoo, and VeriReel preview runtime now flow through
