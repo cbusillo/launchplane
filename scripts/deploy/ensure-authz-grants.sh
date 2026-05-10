@@ -366,7 +366,7 @@ apply_odoo_opw_onboarding() {
                 data_source_mode: "upstream_restore",
                 confirmation: "restore opw upstream",
                 expected_target_name: "opw-prod",
-                expected_domains: ["openwater.pro"]
+                expected_domains: ["opw-prod.shinycomputers.com"]
               }
             }
           ],

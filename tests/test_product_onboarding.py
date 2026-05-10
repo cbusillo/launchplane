@@ -331,6 +331,10 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             )
         self.assertEqual(policies["testing"].expected_target_name, "opw-testing")
         self.assertEqual(policies["prod"].expected_target_name, "opw-prod")
+        self.assertEqual(
+            policies["prod"].expected_domains,
+            ("opw-prod.shinycomputers.com",),
+        )
 
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
