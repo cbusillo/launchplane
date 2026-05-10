@@ -69,6 +69,36 @@ class PostDeployUpdateEvidence(BaseModel):
         return self
 
 
+BootstrapReadinessStatus = Literal[
+    "pending",
+    "pass",
+    "fail",
+    "verification_failed",
+    "skipped",
+]
+
+
+class BootstrapEvidence(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempted: bool = False
+    run_status: ReleaseStatus = "skipped"
+    readiness_status: BootstrapReadinessStatus = "skipped"
+    detail: str = ""
+
+    @model_validator(mode="after")
+    def _validate_attempted_bootstrap(self) -> "BootstrapEvidence":
+        if not self.attempted:
+            if self.run_status != "skipped" or self.readiness_status != "skipped":
+                raise ValueError("non-attempted bootstrap evidence must use skipped statuses")
+            return self
+        if self.run_status == "skipped" or self.readiness_status == "skipped":
+            raise ValueError("attempted bootstrap evidence must not use skipped statuses")
+        if self.run_status == "fail" and self.readiness_status not in {"fail", "pending"}:
+            raise ValueError("failed bootstrap execution must use fail or pending readiness")
+        return self
+
+
 class RollbackExecutionEvidence(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
