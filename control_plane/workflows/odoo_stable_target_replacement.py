@@ -1,13 +1,19 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import json
 from pathlib import Path
 from typing import Literal, Protocol
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import runtime_environments as control_plane_runtime_environments
+from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
+from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -15,7 +21,17 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
+from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
+from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import JsonObject, JsonValue
+from control_plane.workflows.inventory import build_environment_inventory
+from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
+from control_plane.workflows.ship import (
+    build_deployment_record,
+    generate_deployment_record_id,
+    utc_now_timestamp,
+)
 
 
 class OdooStableTargetReplacementStore(Protocol):
@@ -32,6 +48,12 @@ class OdooStableTargetReplacementStore(Protocol):
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory: ...
+
+    def read_artifact_manifest(self, artifact_id: str) -> ArtifactIdentityManifest: ...
+
+    def write_deployment_record(self, record: DeploymentRecord) -> object: ...
+
+    def write_environment_inventory(self, record: EnvironmentInventory) -> object: ...
 
 
 DokployRequest = Callable[..., JsonValue]
@@ -106,9 +128,88 @@ class OdooStableTargetReplacementPlan(BaseModel):
     steps: tuple[OdooStableTargetReplacementStep, ...] = ()
 
 
-def _read_lane(
-    *, profile: LaunchplaneProductProfileRecord, instance: str
-) -> ProductLaneProfile:
+class OdooStableTargetReplacementApplyRequest(OdooStableTargetReplacementRequest):
+    verify_health: bool = True
+    verify_canonical: bool = True
+    verify_logo: bool = True
+    no_cache: bool = False
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    health_timeout_seconds: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _validate_apply_request(self) -> "OdooStableTargetReplacementApplyRequest":
+        if self.strategy != "recreate-in-place":
+            raise ValueError(
+                "Odoo target replacement apply currently supports recreate-in-place only."
+            )
+        return self
+
+
+class OdooStableTargetReplacementApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: str
+    strategy: Literal["recreate-in-place"]
+    deployment_record_id: str = ""
+    deploy_status: Literal["pass", "fail"]
+    post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
+    health_status: Literal["pass", "fail", "skipped"] = "skipped"
+    canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
+    logo_status: Literal["pass", "fail", "skipped"] = "skipped"
+    runtime_identity_injected: bool = False
+    target_id: str = ""
+    target_name: str = ""
+    artifact_id: str = ""
+    image_reference: str = ""
+    error_message: str = ""
+
+
+class _ApplyResultBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    product: str
+    context: str
+    instance: str
+    deployment_record_id: str
+    target_id: str
+    target_name: str
+    artifact_id: str
+    image_reference: str
+
+    def result(
+        self,
+        *,
+        deploy_status: Literal["pass", "fail"],
+        post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped",
+        health_status: Literal["pass", "fail", "skipped"] = "skipped",
+        canonical_status: Literal["pass", "fail", "skipped"] = "skipped",
+        logo_status: Literal["pass", "fail", "skipped"] = "skipped",
+        runtime_identity_injected: bool = False,
+        error_message: str = "",
+    ) -> OdooStableTargetReplacementApplyResult:
+        return OdooStableTargetReplacementApplyResult(
+            product=self.product,
+            context=self.context,
+            instance=self.instance,
+            strategy="recreate-in-place",
+            deployment_record_id=self.deployment_record_id,
+            deploy_status=deploy_status,
+            post_deploy_status=post_deploy_status,
+            health_status=health_status,
+            canonical_status=canonical_status,
+            logo_status=logo_status,
+            runtime_identity_injected=runtime_identity_injected,
+            target_id=self.target_id,
+            target_name=self.target_name,
+            artifact_id=self.artifact_id,
+            image_reference=self.image_reference,
+            error_message=error_message,
+        )
+
+
+def _read_lane(*, profile: LaunchplaneProductProfileRecord, instance: str) -> ProductLaneProfile:
     for lane in profile.lanes:
         if lane.instance == instance:
             return lane
@@ -192,6 +293,156 @@ def _runtime_identity_map(env_map: Mapping[str, str]) -> dict[str, str]:
     return {str(key): str(value) for key, value in payload.items() if value is not None}
 
 
+def _artifact_image_reference(manifest: ArtifactIdentityManifest) -> str:
+    return f"{manifest.image.repository}@{manifest.image.digest}"
+
+
+def _target_base_url(*, lane: ProductLaneProfile, domains: tuple[str, ...]) -> str:
+    if lane.base_url.strip():
+        return lane.base_url.strip().rstrip("/")
+    if domains:
+        return f"https://{domains[0].strip()}".rstrip("/")
+    return ""
+
+
+def _target_health_url(
+    *, profile: LaunchplaneProductProfileRecord, lane: ProductLaneProfile, domains: tuple[str, ...]
+) -> str:
+    if lane.health_url.strip():
+        return lane.health_url.strip()
+    base_url = _target_base_url(lane=lane, domains=domains)
+    if not base_url:
+        return ""
+    health_path = profile.health_path.strip() or "/web/health"
+    if not health_path.startswith("/"):
+        health_path = f"/{health_path}"
+    return f"{base_url}{health_path}"
+
+
+def _http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+    request = Request(url, headers={"User-Agent": "Launchplane-Odoo-Recreate/1"})
+    try:
+        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured URLs only.
+            body = response.read(1024 * 512).decode("utf-8", errors="replace")
+            content_type = response.headers.get("Content-Type", "")
+            return response.status, body, content_type
+    except HTTPError as error:
+        body = error.read(4096).decode("utf-8", errors="replace")
+        return error.code, body, error.headers.get("Content-Type", "")
+    except (TimeoutError, URLError) as error:
+        raise click.ClickException(f"Could not reach {url}: {error}") from error
+
+
+def _verify_health_url(*, health_url: str, timeout_seconds: int) -> None:
+    status_code, body, _content_type = _http_text(health_url, timeout_seconds=timeout_seconds)
+    if status_code >= 400:
+        raise click.ClickException(f"Health check {health_url} returned HTTP {status_code}.")
+    try:
+        payload = json.loads(body)
+    except ValueError:
+        return
+    if isinstance(payload, dict):
+        raw_status = str(payload.get("status") or "").strip().lower()
+        if raw_status and raw_status not in {"ok", "pass", "healthy"}:
+            raise click.ClickException(f"Health check {health_url} returned status={raw_status!r}.")
+
+
+def _verify_canonical_url(*, base_url: str, expected_base_url: str, timeout_seconds: int) -> None:
+    status_code, body, _content_type = _http_text(base_url, timeout_seconds=timeout_seconds)
+    if status_code >= 400:
+        raise click.ClickException(f"Canonical check {base_url} returned HTTP {status_code}.")
+    expected = expected_base_url.rstrip("/")
+    stale_preview_marker = ".cm-preview."
+    if stale_preview_marker in body:
+        raise click.ClickException("Canonical page still contains a cm-preview hostname.")
+    canonical_href = f'rel="canonical" href="{expected}'
+    alternate_canonical_href = f"rel='canonical' href='{expected}"
+    if canonical_href not in body and alternate_canonical_href not in body:
+        raise click.ClickException(f"Canonical page does not advertise {expected}.")
+
+
+def _verify_logo_route(*, base_url: str, timeout_seconds: int) -> None:
+    logo_url = f"{base_url.rstrip('/')}/web/image/website/1/logo"
+    status_code, body, content_type = _http_text(logo_url, timeout_seconds=timeout_seconds)
+    if status_code >= 400:
+        raise click.ClickException(f"Logo check {logo_url} returned HTTP {status_code}.")
+    if "text/html" in content_type.lower() and "404" in body[:500].lower():
+        raise click.ClickException(f"Logo check {logo_url} returned an HTML 404 body.")
+
+
+def _build_ship_request(
+    *,
+    plan: OdooStableTargetReplacementPlan,
+    target_name: str,
+    artifact_id: str,
+    source_git_ref: str,
+    timeout_seconds: int | None,
+    no_cache: bool,
+) -> ShipRequest:
+    return ShipRequest(
+        artifact_id=artifact_id,
+        context=plan.context,
+        instance=plan.instance,
+        source_git_ref=source_git_ref,
+        target_name=target_name,
+        target_type="compose",
+        deploy_mode="dokploy-compose-api",
+        wait=True,
+        timeout_seconds=timeout_seconds,
+        verify_health=False,
+        no_cache=no_cache,
+        destination_health=HealthcheckEvidence(status="skipped"),
+    )
+
+
+def _build_runtime_identity(
+    *,
+    plan: OdooStableTargetReplacementPlan,
+    deployment_record_id: str,
+    artifact_id: str,
+    image_reference: str,
+    deployed_at: str = "",
+) -> RuntimeIdentity:
+    return RuntimeIdentity(
+        product=plan.product,
+        context=plan.context,
+        instance=plan.instance,
+        environment_kind="stable",
+        deployment_record_id=deployment_record_id,
+        artifact_id=artifact_id,
+        source_git_ref=plan.expected_source_git_ref,
+        image_reference=image_reference,
+        deployed_at=deployed_at,
+    )
+
+
+def _write_failed_deployment(
+    *,
+    record_store: OdooStableTargetReplacementStore,
+    ship_request: ShipRequest,
+    deployment_record_id: str,
+    started_at: str,
+    resolved_target: ResolvedTargetEvidence | None = None,
+    runtime_identity: RuntimeIdentity | None = None,
+    post_deploy_update: PostDeployUpdateEvidence | None = None,
+    destination_health: HealthcheckEvidence | None = None,
+) -> None:
+    record_store.write_deployment_record(
+        build_deployment_record(
+            request=ship_request,
+            record_id=deployment_record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="fail",
+            started_at=started_at,
+            finished_at=utc_now_timestamp(),
+            resolved_target=resolved_target,
+            runtime_identity=runtime_identity,
+            post_deploy_update=post_deploy_update,
+            destination_health=destination_health,
+        )
+    )
+
+
 def _snapshot_current_target(
     *,
     host: str,
@@ -206,12 +457,12 @@ def _snapshot_current_target(
         target_type=target_record.target_type,
         target_id=target_id_record.target_id,
     )
-    env_map = control_plane_dokploy.parse_dokploy_env_text(
-        str(target_payload.get("env") or "")
-    )
+    env_map = control_plane_dokploy.parse_dokploy_env_text(str(target_payload.get("env") or ""))
     required_volume_keys = ("ODOO_DATA_VOLUME", "ODOO_LOG_VOLUME", "ODOO_DB_VOLUME")
     present_volume_keys = tuple(key for key in required_volume_keys if env_map.get(key, "").strip())
-    missing_volume_keys = tuple(key for key in required_volume_keys if key not in present_volume_keys)
+    missing_volume_keys = tuple(
+        key for key in required_volume_keys if key not in present_volume_keys
+    )
     latest_deployment = control_plane_dokploy.latest_deployment_for_target(
         host=host,
         token=token,
@@ -225,8 +476,12 @@ def _snapshot_current_target(
         target_id=target_id_record.target_id,
         target_name=target_record.target_name or str(target_payload.get("name") or "").strip(),
         project_name=target_record.project_name,
-        source_type=str(target_payload.get("sourceType") or target_record.source_type or "").strip(),
-        compose_path=str(target_payload.get("composePath") or target_record.compose_path or "").strip(),
+        source_type=str(
+            target_payload.get("sourceType") or target_record.source_type or ""
+        ).strip(),
+        compose_path=str(
+            target_payload.get("composePath") or target_record.compose_path or ""
+        ).strip(),
         compose_file_sha256=control_plane_dokploy.compose_file_sha256(compose_file)
         if compose_file
         else "",
@@ -388,4 +643,334 @@ def build_odoo_stable_target_replacement_plan(
             blockers=blockers_tuple,
             plan_strategy=request.strategy,
         ),
+    )
+
+
+def execute_odoo_stable_target_replacement_apply(
+    *,
+    control_plane_root: Path,
+    record_store: OdooStableTargetReplacementStore,
+    request: OdooStableTargetReplacementApplyRequest,
+    dokploy_request: DokployRequest = control_plane_dokploy.dokploy_request,
+) -> OdooStableTargetReplacementApplyResult:
+    plan = build_odoo_stable_target_replacement_plan(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=OdooStableTargetReplacementRequest(
+            product=request.product,
+            instance=request.instance,
+            strategy=request.strategy,
+            allow_empty_data=request.allow_empty_data,
+        ),
+        dokploy_request=dokploy_request,
+    )
+    if plan.plan_status != "ready" or plan.current_target is None:
+        raise click.ClickException(
+            "Odoo target replacement apply requires a ready replacement plan: "
+            + "; ".join(plan.blockers or ("missing current target",))
+        )
+    if request.strategy != "recreate-in-place":
+        raise click.ClickException("Odoo target replacement apply supports recreate-in-place only.")
+
+    profile = record_store.read_product_profile_record(request.product)
+    lane = _read_lane(profile=profile, instance=request.instance)
+    target_record = record_store.read_dokploy_target_record(
+        context_name=plan.context, instance_name=plan.instance
+    )
+    target_id_record = record_store.read_dokploy_target_id_record(
+        context_name=plan.context, instance_name=plan.instance
+    )
+    if target_record.target_type != "compose":
+        raise click.ClickException("Odoo target replacement apply requires a compose target.")
+    if not plan.expected_artifact_id.strip():
+        raise click.ClickException(
+            "Odoo target replacement apply requires inventory artifact evidence."
+        )
+    if not plan.expected_source_git_ref.strip():
+        raise click.ClickException(
+            "Odoo target replacement apply requires inventory source git ref evidence."
+        )
+
+    artifact_manifest = record_store.read_artifact_manifest(plan.expected_artifact_id)
+    image_reference = _artifact_image_reference(artifact_manifest)
+    target_name = (
+        plan.current_target.target_name
+        or target_record.target_name
+        or plan.expected_next_target_name
+    )
+    deploy_timeout_seconds = (
+        request.timeout_seconds
+        or target_record.deploy_timeout_seconds
+        or control_plane_dokploy.DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    health_timeout_seconds = (
+        request.health_timeout_seconds
+        or target_record.healthcheck_timeout_seconds
+        or control_plane_dokploy.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
+    )
+    ship_request = _build_ship_request(
+        plan=plan,
+        target_name=target_name,
+        artifact_id=plan.expected_artifact_id,
+        source_git_ref=plan.expected_source_git_ref,
+        timeout_seconds=deploy_timeout_seconds,
+        no_cache=request.no_cache,
+    )
+    deployment_record_id = generate_deployment_record_id(
+        context_name=plan.context, instance_name=plan.instance
+    )
+    started_at = utc_now_timestamp()
+    resolved_target = ResolvedTargetEvidence(
+        target_type="compose",
+        target_id=target_id_record.target_id,
+        target_name=target_name,
+    )
+    runtime_identity = _build_runtime_identity(
+        plan=plan,
+        deployment_record_id=deployment_record_id,
+        artifact_id=plan.expected_artifact_id,
+        image_reference=image_reference,
+    )
+
+    record_store.write_deployment_record(
+        build_deployment_record(
+            request=ship_request,
+            record_id=deployment_record_id,
+            deployment_id="control-plane-dokploy",
+            deployment_status="pending",
+            started_at=started_at,
+            finished_at="",
+            resolved_target=resolved_target,
+            runtime_identity=runtime_identity,
+            destination_health=HealthcheckEvidence(status="pending")
+            if request.verify_health
+            else HealthcheckEvidence(status="skipped"),
+        )
+    )
+
+    base_result = _ApplyResultBase(
+        product=plan.product,
+        context=plan.context,
+        instance=plan.instance,
+        deployment_record_id=deployment_record_id,
+        target_id=target_id_record.target_id,
+        target_name=resolved_target.target_name,
+        artifact_id=plan.expected_artifact_id,
+        image_reference=image_reference,
+    )
+
+    try:
+        host, token = control_plane_dokploy.read_dokploy_config(
+            control_plane_root=control_plane_root
+        )
+        target_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+        )
+        runtime_environment_values = (
+            control_plane_runtime_environments.resolve_runtime_environment_values(
+                control_plane_root=control_plane_root,
+                context_name=plan.context,
+                instance_name=plan.instance,
+            )
+        )
+        compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
+            image_reference=image_reference
+        )
+        control_plane_dokploy.sync_dokploy_compose_raw_source(
+            host=host,
+            token=token,
+            compose_id=target_id_record.target_id,
+            compose_name=resolved_target.target_name,
+            target_payload=target_payload,
+            compose_file=compose_file,
+        )
+        current_env_map = control_plane_dokploy.parse_dokploy_env_text(
+            str(target_payload.get("env") or "")
+        )
+        desired_env_map = dict(current_env_map)
+        desired_env_map.update(runtime_environment_values)
+        desired_env_map["DOCKER_IMAGE_REFERENCE"] = image_reference
+        desired_env_map.update(runtime_identity_env(runtime_identity))
+        control_plane_dokploy.update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+            target_payload=target_payload,
+            env_text=control_plane_dokploy.serialize_dokploy_env_text(desired_env_map),
+        )
+        refreshed_payload = control_plane_dokploy.fetch_dokploy_target_payload(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+        )
+        refreshed_env_map = control_plane_dokploy.parse_dokploy_env_text(
+            str(refreshed_payload.get("env") or "")
+        )
+        missing_keys = sorted(
+            key for key, value in desired_env_map.items() if refreshed_env_map.get(key, "") != value
+        )
+        if missing_keys:
+            raise click.ClickException(
+                "Odoo target replacement env did not persist key(s): " + ", ".join(missing_keys)
+            )
+        latest_before = control_plane_dokploy.latest_deployment_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+        )
+        control_plane_dokploy.trigger_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+            no_cache=request.no_cache,
+        )
+        control_plane_dokploy.wait_for_target_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=target_id_record.target_id,
+            before_key=control_plane_dokploy.deployment_key(latest_before),
+            timeout_seconds=deploy_timeout_seconds,
+        )
+    except click.ClickException as error:
+        _write_failed_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            runtime_identity=runtime_identity,
+            destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        return base_result.result(
+            deploy_status="fail",
+            runtime_identity_injected=False,
+            error_message=str(error),
+        )
+
+    post_deploy_result = execute_odoo_post_deploy(
+        control_plane_root=control_plane_root,
+        record_store=record_store,
+        request=OdooPostDeployRequest(context=plan.context, instance=plan.instance, phase="deploy"),
+    )
+    post_deploy_evidence = PostDeployUpdateEvidence(
+        attempted=True,
+        status=post_deploy_result.post_deploy_status,
+        detail=post_deploy_result.error_message
+        or "Odoo post-deploy completed after stable target replacement apply.",
+    )
+    if post_deploy_result.post_deploy_status != "pass":
+        _write_failed_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            runtime_identity=runtime_identity,
+            post_deploy_update=post_deploy_evidence,
+            destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        return base_result.result(
+            deploy_status="fail",
+            post_deploy_status=post_deploy_result.post_deploy_status,
+            runtime_identity_injected=True,
+            error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
+        )
+
+    base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
+    health_url = _target_health_url(profile=profile, lane=lane, domains=plan.expected_domain_hosts)
+    health_status: Literal["pass", "fail", "skipped"] = "skipped"
+    canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
+    logo_status: Literal["pass", "fail", "skipped"] = "skipped"
+    try:
+        if request.verify_health:
+            if not health_url:
+                raise click.ClickException(
+                    "Odoo target replacement health verification has no health URL."
+                )
+            _verify_health_url(health_url=health_url, timeout_seconds=health_timeout_seconds)
+            health_status = "pass"
+        if request.verify_canonical:
+            if not base_url:
+                raise click.ClickException(
+                    "Odoo target replacement canonical verification has no base URL."
+                )
+            _verify_canonical_url(
+                base_url=base_url,
+                expected_base_url=base_url,
+                timeout_seconds=health_timeout_seconds,
+            )
+            canonical_status = "pass"
+        if request.verify_logo:
+            if not base_url:
+                raise click.ClickException(
+                    "Odoo target replacement logo verification has no base URL."
+                )
+            _verify_logo_route(base_url=base_url, timeout_seconds=health_timeout_seconds)
+            logo_status = "pass"
+    except click.ClickException as error:
+        destination_health = HealthcheckEvidence(
+            verified=health_status == "pass",
+            urls=(health_url,) if health_url else (),
+            timeout_seconds=health_timeout_seconds if health_url else None,
+            status="fail",
+        )
+        _write_failed_deployment(
+            record_store=record_store,
+            ship_request=ship_request,
+            deployment_record_id=deployment_record_id,
+            started_at=started_at,
+            resolved_target=resolved_target,
+            runtime_identity=runtime_identity,
+            post_deploy_update=post_deploy_evidence,
+            destination_health=destination_health,
+        )
+        return base_result.result(
+            deploy_status="fail",
+            post_deploy_status="pass",
+            health_status=health_status if health_status == "pass" else "fail",
+            canonical_status=canonical_status if canonical_status == "pass" else "fail",
+            logo_status=logo_status if logo_status == "pass" else "fail",
+            runtime_identity_injected=True,
+            error_message=str(error),
+        )
+
+    finished_at = utc_now_timestamp()
+    final_runtime_identity = runtime_identity.model_copy(update={"deployed_at": finished_at})
+    destination_health = HealthcheckEvidence(
+        verified=request.verify_health,
+        urls=(health_url,) if request.verify_health and health_url else (),
+        timeout_seconds=health_timeout_seconds if request.verify_health and health_url else None,
+        status=health_status,
+    )
+    deployment_record = build_deployment_record(
+        request=ship_request,
+        record_id=deployment_record_id,
+        deployment_id="control-plane-dokploy",
+        deployment_status="pass",
+        started_at=started_at,
+        finished_at=finished_at,
+        resolved_target=resolved_target,
+        runtime_identity=final_runtime_identity,
+        post_deploy_update=post_deploy_evidence,
+        destination_health=destination_health,
+    )
+    record_store.write_deployment_record(deployment_record)
+    record_store.write_environment_inventory(
+        build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
+    )
+    return base_result.result(
+        deploy_status="pass",
+        post_deploy_status="pass",
+        health_status=health_status,
+        canonical_status=canonical_status,
+        logo_status=logo_status,
+        runtime_identity_injected=True,
     )

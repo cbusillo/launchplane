@@ -552,6 +552,16 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/target-replacement-plan",
             authz_action="odoo_target_replacement_plan.read",
         ),
+        _action(
+            "target_replacement_apply",
+            "Apply stable target replacement",
+            "Recreate an Odoo stable compose target in place after replacement planning passes.",
+            safety="mutation",
+            scope="instance",
+            route_path="/v1/drivers/odoo/target-replacement-apply",
+            authz_action="odoo_target_replacement_apply.execute",
+            writes_records=("deployment", "inventory"),
+        ),
     ),
     setting_groups=(
         DriverSettingGroupDescriptor(
