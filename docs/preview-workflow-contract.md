@@ -28,6 +28,8 @@ Launchplane owns:
 
 - Preview-request interpretation and idempotency conventions.
 - Preview refresh, destroy, inventory, readiness, and lifecycle cleanup routes.
+- Scheduled lifecycle sweeps for every product profile where
+  `preview.enabled=true`.
 - Preview records, generation records, desired-state records, cleanup records,
   and PR feedback records.
 - Unsupported notices for fork and Dependabot preview requests.

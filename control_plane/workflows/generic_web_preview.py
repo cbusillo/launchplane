@@ -1972,28 +1972,40 @@ def execute_generic_web_preview_destroy(
     )
     application_id = str((application or {}).get("applicationId") or "").strip()
     cleanup_errors: list[str] = []
-    if application_id:
-        try:
-            raw_domains = control_plane_dokploy.dokploy_request(
-                host=host,
-                token=token,
-                path="/api/domain.byApplicationId",
-                query={"applicationId": application_id},
-            )
-            if isinstance(raw_domains, list):
-                for raw_domain in raw_domains:
-                    application_domain = control_plane_dokploy.as_json_object(raw_domain)
-                    if application_domain is None:
-                        continue
-                    domain_id = str(application_domain.get("domainId") or "").strip()
-                    if domain_id:
-                        _delete_domain(host=host, token=token, domain_id=domain_id)
-        except click.ClickException as exc:
-            cleanup_errors.append(f"domain cleanup failed: {exc}")
-        try:
-            _delete_application(host=host, token=token, application_id=application_id)
-        except click.ClickException as exc:
-            cleanup_errors.append(f"application cleanup failed: {exc}")
+    if not application_id:
+        finished_at = utc_now_timestamp()
+        return GenericWebPreviewDestroyResult(
+            destroy_status="fail",
+            destroy_started_at=started_at,
+            destroy_finished_at=finished_at,
+            product=resolved_profile.product,
+            context=resolved_profile.preview.context,
+            preview_slug=request.preview_slug,
+            application_name=application_name,
+            application_id="",
+            error_message=f"Preview application {application_name!r} was not found.",
+        )
+    try:
+        raw_domains = control_plane_dokploy.dokploy_request(
+            host=host,
+            token=token,
+            path="/api/domain.byApplicationId",
+            query={"applicationId": application_id},
+        )
+        if isinstance(raw_domains, list):
+            for raw_domain in raw_domains:
+                application_domain = control_plane_dokploy.as_json_object(raw_domain)
+                if application_domain is None:
+                    continue
+                domain_id = str(application_domain.get("domainId") or "").strip()
+                if domain_id:
+                    _delete_domain(host=host, token=token, domain_id=domain_id)
+    except click.ClickException as exc:
+        cleanup_errors.append(f"domain cleanup failed: {exc}")
+    try:
+        _delete_application(host=host, token=token, application_id=application_id)
+    except click.ClickException as exc:
+        cleanup_errors.append(f"application cleanup failed: {exc}")
     finished_at = utc_now_timestamp()
     if cleanup_errors:
         return GenericWebPreviewDestroyResult(

@@ -109,6 +109,8 @@ from control_plane.workflows.generic_web_promotion import GenericWebProdPromotio
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
+    GenericWebPreviewInventoryItem,
+    GenericWebPreviewInventoryResult,
     GenericWebPreviewRefreshResult,
     GenericWebPreviewSmokeCheck,
     GenericWebPreviewSmokeResult,
@@ -14265,6 +14267,181 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_preview_lifecycle_sweep_uses_enabled_product_profiles(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            enabled_profile = LaunchplaneProductProfileRecord.model_validate(
+                _generic_site_profile_payload(product="syo")
+            )
+            disabled_payload = _generic_site_profile_payload(product="discord-blue")
+            disabled_payload["preview"] = {"enabled": False}
+            disabled_profile = LaunchplaneProductProfileRecord.model_validate(disabled_payload)
+            store.write_product_profile_record(enabled_profile)
+            store.write_product_profile_record(disabled_profile)
+            store.write_preview_record(
+                PreviewRecord(
+                    preview_id="preview-syo-syo-pr-41",
+                    context="syo",
+                    anchor_repo="syo",
+                    anchor_pr_number=41,
+                    anchor_pr_url="https://github.example/every/syo/pull/41",
+                    preview_label="syo/syo#41",
+                    canonical_url="https://pr-41.syo.example",
+                    state="active",
+                    created_at="2026-04-20T10:00:00Z",
+                    updated_at="2026-04-20T10:00:00Z",
+                    eligible_at="2026-04-20T10:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["syo"],
+                            "contexts": ["syo"],
+                            "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with (
+                patch(
+                    "control_plane.service.execute_generic_web_preview_inventory",
+                    return_value=GenericWebPreviewInventoryResult(
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        app_name_prefix="syo-preview",
+                        previews=(
+                            GenericWebPreviewInventoryItem(
+                                applicationId="app-41",
+                                applicationName="syo-preview-pr-41",
+                                previewSlug="pr-41",
+                            ),
+                        ),
+                    ),
+                ) as inventory_mock,
+                patch(
+                    "control_plane.service.discover_generic_web_preview_desired_state",
+                    return_value=PreviewDesiredStateRecord(
+                        desired_state_id="preview-desired-state-syo-20260510T120000Z",
+                        product="syo",
+                        context="syo",
+                        source="launchplane-preview-lifecycle",
+                        discovered_at="2026-05-10T12:00:00Z",
+                        repository="every/syo",
+                        label="preview",
+                        anchor_repo="syo",
+                        preview_slug_prefix="pr-",
+                        status="pass",
+                        desired_count=0,
+                        desired_previews=(),
+                    ),
+                ) as desired_mock,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/previews/lifecycle-sweep",
+                    payload={
+                        "source": "launchplane-preview-lifecycle",
+                        "apply": False,
+                    },
+                )
+
+            records = FilesystemRecordStore(state_dir=state_dir)
+            plan_records = records.list_preview_lifecycle_plan_records(context_name="syo")
+            cleanup_records = records.list_preview_lifecycle_cleanup_records(context_name="syo")
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["status"], "pass")
+        self.assertEqual(payload["result"]["profile_count"], 1)
+        self.assertEqual(payload["result"]["profiles"][0]["product"], "syo")
+        self.assertEqual(payload["result"]["profiles"][0]["orphaned_slugs"], ["pr-41"])
+        self.assertEqual(plan_records[0].orphaned_slugs, ("pr-41",))
+        self.assertEqual(cleanup_records[0].status, "report_only")
+        inventory_mock.assert_called_once()
+        desired_mock.assert_called_once()
+
+    def test_preview_lifecycle_sweep_rejects_missing_product_authorization(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="syo")
+                )
+            )
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(
+                    _generic_site_profile_payload(product="verireel")
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/launchplane",
+                            "workflow_refs": [
+                                "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["syo"],
+                            "contexts": ["syo"],
+                            "actions": ["preview_lifecycle.plan", "preview_lifecycle.cleanup"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="every/launchplane",
+                        workflow_ref=(
+                            "every/launchplane/.github/workflows/preview-lifecycle.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/previews/lifecycle-sweep",
+                payload={"source": "launchplane-preview-lifecycle"},
+            )
+
+        self.assertEqual(status_code, 403)
+        self.assertEqual(payload["error"]["code"], "authorization_denied")
+        self.assertEqual(payload["authz"]["request"]["product"], "verireel")
 
     def test_preview_pr_feedback_endpoint_records_skipped_delivery_without_token(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
