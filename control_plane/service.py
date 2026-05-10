@@ -81,6 +81,11 @@ from control_plane.contracts.merge_train_policy import (
 )
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooConfigParameterOverride,
+    OdooInstanceOverrideRecord,
+    OdooOverrideValue,
+)
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
     PreviewGenerationMutationRequest,
@@ -901,6 +906,51 @@ class OdooPostDeployEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooConfigParameterOverrideRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str
+    context: str
+    instance: str
+    key: str
+    value: str
+    source_label: str = "launchplane-service"
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooConfigParameterOverrideRequest":
+        self.product = self.product.strip()
+        self.context = self.context.strip().lower()
+        self.instance = self.instance.strip().lower()
+        self.key = self.key.strip().lower()
+        self.source_label = self.source_label.strip() or "launchplane-service"
+        if not self.product:
+            raise ValueError("Odoo config-parameter override requires product.")
+        if not self.context:
+            raise ValueError("Odoo config-parameter override requires context.")
+        if not self.instance:
+            raise ValueError("Odoo config-parameter override requires instance.")
+        if not self.key:
+            raise ValueError("Odoo config-parameter override requires key.")
+        if self.key != "web.base.url":
+            raise ValueError("Only web.base.url overrides are currently service-writable.")
+        if not self.value.strip():
+            raise ValueError("Odoo config-parameter override requires value.")
+        return self
+
+
+class OdooConfigParameterOverrideEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    override: OdooConfigParameterOverrideRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooConfigParameterOverrideEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo config-parameter override")
+        if self.product.strip() != self.override.product.strip():
+            raise ValueError("Odoo config-parameter override requires matching product values.")
+        return self
+
+
 class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     publish: OdooArtifactPublishEvidenceRequest
@@ -926,6 +976,15 @@ _ODOO_POST_DEPLOY_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooPostDeployEnvelope,
     denial_message=(
         "Workflow cannot execute the Odoo post-deploy driver for the requested product/context."
+    ),
+)
+
+
+_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/config-parameter-override",
+    envelope_model=OdooConfigParameterOverrideEnvelope,
+    denial_message=(
+        "Workflow cannot write Odoo config-parameter overrides for the requested product/context."
     ),
 )
 
@@ -2072,6 +2131,49 @@ def _secret_capable_store(record_store: object) -> control_plane_secrets.SecretR
     if hasattr(record_store, "read_secret_record") and hasattr(record_store, "list_secret_records"):
         return cast(control_plane_secrets.SecretReadStore, record_store)
     return None
+
+
+class _OdooInstanceOverrideStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
+    def write_odoo_instance_override_record(self, record: OdooInstanceOverrideRecord) -> object: ...
+
+
+def _write_odoo_config_parameter_override(
+    *,
+    record_store: _OdooInstanceOverrideStore,
+    request: OdooConfigParameterOverrideRequest,
+) -> OdooInstanceOverrideRecord:
+    try:
+        existing_record = record_store.read_odoo_instance_override_record(
+            context_name=request.context, instance_name=request.instance
+        )
+    except FileNotFoundError:
+        existing_record = None
+    config_parameters = {
+        override.key: override
+        for override in (existing_record.config_parameters if existing_record is not None else ())
+    }
+    addon_settings = existing_record.addon_settings if existing_record is not None else ()
+    config_parameters[request.key] = OdooConfigParameterOverride(
+        key=request.key,
+        value=OdooOverrideValue(source="literal", value=request.value),
+    )
+    record = OdooInstanceOverrideRecord(
+        context=request.context,
+        instance=request.instance,
+        apply_on=existing_record.apply_on
+        if existing_record is not None
+        else ("deploy", "promotion"),
+        config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
+        addon_settings=addon_settings,
+        updated_at=_utc_now_timestamp(),
+        source_label=request.source_label,
+    )
+    record_store.write_odoo_instance_override_record(record)
+    return record
 
 
 class _EveryCodeWorkRequestStore(Protocol):
@@ -7441,6 +7543,53 @@ def create_launchplane_service_app(
                     "transition": (
                         f"odoo-post-deploy:{driver_result.context}:{driver_result.instance}:{driver_result.phase}"
                     )
+                }
+            elif path == _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.route_path:
+                odoo_override_request = (
+                    _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE.envelope_model.model_validate(payload)
+                )
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    product=odoo_override_request.product,
+                    authorization_context=odoo_override_request.override.context,
+                    descriptor_context=odoo_override_request.override.context,
+                    descriptor_instance=odoo_override_request.override.instance,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                override_record = _write_odoo_config_parameter_override(
+                    record_store=cast(_OdooInstanceOverrideStore, record_store),
+                    request=odoo_override_request.override,
+                )
+                driver_result = {
+                    "context": override_record.context,
+                    "instance": override_record.instance,
+                    "config_parameter_keys": sorted(
+                        override.key for override in override_record.config_parameters
+                    ),
+                }
+                result = {
+                    "context": override_record.context,
+                    "instance": override_record.instance,
+                    "config_parameter_keys": sorted(
+                        override.key for override in override_record.config_parameters
+                    ),
                 }
             elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
                 odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(
