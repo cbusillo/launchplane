@@ -80,12 +80,62 @@ class DokployTargetRecordStore(Protocol):
     def list_dokploy_target_id_records(self) -> tuple[DokployTargetIdRecord, ...]: ...
 
 
-def render_odoo_raw_compose_file(*, image_reference: str) -> str:
+def _traefik_route_name(*, domain_host: str) -> str:
+    normalized_host = domain_host.strip().lower()
+    host_slug = re.sub(r"[^a-z0-9]+", "-", normalized_host).strip("-")
+    if not host_slug:
+        raise click.ClickException("Traefik route rendering requires a domain host.")
+    host_hash = hashlib.sha1(normalized_host.encode("utf-8")).hexdigest()[:8]
+    return f"launchplane-odoo-web-{host_slug[:48]}-{host_hash}"
+
+
+def _render_odoo_web_traefik_labels(*, domain_hosts: tuple[str, ...], runtime_port: int) -> str:
+    if not domain_hosts:
+        return ""
+    if runtime_port <= 0:
+        raise click.ClickException("Odoo Traefik label rendering requires a positive port.")
+    lines: list[str] = [
+        "    networks:",
+        "      - default",
+        "      - dokploy-network",
+        "    labels:",
+        '      - "traefik.enable=true"',
+        '      - "traefik.docker.network=dokploy-network"',
+    ]
+    seen_hosts: set[str] = set()
+    for raw_domain_host in domain_hosts:
+        domain_host = raw_domain_host.strip().lower()
+        if not domain_host or domain_host in seen_hosts:
+            continue
+        if "`" in domain_host:
+            raise click.ClickException(
+                f"Odoo Traefik label rendering received an invalid domain host: {domain_host}"
+            )
+        seen_hosts.add(domain_host)
+        route_name = _traefik_route_name(domain_host=domain_host)
+        lines.extend(
+            (
+                f'      - "traefik.http.routers.{route_name}.rule=Host(`{domain_host}`)"',
+                f'      - "traefik.http.routers.{route_name}.entrypoints=websecure"',
+                f'      - "traefik.http.routers.{route_name}.tls.certResolver=letsencrypt"',
+                f'      - "traefik.http.routers.{route_name}.service={route_name}"',
+                f'      - "traefik.http.services.{route_name}.loadbalancer.server.port={runtime_port}"',
+            )
+        )
+    return "\n".join(lines) + "\n"
+
+
+def render_odoo_raw_compose_file(
+    *, image_reference: str, domain_hosts: tuple[str, ...] = (), runtime_port: int = 8069
+) -> str:
     normalized_image_reference = image_reference.strip()
     if not normalized_image_reference:
         raise click.ClickException(
             "Odoo raw compose rendering requires a non-empty image reference."
         )
+    web_route_labels = _render_odoo_web_traefik_labels(
+        domain_hosts=domain_hosts, runtime_port=runtime_port
+    )
     # Keep this intentionally close to odoo-devkit/docker-compose.yml. Launchplane
     # renders the image reference directly so Dokploy git checkout state cannot
     # decide what Odoo artifact is deployed.
@@ -152,6 +202,7 @@ services:
       start_period: 20s
     extra_hosts:
       - "host.docker.internal:host-gateway"
+{web_route_labels}
 
   database:
     image: postgres:17
@@ -236,6 +287,10 @@ volumes:
 secrets:
   github_token:
     environment: GITHUB_TOKEN
+
+networks:
+  dokploy-network:
+    external: true
 """
 
 
