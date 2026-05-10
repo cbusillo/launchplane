@@ -697,6 +697,13 @@ uv run launchplane odoo-targets replacement-plan \
   --instance testing
 ```
 
+For live shared targets, prefer the trusted workflow
+`Odoo Target Replacement Plan`. It calls the deployed Launchplane service route
+`POST /v1/drivers/odoo/target-replacement-plan` with GitHub Actions OIDC so the
+service resolves DB-backed records and managed Dokploy secrets inside the normal
+runtime boundary. The local CLI form is for operator debugging from an already
+trusted runtime with `LAUNCHPLANE_DATABASE_URL` configured.
+
 The plan reads the product profile, Launchplane Dokploy target/id records,
 current inventory, live Dokploy target payload, domains, volume env keys, latest
 deployment, and expected runtime identity. It does not create, delete, deploy,
