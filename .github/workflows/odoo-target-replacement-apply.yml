@@ -16,6 +16,7 @@ name: Odoo Target Replacement Apply
         type: choice
         options:
           - testing
+          - prod
       strategy:
         description: Replacement strategy to apply.
         required: true
@@ -43,6 +44,20 @@ name: Odoo Target Replacement Apply
         required: true
         default: false
         type: boolean
+      data_source_mode:
+        description: Prelaunch rebuild data authority for resettable targets.
+        required: true
+        default: existing
+        type: choice
+        options:
+          - existing
+          - empty
+          - upstream_restore
+      confirmation:
+        description: Confirmation phrase for lane prelaunch rebuild policy.
+        required: false
+        default: ""
+        type: string
       verify_health:
         description: Verify the Odoo health endpoint after deploy.
         required: true
@@ -95,6 +110,8 @@ jobs:
       ARTIFACT_ID: ${{ inputs.artifact_id }}
       SOURCE_GIT_REF: ${{ inputs.source_git_ref }}
       ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
+      DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
+      CONFIRMATION: ${{ inputs.confirmation }}
       VERIFY_HEALTH: ${{ inputs.verify_health }}
       VERIFY_CANONICAL: ${{ inputs.verify_canonical }}
       VERIFY_LOGO: ${{ inputs.verify_logo }}
@@ -111,10 +128,6 @@ jobs:
           : "${PRODUCT:?Missing product input}"
           : "${INSTANCE:?Missing instance input}"
           : "${STRATEGY:?Missing strategy input}"
-          if [ "$INSTANCE" != "testing" ]; then
-            echo 'This workflow only applies testing target replacement.' >&2
-            exit 1
-          fi
           if [ "$STRATEGY" != "recreate-in-place" ]; then
             echo 'Only recreate-in-place is currently supported.' >&2
             exit 1
@@ -156,6 +169,8 @@ jobs:
               --arg strategy "$STRATEGY" \
               --arg artifact_id "$ARTIFACT_ID" \
               --arg source_git_ref "$SOURCE_GIT_REF" \
+              --arg data_source_mode "$DATA_SOURCE_MODE" \
+              --arg confirmation "$CONFIRMATION" \
               --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
               --argjson verify_health "$VERIFY_HEALTH" \
               --argjson verify_canonical "$VERIFY_CANONICAL" \
@@ -172,6 +187,8 @@ jobs:
                   artifact_id: $artifact_id,
                   source_git_ref: $source_git_ref,
                   allow_empty_data: $allow_empty_data,
+                  data_source_mode: $data_source_mode,
+                  confirmation: $confirmation,
                   verify_health: $verify_health,
                   verify_canonical: $verify_canonical,
                   verify_logo: $verify_logo,
@@ -201,10 +218,12 @@ jobs:
             printf '%s' \
               "odoo-target-replacement-apply:${PRODUCT}:${INSTANCE}:" \
               "${STRATEGY}:${ARTIFACT_ID}:${SOURCE_GIT_REF}:" \
-              "${ALLOW_EMPTY_DATA}:${VERIFY_HEALTH}:${VERIFY_CANONICAL}:" \
-              "${VERIFY_LOGO}:${NO_CACHE}:${GITHUB_RUN_ID}:" \
+              "${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:${CONFIRMATION}:" \
+              "${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:" \
+              "${NO_CACHE}:${GITHUB_RUN_ID}:" \
               "${GITHUB_RUN_ATTEMPT}"
           })"
+          route="${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo"
           status_code="$({
             curl -sS \
               -o odoo-target-replacement-apply.json \
@@ -214,12 +233,12 @@ jobs:
               -H 'Content-Type: application/json' \
               -H "Idempotency-Key: ${idempotency_key}" \
               --data "$payload" \
-              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/target-replacement-apply"
+              "${route}/target-replacement-apply"
           })"
           jq . odoo-target-replacement-apply.json
           if [ "$status_code" != "202" ]; then
             echo \
-              "Odoo target replacement apply failed with HTTP ${status_code}." \
+              "Odoo target replacement apply failed: ${status_code}." \
               >&2
             exit 1
           fi

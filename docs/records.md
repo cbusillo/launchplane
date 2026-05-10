@@ -231,6 +231,16 @@ implementation signal, not a launch tracker: close it when the policy is encoded
 and keep launch/cutover retirement in a separate issue or explicit expiration
 record.
 
+Odoo prelaunch rebuild eligibility is also lane-owned product-profile data. A
+lane's `odoo_prelaunch_rebuild` policy defaults to disabled and must explicitly
+carry an issue-backed approval URL, confirmation phrase, data source mode,
+expected Dokploy target name, and expected domains. The initial data source
+modes are `empty` and `upstream_restore`. Target replacement plan/apply requests
+that set a prelaunch data source must match this policy before Launchplane will
+treat missing Odoo volume keys as intentional. This keeps provisional lanes such
+as OPW testing/prod auditable without making environment names like `prod`
+destructive authority by themselves.
+
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
 be Launchplane's authenticated service ingress plus the durable record semantics

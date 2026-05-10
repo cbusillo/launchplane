@@ -49,6 +49,14 @@ def _site_profile_payload(
                 "context": prod_context,
                 "base_url": f"https://{product}.example",
                 "health_url": f"https://{product}.example/healthz",
+                "odoo_prelaunch_rebuild": {
+                    "enabled": True,
+                    "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
+                    "data_source_mode": "upstream_restore",
+                    "confirmation": "restore opw upstream",
+                    "expected_target_name": f"{product}-prod",
+                    "expected_domains": [f"{product}.example"],
+                },
             },
         ),
         "preview": {
@@ -652,6 +660,37 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
 
         self.assertEqual(detail.managed_secrets[0].status, "disabled")
         self.assertEqual(detail.managed_secrets[0].trust_state, "disabled")
+
+    def test_product_read_model_exposes_prelaunch_rebuild_policy(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(product="odoo-tenant-opw", preview_enabled=False)
+        )
+        store = _PreviewRecordStore(profile, ())
+
+        overview = build_product_site_overview(
+            record_store=store,
+            product="odoo-tenant-opw",
+            action_allowed=lambda *_: False,
+        )
+        detail = build_product_environment_detail(
+            record_store=store,
+            product="odoo-tenant-opw",
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+
+        prod_summary = {summary.environment: summary for summary in overview.environments}["prod"]
+        self.assertTrue(prod_summary.prelaunch_rebuild_allowed)
+        self.assertEqual(
+            prod_summary.prelaunch_rebuild_data_source_mode,
+            "upstream_restore",
+        )
+        self.assertEqual(
+            prod_summary.prelaunch_rebuild_approval_issue_url,
+            "https://github.com/cbusillo/launchplane/issues/573",
+        )
+        self.assertTrue(detail.prelaunch_rebuild_allowed)
+        self.assertEqual(detail.prelaunch_rebuild_data_source_mode, "upstream_restore")
 
     def test_product_environment_config_status_reports_expected_key_states(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

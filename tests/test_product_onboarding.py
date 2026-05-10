@@ -45,6 +45,14 @@ def _manifest_payload() -> dict[str, object]:
                 "context": "example-site-prod",
                 "base_url": "https://example.invalid",
                 "health_url": "https://example.invalid/status",
+                "odoo_prelaunch_rebuild": {
+                    "enabled": True,
+                    "approval_issue_url": "https://github.com/cbusillo/launchplane/issues/573",
+                    "data_source_mode": "upstream_restore",
+                    "confirmation": "restore example upstream",
+                    "expected_target_name": "example-site-prod",
+                    "expected_domains": ["example.invalid"],
+                },
             },
         ],
         "preview": {
@@ -226,6 +234,104 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             ],
         )
 
+    def test_deploy_odoo_opw_onboarding_manifest_encodes_upstream_restore_policy(
+        self,
+    ) -> None:
+        script_path = Path("scripts/deploy/ensure-authz-grants.sh")
+        extractor = """
+set -euo pipefail
+PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
+"""
+        with TemporaryDirectory() as temporary_directory_name:
+            temporary_directory = Path(temporary_directory_name)
+            captured_bin_directory = temporary_directory / "bin"
+            captured_bin_directory.mkdir()
+            (captured_bin_directory / "curl").write_text(
+                "#!/usr/bin/env bash\n"
+                "case \"$*\" in\n"
+                "  *github.invalid/oidc*) printf '{\"value\":\"oidc-token\"}' ;;\n"
+                "  *)\n"
+                "    idempotency_key=''\n"
+                "    output_file=''\n"
+                "    request_payload=''\n"
+                "    while [ \"$#\" -gt 0 ]; do\n"
+                "      case \"$1\" in\n"
+                "        -o) shift; output_file=\"$1\" ;;\n"
+                "        -H)\n"
+                "          shift\n"
+                "          case \"$1\" in\n"
+                "            Idempotency-Key:*) idempotency_key=\"$1\" ;;\n"
+                "          esac\n"
+                "          ;;\n"
+                "        --data) shift; request_payload=\"$1\" ;;\n"
+                "      esac\n"
+                "      shift || true\n"
+                "    done\n"
+                "    case \"$idempotency_key\" in\n"
+                "      *launchplane-product-onboarding:odoo-opw-prelaunch-profile*)\n"
+                "        printf '%s' \"$request_payload\" > \"$CAPTURED_REQUEST_PAYLOAD\"\n"
+                "        ;;\n"
+                "    esac\n"
+                "    if [ -n \"$output_file\" ]; then\n"
+                "      printf '{\"status\":\"ok\"}' > \"$output_file\"\n"
+                "    fi\n"
+                "    printf '200'\n"
+                "    ;;\n"
+                "esac\n"
+            )
+            (captured_bin_directory / "mktemp").write_text(
+                "#!/usr/bin/env bash\n"
+                "printf '%s\\n' \"$CAPTURED_RESPONSE_FILE\"\n"
+            )
+            (captured_bin_directory / "curl").chmod(0o755)
+            (captured_bin_directory / "mktemp").chmod(0o755)
+            captured_request_payload = temporary_directory / "request.json"
+            captured_response_file = temporary_directory / "response.json"
+            env = {
+                **os.environ,
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "request-token",
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://github.invalid/oidc",
+                "GITHUB_REPOSITORY": "cbusillo/launchplane",
+                "GITHUB_SHA": "test-sha",
+                "LAUNCHPLANE_SERVICE_AUDIENCE": "launchplane-service",
+                "LAUNCHPLANE_SERVICE_URL": "https://launchplane.example.invalid",
+                "DISCORD_BLUE_DOKPLOY_TARGET_ID": "app-discord-blue",
+                "ODOO_CM_TESTING_DOKPLOY_TARGET_ID": "compose-cm-testing",
+                "ODOO_CM_PROD_DOKPLOY_TARGET_ID": "compose-cm-prod",
+                "ODOO_OPW_TESTING_DOKPLOY_TARGET_ID": "compose-opw-testing",
+                "ODOO_OPW_PROD_DOKPLOY_TARGET_ID": "compose-opw-prod",
+                "CAPTURED_REQUEST_PAYLOAD": str(captured_request_payload),
+                "CAPTURED_RESPONSE_FILE": str(captured_response_file),
+                "CAPTURED_BIN_DIR": str(captured_bin_directory),
+            }
+
+            result = subprocess.run(
+                ["bash", "-c", extractor],
+                check=False,
+                cwd=script_path.parent.parent.parent,
+                env=env,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            request_payload = json.loads(captured_request_payload.read_text())
+
+        manifest = ProductOnboardingManifest.model_validate(request_payload["manifest"])
+
+        self.assertEqual(manifest.product, "odoo-tenant-opw")
+        policies = {lane.instance: lane.odoo_prelaunch_rebuild for lane in manifest.lanes}
+        for instance in ("testing", "prod"):
+            self.assertTrue(policies[instance].enabled)
+            self.assertEqual(policies[instance].data_source_mode, "upstream_restore")
+            self.assertEqual(policies[instance].confirmation, "restore opw upstream")
+            self.assertEqual(
+                policies[instance].approval_issue_url,
+                "https://github.com/cbusillo/launchplane/issues/573",
+            )
+        self.assertEqual(policies["testing"].expected_target_name, "opw-testing")
+        self.assertEqual(policies["prod"].expected_target_name, "opw-prod")
+
     def test_apply_product_onboarding_manifest_writes_canonical_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -264,6 +370,11 @@ PATH="$CAPTURED_BIN_DIR:$PATH" bash scripts/deploy/ensure-authz-grants.sh
             "bootstrap example testing",
         )
         self.assertEqual(profile.lanes[1].health_url, "https://example.invalid/status")
+        self.assertTrue(profile.lanes[1].odoo_prelaunch_rebuild.enabled)
+        self.assertEqual(
+            profile.lanes[1].odoo_prelaunch_rebuild.data_source_mode,
+            "upstream_restore",
+        )
         self.assertEqual(profile.preview.enable_label, "preview-requested")
         self.assertEqual(profile.expected_config.runtime_environment_keys[0].key, "PUBLIC_BASE_URL")
         self.assertEqual(

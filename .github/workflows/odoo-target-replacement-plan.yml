@@ -26,17 +26,32 @@ name: Odoo Target Replacement Plan
           - recreate-in-place
           - replace-and-cutover
       allow_empty_data:
-        description: Allow missing volume env keys for intentionally empty targets.
+        description: Allow missing Odoo volume env keys.
         required: true
         default: false
         type: boolean
+      data_source_mode:
+        description: Prelaunch rebuild data authority for resettable targets.
+        required: true
+        default: existing
+        type: choice
+        options:
+          - existing
+          - empty
+          - upstream_restore
+      confirmation:
+        description: Confirmation phrase for lane prelaunch rebuild policy.
+        required: false
+        default: ""
+        type: string
 
 permissions:
   contents: read
   id-token: write
 
 concurrency:
-  group: odoo-target-replacement-plan-${{ inputs.product }}-${{ inputs.instance }}
+  group: >-
+    odoo-target-replacement-plan-${{ inputs.product }}-${{ inputs.instance }}
   cancel-in-progress: false
 
 jobs:
@@ -49,6 +64,8 @@ jobs:
       INSTANCE: ${{ inputs.instance }}
       STRATEGY: ${{ inputs.strategy }}
       ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
+      DATA_SOURCE_MODE: ${{ inputs.data_source_mode }}
+      CONFIRMATION: ${{ inputs.confirmation }}
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
     steps:
@@ -59,8 +76,11 @@ jobs:
           : "${PRODUCT:?Missing product input}"
           : "${INSTANCE:?Missing instance input}"
           : "${STRATEGY:?Missing strategy input}"
-          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
-            echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || \
+             [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            echo \
+              'Missing Launchplane service URL or OIDC audience variable.' \
+              >&2
             exit 1
           fi
 
@@ -69,9 +89,10 @@ jobs:
         run: |
           set -euo pipefail
           oidc_token="$({
+            token_url="${ACTIONS_ID_TOKEN_REQUEST_URL}"
             curl -fsSL \
               -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
-              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
+              "${token_url}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
             | jq -r '.value'
           })"
           payload="$({
@@ -79,6 +100,8 @@ jobs:
               --arg product "$PRODUCT" \
               --arg instance "$INSTANCE" \
               --arg strategy "$STRATEGY" \
+              --arg data_source_mode "$DATA_SOURCE_MODE" \
+              --arg confirmation "$CONFIRMATION" \
               --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
               '{
                 schema_version: 1,
@@ -88,10 +111,19 @@ jobs:
                   product: $product,
                   instance: $instance,
                   strategy: $strategy,
-                  allow_empty_data: $allow_empty_data
+                  allow_empty_data: $allow_empty_data,
+                  data_source_mode: $data_source_mode,
+                  confirmation: $confirmation
                 }
               }'
           })"
+          idempotency_key="$({
+            printf '%s' \
+              "odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:" \
+              "${STRATEGY}:${ALLOW_EMPTY_DATA}:${DATA_SOURCE_MODE}:" \
+              "${CONFIRMATION}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}"
+          })"
+          route="${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo"
           status_code="$({
             curl -sS \
               -o odoo-target-replacement-plan.json \
@@ -99,18 +131,20 @@ jobs:
               -X POST \
               -H "Authorization: Bearer ${oidc_token}" \
               -H 'Content-Type: application/json' \
-              -H "Idempotency-Key: odoo-target-replacement-plan:${PRODUCT}:${INSTANCE}:${STRATEGY}:${ALLOW_EMPTY_DATA}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              -H "Idempotency-Key: ${idempotency_key}" \
               --data "$payload" \
-              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/target-replacement-plan"
+              "${route}/target-replacement-plan"
           })"
           jq . odoo-target-replacement-plan.json
           if [ "$status_code" != "202" ]; then
-            echo "Launchplane Odoo target replacement plan failed with HTTP ${status_code}." >&2
+            echo \
+              "Odoo replacement plan failed: ${status_code}." \
+              >&2
             exit 1
           fi
 
       - name: Upload replacement plan
         uses: actions/upload-artifact@v5
         with:
-          name: odoo-target-replacement-plan-${{ inputs.product }}-${{ inputs.instance }}
+          name: odoo-target-replacement-plan
           path: odoo-target-replacement-plan.json

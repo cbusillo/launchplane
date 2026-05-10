@@ -139,6 +139,9 @@ class ProductEnvironmentSummary(BaseModel):
     context: str
     base_url: str = ""
     health_url: str = ""
+    prelaunch_rebuild_allowed: bool = False
+    prelaunch_rebuild_data_source_mode: str = ""
+    prelaunch_rebuild_approval_issue_url: str = ""
     trust_state: FreshnessStatus
     provenance: DataProvenance
     warnings: tuple[str, ...] = ()
@@ -191,6 +194,9 @@ class ProductEnvironmentDetail(BaseModel):
     context: str
     base_url: str = ""
     health_url: str = ""
+    prelaunch_rebuild_allowed: bool = False
+    prelaunch_rebuild_data_source_mode: str = ""
+    prelaunch_rebuild_approval_issue_url: str = ""
     target: ProductTargetSummary
     runtime_settings: tuple[ProductRuntimeSettingSummary, ...] = ()
     managed_secrets: tuple[ProductSecretBindingSummary, ...] = ()
@@ -365,6 +371,11 @@ def build_product_environment_detail(
         context=lane.context,
         base_url=lane.base_url,
         health_url=lane.health_url,
+        prelaunch_rebuild_allowed=lane.odoo_prelaunch_rebuild.enabled,
+        prelaunch_rebuild_data_source_mode=lane.odoo_prelaunch_rebuild.data_source_mode
+        if lane.odoo_prelaunch_rebuild.enabled
+        else "",
+        prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
         target=_target_summary(lane_summary),
         runtime_settings=_runtime_setting_summaries(lane_summary),
         managed_secrets=_secret_binding_summaries(lane_summary),
@@ -1014,6 +1025,11 @@ def _build_environment_summary(
         context=lane.context,
         base_url=lane.base_url,
         health_url=lane.health_url,
+        prelaunch_rebuild_allowed=lane.odoo_prelaunch_rebuild.enabled,
+        prelaunch_rebuild_data_source_mode=lane.odoo_prelaunch_rebuild.data_source_mode
+        if lane.odoo_prelaunch_rebuild.enabled
+        else "",
+        prelaunch_rebuild_approval_issue_url=lane.odoo_prelaunch_rebuild.approval_issue_url,
         trust_state=provenance.freshness_status,
         provenance=provenance,
         available_actions=_action_availability(

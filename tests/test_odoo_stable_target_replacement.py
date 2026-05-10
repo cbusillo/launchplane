@@ -18,6 +18,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
     ProductLaneProfile,
+    ProductOdooPrelaunchRebuildPolicy,
     ProductPreviewProfile,
 )
 from control_plane.contracts.promotion_record import (
@@ -111,6 +112,36 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
     )
 
 
+def _opw_profile_with_prelaunch_policy(*, enabled: bool) -> LaunchplaneProductProfileRecord:
+    return LaunchplaneProductProfileRecord(
+        product="odoo-tenant-opw",
+        display_name="Odoo OPW",
+        repository="cbusillo/odoo-tenant-opw",
+        driver_id="odoo",
+        image=ProductImageProfile(repository="ghcr.io/cbusillo/odoo-tenant-opw"),
+        runtime_port=8069,
+        health_path="/web/health",
+        lanes=(
+            ProductLaneProfile(
+                instance="prod",
+                context="opw",
+                odoo_prelaunch_rebuild=ProductOdooPrelaunchRebuildPolicy(
+                    enabled=enabled,
+                    approval_issue_url="https://github.com/cbusillo/launchplane/issues/573"
+                    if enabled
+                    else "",
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream" if enabled else "",
+                    expected_target_name="opw-prod" if enabled else "",
+                    expected_domains=("openwater.pro",) if enabled else (),
+                ),
+            ),
+        ),
+        updated_at="2026-05-10T00:00:00Z",
+        source="test",
+    )
+
+
 def _target_record(target_type: str = "compose") -> DokployTargetRecord:
     return DokployTargetRecord(
         context="cm",
@@ -120,6 +151,27 @@ def _target_record(target_type: str = "compose") -> DokployTargetRecord:
         target_name="cm-testing",
         domains=("cm-testing.shinycomputers.com",),
         updated_at="2026-05-09T00:00:00Z",
+    )
+
+
+def _opw_target_record() -> DokployTargetRecord:
+    return DokployTargetRecord(
+        context="opw",
+        instance="prod",
+        project_name="odoo",
+        target_type="compose",
+        target_name="opw-prod",
+        domains=("openwater.pro",),
+        updated_at="2026-05-10T00:00:00Z",
+    )
+
+
+def _opw_target_id_record() -> DokployTargetIdRecord:
+    return DokployTargetIdRecord(
+        context="opw",
+        instance="prod",
+        target_id="compose-opw-prod",
+        updated_at="2026-05-10T00:00:00Z",
     )
 
 
@@ -170,10 +222,99 @@ def _artifact_manifest(
 def _request(path: str, query: object | None = None, **_: object) -> JsonValue:
     if path == "/api/domain.byComposeId" and query == {"composeId": "compose-cm-testing"}:
         return [{"host": "cm-testing.shinycomputers.com", "domainId": "domain-cm"}]
+    if path == "/api/domain.byComposeId" and query == {"composeId": "compose-opw-prod"}:
+        return [{"host": "openwater.pro", "domainId": "domain-opw"}]
     return []
 
 
 class OdooStableTargetReplacementTests(unittest.TestCase):
+    def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "opw-prod",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "",
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-opw", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(
+                    profile=_opw_profile_with_prelaunch_policy(enabled=True),
+                    target_record=_opw_target_record(),
+                    target_id_record=_opw_target_id_record(),
+                ),
+                request=OdooStableTargetReplacementRequest(
+                    product="odoo-tenant-opw",
+                    instance="prod",
+                    allow_empty_data=True,
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(plan.plan_status, "ready")
+        self.assertTrue(plan.allow_empty_data)
+        self.assertEqual(plan.data_source_mode, "upstream_restore")
+        self.assertEqual(
+            plan.approval_issue_url,
+            "https://github.com/cbusillo/launchplane/issues/573",
+        )
+
+    def test_build_plan_blocks_upstream_restore_without_issue_backed_policy(self) -> None:
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.read_dokploy_config",
+                return_value=("host", "token"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "name": "opw-prod",
+                    "sourceType": "raw",
+                    "composePath": "docker-compose.yml",
+                    "composeFile": "services: {}",
+                    "env": "",
+                },
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_target_replacement.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "deploy-opw", "status": "success"},
+            ),
+        ):
+            plan = build_odoo_stable_target_replacement_plan(
+                control_plane_root=Path("."),
+                record_store=_Store(
+                    profile=_opw_profile_with_prelaunch_policy(enabled=False),
+                    target_record=_opw_target_record(),
+                    target_id_record=_opw_target_id_record(),
+                ),
+                request=OdooStableTargetReplacementRequest(
+                    product="odoo-tenant-opw",
+                    instance="prod",
+                    allow_empty_data=True,
+                    data_source_mode="upstream_restore",
+                    confirmation="restore opw upstream",
+                ),
+                dokploy_request=cast(DokployRequest, _request),
+            )
+
+        self.assertEqual(plan.plan_status, "blocked")
+        self.assertIn("prelaunch rebuild is not enabled", "; ".join(plan.blockers))
+
     def test_build_plan_reports_ready_when_records_and_volume_contract_exist(self) -> None:
         identity = json.dumps(
             {"deployment_record_id": "deployment-cm-testing", "artifact_id": "artifact"}
