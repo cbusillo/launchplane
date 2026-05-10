@@ -259,6 +259,11 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
 )
+from control_plane.workflows.odoo_stable_bootstrap import (
+    OdooStableBootstrapRequest,
+    OdooStableBootstrapStore,
+    execute_odoo_stable_bootstrap,
+)
 from control_plane.workflows.odoo_prod_backup_gate import (
     OdooProdBackupGateRequest,
     execute_odoo_prod_backup_gate,
@@ -951,6 +956,18 @@ class OdooConfigParameterOverrideEnvelope(_ProductRouteEnvelope):
         return self
 
 
+class OdooStableBootstrapEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    bootstrap: OdooStableBootstrapRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooStableBootstrapEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo stable bootstrap")
+        if self.product.strip() != self.bootstrap.product.strip():
+            raise ValueError("Odoo stable bootstrap requires matching product values.")
+        return self
+
+
 class OdooArtifactPublishEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     publish: OdooArtifactPublishEvidenceRequest
@@ -985,6 +1002,15 @@ _ODOO_CONFIG_PARAMETER_OVERRIDE_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooConfigParameterOverrideEnvelope,
     denial_message=(
         "Workflow cannot write Odoo config-parameter overrides for the requested product/context."
+    ),
+)
+
+
+_ODOO_STABLE_BOOTSTRAP_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/stable-bootstrap",
+    envelope_model=OdooStableBootstrapEnvelope,
+    denial_message=(
+        "Workflow cannot execute Odoo stable bootstrap for the requested product/context."
     ),
 )
 
@@ -7591,6 +7617,41 @@ def create_launchplane_service_app(
                         override.key for override in override_record.config_parameters
                     ),
                 }
+            elif path == _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path:
+                odoo_bootstrap_request = (
+                    _ODOO_STABLE_BOOTSTRAP_ROUTE.envelope_model.model_validate(payload)
+                )
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_STABLE_BOOTSTRAP_ROUTE,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    product=odoo_bootstrap_request.product,
+                    authorization_context=odoo_bootstrap_request.bootstrap.context,
+                    descriptor_context=odoo_bootstrap_request.bootstrap.context,
+                    descriptor_instance=odoo_bootstrap_request.bootstrap.instance,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                driver_result = execute_odoo_stable_bootstrap(
+                    control_plane_root=resolved_root,
+                    record_store=cast(OdooStableBootstrapStore, record_store),
+                    request=odoo_bootstrap_request.bootstrap,
+                )
+                result = {"deployment_record_id": driver_result.deployment_record_id}
             elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
                 odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(
                     payload

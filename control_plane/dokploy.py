@@ -30,6 +30,7 @@ DEFAULT_CONTROL_PLANE_DOKPLOY_SOURCE_FILE = Path("config/dokploy.toml")
 DEFAULT_CONTROL_PLANE_DOKPLOY_TARGET_IDS_FILE = Path("config/dokploy-targets.toml")
 DEFAULT_STABLE_REMOTE_INSTANCES = {"testing", "prod"}
 DOKPLOY_DATA_WORKFLOW_SCHEDULE_NAME = "platform-data-workflow"
+DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME = "platform-odoo-bootstrap"
 DOKPLOY_ODOO_BACKUP_GATE_SCHEDULE_NAME = "platform-odoo-backup-gate"
 DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION = "0 0 31 2 *"
 DOKPLOY_RUNNING_DEPLOYMENT_STATUSES = {"pending", "queued", "running", "in_progress", "starting"}
@@ -1411,6 +1412,165 @@ def run_compose_post_deploy_update(
     )
 
 
+def run_compose_odoo_stable_bootstrap(
+    *,
+    host: str,
+    token: str,
+    target_definition: DokployTargetDefinition,
+    env_file: Path | None,
+    workflow_environment_overrides: Mapping[str, str] | None = None,
+    required_workflow_environment_keys: tuple[str, ...] = (),
+    timeout_seconds: int | None = None,
+) -> None:
+    compose_id = target_definition.target_id.strip()
+    compose_name = (
+        target_definition.target_name.strip()
+        or f"{target_definition.context}-{target_definition.instance}"
+    )
+    if not compose_id:
+        raise click.ClickException(
+            f"Dokploy compose target {target_definition.context}/{target_definition.instance} requires target_id for Odoo bootstrap."
+        )
+    target_payload = fetch_dokploy_target_payload(
+        host=host,
+        token=token,
+        target_type="compose",
+        target_id=compose_id,
+    )
+    current_env_map = parse_dokploy_env_text(str(target_payload.get("env") or ""))
+    desired_env_map = _apply_post_deploy_env_file_overrides(
+        current_env_map=current_env_map,
+        env_file=env_file,
+    )
+    schedule_timeout_seconds = (
+        timeout_seconds
+        or target_definition.deploy_timeout_seconds
+        or DEFAULT_DOKPLOY_DEPLOY_TIMEOUT_SECONDS
+    )
+    if desired_env_map != current_env_map:
+        update_dokploy_target_env(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            target_payload=target_payload,
+            env_text=serialize_dokploy_env_text(desired_env_map),
+        )
+        latest_compose_deployment = latest_deployment_for_target(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+        )
+        trigger_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            no_cache=False,
+        )
+        wait_for_target_deployment(
+            host=host,
+            token=token,
+            target_type="compose",
+            target_id=compose_id,
+            before_key=deployment_key(latest_compose_deployment),
+            timeout_seconds=schedule_timeout_seconds,
+        )
+
+    database_name = desired_env_map.get("ODOO_DB_NAME", "").strip()
+    if not database_name:
+        raise click.ClickException(
+            "Odoo stable bootstrap requires ODOO_DB_NAME in the live target environment or explicit env file."
+        )
+    filestore_path = (
+        desired_env_map.get("ODOO_FILESTORE_PATH") or "/volumes/data/filestore"
+    ).strip() or "/volumes/data/filestore"
+    data_workflow_lock_path = (
+        desired_env_map.get("ODOO_DATA_WORKFLOW_LOCK_FILE") or DEFAULT_DATA_WORKFLOW_LOCK_PATH
+    ).strip() or DEFAULT_DATA_WORKFLOW_LOCK_PATH
+    schedule_type, schedule_lookup_id, compose_app_name, schedule_server_id = (
+        _resolve_dokploy_schedule_runtime(
+            host=host,
+            token=token,
+            compose_id=compose_id,
+            compose_name=compose_name,
+            target_payload=target_payload,
+        )
+    )
+    schedule_app_name = f"platform-{target_definition.context}-{target_definition.instance}-odoo-bootstrap"
+    existing_schedule = find_matching_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
+        app_name=schedule_app_name,
+    )
+    if _has_running_schedule_deployment(existing_schedule):
+        raise click.ClickException(
+            "Dokploy-managed Odoo bootstrap already has a running schedule deployment for "
+            f"{target_definition.context}/{target_definition.instance}."
+        )
+    schedule_script = _build_dokploy_data_workflow_script(
+        compose_app_name=compose_app_name,
+        database_name=database_name,
+        filestore_path=filestore_path,
+        clear_stale_lock=_should_clear_stale_data_workflow_lock(existing_schedule),
+        data_workflow_lock_path=data_workflow_lock_path,
+        workflow_mode="bootstrap",
+        workflow_environment_overrides=workflow_environment_overrides or {},
+        required_workflow_environment_keys=required_workflow_environment_keys,
+    )
+    schedule_payload: JsonObject = {
+        "name": DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
+        "cronExpression": DOKPLOY_MANUAL_ONLY_CRON_EXPRESSION,
+        "appName": schedule_app_name,
+        "shellType": "bash",
+        "scheduleType": schedule_type,
+        "command": "control-plane odoo stable bootstrap",
+        "script": schedule_script,
+        "serverId": schedule_server_id,
+        "userId": schedule_lookup_id if schedule_type == "dokploy-server" else None,
+        "enabled": False,
+        "timezone": "UTC",
+    }
+    schedule = upsert_dokploy_schedule(
+        host=host,
+        token=token,
+        target_id=schedule_lookup_id,
+        schedule_type=schedule_type,
+        schedule_name=DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
+        app_name=schedule_app_name,
+        schedule_payload=schedule_payload,
+    )
+    schedule_id = schedule_key(schedule)
+    if not schedule_id:
+        raise click.ClickException(
+            f"Dokploy Odoo bootstrap schedule for {target_definition.context}/{target_definition.instance} did not expose a schedule id."
+        )
+    latest_schedule_deployment = latest_deployment_for_schedule(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+    )
+    dokploy_request(
+        host=host,
+        token=token,
+        path="/api/schedule.runManually",
+        method="POST",
+        payload={"scheduleId": schedule_id},
+        timeout_seconds=schedule_timeout_seconds,
+    )
+    wait_for_dokploy_schedule_deployment(
+        host=host,
+        token=token,
+        schedule_id=schedule_id,
+        before_key=deployment_key(latest_schedule_deployment),
+        timeout_seconds=schedule_timeout_seconds,
+    )
+
+
 def run_compose_odoo_backup_gate(
     *,
     host: str,
@@ -1722,6 +1882,7 @@ def _build_dokploy_data_workflow_script(
     filestore_path: str,
     clear_stale_lock: bool,
     data_workflow_lock_path: str,
+    workflow_mode: Literal["update", "bootstrap"] = "update",
     workflow_environment_overrides: Mapping[str, str] | None = None,
     required_workflow_environment_keys: tuple[str, ...] = (),
     protected_shopify_store_keys: tuple[str, ...] = (),
@@ -1741,6 +1902,8 @@ def _build_dokploy_data_workflow_script(
         "protected_shopify_store_keys",
         protected_shopify_store_keys,
     )
+    workflow_arguments = "--bootstrap" if workflow_mode == "bootstrap" else "--update-only"
+    workflow_label = "bootstrap" if workflow_mode == "bootstrap" else "post-deploy update"
     return f"""#!/usr/bin/env bash
 set -euo pipefail
 
@@ -1748,7 +1911,7 @@ compose_project={quoted_compose_app_name}
 database_name={quoted_database_name}
 filestore_root={quoted_filestore_path}
 workflow_ssh_dir=/tmp/platform-data-workflow-ssh
-workflow_arguments=(--update-only)
+workflow_arguments=({workflow_arguments})
 workflow_environment=()
 {workflow_environment_lines}
 required_workflow_environment_keys=()
@@ -1886,7 +2049,7 @@ workflow_identity_key=$(docker exec -u root \
         printf "%s" "$workflow_identity_key"
     ')
 
-echo "Running post-deploy update in container ${{script_runner_container_id}}"
+echo "Running Odoo {workflow_label} in container ${{script_runner_container_id}}"
 docker exec \
     -e DATA_WORKFLOW_SSH_DIR="${{workflow_ssh_dir}}" \
     -e DATA_WORKFLOW_SSH_KEY="$workflow_identity_key" \

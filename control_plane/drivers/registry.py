@@ -407,7 +407,7 @@ ODOO_DRIVER = DriverDescriptor(
             capability_id="post_deploy_settings",
             label="Post-deploy settings",
             description="Apply typed Odoo instance settings and managed secret bindings after deploy.",
-            actions=("post_deploy",),
+            actions=("post_deploy", "stable_bootstrap"),
             panels=("settings", "secret_bindings", "audit"),
         ),
         DriverCapabilityDescriptor(
@@ -474,6 +474,16 @@ ODOO_DRIVER = DriverDescriptor(
             route_path="/v1/drivers/odoo/config-parameter-override",
             authz_action="odoo_config_parameter_override.write",
             writes_records=("odoo_instance_override",),
+        ),
+        _action(
+            "stable_bootstrap",
+            "Bootstrap stable instance",
+            "Run a guarded Odoo stable bootstrap through Launchplane-owned provider scheduling.",
+            safety="destructive",
+            scope="instance",
+            route_path="/v1/drivers/odoo/stable-bootstrap",
+            authz_action="odoo_stable_bootstrap.execute",
+            writes_records=("deployment", "inventory"),
         ),
         _action(
             "preview_desired_state",

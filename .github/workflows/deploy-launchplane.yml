@@ -1133,6 +1133,14 @@ jobs:
             odoo_config_parameter_override.write \
             deploy:odoo-cm-config-parameter-override-grant \
             odoo-cm-config-parameter-override
+          post_grant \
+            "$GITHUB_REPOSITORY" \
+            odoo-stable-bootstrap.yml \
+            odoo-tenant-cm \
+            cm \
+            odoo_stable_bootstrap.execute \
+            deploy:odoo-cm-stable-bootstrap-grant \
+            odoo-cm-stable-bootstrap
           post_syo_preview_grants \
             sellyouroutboard-testing \
             legacy-context

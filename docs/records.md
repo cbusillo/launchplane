@@ -335,6 +335,11 @@ state/
 - Deployment records make the native follow-up step explicit by
   recording whether the Odoo-specific compose post-deploy update was skipped,
   pending, passed, or failed.
+- Odoo stable bootstrap writes normal deployment and inventory records even
+  though the provider deploy step is a dedicated Dokploy schedule. The record's
+  deploy mode is `dokploy-compose-schedule`; post-deploy evidence captures the
+  typed Odoo settings apply, and destination health captures the public
+  verification outcome after bootstrap.
 - Odoo prod rollback writes a normal deployment record for the rollback deploy,
   refreshes prod inventory, mints the prod release tuple from the selected
   artifact manifest, and annotates the current prod promotion record's

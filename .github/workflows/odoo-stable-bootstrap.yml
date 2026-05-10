@@ -1,0 +1,170 @@
+---
+name: Odoo Stable Bootstrap
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Odoo product profile key.
+        required: true
+        default: odoo-tenant-cm
+        type: string
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        default: cm
+        type: choice
+        options:
+          - cm
+      instance:
+        description: Stable Odoo instance to bootstrap.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+      confirmation:
+        description: Type "bootstrap cm testing" to confirm destructive bootstrap.
+        required: true
+        type: string
+      verify_health:
+        description: Verify the Odoo health endpoint after bootstrap.
+        required: true
+        default: true
+        type: boolean
+      verify_canonical:
+        description: Verify the stable URL canonical page after bootstrap.
+        required: true
+        default: true
+        type: boolean
+      verify_logo:
+        description: Verify the Odoo logo route after bootstrap.
+        required: true
+        default: true
+        type: boolean
+      timeout_seconds:
+        description: Optional Dokploy bootstrap timeout override in seconds.
+        required: false
+        default: ""
+        type: string
+      health_timeout_seconds:
+        description: Optional health/canonical/logo timeout override in seconds.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: odoo-stable-bootstrap-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  bootstrap:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT: ${{ inputs.context }}
+      INSTANCE: ${{ inputs.instance }}
+      CONFIRMATION: ${{ inputs.confirmation }}
+      VERIFY_HEALTH: ${{ inputs.verify_health }}
+      VERIFY_CANONICAL: ${{ inputs.verify_canonical }}
+      VERIFY_LOGO: ${{ inputs.verify_logo }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+      HEALTH_TIMEOUT_SECONDS: ${{ inputs.health_timeout_seconds }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
+    steps:
+      - name: Validate runtime inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRODUCT:?Missing product input}"
+          : "${CONTEXT:?Missing context input}"
+          : "${INSTANCE:?Missing instance input}"
+          : "${CONFIRMATION:?Missing confirmation input}"
+          if [ "$PRODUCT" != "odoo-tenant-cm" ] || [ "$CONTEXT" != "cm" ] || [ "$INSTANCE" != "testing" ]; then
+            echo 'This workflow currently only bootstraps odoo-tenant-cm cm/testing.' >&2
+            exit 1
+          fi
+          if [ "$CONFIRMATION" != "bootstrap cm testing" ]; then
+            echo 'Confirmation must be exactly: bootstrap cm testing' >&2
+            exit 1
+          fi
+          for value in "$VERIFY_HEALTH" "$VERIFY_CANONICAL" "$VERIFY_LOGO"; do
+            if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+              echo "Boolean input resolved to invalid value: ${value}" >&2
+              exit 1
+            fi
+          done
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2
+            exit 1
+          fi
+
+      - name: Run bootstrap
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          payload="$({
+            jq -n \
+              --arg product "$PRODUCT" \
+              --arg context "$CONTEXT" \
+              --arg instance "$INSTANCE" \
+              --arg confirmation "$CONFIRMATION" \
+              --argjson verify_health "$VERIFY_HEALTH" \
+              --argjson verify_canonical "$VERIFY_CANONICAL" \
+              --argjson verify_logo "$VERIFY_LOGO" \
+              '{
+                schema_version: 1,
+                product: $product,
+                bootstrap: {
+                  schema_version: 1,
+                  product: $product,
+                  context: $context,
+                  instance: $instance,
+                  confirmation: $confirmation,
+                  verify_health: $verify_health,
+                  verify_canonical: $verify_canonical,
+                  verify_logo: $verify_logo
+                }
+              }'
+          })"
+          if [ -n "${TIMEOUT_SECONDS:-}" ]; then
+            payload="$(jq --argjson timeout_seconds "$TIMEOUT_SECONDS" '.bootstrap.timeout_seconds = $timeout_seconds' <<<"$payload")"
+          fi
+          if [ -n "${HEALTH_TIMEOUT_SECONDS:-}" ]; then
+            payload="$(jq --argjson health_timeout_seconds "$HEALTH_TIMEOUT_SECONDS" '.bootstrap.health_timeout_seconds = $health_timeout_seconds' <<<"$payload")"
+          fi
+          status_code="$({
+            curl -sS \
+              -o odoo-stable-bootstrap.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: odoo-stable-bootstrap:${PRODUCT}:${CONTEXT}:${INSTANCE}:${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              --data "$payload" \
+              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/stable-bootstrap"
+          })"
+          jq . odoo-stable-bootstrap.json
+          if [ "$status_code" != "202" ]; then
+            echo "Launchplane Odoo stable bootstrap failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+      - name: Upload bootstrap result
+        uses: actions/upload-artifact@v5
+        with:
+          name: odoo-stable-bootstrap-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
+          path: odoo-stable-bootstrap.json
