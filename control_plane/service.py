@@ -2281,6 +2281,18 @@ class _EveryCodeWorkRequestStore(Protocol):
 class _AgentWriteIntentRecordStore(Protocol):
     def write_agent_write_intent_record(self, record: AgentWriteIntentRecord) -> object: ...
 
+    def read_agent_write_intent_record(self, record_id: str) -> AgentWriteIntentRecord: ...
+
+    def list_agent_write_intent_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        status: str = "",
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> tuple[AgentWriteIntentRecord, ...]: ...
+
 
 def _every_code_work_request_store(record_store: object) -> _EveryCodeWorkRequestStore:
     required_methods = (

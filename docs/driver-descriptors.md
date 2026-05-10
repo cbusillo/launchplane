@@ -164,11 +164,14 @@ the preview generation as `ready` with deploy, verify, and overall health status
 not advertise ready before the checks pass.
 
 Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
-instance-scoped action. The first implementation is policy-limited to CM testing
-and reuses the existing devkit `--bootstrap` data workflow through a
-Launchplane-owned Dokploy schedule. It is separate from target replacement:
-replacement reconciles provider/runtime target state, while bootstrap rebuilds
-Odoo application data for lanes that are explicitly safe to recreate.
+instance-scoped action. It is enabled per product-profile lane through
+`odoo_stable_bootstrap` policy rather than driver code literals. The policy
+defines the destructive confirmation phrase, allowed data-source mode, expected
+target name/domains, and required verification checks before Launchplane reuses
+the existing devkit `--bootstrap` data workflow through a Launchplane-owned
+Dokploy schedule. It is separate from target replacement: replacement reconciles
+provider/runtime target state, while bootstrap rebuilds Odoo application data for
+lanes that are explicitly safe to recreate.
 
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call

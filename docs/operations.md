@@ -727,13 +727,17 @@ Target replacement only reconciles the provider target and runtime envelope. If
 an intentionally empty CM testing lane needs its Odoo database and filestore
 rebuilt, use the trusted `Odoo Stable Bootstrap` workflow instead of repairing
 state in Dokploy or a local checkout. The workflow calls
-`POST /v1/drivers/odoo/stable-bootstrap`, requires the exact confirmation
-`bootstrap cm testing`, and is currently limited to `odoo-tenant-cm` `cm/testing`.
-The service runs the existing compose-local devkit data workflow in `--bootstrap`
-mode through a dedicated manual Dokploy schedule, then runs Odoo post-deploy and
-verifies health, canonical URL, and logo routes before writing deployment and
-inventory evidence. Do not use this path for prod until Launchplane has explicit
-backup/restore policy evidence for that lane.
+`POST /v1/drivers/odoo/stable-bootstrap` and requires the lane's product-profile
+`odoo_stable_bootstrap` policy to be enabled. That policy carries the destructive
+confirmation phrase, expected Dokploy target name, expected domain set, data
+source mode, and required verification checks. The service proves the request,
+product lane, stored target record, and target domains before contacting Dokploy;
+the Dokploy runner also refuses if the live compose name no longer matches the
+expected target. After proof passes, Launchplane runs the existing compose-local
+devkit data workflow in `--bootstrap` mode through a dedicated manual Dokploy
+schedule, then runs Odoo post-deploy and verifies health, canonical URL, and logo
+routes before writing deployment and inventory evidence. Do not use this path for
+prod until Launchplane has explicit backup/restore policy evidence for that lane.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress

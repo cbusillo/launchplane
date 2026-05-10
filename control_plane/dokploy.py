@@ -1437,6 +1437,12 @@ def run_compose_odoo_stable_bootstrap(
         target_type="compose",
         target_id=compose_id,
     )
+    observed_compose_name = str(target_payload.get("name") or "").strip()
+    if observed_compose_name and observed_compose_name != compose_name:
+        raise click.ClickException(
+            "Odoo stable bootstrap target proof failed: live Dokploy compose name "
+            f"{observed_compose_name!r} does not match expected {compose_name!r}."
+        )
     current_env_map = parse_dokploy_env_text(str(target_payload.get("env") or ""))
     desired_env_map = _apply_post_deploy_env_file_overrides(
         current_env_map=current_env_map,
@@ -1498,7 +1504,9 @@ def run_compose_odoo_stable_bootstrap(
             target_payload=target_payload,
         )
     )
-    schedule_app_name = f"platform-{target_definition.context}-{target_definition.instance}-odoo-bootstrap"
+    schedule_app_name = (
+        f"platform-{target_definition.context}-{target_definition.instance}-odoo-bootstrap"
+    )
     existing_schedule = find_matching_dokploy_schedule(
         host=host,
         token=token,

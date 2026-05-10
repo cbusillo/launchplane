@@ -11,6 +11,7 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
+    ProductOdooStableBootstrapPolicy,
     ProductImageProfile,
     ProductLaneProfile,
 )
@@ -18,11 +19,13 @@ from control_plane.dokploy import DokployTargetDefinition
 from control_plane.contracts.promotion_record import ArtifactIdentityReference, DeploymentEvidence
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_bootstrap import (
-    ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
     OdooStableBootstrapRequest,
     execute_odoo_stable_bootstrap,
     _run_verification_with_retry,
 )
+
+
+_BOOTSTRAP_CONFIRMATION = "bootstrap cm testing"
 
 
 class _Store:
@@ -41,6 +44,12 @@ class _Store:
                     context="cm",
                     base_url="https://cm-testing.shinycomputers.com",
                     health_url="https://cm-testing.shinycomputers.com/web/health",
+                    odoo_stable_bootstrap=ProductOdooStableBootstrapPolicy(
+                        enabled=True,
+                        confirmation=_BOOTSTRAP_CONFIRMATION,
+                        expected_target_name="cm-testing",
+                        expected_domains=("cm-testing.shinycomputers.com",),
+                    ),
                 ),
             ),
             updated_at="2026-05-10T00:00:00Z",
@@ -172,7 +181,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     product="odoo-tenant-cm",
                     context="cm",
                     instance="testing",
-                    confirmation=ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
             )
 
@@ -208,7 +217,35 @@ class OdooStableBootstrapTests(unittest.TestCase):
             "deployment-cm-testing-bootstrap",
         )
 
-    def test_execute_refuses_non_cm_testing(self) -> None:
+    def test_execute_refuses_lane_without_bootstrap_policy(self) -> None:
+        store = _Store()
+        store.profile = store.profile.model_copy(
+            update={
+                "lanes": (
+                    ProductLaneProfile(
+                        instance="testing",
+                        context="cm",
+                        base_url="https://cm-testing.shinycomputers.com",
+                        health_url="https://cm-testing.shinycomputers.com/web/health",
+                    ),
+                )
+            }
+        )
+        with self.assertRaises(click.ClickException) as raised_error:
+            execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertIn("not enabled", str(raised_error.exception))
+
+    def test_execute_refuses_wrong_confirmation(self) -> None:
         store = _Store()
         with self.assertRaises(click.ClickException) as raised_error:
             execute_odoo_stable_bootstrap(
@@ -217,19 +254,72 @@ class OdooStableBootstrapTests(unittest.TestCase):
                 request=OdooStableBootstrapRequest(
                     product="odoo-tenant-cm",
                     context="cm",
-                    instance="prod",
-                    confirmation=ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
+                    instance="testing",
+                    confirmation="bootstrap prod",
                 ),
             )
 
-        self.assertIn("cm/testing", str(raised_error.exception))
+        self.assertIn("requires confirmation", str(raised_error.exception))
+
+    def test_execute_refuses_mismatched_target_name(self) -> None:
+        store = _Store()
+        store.target_record = store.target_record.model_copy(update={"target_name": "cm-prod"})
+        with self.assertRaises(click.ClickException) as raised_error:
+            execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertIn("target proof failed", str(raised_error.exception))
+
+    def test_execute_refuses_mismatched_domain(self) -> None:
+        store = _Store()
+        store.target_record = store.target_record.model_copy(
+            update={"domains": ("cm-prod.shinycomputers.com",)}
+        )
+        with self.assertRaises(click.ClickException) as raised_error:
+            execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+            )
+
+        self.assertIn("missing expected domain", str(raised_error.exception))
+
+    def test_execute_refuses_disabled_required_verification(self) -> None:
+        store = _Store()
+        with self.assertRaises(click.ClickException) as raised_error:
+            execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                    verify_logo=False,
+                ),
+            )
+
+        self.assertIn("requires logo verification", str(raised_error.exception))
 
     def test_execute_reports_missing_target_records_as_controlled_errors(self) -> None:
         request = OdooStableBootstrapRequest(
             product="odoo-tenant-cm",
             context="cm",
             instance="testing",
-            confirmation=ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
+            confirmation=_BOOTSTRAP_CONFIRMATION,
         )
 
         for missing_attribute, expected_message in (
@@ -276,7 +366,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                     product="odoo-tenant-cm",
                     context="cm",
                     instance="testing",
-                    confirmation=ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
                 ),
             )
 
