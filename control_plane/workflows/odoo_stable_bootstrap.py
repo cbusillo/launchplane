@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Literal, Protocol
+import time
+from typing import Callable, Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -31,6 +32,7 @@ from control_plane.workflows.ship import (
 )
 
 ODOO_STABLE_BOOTSTRAP_CONFIRMATION = "bootstrap cm testing"
+ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
 
 class OdooStableBootstrapStore(Protocol):
@@ -158,6 +160,26 @@ def _write_failed_bootstrap_deployment(
             destination_health=destination_health,
         )
     )
+
+
+def _run_verification_with_retry(
+    verification: Callable[[], None],
+    *,
+    timeout_seconds: int,
+    retry_interval_seconds: int = ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: click.ClickException | None = None
+    while True:
+        try:
+            verification()
+            return
+        except click.ClickException as error:
+            last_error = error
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise last_error
+            time.sleep(min(retry_interval_seconds, remaining_seconds))
 
 
 def _base_result(
@@ -349,21 +371,34 @@ def execute_odoo_stable_bootstrap(
         if request.verify_health:
             if not health_url:
                 raise click.ClickException("Odoo stable bootstrap has no health URL.")
-            _verify_health_url(health_url=health_url, timeout_seconds=health_timeout_seconds)
+            _run_verification_with_retry(
+                lambda: _verify_health_url(
+                    health_url=health_url, timeout_seconds=health_timeout_seconds
+                ),
+                timeout_seconds=health_timeout_seconds,
+            )
             health_status = "pass"
         if request.verify_canonical:
             if not base_url:
                 raise click.ClickException("Odoo stable bootstrap has no base URL.")
-            _verify_canonical_url(
-                base_url=base_url,
-                expected_base_url=base_url,
+            _run_verification_with_retry(
+                lambda: _verify_canonical_url(
+                    base_url=base_url,
+                    expected_base_url=base_url,
+                    timeout_seconds=health_timeout_seconds,
+                ),
                 timeout_seconds=health_timeout_seconds,
             )
             canonical_status = "pass"
         if request.verify_logo:
             if not base_url:
                 raise click.ClickException("Odoo stable bootstrap has no base URL.")
-            _verify_logo_route(base_url=base_url, timeout_seconds=health_timeout_seconds)
+            _run_verification_with_retry(
+                lambda: _verify_logo_route(
+                    base_url=base_url, timeout_seconds=health_timeout_seconds
+                ),
+                timeout_seconds=health_timeout_seconds,
+            )
             logo_status = "pass"
     except click.ClickException as error:
         destination_health = HealthcheckEvidence(
