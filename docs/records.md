@@ -660,6 +660,12 @@ preflights.
   `launchplane_agent_write_intents` records. Each record stores the request,
   evaluation result, `agent_audit` envelope, trace id, optional idempotency key,
   and recorded timestamp so later action routes can link to durable evidence.
+  Execution routes treat these records as provenance, not credentials: they must
+  perform their normal route-specific authorization and fail closed when the
+  linked record is denied, stale, the wrong intent family, or mismatched on
+  product, context, route action, source, or idempotency binding. The first
+  consumer is Every Code rerun, which requires approved `every_code_rerun`
+  evidence before requeueing a terminal work request.
 - Merge train service runs are persisted as `launchplane_merge_train_runs`
   records. Each record stores the repository/base branch, mode, status, policy
   key and digest, fresh GitHub snapshot, dry-run decision, selected pull request
