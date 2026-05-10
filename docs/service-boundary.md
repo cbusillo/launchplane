@@ -484,9 +484,10 @@ subject model before diagnostics or downstream intent contracts consume them:
   cannot use POST routes, product mutations, authz policy changes, destructive
   cleanup, or secret-backed actions even if a policy rule is too broad.
 - `local_operator`: trusted owner terminal agents authenticated by the dedicated
-  write bearer token. These subjects can use Launchplane mutation routes such as
-  product-config apply from a trusted shell with a required reason, but cannot
-  administer authz policy.
+  write bearer token. These subjects can use only product-config plan/apply from
+  a trusted shell with a required reason and matching dry-run before apply. They
+  cannot call other mutation, destructive, production, secret-backed
+  non-product-config, or authz policy routes.
 - `github_human`: browser-session humans with `read_only` or `admin` role from
   GitHub human policy rules or bootstrap admin email matching. Read-only humans
   are `limited_remote_user` consumers: even if a rule is accidentally broad,
