@@ -543,6 +543,15 @@ ODOO_DRIVER = DriverDescriptor(
             authz_action="odoo_prod_rollback.execute",
             writes_records=("deployment", "promotion", "inventory", "release_tuple"),
         ),
+        _action(
+            "target_replacement_plan",
+            "Plan stable target replacement",
+            "Read Launchplane and provider evidence for a safe Odoo stable target replacement dry-run.",
+            safety="read",
+            scope="instance",
+            route_path="/v1/drivers/odoo/target-replacement-plan",
+            authz_action="odoo_target_replacement_plan.read",
+        ),
     ),
     setting_groups=(
         DriverSettingGroupDescriptor(

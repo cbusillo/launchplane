@@ -265,6 +265,11 @@ from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
 )
+from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementStore,
+    OdooStableTargetReplacementRequest,
+    build_odoo_stable_target_replacement_plan,
+)
 from control_plane.workflows.verireel_stable_deploy import (
     VeriReelStableDeployRequest,
     execute_verireel_stable_deploy,
@@ -989,6 +994,27 @@ _ODOO_PROD_ROLLBACK_ROUTE = _DriverRouteExecutionMetadata(
     envelope_model=OdooProdRollbackEnvelope,
     denial_message=(
         "Workflow cannot execute the Odoo prod rollback driver for the requested product/context."
+    ),
+)
+
+
+class OdooTargetReplacementPlanEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    replacement: OdooStableTargetReplacementRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooTargetReplacementPlanEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo target replacement plan")
+        if self.product.strip() != self.replacement.product.strip():
+            raise ValueError("Odoo target replacement plan requires matching product values.")
+        return self
+
+
+_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/target-replacement-plan",
+    envelope_model=OdooTargetReplacementPlanEnvelope,
+    denial_message=(
+        "Workflow cannot read the Odoo target replacement plan for the requested product/context."
     ),
 )
 
@@ -7447,6 +7473,42 @@ def create_launchplane_service_app(
                     "rollback_status": driver_result.rollback_status,
                     "rollback_health_status": driver_result.rollback_health_status,
                 }
+            elif path == _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.route_path:
+                odoo_replacement_plan_request = (
+                    _ODOO_TARGET_REPLACEMENT_PLAN_ROUTE.envelope_model.model_validate(payload)
+                )
+                profile = record_store.read_product_profile_record(
+                    odoo_replacement_plan_request.product
+                )
+                replacement_plan_lane = _find_product_profile_lane(
+                    profile=profile,
+                    context="",
+                    instance=odoo_replacement_plan_request.replacement.instance,
+                )
+                if replacement_plan_lane is None:
+                    raise click.ClickException(
+                        "Odoo target replacement plan requires a known product lane."
+                    )
+                _, authorization_response = _resolve_and_authorize_descriptor_route(
+                    route_metadata=_ODOO_TARGET_REPLACEMENT_PLAN_ROUTE,
+                    record_store=record_store,
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    product=odoo_replacement_plan_request.product,
+                    authorization_context=replacement_plan_lane.context,
+                    descriptor_context=replacement_plan_lane.context,
+                    descriptor_instance=replacement_plan_lane.instance,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                driver_result = build_odoo_stable_target_replacement_plan(
+                    control_plane_root=resolved_root,
+                    record_store=cast(OdooStableTargetReplacementStore, record_store),
+                    request=odoo_replacement_plan_request.replacement,
+                )
+                result = {}
             elif path == _VERIREEL_TESTING_DEPLOY_ROUTE.route_path:
                 verireel_testing_deploy_request = (
                     _VERIREEL_TESTING_DEPLOY_ROUTE.envelope_model.model_validate(payload)

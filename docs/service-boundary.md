@@ -92,6 +92,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/artifact-publish-inputs`
   - `POST /v1/drivers/odoo/artifact-publish`
   - `POST /v1/drivers/odoo/post-deploy`
+  - `POST /v1/drivers/odoo/target-replacement-plan`
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
   - `POST /v1/drivers/odoo/prod-rollback`
