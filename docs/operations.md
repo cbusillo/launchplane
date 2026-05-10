@@ -707,9 +707,17 @@ trusted runtime with `LAUNCHPLANE_DATABASE_URL` configured.
 The plan reads the product profile, Launchplane Dokploy target/id records,
 current inventory, live Dokploy target payload, domains, volume env keys, latest
 deployment, and expected runtime identity. It does not create, delete, deploy,
-or change routes. Later apply workflows must build on this plan and keep the
-same explicit volume, route, post-deploy, health, canonical URL, logo, and
-runtime identity checks.
+or change routes.
+
+When a plan is `ready`, the trusted `Odoo Target Replacement Apply` workflow can
+call `POST /v1/drivers/odoo/target-replacement-apply` for the guarded
+`recreate-in-place` path. The first apply surface is testing-only and keeps the
+existing compose target, domains, and explicit Odoo volume env keys; it re-syncs
+the Launchplane-rendered compose source, injects the runtime identity breadcrumb,
+triggers Dokploy deploy, runs Odoo post-deploy, verifies health/canonical/logo,
+and writes deployment plus inventory records. Do not manually delete canonical
+stable targets as a replacement shortcut; add the missing Launchplane apply
+coverage first, then use the service-backed workflow.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress

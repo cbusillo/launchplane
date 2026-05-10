@@ -1,0 +1,178 @@
+---
+name: Odoo Target Replacement Apply
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Odoo product profile key.
+        required: true
+        default: odoo-tenant-cm
+        type: string
+      instance:
+        description: Stable Odoo instance to recreate in place.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+      strategy:
+        description: Replacement strategy to apply.
+        required: true
+        default: recreate-in-place
+        type: choice
+        options:
+          - recreate-in-place
+      allow_empty_data:
+        description: Allow missing volume env keys for intentionally empty targets.
+        required: true
+        default: false
+        type: boolean
+      verify_health:
+        description: Verify the Odoo health endpoint after deploy.
+        required: true
+        default: true
+        type: boolean
+      verify_canonical:
+        description: Verify the stable URL canonical page after deploy.
+        required: true
+        default: true
+        type: boolean
+      verify_logo:
+        description: Verify the Odoo logo route after deploy.
+        required: true
+        default: true
+        type: boolean
+      no_cache:
+        description: Ask Dokploy to rebuild without cache.
+        required: true
+        default: false
+        type: boolean
+      timeout_seconds:
+        description: Optional Dokploy deploy timeout override in seconds.
+        required: false
+        default: ""
+        type: string
+      health_timeout_seconds:
+        description: Optional health/canonical/logo timeout override in seconds.
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: odoo-target-replacement-apply-${{ inputs.product }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  apply:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      PRODUCT: ${{ inputs.product }}
+      INSTANCE: ${{ inputs.instance }}
+      STRATEGY: ${{ inputs.strategy }}
+      ALLOW_EMPTY_DATA: ${{ inputs.allow_empty_data }}
+      VERIFY_HEALTH: ${{ inputs.verify_health }}
+      VERIFY_CANONICAL: ${{ inputs.verify_canonical }}
+      VERIFY_LOGO: ${{ inputs.verify_logo }}
+      NO_CACHE: ${{ inputs.no_cache }}
+      TIMEOUT_SECONDS: ${{ inputs.timeout_seconds }}
+      HEALTH_TIMEOUT_SECONDS: ${{ inputs.health_timeout_seconds }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
+    steps:
+      - name: Validate runtime inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRODUCT:?Missing product input}"
+          : "${INSTANCE:?Missing instance input}"
+          : "${STRATEGY:?Missing strategy input}"
+          if [ "$INSTANCE" != "testing" ]; then
+            echo 'This workflow only applies testing target replacement.' >&2
+            exit 1
+          fi
+          if [ "$STRATEGY" != "recreate-in-place" ]; then
+            echo 'Only recreate-in-place is currently supported.' >&2
+            exit 1
+          fi
+          for value in "$ALLOW_EMPTY_DATA" "$VERIFY_HEALTH" "$VERIFY_CANONICAL" "$VERIFY_LOGO" "$NO_CACHE"; do
+            if [ "$value" != "true" ] && [ "$value" != "false" ]; then
+              echo "Boolean input resolved to invalid value: ${value}" >&2
+              exit 1
+            fi
+          done
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2
+            exit 1
+          fi
+
+      - name: Apply replacement
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          payload="$({
+            jq -n \
+              --arg product "$PRODUCT" \
+              --arg instance "$INSTANCE" \
+              --arg strategy "$STRATEGY" \
+              --argjson allow_empty_data "$ALLOW_EMPTY_DATA" \
+              --argjson verify_health "$VERIFY_HEALTH" \
+              --argjson verify_canonical "$VERIFY_CANONICAL" \
+              --argjson verify_logo "$VERIFY_LOGO" \
+              --argjson no_cache "$NO_CACHE" \
+              '{
+                schema_version: 1,
+                product: $product,
+                replacement: {
+                  schema_version: 1,
+                  product: $product,
+                  instance: $instance,
+                  strategy: $strategy,
+                  allow_empty_data: $allow_empty_data,
+                  verify_health: $verify_health,
+                  verify_canonical: $verify_canonical,
+                  verify_logo: $verify_logo,
+                  no_cache: $no_cache
+                }
+              }'
+          })"
+          if [ -n "${TIMEOUT_SECONDS:-}" ]; then
+            payload="$(jq --argjson timeout_seconds "$TIMEOUT_SECONDS" '.replacement.timeout_seconds = $timeout_seconds' <<<"$payload")"
+          fi
+          if [ -n "${HEALTH_TIMEOUT_SECONDS:-}" ]; then
+            payload="$(jq --argjson health_timeout_seconds "$HEALTH_TIMEOUT_SECONDS" '.replacement.health_timeout_seconds = $health_timeout_seconds' <<<"$payload")"
+          fi
+          status_code="$({
+            curl -sS \
+              -o odoo-target-replacement-apply.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: odoo-target-replacement-apply:${PRODUCT}:${INSTANCE}:${STRATEGY}:${ALLOW_EMPTY_DATA}:${VERIFY_HEALTH}:${VERIFY_CANONICAL}:${VERIFY_LOGO}:${NO_CACHE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              --data "$payload" \
+              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/target-replacement-apply"
+          })"
+          jq . odoo-target-replacement-apply.json
+          if [ "$status_code" != "202" ]; then
+            echo "Launchplane Odoo target replacement apply failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+      - name: Upload replacement apply result
+        uses: actions/upload-artifact@v5
+        with:
+          name: odoo-target-replacement-apply-${{ inputs.product }}-${{ inputs.instance }}
+          path: odoo-target-replacement-apply.json

@@ -101,6 +101,7 @@ from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResu
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementPlan,
 )
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
@@ -15287,6 +15288,145 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "instance": "testing",
                     },
                 },
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_odoo_target_replacement_apply_driver_runs_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_target_replacement_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_stable_target_replacement_apply",
+                return_value=OdooStableTargetReplacementApplyResult(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    strategy="recreate-in-place",
+                    deployment_record_id="deployment-cm-testing",
+                    deploy_status="pass",
+                    post_deploy_status="pass",
+                    health_status="pass",
+                    canonical_status="pass",
+                    logo_status="pass",
+                    runtime_identity_injected=True,
+                ),
+            ) as apply_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "replacement": {
+                            "product": "odoo-tenant-cm",
+                            "instance": "testing",
+                            "strategy": "recreate-in-place",
+                            "allow_empty_data": False,
+                            "verify_health": True,
+                            "verify_canonical": True,
+                            "verify_logo": True,
+                        },
+                    },
+                    headers={"Idempotency-Key": "apply-cm-testing"},
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(payload["result"]["deployment_record_id"], "deployment-cm-testing")
+            apply_mock.assert_called_once()
+            request = apply_mock.call_args.kwargs["request"]
+            self.assertTrue(request.verify_health)
+            self.assertFalse(request.allow_empty_data)
+
+    def test_odoo_target_replacement_apply_driver_rejects_unauthorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "workflow_refs": [
+                                    "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo-tenant-cm"],
+                                "contexts": ["cm"],
+                                "actions": ["odoo_target_replacement_plan.read"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/target-replacement-apply",
+                payload={
+                    "product": "odoo-tenant-cm",
+                    "replacement": {
+                        "product": "odoo-tenant-cm",
+                        "instance": "testing",
+                    },
+                },
+                headers={"Idempotency-Key": "apply-cm-testing"},
             )
 
             self.assertEqual(status_code, 403)
