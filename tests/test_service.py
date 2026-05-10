@@ -10853,6 +10853,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                                 "LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN": "terminal-read-token",
                                 "LAUNCHPLANE_TERMINAL_AGENT_SUBJECT": "local-owner-agent",
                                 "LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL": "local-owner-read",
+                                "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN": "local-operator-token",
+                                "LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT": "local-owner-agent",
+                                "LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL": "local-owner-write",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER": "cbusillo",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER": "4",
                                 "LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT": "200",
@@ -10893,6 +10896,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_READ_TOKEN=terminal-read-token", updated_env_text)
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_SUBJECT=local-owner-agent", updated_env_text)
         self.assertIn("LAUNCHPLANE_TERMINAL_AGENT_TOKEN_LABEL=local-owner-read", updated_env_text)
+        self.assertIn("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN=local-operator-token", updated_env_text)
+        self.assertIn("LAUNCHPLANE_LOCAL_OPERATOR_SUBJECT=local-owner-agent", updated_env_text)
+        self.assertIn("LAUNCHPLANE_LOCAL_OPERATOR_TOKEN_LABEL=local-owner-write", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER=cbusillo", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER=4", updated_env_text)
         self.assertIn("LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT=200", updated_env_text)
