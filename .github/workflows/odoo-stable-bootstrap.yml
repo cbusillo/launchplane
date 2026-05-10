@@ -13,18 +13,14 @@ name: Odoo Stable Bootstrap
         description: Launchplane Odoo context.
         required: true
         default: cm
-        type: choice
-        options:
-          - cm
+        type: string
       instance:
         description: Stable Odoo instance to bootstrap.
         required: true
         default: testing
-        type: choice
-        options:
-          - testing
+        type: string
       confirmation:
-        description: Type "bootstrap cm testing" to confirm destructive bootstrap.
+        description: Type the lane policy confirmation to confirm destructive bootstrap.
         required: true
         type: string
       verify_health:
@@ -87,14 +83,6 @@ jobs:
           : "${CONTEXT:?Missing context input}"
           : "${INSTANCE:?Missing instance input}"
           : "${CONFIRMATION:?Missing confirmation input}"
-          if [ "$PRODUCT" != "odoo-tenant-cm" ] || [ "$CONTEXT" != "cm" ] || [ "$INSTANCE" != "testing" ]; then
-            echo 'This workflow currently only bootstraps odoo-tenant-cm cm/testing.' >&2
-            exit 1
-          fi
-          if [ "$CONFIRMATION" != "bootstrap cm testing" ]; then
-            echo 'Confirmation must be exactly: bootstrap cm testing' >&2
-            exit 1
-          fi
           for value in "$VERIFY_HEALTH" "$VERIFY_CANONICAL" "$VERIFY_LOGO"; do
             if [ "$value" != "true" ] && [ "$value" != "false" ]; then
               echo "Boolean input resolved to invalid value: ${value}" >&2
