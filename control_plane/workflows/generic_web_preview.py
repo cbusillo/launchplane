@@ -5,7 +5,7 @@ import time
 from pathlib import Path
 from typing import Iterator, Literal, Protocol, runtime_checkable
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlunparse
 from urllib.request import Request, urlopen
 
 import click
@@ -51,6 +51,7 @@ _ODOO_COMPOSE_STAGE_PREVIEW_REQUIRED_ENV_KEYS = (
 )
 _ODOO_COMPOSE_STAGE_PREVIEW_MIN_DEPLOY_TIMEOUT_SECONDS = 30
 _ODOO_COMPOSE_STAGE_PREVIEW_HEALTH_TIMEOUT_SECONDS = 120
+_PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
 
 
 class GenericWebPreviewProfileStore(Protocol):
@@ -175,7 +176,7 @@ class GenericWebPreviewRefreshRequest(BaseModel):
     schema_version: int = Field(default=1, ge=1)
     product: str
     preview_slug: str
-    preview_url: str
+    preview_url: str = ""
     image_reference: str
     anchor_pr_number: int | None = Field(default=None, ge=1)
     anchor_pr_url: str = ""
@@ -190,13 +191,12 @@ class GenericWebPreviewRefreshRequest(BaseModel):
             raise ValueError("Generic web preview refresh requires product.")
         if not self.preview_slug.strip():
             raise ValueError("Generic web preview refresh requires preview_slug.")
-        if not self.preview_url.strip():
-            raise ValueError("Generic web preview refresh requires preview_url.")
-        parsed = urlparse(self.preview_url.strip())
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            raise ValueError(
-                "Generic web preview refresh preview_url must be an absolute http(s) URL."
-            )
+        if self.preview_url.strip():
+            parsed = urlparse(self.preview_url.strip())
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError(
+                    "Generic web preview refresh preview_url must be an absolute http(s) URL."
+                )
         if not self.image_reference.strip():
             raise ValueError("Generic web preview refresh requires image_reference.")
         if not self.source.strip():
@@ -827,6 +827,51 @@ def _preview_host(preview_url: str) -> str:
     return parsed.hostname
 
 
+def _preview_url_from_base_url(*, preview_slug: str, preview_base_url: str) -> str:
+    parsed = urlparse(preview_base_url.strip())
+    if parsed.scheme not in {"http", "https"}:
+        raise click.ClickException(f"{_PREVIEW_BASE_URL_ENV_KEY} must use http or https.")
+    if not parsed.hostname:
+        raise click.ClickException(f"{_PREVIEW_BASE_URL_ENV_KEY} requires a hostname.")
+    if parsed.path not in {"", "/"} or parsed.query or parsed.fragment:
+        raise click.ClickException(
+            f"{_PREVIEW_BASE_URL_ENV_KEY} must be a root URL without path, query, or fragment."
+        )
+    return urlunparse(
+        parsed._replace(
+            netloc=f"{preview_slug.strip()}.{parsed.hostname}",
+            path="",
+            params="",
+            query="",
+            fragment="",
+        )
+    )
+
+
+def resolve_generic_web_preview_url(
+    *,
+    control_plane_root: Path,
+    profile: LaunchplaneProductProfileRecord,
+    request: GenericWebPreviewRefreshRequest,
+) -> str:
+    explicit_preview_url = request.preview_url.strip()
+    if explicit_preview_url:
+        return explicit_preview_url
+    context_values = control_plane_runtime_environments.resolve_runtime_context_values(
+        control_plane_root=control_plane_root,
+        context_name=profile.preview.context,
+    )
+    preview_base_url = str(context_values.get(_PREVIEW_BASE_URL_ENV_KEY) or "").strip()
+    if not preview_base_url:
+        raise click.ClickException(
+            f"Missing {_PREVIEW_BASE_URL_ENV_KEY} in Launchplane runtime-environment records for {profile.preview.context}."
+        )
+    return _preview_url_from_base_url(
+        preview_slug=request.preview_slug,
+        preview_base_url=preview_base_url,
+    )
+
+
 def _render_preview_env_text(
     *,
     profile: LaunchplaneProductProfileRecord,
@@ -1244,6 +1289,11 @@ def execute_generic_web_preview_refresh(
             record_store=record_store,
             product=request.product,
         )
+    preview_url = resolve_generic_web_preview_url(
+        control_plane_root=control_plane_root,
+        profile=resolved_profile,
+        request=request,
+    )
     started_at = utc_now_timestamp()
     app_name_prefix = effective_preview_app_name_prefix(profile=resolved_profile)
     application_name = preview_application_name(
@@ -1267,7 +1317,7 @@ def execute_generic_web_preview_refresh(
             context=resolved_profile.preview.context,
             preview_slug=request.preview_slug,
             application_name=application_name,
-            preview_url=request.preview_url,
+            preview_url=preview_url,
             readiness=readiness,
             error_message="Generic web preview readiness blocked refresh.",
         )
@@ -1306,6 +1356,7 @@ def execute_generic_web_preview_refresh(
                 template_lane=template_lane,
                 target_definition=target_definition,
                 template_payload=template_application,
+                preview_url=preview_url,
             )
             finished_at = utc_now_timestamp()
             return GenericWebPreviewRefreshResult(
@@ -1317,7 +1368,7 @@ def execute_generic_web_preview_refresh(
                 preview_slug=request.preview_slug,
                 application_name=application_name,
                 application_id=application_id,
-                preview_url=request.preview_url,
+                preview_url=preview_url,
                 readiness=readiness,
             )
         _enforce_preview_copied_runtime_key_safety(
@@ -1330,7 +1381,7 @@ def execute_generic_web_preview_refresh(
         env_text = _render_preview_env_text(
             profile=resolved_profile,
             template_application=template_application,
-            preview_url=request.preview_url,
+            preview_url=preview_url,
         )
         application, created_application = _ensure_application(
             host=host,
@@ -1355,7 +1406,7 @@ def execute_generic_web_preview_refresh(
             host=host,
             token=token,
             application_id=application_id,
-            preview_host=_preview_host(request.preview_url),
+            preview_host=_preview_host(preview_url),
             runtime_port=resolved_profile.runtime_port,
         )
         latest_before = control_plane_dokploy.latest_deployment_for_target(
@@ -1380,7 +1431,7 @@ def execute_generic_web_preview_refresh(
             timeout_seconds=request.timeout_seconds,
         )
         _wait_for_preview_health(
-            preview_url=request.preview_url,
+            preview_url=preview_url,
             health_path=resolved_profile.health_path,
             timeout_seconds=request.timeout_seconds,
         )
@@ -1411,7 +1462,7 @@ def execute_generic_web_preview_refresh(
             preview_slug=request.preview_slug,
             application_name=application_name,
             application_id=application_id,
-            preview_url=request.preview_url,
+            preview_url=preview_url,
             readiness=readiness,
             error_message=message,
         )
@@ -1426,7 +1477,7 @@ def execute_generic_web_preview_refresh(
         preview_slug=request.preview_slug,
         application_name=application_name,
         application_id=application_id,
-        preview_url=request.preview_url,
+        preview_url=preview_url,
         readiness=readiness,
     )
 
@@ -1440,6 +1491,7 @@ def _execute_odoo_compose_stage_preview_refresh(
     template_lane: ProductLaneProfile,
     target_definition: control_plane_dokploy.DokployTargetDefinition,
     template_payload: JsonObject,
+    preview_url: str,
 ) -> str:
     _enforce_preview_copied_runtime_key_safety(
         record_store=record_store,
@@ -1470,7 +1522,7 @@ def _execute_odoo_compose_stage_preview_refresh(
         profile=profile,
         template_lane=template_lane,
         template_payload=template_payload,
-        preview_url=request.preview_url,
+        preview_url=preview_url,
         image_reference=request.image_reference,
     )
     control_plane_dokploy.update_dokploy_target_env(
@@ -1485,7 +1537,7 @@ def _execute_odoo_compose_stage_preview_refresh(
         host=host,
         token=token,
         compose_id=target_definition.target_id,
-        preview_host=_preview_host(request.preview_url),
+        preview_host=_preview_host(preview_url),
         runtime_port=profile.runtime_port,
     )
     latest_before = control_plane_dokploy.latest_deployment_for_target(
@@ -1518,7 +1570,7 @@ def _execute_odoo_compose_stage_preview_refresh(
         timeout_seconds=deployment_timeout_seconds,
     )
     _wait_for_preview_health(
-        preview_url=request.preview_url,
+        preview_url=preview_url,
         health_path=profile.health_path,
         timeout_seconds=health_timeout_seconds,
     )

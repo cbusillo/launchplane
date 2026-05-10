@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 
 import click
 
+from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.dokploy import DokploySourceOfTruth, DokployTargetDefinition
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.product_profile_record import (
@@ -16,6 +17,7 @@ from control_plane.contracts.product_profile_record import (
     ProductLaneProfile,
     ProductPreviewProfile,
 )
+from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeSecretClass,
@@ -35,6 +37,7 @@ from control_plane.workflows.generic_web_preview import (
     execute_generic_web_preview_refresh,
     preview_pr_number_from_slug,
     resolve_generic_web_preview_profile,
+    resolve_generic_web_preview_url,
     _wait_for_preview_health,
 )
 from control_plane.workflows.preview_desired_state import render_preview_slug
@@ -90,6 +93,25 @@ class _GenericWebPreviewStore:
         if limit is not None:
             return bindings[:limit]
         return bindings
+
+    def list_runtime_environment_records(
+        self, *, context_name: str = "", instance_name: str = ""
+    ) -> tuple[RuntimeEnvironmentRecord, ...]:
+        records = (
+            RuntimeEnvironmentRecord(
+                scope="context",
+                context=self.profile.preview.context,
+                env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://syo-preview.example.test"},
+                updated_at="2026-05-10T05:30:00Z",
+                source_label="test",
+            ),
+        )
+        return tuple(
+            record
+            for record in records
+            if (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+        )
 
 
 def _profile(
@@ -810,6 +832,118 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertEqual(result.refresh_status, "blocked")
         dokploy_request.assert_not_called()
 
+    def test_resolve_preview_url_derives_from_runtime_context_base_url(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(
+                    update={"slug_template": "pr-{number}"}
+                )
+            }
+        )
+        store = _GenericWebPreviewStore(profile)
+
+        with patch(
+            "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
+            return_value=control_plane_runtime_environments.build_runtime_environment_definition_from_records(
+                tuple(store.list_runtime_environment_records())
+            ),
+        ):
+            preview_url = resolve_generic_web_preview_url(
+                control_plane_root=Path("."),
+                profile=profile,
+                request=GenericWebPreviewRefreshRequest(
+                    product="sellyouroutboard",
+                    preview_slug="pr-42",
+                    preview_url="",
+                    image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                ),
+            )
+
+        self.assertEqual(preview_url, "https://pr-42.syo-preview.example.test")
+
+    def test_resolve_preview_url_fails_closed_when_base_url_missing(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(
+                    update={"slug_template": "pr-{number}"}
+                )
+            }
+        )
+        with patch(
+            "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
+            return_value=control_plane_runtime_environments.build_runtime_environment_definition_from_records(
+                (
+                    RuntimeEnvironmentRecord(
+                        scope="context",
+                        context="sellyouroutboard-testing",
+                        env={"OTHER_KEY": "value"},
+                        updated_at="2026-05-10T05:30:00Z",
+                        source_label="test",
+                    ),
+                )
+            ),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "Missing LAUNCHPLANE_PREVIEW_BASE_URL"):
+                resolve_generic_web_preview_url(
+                    control_plane_root=Path("."),
+                    profile=profile,
+                    request=GenericWebPreviewRefreshRequest(
+                        product="sellyouroutboard",
+                        preview_slug="pr-42",
+                        preview_url="",
+                        image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                    ),
+                )
+
+    def test_resolve_preview_url_rejects_non_root_base_url(self) -> None:
+        profile = _profile().model_copy(
+            update={
+                "preview": _profile().preview.model_copy(
+                    update={"slug_template": "pr-{number}"}
+                )
+            }
+        )
+        with patch(
+            "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.load_runtime_environment_definition",
+            return_value=control_plane_runtime_environments.build_runtime_environment_definition_from_records(
+                (
+                    RuntimeEnvironmentRecord(
+                        scope="context",
+                        context="sellyouroutboard-testing",
+                        env={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://preview.example/path"},
+                        updated_at="2026-05-10T05:30:00Z",
+                        source_label="test",
+                    ),
+                )
+            ),
+        ):
+            with self.assertRaisesRegex(click.ClickException, "root URL"):
+                resolve_generic_web_preview_url(
+                    control_plane_root=Path("."),
+                    profile=profile,
+                    request=GenericWebPreviewRefreshRequest(
+                        product="sellyouroutboard",
+                        preview_slug="pr-42",
+                        preview_url="",
+                        image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                    ),
+                )
+
+    def test_resolve_preview_url_keeps_explicit_override_compatible(self) -> None:
+        profile = _profile()
+        preview_url = resolve_generic_web_preview_url(
+            control_plane_root=Path("."),
+            profile=profile,
+            request=GenericWebPreviewRefreshRequest(
+                product="sellyouroutboard",
+                preview_slug="pr-42",
+                preview_url="https://custom-preview.example.test",
+                image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+            ),
+        )
+
+        self.assertEqual(preview_url, "https://custom-preview.example.test")
+
     def test_wait_for_preview_health_reports_dokploy_dead_host_as_ingress_failure(self) -> None:
         dead_host = HTTPError(
             url="https://preview-42.example.test/api/health",
@@ -1022,7 +1156,7 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertIn("secret_class_not_allowed", result.error_message)
         dokploy_request.assert_not_called()
 
-    def test_execute_generic_web_preview_refresh_updates_odoo_compose_stage_target(
+    def test_execute_generic_web_preview_refresh_derives_odoo_compose_preview_url(
         self,
     ) -> None:
         store = _GenericWebPreviewStore(_odoo_compose_profile())
@@ -1103,6 +1237,10 @@ class GenericWebPreviewTests(unittest.TestCase):
                 return_value={"ODOO_PROJECT_NAME": "cm-pr-28"},
             ),
             patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_context_values",
+                return_value={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.shinycomputers.com"},
+            ),
+            patch(
                 "control_plane.workflows.generic_web_preview.control_plane_dokploy.sync_dokploy_compose_raw_source",
             ) as sync_raw_source,
             patch(
@@ -1137,7 +1275,6 @@ class GenericWebPreviewTests(unittest.TestCase):
                 request=GenericWebPreviewRefreshRequest(
                     product="odoo-tenant-cm",
                     preview_slug="pr-28",
-                    preview_url="https://pr-28.cm-preview.shinycomputers.com",
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm:sha",
                     timeout_seconds=240,
                 ),

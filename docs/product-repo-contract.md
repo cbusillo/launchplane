@@ -164,6 +164,12 @@ repo action instead:
       error_message=result.error_message
 ```
 
+The preview refresh payload should identify the product, preview slug, immutable
+image reference, and optional PR metadata. New product workflows should omit
+`preview_url`; Launchplane derives the live URL from the product preview context
+and `LAUNCHPLANE_PREVIEW_BASE_URL`. `preview_url` is reserved as a compatibility
+override for older callers.
+
 The action requests a GitHub OIDC token, sends the JSON request with a stable
 `Idempotency-Key`, exposes the raw response body, and can map response JSON paths
 to GitHub outputs. Product repos may still need small payload-builder scripts

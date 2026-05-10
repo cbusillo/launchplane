@@ -9452,6 +9452,83 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 refresh.assert_called_once()
                 _, kwargs = refresh.call_args
                 self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
+                self.assertEqual(kwargs["request"].preview_url, "https://pr-42.example.test")
+
+    def test_generic_web_preview_refresh_route_accepts_omitted_preview_url(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/sellyouroutboard",
+                            "workflow_refs": [
+                                "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-testing"],
+                            "actions": ["preview_refresh.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/sellyouroutboard",
+                        workflow_ref=(
+                            "cbusillo/sellyouroutboard/.github/workflows/preview-control-plane.yml"
+                            "@refs/heads/main"
+                        ),
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_generic_web_preview_refresh",
+                return_value={
+                    "refresh_status": "pass",
+                    "refresh_started_at": "2026-05-03T15:00:00Z",
+                    "refresh_finished_at": "2026-05-03T15:05:00Z",
+                    "product": "sellyouroutboard",
+                    "context": "sellyouroutboard-testing",
+                    "preview_slug": "pr-42",
+                    "application_name": "sellyouroutboard-pr-42",
+                    "application_id": "app-preview",
+                    "preview_url": "https://pr-42.syo-preview.example.test",
+                },
+            ) as refresh:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/generic-web/preview-refresh",
+                    payload={
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "refresh": {
+                            "schema_version": 1,
+                            "product": "sellyouroutboard",
+                            "preview_slug": "pr-42",
+                            "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                        },
+                    },
+                    headers={"Idempotency-Key": "generic-web-preview-refresh:syo:pr-42"},
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["preview_url"], "https://pr-42.syo-preview.example.test")
+        refresh.assert_called_once()
+        _, kwargs = refresh.call_args
+        self.assertEqual(kwargs["request"].preview_url, "")
 
     def test_generic_web_preview_refresh_route_persists_provider_failure_result(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -9608,7 +9685,6 @@ class LaunchplaneServiceTests(unittest.TestCase):
                             "schema_version": 1,
                             "product": "odoo-tenant-cm",
                             "preview_slug": "pr-42",
-                            "preview_url": "https://pr-42.cm.example.test",
                             "image_reference": "ghcr.io/cbusillo/odoo-tenant-cm:sha",
                         },
                     },
@@ -9626,6 +9702,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             _, kwargs = refresh.call_args
             self.assertEqual(kwargs["profile"].driver_id, "odoo")
             self.assertEqual(kwargs["profile"].preview.context, "cm")
+            self.assertEqual(kwargs["request"].preview_url, "")
 
     def test_odoo_preview_refresh_route_fails_closed_when_preview_disabled(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
