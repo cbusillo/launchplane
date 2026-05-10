@@ -131,7 +131,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
                 return_value=OdooPostDeployResult(
                     context="cm",
                     instance="testing",
-                    phase="manual",
+                    phase="deploy",
                     post_deploy_status="pass",
                 ),
             ) as post_deploy_mock,
@@ -179,7 +179,7 @@ class OdooStableBootstrapTests(unittest.TestCase):
         self.assertEqual(target_definition.target_id, "compose-cm-testing")
         self.assertEqual(captured_bootstrap_runs[0]["timeout_seconds"], None)
         post_deploy_mock.assert_called_once()
-        self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "manual")
+        self.assertEqual(post_deploy_mock.call_args.kwargs["request"].phase, "deploy")
         health_mock.assert_called_once()
         self.assertEqual(
             health_mock.call_args.kwargs["health_url"],
