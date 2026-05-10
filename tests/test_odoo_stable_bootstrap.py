@@ -46,6 +46,7 @@ class _Store:
                     health_url="https://cm-testing.shinycomputers.com/web/health",
                     odoo_stable_bootstrap=ProductOdooStableBootstrapPolicy(
                         enabled=True,
+                        approval_issue_url="https://github.com/cbusillo/launchplane/issues/573",
                         confirmation=_BOOTSTRAP_CONFIRMATION,
                         expected_target_name="cm-testing",
                         expected_domains=("cm-testing.shinycomputers.com",),
@@ -253,6 +254,17 @@ class OdooStableBootstrapTests(unittest.TestCase):
             )
 
         self.assertIn("not enabled", str(raised_error.exception))
+
+    def test_enabled_bootstrap_policy_requires_issue_backed_approval(self) -> None:
+        with self.assertRaises(ValueError) as raised_error:
+            ProductOdooStableBootstrapPolicy(
+                enabled=True,
+                confirmation=_BOOTSTRAP_CONFIRMATION,
+                expected_target_name="cm-testing",
+                expected_domains=("cm-testing.shinycomputers.com",),
+            )
+
+        self.assertIn("approval_issue_url", str(raised_error.exception))
 
     def test_execute_refuses_wrong_confirmation(self) -> None:
         store = _Store()

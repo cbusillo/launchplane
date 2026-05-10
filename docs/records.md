@@ -222,10 +222,14 @@ a repo-local manifest and should not become product repo authority.
 
 Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
 `odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
-the destructive confirmation phrase, `data_source_mode`, expected Dokploy target
-name, expected domains, and required verification checks. Launchplane treats the
-policy plus stored/observed target proof as the authority for whether a bootstrap
-can proceed; request product/context/instance alone is not sufficient.
+an issue-backed approval URL, the destructive confirmation phrase,
+`data_source_mode`, expected Dokploy target name, expected domains, and required
+verification checks. Launchplane treats the policy plus stored/observed target
+proof as the authority for whether a bootstrap can proceed; request
+product/context/instance alone is not sufficient. The approval issue is the
+implementation signal, not a launch tracker: close it when the policy is encoded
+and keep launch/cutover retirement in a separate issue or explicit expiration
+record.
 
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
