@@ -1983,6 +1983,7 @@ protected_store_keys = ["yps-your-part-supplier"]
             patch(
                 "control_plane.dokploy.fetch_dokploy_target_payload",
                 return_value={
+                    "name": "cm-testing",
                     "env": "ODOO_DB_NAME=cm_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
                     "appName": "cm-testing-app",
                     "serverId": "server-123",
@@ -2026,6 +2027,33 @@ protected_store_keys = ["yps-your-part-supplier"]
         self.assertIn("workflow_arguments=(--bootstrap)", script)
         self.assertNotIn("workflow_arguments=(--update-only)", script)
         self.assertIn("/api/schedule.runManually", request_paths)
+
+    def test_run_compose_odoo_stable_bootstrap_refuses_live_name_mismatch(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm",
+            instance="testing",
+            target_id="compose-123",
+            target_name="cm-testing",
+        )
+
+        with patch(
+            "control_plane.dokploy.fetch_dokploy_target_payload",
+            return_value={
+                "name": "cm-prod",
+                "env": "ODOO_DB_NAME=cm_testing\n",
+                "appName": "cm-testing-app",
+                "serverId": "server-123",
+            },
+        ):
+            with self.assertRaises(click.ClickException) as raised_error:
+                control_plane_dokploy.run_compose_odoo_stable_bootstrap(
+                    host="https://dokploy.example.com",
+                    token="secret-token",
+                    target_definition=target_definition,
+                    env_file=None,
+                )
+
+        self.assertIn("target proof failed", str(raised_error.exception))
 
     def test_run_compose_post_deploy_update_rejects_unsupported_env_overlay_keys(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

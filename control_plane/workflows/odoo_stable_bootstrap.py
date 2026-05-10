@@ -12,7 +12,10 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
-from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.product_profile_record import (
+    LaunchplaneProductProfileRecord,
+    ProductLaneProfile,
+)
 from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.inventory import build_environment_inventory
@@ -31,7 +34,6 @@ from control_plane.workflows.ship import (
     utc_now_timestamp,
 )
 
-ODOO_STABLE_BOOTSTRAP_CONFIRMATION = "bootstrap cm testing"
 ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
 
@@ -103,15 +105,51 @@ class OdooStableBootstrapResult(BaseModel):
     error_message: str = ""
 
 
-def _assert_cm_testing_bootstrap_allowed(request: OdooStableBootstrapRequest) -> None:
-    if request.product != "odoo-tenant-cm" or request.context != "cm" or request.instance != "testing":
+def _normalize_domain(raw_domain: str) -> str:
+    return raw_domain.strip().lower().removeprefix("https://").removeprefix("http://").rstrip("/")
+
+
+def _assert_bootstrap_policy_allows_request(
+    *,
+    request: OdooStableBootstrapRequest,
+    lane: ProductLaneProfile,
+    target_record: DokployTargetRecord,
+) -> None:
+    policy = lane.odoo_stable_bootstrap
+    if not policy.enabled:
         raise click.ClickException(
-            "Odoo stable bootstrap is currently limited to odoo-tenant-cm cm/testing."
+            f"Odoo stable bootstrap is not enabled for {request.product} {request.context}/{request.instance}."
         )
-    if request.confirmation != ODOO_STABLE_BOOTSTRAP_CONFIRMATION:
+    if request.confirmation != policy.confirmation:
         raise click.ClickException(
-            f"Odoo stable bootstrap requires confirmation {ODOO_STABLE_BOOTSTRAP_CONFIRMATION!r}."
+            f"Odoo stable bootstrap requires confirmation {policy.confirmation!r}."
         )
+    if policy.data_source_mode != "empty":
+        raise click.ClickException(
+            f"Unsupported Odoo stable bootstrap data source mode {policy.data_source_mode!r}."
+        )
+    if policy.expected_target_name and target_record.target_name != policy.expected_target_name:
+        raise click.ClickException(
+            "Odoo stable bootstrap target proof failed: expected target "
+            f"{policy.expected_target_name!r}, observed {target_record.target_name!r}."
+        )
+    target_domains = {
+        _normalize_domain(domain) for domain in target_record.domains if domain.strip()
+    }
+    missing_domains = tuple(
+        domain for domain in policy.expected_domains if domain not in target_domains
+    )
+    if missing_domains:
+        raise click.ClickException(
+            "Odoo stable bootstrap target proof failed: missing expected domain(s) "
+            + ", ".join(missing_domains)
+        )
+    if policy.require_health_verification and not request.verify_health:
+        raise click.ClickException("Odoo stable bootstrap policy requires health verification.")
+    if policy.require_canonical_verification and not request.verify_canonical:
+        raise click.ClickException("Odoo stable bootstrap policy requires canonical verification.")
+    if policy.require_logo_verification and not request.verify_logo:
+        raise click.ClickException("Odoo stable bootstrap policy requires logo verification.")
 
 
 def _build_bootstrap_ship_request(
@@ -221,9 +259,7 @@ def _read_bootstrap_target_record(
     *, record_store: OdooStableBootstrapStore, context: str, instance: str
 ) -> DokployTargetRecord:
     try:
-        return record_store.read_dokploy_target_record(
-            context_name=context, instance_name=instance
-        )
+        return record_store.read_dokploy_target_record(context_name=context, instance_name=instance)
     except FileNotFoundError as error:
         raise click.ClickException(
             f"Odoo stable bootstrap requires a Launchplane Dokploy target record for {context}/{instance}."
@@ -247,9 +283,7 @@ def _read_bootstrap_inventory(
     *, record_store: OdooStableBootstrapStore, context: str, instance: str
 ) -> EnvironmentInventory:
     try:
-        return record_store.read_environment_inventory(
-            context_name=context, instance_name=instance
-        )
+        return record_store.read_environment_inventory(context_name=context, instance_name=instance)
     except FileNotFoundError as error:
         raise click.ClickException(
             f"Odoo stable bootstrap requires current Launchplane environment inventory for {context}/{instance}."
@@ -263,7 +297,6 @@ def execute_odoo_stable_bootstrap(
     request: OdooStableBootstrapRequest,
     env_file: Path | None = None,
 ) -> OdooStableBootstrapResult:
-    _assert_cm_testing_bootstrap_allowed(request)
     profile = record_store.read_product_profile_record(request.product)
     lane = _read_lane(profile=profile, instance=request.instance)
     if lane.context.strip().lower() != request.context:
@@ -278,6 +311,7 @@ def execute_odoo_stable_bootstrap(
     )
     if target_record.target_type != "compose":
         raise click.ClickException("Odoo stable bootstrap requires a compose target.")
+    _assert_bootstrap_policy_allows_request(request=request, lane=lane, target_record=target_record)
     inventory = _read_bootstrap_inventory(
         record_store=record_store, context=request.context, instance=request.instance
     )
@@ -287,7 +321,9 @@ def execute_odoo_stable_bootstrap(
     if not artifact_id.strip():
         raise click.ClickException("Odoo stable bootstrap requires inventory artifact evidence.")
     if not inventory.source_git_ref.strip():
-        raise click.ClickException("Odoo stable bootstrap requires inventory source git ref evidence.")
+        raise click.ClickException(
+            "Odoo stable bootstrap requires inventory source git ref evidence."
+        )
 
     deployment_record_id = generate_deployment_record_id(
         context_name=request.context, instance_name=request.instance
@@ -395,9 +431,7 @@ def execute_odoo_stable_bootstrap(
         )
 
     base_url = _target_base_url(lane=lane, domains=target_record.domains)
-    health_url = _target_health_url(
-        profile=profile, lane=lane, domains=target_record.domains
-    )
+    health_url = _target_health_url(profile=profile, lane=lane, domains=target_record.domains)
     health_timeout_seconds = (
         request.health_timeout_seconds
         or target_record.healthcheck_timeout_seconds

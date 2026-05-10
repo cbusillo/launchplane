@@ -220,6 +220,13 @@ directly with `uv run launchplane product-profiles upsert --database-url ...`.
 That command is an operator tool for creating the Launchplane record; it is not
 a repo-local manifest and should not become product repo authority.
 
+Odoo stable bootstrap eligibility is lane-owned product-profile data. A lane's
+`odoo_stable_bootstrap` policy defaults to disabled and must explicitly carry
+the destructive confirmation phrase, `data_source_mode`, expected Dokploy target
+name, expected domains, and required verification checks. Launchplane treats the
+policy plus stored/observed target proof as the authority for whether a bootstrap
+can proceed; request product/context/instance alone is not sufficient.
+
 This file layout describes today's local Launchplane implementation, not the
 final cross-product communication boundary. The stable long-term contract should
 be Launchplane's authenticated service ingress plus the durable record semantics

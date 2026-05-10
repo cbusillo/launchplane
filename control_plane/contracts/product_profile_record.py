@@ -18,6 +18,50 @@ class ProductImageProfile(BaseModel):
         return self
 
 
+class ProductOdooStableBootstrapPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    data_source_mode: Literal["empty"] = "empty"
+    confirmation: str = ""
+    expected_target_name: str = ""
+    expected_domains: tuple[str, ...] = ()
+    require_health_verification: bool = True
+    require_canonical_verification: bool = True
+    require_logo_verification: bool = True
+
+    @model_validator(mode="after")
+    def _validate_policy(self) -> "ProductOdooStableBootstrapPolicy":
+        self.confirmation = self.confirmation.strip().lower()
+        self.expected_target_name = self.expected_target_name.strip()
+        normalized_domains: list[str] = []
+        for raw_domain in self.expected_domains:
+            domain = (
+                raw_domain.strip()
+                .lower()
+                .removeprefix("https://")
+                .removeprefix("http://")
+                .rstrip("/")
+            )
+            if not domain:
+                raise ValueError(
+                    "Odoo stable bootstrap policy expected_domains values must be non-empty"
+                )
+            if domain not in normalized_domains:
+                normalized_domains.append(domain)
+        self.expected_domains = tuple(normalized_domains)
+        if self.enabled:
+            if not self.confirmation:
+                raise ValueError("enabled Odoo stable bootstrap policy requires confirmation")
+            if not self.expected_target_name:
+                raise ValueError(
+                    "enabled Odoo stable bootstrap policy requires expected_target_name"
+                )
+            if not self.expected_domains:
+                raise ValueError("enabled Odoo stable bootstrap policy requires expected_domains")
+        return self
+
+
 class ProductLaneProfile(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -25,6 +69,9 @@ class ProductLaneProfile(BaseModel):
     context: str
     base_url: str = ""
     health_url: str = ""
+    odoo_stable_bootstrap: ProductOdooStableBootstrapPolicy = Field(
+        default_factory=ProductOdooStableBootstrapPolicy
+    )
 
     @model_validator(mode="after")
     def _validate_lane(self) -> "ProductLaneProfile":
