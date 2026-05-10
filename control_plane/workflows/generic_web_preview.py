@@ -52,6 +52,12 @@ _ODOO_COMPOSE_STAGE_PREVIEW_REQUIRED_ENV_KEYS = (
 _ODOO_COMPOSE_STAGE_PREVIEW_MIN_DEPLOY_TIMEOUT_SECONDS = 30
 _ODOO_COMPOSE_STAGE_PREVIEW_HEALTH_TIMEOUT_SECONDS = 120
 _PREVIEW_BASE_URL_ENV_KEY = "LAUNCHPLANE_PREVIEW_BASE_URL"
+_ODOO_COMPOSE_STAGE_PREVIEW_SMOKE_PATHS = (
+    ("web_health", "/web/health"),
+    ("cm_website_health", "/cm-website/health"),
+    ("cell_mechanic_page", "/cell-mechanic"),
+)
+_ODOO_COMPOSE_STAGE_PREVIEW_MODULE_KEYS = ("ODOO_INSTALL_MODULES", "ODOO_UPDATE_MODULES")
 
 
 class GenericWebPreviewProfileStore(Protocol):
@@ -223,6 +229,7 @@ class GenericWebPreviewRefreshResult(BaseModel):
     application_id: str = ""
     preview_url: str
     readiness: GenericWebPreviewReadinessResult | None = None
+    smoke: GenericWebPreviewSmokeResult | None = None
     error_message: str = ""
 
 
@@ -280,6 +287,23 @@ class GenericWebPreviewReadinessResult(BaseModel):
     missing_provider_fields: tuple[str, ...]
     transport: GenericWebPreviewTransportSummary
     checks: tuple[GenericWebPreviewReadinessCheck, ...]
+
+
+class GenericWebPreviewSmokeCheck(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    check_id: str
+    status: Literal["pass", "fail"]
+    message: str
+
+
+class GenericWebPreviewSmokeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    smoke_status: Literal["pass", "fail"]
+    checked_at: str
+    checks: tuple[GenericWebPreviewSmokeCheck, ...]
+    failure_summary: str = ""
 
 
 def _anchor_repo(repository: str) -> str:
@@ -637,10 +661,13 @@ def _preview_slug_from_compose_domain(
     if not host.startswith(slug_prefix):
         return ""
     slug = host.split(".", 1)[0]
-    if preview_pr_number_from_slug(
-        preview_slug=slug,
-        slug_template=profile.preview.slug_template,
-    ) is None:
+    if (
+        preview_pr_number_from_slug(
+            preview_slug=slug,
+            slug_template=profile.preview.slug_template,
+        )
+        is None
+    ):
         return ""
     return slug
 
@@ -689,7 +716,9 @@ def resolve_generic_web_preview_profile(
     driver_is_generic_web = driver_id == "generic-web"
     if not driver_is_generic_web:
         try:
-            driver_is_generic_web = read_driver_descriptor(driver_id).base_driver_id == "generic-web"
+            driver_is_generic_web = (
+                read_driver_descriptor(driver_id).base_driver_id == "generic-web"
+            )
         except FileNotFoundError:
             driver_is_generic_web = False
     if not driver_is_generic_web:
@@ -782,9 +811,7 @@ def _read_template_payload(
     return target_definition, payload, ""
 
 
-def _profile_allows_odoo_compose_stage_preview(
-    *, profile: LaunchplaneProductProfileRecord
-) -> bool:
+def _profile_allows_odoo_compose_stage_preview(*, profile: LaunchplaneProductProfileRecord) -> bool:
     return (
         profile.driver_id.strip() == _ODOO_COMPOSE_STAGE_PREVIEW_DRIVER_ID
         and profile.preview.data_transport_mode == _ODOO_COMPOSE_STAGE_PREVIEW_MODE
@@ -1061,6 +1088,149 @@ def _wait_for_preview_health(*, preview_url: str, health_path: str, timeout_seco
         time.sleep(sleep_seconds)
         deadline -= sleep_seconds
     raise click.ClickException(f"Timed out waiting for {health_url} to report healthy.")
+
+
+def _preview_url_with_path(*, preview_url: str, path: str) -> str:
+    parsed = urlparse(preview_url.rstrip("/"))
+    return parsed._replace(path=path, params="", query="", fragment="").geturl()
+
+
+def _fetch_preview_smoke_path(*, preview_url: str, path: str, timeout_seconds: int) -> None:
+    smoke_url = _preview_url_with_path(preview_url=preview_url, path=path)
+    request = Request(
+        smoke_url,
+        headers={
+            "Accept": "application/json, text/html, text/plain, */*",
+            "Cache-Control": "no-store",
+        },
+    )
+    deadline = timeout_seconds
+    last_error = "is not reachable"
+    while deadline > 0:
+        try:
+            with urlopen(request, timeout=min(15, deadline)) as response:
+                response.read()
+            if 200 <= response.status < 400:
+                return
+            last_error = f"returned HTTP {response.status}"
+        except HTTPError as exc:
+            last_error = f"returned HTTP {exc.code}"
+        except (TimeoutError, URLError, ValueError):
+            last_error = "is not reachable"
+        sleep_seconds = min(5, deadline)
+        time.sleep(sleep_seconds)
+        deadline -= sleep_seconds
+    raise click.ClickException(f"Odoo preview smoke path {path} {last_error}.")
+
+
+def _pass_smoke_check(*, check_id: str, message: str) -> GenericWebPreviewSmokeCheck:
+    return GenericWebPreviewSmokeCheck(check_id=check_id, status="pass", message=message)
+
+
+def _fail_smoke_check(*, check_id: str, message: str) -> GenericWebPreviewSmokeCheck:
+    return GenericWebPreviewSmokeCheck(check_id=check_id, status="fail", message=message)
+
+
+def _failure_summary_from_smoke_checks(checks: tuple[GenericWebPreviewSmokeCheck, ...]) -> str:
+    for check in checks:
+        if check.status == "fail":
+            return f"Odoo preview smoke failed: {check.message}"
+    return "Odoo preview smoke failed."
+
+
+def _odoo_compose_stage_preview_smoke_result(
+    *,
+    checked_at: str,
+    request: GenericWebPreviewRefreshRequest,
+    env_text: str,
+    preview_url: str,
+    timeout_seconds: int,
+) -> GenericWebPreviewSmokeResult:
+    checks: list[GenericWebPreviewSmokeCheck] = []
+    if request.image_reference.strip():
+        checks.append(
+            _pass_smoke_check(
+                check_id="artifact_image_reference",
+                message="Preview image artifact reference is present.",
+            )
+        )
+    else:
+        checks.append(
+            _fail_smoke_check(
+                check_id="artifact_image_reference",
+                message="Preview image artifact reference is missing.",
+            )
+        )
+    if request.anchor_head_sha.strip():
+        checks.append(
+            _pass_smoke_check(
+                check_id="anchor_head_sha",
+                message="Preview source revision is present.",
+            )
+        )
+    else:
+        checks.append(
+            _fail_smoke_check(
+                check_id="anchor_head_sha",
+                message="Preview source revision is missing.",
+            )
+        )
+
+    rendered_env = control_plane_dokploy.parse_dokploy_env_text(env_text)
+    configured_module_keys = tuple(
+        key for key in _ODOO_COMPOSE_STAGE_PREVIEW_MODULE_KEYS if rendered_env.get(key, "").strip()
+    )
+    if configured_module_keys:
+        checks.append(
+            _pass_smoke_check(
+                check_id="module_install_update_evidence",
+                message="Odoo module install/update evidence is captured in rendered env.",
+            )
+        )
+    else:
+        checks.append(
+            _fail_smoke_check(
+                check_id="module_install_update_evidence",
+                message="Odoo module install/update evidence is missing.",
+            )
+        )
+
+    for check_id, path in _ODOO_COMPOSE_STAGE_PREVIEW_SMOKE_PATHS:
+        try:
+            if path == "/web/health":
+                _wait_for_preview_health(
+                    preview_url=preview_url,
+                    health_path=path,
+                    timeout_seconds=timeout_seconds,
+                )
+            else:
+                _fetch_preview_smoke_path(
+                    preview_url=preview_url,
+                    path=path,
+                    timeout_seconds=timeout_seconds,
+                )
+        except click.ClickException as exc:
+            checks.append(_fail_smoke_check(check_id=check_id, message=str(exc)))
+        else:
+            checks.append(
+                _pass_smoke_check(
+                    check_id=check_id,
+                    message=f"Odoo preview smoke path {path} responded successfully.",
+                )
+            )
+
+    smoke_checks = tuple(checks)
+    smoke_status: Literal["pass", "fail"] = (
+        "fail" if any(check.status == "fail" for check in smoke_checks) else "pass"
+    )
+    return GenericWebPreviewSmokeResult(
+        smoke_status=smoke_status,
+        checked_at=checked_at,
+        checks=smoke_checks,
+        failure_summary=""
+        if smoke_status == "pass"
+        else _failure_summary_from_smoke_checks(smoke_checks),
+    )
 
 
 def evaluate_generic_web_preview_readiness(
@@ -1348,7 +1518,7 @@ def execute_generic_web_preview_refresh(
             profile=resolved_profile,
             target_definition=target_definition,
         ):
-            application_id = _execute_odoo_compose_stage_preview_refresh(
+            application_id, smoke = _execute_odoo_compose_stage_preview_refresh(
                 control_plane_root=control_plane_root,
                 record_store=record_store,
                 request=request,
@@ -1359,8 +1529,11 @@ def execute_generic_web_preview_refresh(
                 preview_url=preview_url,
             )
             finished_at = utc_now_timestamp()
+            refresh_status: Literal["pass", "blocked", "fail"] = (
+                "pass" if smoke.smoke_status == "pass" else "fail"
+            )
             return GenericWebPreviewRefreshResult(
-                refresh_status="pass",
+                refresh_status=refresh_status,
                 refresh_started_at=started_at,
                 refresh_finished_at=finished_at,
                 product=resolved_profile.product,
@@ -1370,6 +1543,8 @@ def execute_generic_web_preview_refresh(
                 application_id=application_id,
                 preview_url=preview_url,
                 readiness=readiness,
+                smoke=smoke,
+                error_message="" if refresh_status == "pass" else smoke.failure_summary,
             )
         _enforce_preview_copied_runtime_key_safety(
             record_store=record_store,
@@ -1492,7 +1667,7 @@ def _execute_odoo_compose_stage_preview_refresh(
     target_definition: control_plane_dokploy.DokployTargetDefinition,
     template_payload: JsonObject,
     preview_url: str,
-) -> str:
+) -> tuple[str, GenericWebPreviewSmokeResult]:
     _enforce_preview_copied_runtime_key_safety(
         record_store=record_store,
         profile=profile,
@@ -1569,12 +1744,14 @@ def _execute_odoo_compose_stage_preview_refresh(
         before_key=control_plane_dokploy.deployment_key(latest_before),
         timeout_seconds=deployment_timeout_seconds,
     )
-    _wait_for_preview_health(
+    smoke = _odoo_compose_stage_preview_smoke_result(
+        checked_at=utc_now_timestamp(),
+        request=request,
+        env_text=env_text,
         preview_url=preview_url,
-        health_path=profile.health_path,
         timeout_seconds=health_timeout_seconds,
     )
-    return target_definition.target_id
+    return target_definition.target_id, smoke
 
 
 def discover_generic_web_preview_desired_state(
@@ -1662,9 +1839,7 @@ def execute_generic_web_preview_inventory(
                 context=resolved_profile.preview.context,
                 source=request.source,
                 app_name_prefix=app_name_prefix,
-                previews=tuple(
-                    sorted(compose_preview_items, key=lambda item: item.previewSlug)
-                ),
+                previews=tuple(sorted(compose_preview_items, key=lambda item: item.previewSlug)),
             )
 
     raw_projects = control_plane_dokploy.dokploy_request(

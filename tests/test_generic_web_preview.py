@@ -30,6 +30,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewInventoryRequest,
     GenericWebPreviewReadinessRequest,
     GenericWebPreviewRefreshRequest,
+    GenericWebPreviewRefreshResult,
     discover_generic_web_preview_desired_state,
     evaluate_generic_web_preview_readiness,
     execute_generic_web_preview_destroy,
@@ -835,9 +836,7 @@ class GenericWebPreviewTests(unittest.TestCase):
     def test_resolve_preview_url_derives_from_runtime_context_base_url(self) -> None:
         profile = _profile().model_copy(
             update={
-                "preview": _profile().preview.model_copy(
-                    update={"slug_template": "pr-{number}"}
-                )
+                "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"})
             }
         )
         store = _GenericWebPreviewStore(profile)
@@ -864,9 +863,7 @@ class GenericWebPreviewTests(unittest.TestCase):
     def test_resolve_preview_url_fails_closed_when_base_url_missing(self) -> None:
         profile = _profile().model_copy(
             update={
-                "preview": _profile().preview.model_copy(
-                    update={"slug_template": "pr-{number}"}
-                )
+                "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"})
             }
         )
         with patch(
@@ -883,7 +880,9 @@ class GenericWebPreviewTests(unittest.TestCase):
                 )
             ),
         ):
-            with self.assertRaisesRegex(click.ClickException, "Missing LAUNCHPLANE_PREVIEW_BASE_URL"):
+            with self.assertRaisesRegex(
+                click.ClickException, "Missing LAUNCHPLANE_PREVIEW_BASE_URL"
+            ):
                 resolve_generic_web_preview_url(
                     control_plane_root=Path("."),
                     profile=profile,
@@ -898,9 +897,7 @@ class GenericWebPreviewTests(unittest.TestCase):
     def test_resolve_preview_url_rejects_non_root_base_url(self) -> None:
         profile = _profile().model_copy(
             update={
-                "preview": _profile().preview.model_copy(
-                    update={"slug_template": "pr-{number}"}
-                )
+                "preview": _profile().preview.model_copy(update={"slug_template": "pr-{number}"})
             }
         )
         with patch(
@@ -1238,7 +1235,9 @@ class GenericWebPreviewTests(unittest.TestCase):
             ),
             patch(
                 "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_context_values",
-                return_value={"LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.shinycomputers.com"},
+                return_value={
+                    "LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.shinycomputers.com"
+                },
             ),
             patch(
                 "control_plane.workflows.generic_web_preview.control_plane_dokploy.sync_dokploy_compose_raw_source",
@@ -1265,8 +1264,15 @@ class GenericWebPreviewTests(unittest.TestCase):
                 "control_plane.workflows.generic_web_preview._wait_for_preview_health"
             ) as wait_health,
             patch(
+                "control_plane.workflows.generic_web_preview._fetch_preview_smoke_path"
+            ) as fetch_smoke_path,
+            patch(
                 "control_plane.workflows.generic_web_preview.utc_now_timestamp",
-                side_effect=["2026-05-09T15:00:00Z", "2026-05-09T15:00:05Z"],
+                side_effect=[
+                    "2026-05-09T15:00:00Z",
+                    "2026-05-09T15:00:04Z",
+                    "2026-05-09T15:00:05Z",
+                ],
             ),
         ):
             result = execute_generic_web_preview_refresh(
@@ -1276,11 +1282,14 @@ class GenericWebPreviewTests(unittest.TestCase):
                     product="odoo-tenant-cm",
                     preview_slug="pr-28",
                     image_reference="ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    anchor_head_sha="abc123",
                     timeout_seconds=240,
                 ),
             )
 
         self.assertEqual(result.refresh_status, "pass")
+        self.assertIsNotNone(result.smoke)
+        self.assertEqual(result.smoke.smoke_status if result.smoke else "", "pass")
         self.assertEqual(result.application_id, "compose-cm-testing")
         sync_raw_source.assert_called_once()
         _, sync_kwargs = sync_raw_source.call_args
@@ -1294,12 +1303,8 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertIn("ODOO_DB_NAME=cm_preview", env_updates[0])
         self.assertIn("ODOO_PROJECT_NAME=cm-pr-28", env_updates[0])
         self.assertIn("ODOO_INSTALL_MODULES=cm_custom,cm_website", env_updates[0])
-        self.assertIn(
-            "WEB_BASE_URL=https://pr-28.cm-preview.shinycomputers.com", env_updates[0]
-        )
-        self.assertIn(
-            "DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-cm:sha", env_updates[0]
-        )
+        self.assertIn("WEB_BASE_URL=https://pr-28.cm-preview.shinycomputers.com", env_updates[0])
+        self.assertIn("DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-cm:sha", env_updates[0])
         self.assertEqual(
             [request["path"] for request in domain_requests],
             ["/api/domain.byComposeId", "/api/domain.create"],
@@ -1337,6 +1342,198 @@ class GenericWebPreviewTests(unittest.TestCase):
             health_path="/web/health",
             timeout_seconds=120,
         )
+        self.assertEqual(
+            [call.kwargs["path"] for call in fetch_smoke_path.call_args_list],
+            ["/cm-website/health", "/cell-mechanic"],
+        )
+
+    def test_execute_generic_web_preview_refresh_fails_odoo_health_smoke(self) -> None:
+        result = self._execute_odoo_compose_stage_preview_with_smoke_failure(
+            health_failure=click.ClickException("Timed out waiting for health."),
+            anchor_head_sha="abc123",
+        )
+
+        self.assertEqual(result.refresh_status, "fail")
+        self.assertIsNotNone(result.smoke)
+        self.assertEqual(result.smoke.smoke_status if result.smoke else "", "fail")
+        self.assertIn("Timed out waiting for health", result.error_message)
+
+    def test_execute_generic_web_preview_refresh_fails_odoo_page_smoke(self) -> None:
+        result = self._execute_odoo_compose_stage_preview_with_smoke_failure(
+            page_failures={"/cell-mechanic": click.ClickException("HTTP 404")},
+            anchor_head_sha="abc123",
+        )
+
+        self.assertEqual(result.refresh_status, "fail")
+        self.assertIsNotNone(result.smoke)
+        failed_checks = (
+            [check.check_id for check in result.smoke.checks if check.status == "fail"]
+            if result.smoke
+            else []
+        )
+        self.assertEqual(failed_checks, ["cell_mechanic_page"])
+
+    def test_execute_generic_web_preview_refresh_fails_odoo_missing_revision_evidence(
+        self,
+    ) -> None:
+        result = self._execute_odoo_compose_stage_preview_with_smoke_failure(anchor_head_sha="")
+
+        self.assertEqual(result.refresh_status, "fail")
+        self.assertIn("source revision is missing", result.error_message)
+
+    def test_execute_generic_web_preview_refresh_rejects_missing_artifact_evidence(self) -> None:
+        with self.assertRaises(ValueError):
+            GenericWebPreviewRefreshRequest(
+                product="odoo-tenant-cm",
+                preview_slug="pr-28",
+                image_reference="",
+            )
+
+    def test_execute_generic_web_preview_refresh_fails_odoo_missing_module_evidence(
+        self,
+    ) -> None:
+        base_profile = _odoo_compose_profile()
+        result = self._execute_odoo_compose_stage_preview_with_smoke_failure(
+            profile=base_profile.model_copy(
+                update={"preview": base_profile.preview.model_copy(update={"override_env": {}})}
+            ),
+            anchor_head_sha="abc123",
+        )
+
+        self.assertEqual(result.refresh_status, "fail")
+        self.assertIn("module install/update evidence is missing", result.error_message)
+
+    def _execute_odoo_compose_stage_preview_with_smoke_failure(
+        self,
+        *,
+        profile: LaunchplaneProductProfileRecord | None = None,
+        anchor_head_sha: str = "abc123",
+        health_failure: click.ClickException | None = None,
+        page_failures: dict[str, click.ClickException] | None = None,
+    ) -> GenericWebPreviewRefreshResult:
+        resolved_profile = profile or _odoo_compose_profile()
+        store = _GenericWebPreviewStore(resolved_profile)
+        source = DokploySourceOfTruth(
+            schema_version=1,
+            targets=(
+                DokployTargetDefinition(
+                    context="cm",
+                    instance="testing",
+                    target_type="compose",
+                    target_id="compose-cm-testing",
+                    target_name="cm-testing",
+                ),
+            ),
+        )
+
+        def _fake_fetch(**kwargs: object) -> dict[str, object]:
+            return {
+                "composeId": "compose-cm-testing",
+                "name": "cm-testing",
+                "environmentId": "env-1",
+                "sourceType": "raw",
+                "composePath": "docker-compose.yml",
+                "composeFile": "",
+                "env": (
+                    "ODOO_DB_NAME=cm_preview\n"
+                    "ODOO_DB_USER=odoo\n"
+                    "ODOO_DB_PASSWORD=safe\n"
+                    "ODOO_DATA_VOLUME=cm_data\n"
+                    "ODOO_LOG_VOLUME=cm_logs\n"
+                    "ODOO_DB_VOLUME=cm_db\n"
+                    "ODOO_MASTER_PASSWORD=safe-master\n"
+                    "ODOO_ADMIN_PASSWORD=safe-admin\n"
+                    "WEB_BASE_URL=https://testing.cm.example.test\n"
+                ),
+            }
+
+        def _fake_dokploy_request(**kwargs: object) -> object:
+            if kwargs["path"] == "/api/domain.byComposeId":
+                return []
+            if kwargs["path"] == "/api/domain.create":
+                return {"domainId": "domain-preview"}
+            return {}
+
+        def _fake_wait_health(**kwargs: object) -> None:
+            if health_failure is not None:
+                raise health_failure
+
+        def _fake_fetch_smoke_path(**kwargs: object) -> None:
+            failure = (page_failures or {}).get(str(kwargs["path"]))
+            if failure is not None:
+                raise failure
+
+        with (
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_control_plane_dokploy_source_of_truth",
+                return_value=source,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example", "token"),
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.fetch_dokploy_target_payload",
+                side_effect=_fake_fetch,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_environment_values",
+                return_value={"ODOO_PROJECT_NAME": "cm-pr-28"},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_runtime_environments.resolve_runtime_context_values",
+                return_value={
+                    "LAUNCHPLANE_PREVIEW_BASE_URL": "https://cm-preview.shinycomputers.com"
+                },
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.sync_dokploy_compose_raw_source",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.update_dokploy_target_env",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.dokploy_request",
+                side_effect=_fake_dokploy_request,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.latest_deployment_for_target",
+                return_value={"deploymentId": "before"},
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.trigger_deployment",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.control_plane_dokploy.wait_for_target_deployment",
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview._wait_for_preview_health",
+                side_effect=_fake_wait_health,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview._fetch_preview_smoke_path",
+                side_effect=_fake_fetch_smoke_path,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_preview.utc_now_timestamp",
+                side_effect=[
+                    "2026-05-09T15:00:00Z",
+                    "2026-05-09T15:00:04Z",
+                    "2026-05-09T15:00:05Z",
+                ],
+            ),
+        ):
+            return execute_generic_web_preview_refresh(
+                control_plane_root=Path("."),
+                record_store=store,
+                request=GenericWebPreviewRefreshRequest(
+                    product="odoo-tenant-cm",
+                    preview_slug="pr-28",
+                    image_reference="ghcr.io/cbusillo/odoo-tenant-cm:sha",
+                    anchor_head_sha=anchor_head_sha,
+                    timeout_seconds=240,
+                ),
+            )
 
     def test_execute_generic_web_preview_refresh_allows_preview_safe_copied_secret_key(
         self,
