@@ -5,6 +5,7 @@ from control_plane.contracts.deployment_record import DelegatedExecutor
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
+    BootstrapEvidence,
     DeploymentEvidence,
     HealthcheckEvidence,
     PostDeployUpdateEvidence,
@@ -93,6 +94,7 @@ def build_deployment_record(
     delegated_executor: DelegatedExecutor = "control-plane.dokploy",
     runtime_source: dict[str, str] | None = None,
     runtime_identity: RuntimeIdentity | None = None,
+    bootstrap: BootstrapEvidence | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
 ) -> DeploymentRecord:
@@ -122,6 +124,7 @@ def build_deployment_record(
             started_at=started_at,
             finished_at=finished_at,
         ),
+        bootstrap=bootstrap or BootstrapEvidence(),
         post_deploy_update=post_deploy_update
         or _resolve_post_deploy_update(
             request,

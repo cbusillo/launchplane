@@ -16,7 +16,11 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
-from control_plane.contracts.promotion_record import HealthcheckEvidence, PostDeployUpdateEvidence
+from control_plane.contracts.promotion_record import (
+    BootstrapEvidence,
+    HealthcheckEvidence,
+    PostDeployUpdateEvidence,
+)
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
@@ -94,6 +98,8 @@ class OdooStableBootstrapResult(BaseModel):
     instance: str
     deployment_record_id: str = ""
     bootstrap_status: Literal["pass", "fail"]
+    bootstrap_run_status: Literal["pass", "fail", "skipped"] = "skipped"
+    readiness_status: Literal["pass", "fail", "verification_failed", "skipped"] = "skipped"
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped"
     health_status: Literal["pass", "fail", "skipped"] = "skipped"
     canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
@@ -182,6 +188,7 @@ def _write_failed_bootstrap_deployment(
     deployment_record_id: str,
     started_at: str,
     resolved_target: ResolvedTargetEvidence,
+    bootstrap: BootstrapEvidence | None = None,
     post_deploy_update: PostDeployUpdateEvidence | None = None,
     destination_health: HealthcheckEvidence | None = None,
 ) -> None:
@@ -194,9 +201,21 @@ def _write_failed_bootstrap_deployment(
             started_at=started_at,
             finished_at=utc_now_timestamp(),
             resolved_target=resolved_target,
+            bootstrap=bootstrap,
             post_deploy_update=post_deploy_update,
             destination_health=destination_health,
         )
+    )
+
+
+def _write_bootstrap_inventory_pointer(
+    *,
+    record_store: OdooStableBootstrapStore,
+    inventory: EnvironmentInventory,
+    bootstrap_record_id: str,
+) -> None:
+    record_store.write_environment_inventory(
+        inventory.model_copy(update={"bootstrap_record_id": bootstrap_record_id})
     )
 
 
@@ -228,6 +247,8 @@ def _base_result(
     target_id_record: DokployTargetIdRecord,
     inventory: EnvironmentInventory,
     bootstrap_status: Literal["pass", "fail"],
+    bootstrap_run_status: Literal["pass", "fail", "skipped"] = "skipped",
+    readiness_status: Literal["pass", "fail", "verification_failed", "skipped"] = "skipped",
     post_deploy_status: Literal["pass", "fail", "skipped"] = "skipped",
     health_status: Literal["pass", "fail", "skipped"] = "skipped",
     canonical_status: Literal["pass", "fail", "skipped"] = "skipped",
@@ -243,6 +264,8 @@ def _base_result(
         instance=request.instance,
         deployment_record_id=deployment_record_id,
         bootstrap_status=bootstrap_status,
+        bootstrap_run_status=bootstrap_run_status,
+        readiness_status=readiness_status,
         post_deploy_status=post_deploy_status,
         health_status=health_status,
         canonical_status=canonical_status,
@@ -350,6 +373,12 @@ def execute_odoo_stable_bootstrap(
             started_at=started_at,
             finished_at="",
             resolved_target=resolved_target,
+            bootstrap=BootstrapEvidence(
+                attempted=True,
+                run_status="pending",
+                readiness_status="pending",
+                detail="Odoo stable bootstrap schedule is pending.",
+            ),
             destination_health=HealthcheckEvidence(status="pending")
             if request.verify_health
             else HealthcheckEvidence(status="skipped"),
@@ -384,7 +413,18 @@ def execute_odoo_stable_bootstrap(
             deployment_record_id=deployment_record_id,
             started_at=started_at,
             resolved_target=resolved_target,
+            bootstrap=BootstrapEvidence(
+                attempted=True,
+                run_status="fail",
+                readiness_status="fail",
+                detail=str(error),
+            ),
             destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        _write_bootstrap_inventory_pointer(
+            record_store=record_store,
+            inventory=inventory,
+            bootstrap_record_id=deployment_record_id,
         )
         return _base_result(
             request=request,
@@ -393,6 +433,8 @@ def execute_odoo_stable_bootstrap(
             target_id_record=target_id_record,
             inventory=inventory,
             bootstrap_status="fail",
+            bootstrap_run_status="fail",
+            readiness_status="fail",
             error_message=str(error),
         )
 
@@ -416,8 +458,19 @@ def execute_odoo_stable_bootstrap(
             deployment_record_id=deployment_record_id,
             started_at=started_at,
             resolved_target=resolved_target,
+            bootstrap=BootstrapEvidence(
+                attempted=True,
+                run_status="pass",
+                readiness_status="fail",
+                detail=post_deploy_result.error_message or "Odoo post-deploy failed.",
+            ),
             post_deploy_update=post_deploy_evidence,
             destination_health=HealthcheckEvidence(status="skipped"),
+        )
+        _write_bootstrap_inventory_pointer(
+            record_store=record_store,
+            inventory=inventory,
+            bootstrap_record_id=deployment_record_id,
         )
         return _base_result(
             request=request,
@@ -426,6 +479,8 @@ def execute_odoo_stable_bootstrap(
             target_id_record=target_id_record,
             inventory=inventory,
             bootstrap_status="fail",
+            bootstrap_run_status="pass",
+            readiness_status="fail",
             post_deploy_status=post_deploy_result.post_deploy_status,
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
@@ -478,8 +533,19 @@ def execute_odoo_stable_bootstrap(
             deployment_record_id=deployment_record_id,
             started_at=started_at,
             resolved_target=resolved_target,
+            bootstrap=BootstrapEvidence(
+                attempted=True,
+                run_status="pass",
+                readiness_status="verification_failed",
+                detail=str(error),
+            ),
             post_deploy_update=post_deploy_evidence,
             destination_health=destination_health,
+        )
+        _write_bootstrap_inventory_pointer(
+            record_store=record_store,
+            inventory=inventory,
+            bootstrap_record_id=deployment_record_id,
         )
         return _base_result(
             request=request,
@@ -488,6 +554,8 @@ def execute_odoo_stable_bootstrap(
             target_id_record=target_id_record,
             inventory=inventory,
             bootstrap_status="fail",
+            bootstrap_run_status="pass",
+            readiness_status="verification_failed",
             post_deploy_status="pass",
             health_status=health_status if health_status == "pass" else "fail",
             canonical_status=canonical_status if canonical_status == "pass" else "fail",
@@ -510,12 +578,22 @@ def execute_odoo_stable_bootstrap(
         started_at=started_at,
         finished_at=finished_at,
         resolved_target=resolved_target,
+        bootstrap=BootstrapEvidence(
+            attempted=True,
+            run_status="pass",
+            readiness_status="pass",
+            detail="Odoo stable bootstrap, post-deploy, and verification completed.",
+        ),
         post_deploy_update=post_deploy_evidence,
         destination_health=destination_health,
     )
     record_store.write_deployment_record(deployment_record)
     record_store.write_environment_inventory(
-        build_environment_inventory(deployment_record=deployment_record, updated_at=finished_at)
+        build_environment_inventory(
+            deployment_record=deployment_record,
+            updated_at=finished_at,
+            bootstrap_record_id=deployment_record_id,
+        )
     )
     return _base_result(
         request=request,
@@ -524,6 +602,8 @@ def execute_odoo_stable_bootstrap(
         target_id_record=target_id_record,
         inventory=inventory,
         bootstrap_status="pass",
+        bootstrap_run_status="pass",
+        readiness_status="pass",
         post_deploy_status="pass",
         health_status=health_status,
         canonical_status=canonical_status,
