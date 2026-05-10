@@ -979,6 +979,24 @@ jobs:
               "syo-preview-destroy-manual-${suffix}"
           }
 
+          post_verireel_preview_grant() {
+            local workflow_file="$1"
+            local action_name="$2"
+            local source_label="$3"
+            local idempotency_suffix="$4"
+            local event_name="${5:-pull_request}"
+            post_grant \
+              cbusillo/verireel \
+              "$workflow_file" \
+              verireel \
+              verireel-testing \
+              "$action_name" \
+              "$source_label" \
+              "$idempotency_suffix" \
+              "$event_name" \
+              '*'
+          }
+
           post_odoo_cm_preview_grant() {
             local product_name="$1"
             local action_name="$2"
@@ -1147,6 +1165,22 @@ jobs:
           post_syo_preview_grants \
             sellyouroutboard \
             canonical-context
+          post_verireel_preview_grant \
+            preview-control-plane.yml \
+            preview_pr_feedback.write \
+            deploy:verireel-preview-pr-feedback-grant \
+            verireel-preview-pr-feedback
+          post_verireel_preview_grant \
+            preview-fork-notice.yml \
+            preview_pr_feedback.write \
+            deploy:verireel-preview-unsupported-feedback-grant \
+            verireel-preview-unsupported-feedback \
+            pull_request_target
+          post_verireel_preview_grant \
+            preview-cleanup.yml \
+            preview_pr_feedback.write \
+            deploy:verireel-preview-cleanup-feedback-grant \
+            verireel-preview-cleanup-feedback
           post_odoo_cm_preview_grant \
             odoo \
             odoo_artifact_publish_inputs.read \
