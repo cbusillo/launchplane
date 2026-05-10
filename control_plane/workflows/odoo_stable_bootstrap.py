@@ -381,24 +381,16 @@ def execute_odoo_stable_bootstrap(
         if request.verify_canonical:
             if not base_url:
                 raise click.ClickException("Odoo stable bootstrap has no base URL.")
-            _run_verification_with_retry(
-                lambda: _verify_canonical_url(
-                    base_url=base_url,
-                    expected_base_url=base_url,
-                    timeout_seconds=health_timeout_seconds,
-                ),
+            _verify_canonical_url(
+                base_url=base_url,
+                expected_base_url=base_url,
                 timeout_seconds=health_timeout_seconds,
             )
             canonical_status = "pass"
         if request.verify_logo:
             if not base_url:
                 raise click.ClickException("Odoo stable bootstrap has no base URL.")
-            _run_verification_with_retry(
-                lambda: _verify_logo_route(
-                    base_url=base_url, timeout_seconds=health_timeout_seconds
-                ),
-                timeout_seconds=health_timeout_seconds,
-            )
+            _verify_logo_route(base_url=base_url, timeout_seconds=health_timeout_seconds)
             logo_status = "pass"
     except click.ClickException as error:
         destination_health = HealthcheckEvidence(
