@@ -325,7 +325,7 @@ def execute_odoo_stable_bootstrap(
         control_plane_root=control_plane_root,
         record_store=record_store,
         request=OdooPostDeployRequest(
-            context=request.context, instance=request.instance, phase="manual"
+            context=request.context, instance=request.instance, phase="deploy"
         ),
     )
     post_deploy_evidence = PostDeployUpdateEvidence(
