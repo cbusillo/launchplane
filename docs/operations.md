@@ -737,10 +737,10 @@ backup/restore policy evidence for that lane.
 
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
-payload shape. VeriReel preview runtime now flows through Launchplane drivers:
-the app repo sends PR/image intent, Launchplane derives the live preview URL
-from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that returned URL with
-generation status and cleanup outcome.
+payload shape. Generic-web, Odoo, and VeriReel preview runtime now flow through
+Launchplane drivers: product repos send PR/image intent, Launchplane derives the
+live preview URL from `LAUNCHPLANE_PREVIEW_BASE_URL`, and evidence stores that
+returned URL with generation status and cleanup outcome.
 
 Launchplane now owns the preview lifecycle planning boundary. The scheduled
 Launchplane `Preview Lifecycle` workflow discovers desired preview anchors from

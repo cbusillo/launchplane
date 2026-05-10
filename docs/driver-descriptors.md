@@ -125,9 +125,11 @@ The `preview_refresh`, `preview_inventory`, `preview_readiness`, and
 `POST /v1/drivers/generic-web/preview-readiness`, and
 `POST /v1/drivers/generic-web/preview-destroy`. Refresh runs readiness first,
 then creates or updates a stateless Dokploy application from the DB-backed
-template lane, applies explicit settings transport, deploys the submitted image,
-and checks the product health path. Inventory and destroy scan and delete
-Dokploy applications by the product profile's preview application-name prefix.
+template lane, derives the live preview URL from the context-level
+`LAUNCHPLANE_PREVIEW_BASE_URL` runtime-environment record plus the preview slug,
+applies explicit settings transport, deploys the submitted image, and checks the
+product health path. Inventory and destroy scan and delete Dokploy applications
+by the product profile's preview application-name prefix.
 
 Product drivers can declare `base_driver_id="generic-web"` when they reuse the
 generic web lifecycle and add named product-specific gates or runtime actions.
@@ -140,8 +142,9 @@ routes for the same lifecycle: `POST /v1/drivers/odoo/preview-desired-state`,
 `POST /v1/drivers/odoo/preview-inventory`,
 `POST /v1/drivers/odoo/preview-readiness`, and
 `POST /v1/drivers/odoo/preview-destroy`. These routes use the generic-web
-preview request schema and record writer so Odoo PR previews land in the same
-Launchplane preview and preview-generation records as generic-web previews.
+preview request schema, live URL derivation, and record writer so Odoo PR
+previews land in the same Launchplane preview and preview-generation records as
+generic-web previews.
 Odoo is the only current generic-web-based driver allowed to use the staged
 compose preview MVP: if its product profile uses `preview.data_transport_mode =
 "bootstrap"` and its template lane is a Dokploy `compose` target, preview refresh

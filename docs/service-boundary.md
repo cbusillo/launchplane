@@ -662,16 +662,19 @@ DB-backed product profile before recording desired preview state.
 
 Generic web preview refresh uses
 `POST /v1/drivers/generic-web/preview-refresh`. The request names the product,
-preview slug, preview URL, and immutable image reference; Launchplane resolves
-the repository and preview context from the DB-backed product profile, derives
-the anchor pull request from the preview slug when possible, and records preview
-and generation evidence for both successful and failed provider results. Product
-workflows may send `anchor_pr_number`, `anchor_pr_url`, and `anchor_head_sha`
-when the preview slug cannot be parsed from the configured slug template or when
-the workflow has more precise anchor metadata than the image reference. Preview
-health failures that return Dokploy Dead Host are classified as public preview
-ingress failures so workflow output and persisted generation evidence point at
-DNS/ingress routing instead of a generic provider timeout.
+preview slug, and immutable image reference. Launchplane resolves the repository
+and preview context from the DB-backed product profile, derives the canonical
+live preview URL from the context-level `LAUNCHPLANE_PREVIEW_BASE_URL` runtime
+environment record plus the preview slug, derives the anchor pull request from
+the preview slug when possible, and records preview and generation evidence for
+both successful and failed provider results. Product workflows may send
+`anchor_pr_number`, `anchor_pr_url`, and `anchor_head_sha` when the preview slug
+cannot be parsed from the configured slug template or when the workflow has more
+precise anchor metadata than the image reference. `preview_url` remains accepted
+as a compatibility override but is not the product-repo authority for new
+workflows. Preview health failures that return Dokploy Dead Host are classified
+as public preview ingress failures so workflow output and persisted generation
+evidence point at DNS/ingress routing instead of a generic provider timeout.
 
 Generic web preview inventory and destroy use
 `POST /v1/drivers/generic-web/preview-inventory` and
@@ -920,10 +923,11 @@ free-form destroy reason so the same preview cleanup is idempotent even when the
 caller wording changes between cleanup paths.
 
 Odoo preview routes intentionally reuse the generic-web preview request schema,
-profile resolver, and record writer. Product repos call the Odoo-shaped routes
-so authz and driver views remain product-specific, while Launchplane still writes
-the shared preview and preview-generation records from DB-backed product profile
-preview configuration.
+profile resolver, URL derivation, and record writer. Product repos call the
+Odoo-shaped routes so authz and driver views remain product-specific, while
+Launchplane still derives the live preview URL from runtime-environment records
+and writes the shared preview and preview-generation records from DB-backed
+product profile preview configuration.
 
 The CM tenant preview workflow uses two product scopes deliberately. Artifact
 publish input and publish evidence requests use product `odoo` for context `cm`,
