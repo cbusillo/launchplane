@@ -79,6 +79,9 @@ class _Store:
         )
         self.deployment_records: list[DeploymentRecord] = []
         self.environment_inventories: list[EnvironmentInventory] = []
+        self.missing_target_record = False
+        self.missing_target_id_record = False
+        self.missing_inventory = False
 
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord:
         if product != self.profile.product:
@@ -88,6 +91,8 @@ class _Store:
     def read_dokploy_target_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetRecord:
+        if self.missing_target_record:
+            raise FileNotFoundError(f"{context_name}/{instance_name}")
         if (context_name, instance_name) != ("cm", "testing"):
             raise FileNotFoundError(f"{context_name}/{instance_name}")
         return self.target_record
@@ -95,6 +100,8 @@ class _Store:
     def read_dokploy_target_id_record(
         self, *, context_name: str, instance_name: str
     ) -> DokployTargetIdRecord:
+        if self.missing_target_id_record:
+            raise FileNotFoundError(f"{context_name}/{instance_name}")
         if (context_name, instance_name) != ("cm", "testing"):
             raise FileNotFoundError(f"{context_name}/{instance_name}")
         return self.target_id_record
@@ -102,6 +109,8 @@ class _Store:
     def read_environment_inventory(
         self, *, context_name: str, instance_name: str
     ) -> EnvironmentInventory:
+        if self.missing_inventory:
+            raise FileNotFoundError(f"{context_name}/{instance_name}")
         if (context_name, instance_name) != ("cm", "testing"):
             raise FileNotFoundError(f"{context_name}/{instance_name}")
         return self.inventory
@@ -214,6 +223,31 @@ class OdooStableBootstrapTests(unittest.TestCase):
             )
 
         self.assertIn("cm/testing", str(raised_error.exception))
+
+    def test_execute_reports_missing_target_records_as_controlled_errors(self) -> None:
+        request = OdooStableBootstrapRequest(
+            product="odoo-tenant-cm",
+            context="cm",
+            instance="testing",
+            confirmation=ODOO_STABLE_BOOTSTRAP_CONFIRMATION,
+        )
+
+        for missing_attribute, expected_message in (
+            ("missing_target_record", "Dokploy target record"),
+            ("missing_target_id_record", "Dokploy target-id record"),
+            ("missing_inventory", "environment inventory"),
+        ):
+            with self.subTest(missing_attribute=missing_attribute):
+                store = _Store()
+                setattr(store, missing_attribute, True)
+                with self.assertRaises(click.ClickException) as raised_error:
+                    execute_odoo_stable_bootstrap(
+                        control_plane_root=Path("/tmp/launchplane"),
+                        record_store=store,
+                        request=request,
+                    )
+
+                self.assertIn(expected_message, str(raised_error.exception))
 
     def test_execute_records_failure_when_bootstrap_schedule_fails(self) -> None:
         store = _Store()

@@ -217,6 +217,45 @@ def _base_result(
     )
 
 
+def _read_bootstrap_target_record(
+    *, record_store: OdooStableBootstrapStore, context: str, instance: str
+) -> DokployTargetRecord:
+    try:
+        return record_store.read_dokploy_target_record(
+            context_name=context, instance_name=instance
+        )
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            f"Odoo stable bootstrap requires a Launchplane Dokploy target record for {context}/{instance}."
+        ) from error
+
+
+def _read_bootstrap_target_id_record(
+    *, record_store: OdooStableBootstrapStore, context: str, instance: str
+) -> DokployTargetIdRecord:
+    try:
+        return record_store.read_dokploy_target_id_record(
+            context_name=context, instance_name=instance
+        )
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            f"Odoo stable bootstrap requires a Launchplane Dokploy target-id record for {context}/{instance}."
+        ) from error
+
+
+def _read_bootstrap_inventory(
+    *, record_store: OdooStableBootstrapStore, context: str, instance: str
+) -> EnvironmentInventory:
+    try:
+        return record_store.read_environment_inventory(
+            context_name=context, instance_name=instance
+        )
+    except FileNotFoundError as error:
+        raise click.ClickException(
+            f"Odoo stable bootstrap requires current Launchplane environment inventory for {context}/{instance}."
+        ) from error
+
+
 def execute_odoo_stable_bootstrap(
     *,
     control_plane_root: Path,
@@ -231,16 +270,16 @@ def execute_odoo_stable_bootstrap(
         raise click.ClickException(
             f"Product {request.product!r} lane {request.instance!r} belongs to context {lane.context!r}, not {request.context!r}."
         )
-    target_record = record_store.read_dokploy_target_record(
-        context_name=request.context, instance_name=request.instance
+    target_record = _read_bootstrap_target_record(
+        record_store=record_store, context=request.context, instance=request.instance
     )
-    target_id_record = record_store.read_dokploy_target_id_record(
-        context_name=request.context, instance_name=request.instance
+    target_id_record = _read_bootstrap_target_id_record(
+        record_store=record_store, context=request.context, instance=request.instance
     )
     if target_record.target_type != "compose":
         raise click.ClickException("Odoo stable bootstrap requires a compose target.")
-    inventory = record_store.read_environment_inventory(
-        context_name=request.context, instance_name=request.instance
+    inventory = _read_bootstrap_inventory(
+        record_store=record_store, context=request.context, instance=request.instance
     )
     artifact_id = ""
     if inventory.artifact_identity is not None:
