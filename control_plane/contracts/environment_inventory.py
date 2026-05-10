@@ -2,6 +2,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
+    BootstrapEvidence,
     DeploymentEvidence,
     HealthcheckEvidence,
 )
@@ -18,11 +19,13 @@ class EnvironmentInventory(BaseModel):
     artifact_identity: ArtifactIdentityReference | None = None
     source_git_ref: str
     deploy: DeploymentEvidence
+    bootstrap: BootstrapEvidence = Field(default_factory=BootstrapEvidence)
     runtime_identity: RuntimeIdentity | None = None
     post_deploy_update: PostDeployUpdateEvidence = Field(default_factory=PostDeployUpdateEvidence)
     destination_health: HealthcheckEvidence = Field(default_factory=HealthcheckEvidence)
     updated_at: str
     deployment_record_id: str
+    bootstrap_record_id: str = ""
     promotion_record_id: str = ""
     promoted_from_instance: str = ""
 
