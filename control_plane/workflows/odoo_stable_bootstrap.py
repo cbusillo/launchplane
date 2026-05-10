@@ -333,8 +333,10 @@ def execute_odoo_stable_bootstrap(
             error_message=post_deploy_result.error_message or "Odoo post-deploy failed.",
         )
 
-    base_url = _target_base_url(lane=lane, domains=())
-    health_url = _target_health_url(profile=profile, lane=lane, domains=())
+    base_url = _target_base_url(lane=lane, domains=target_record.domains)
+    health_url = _target_health_url(
+        profile=profile, lane=lane, domains=target_record.domains
+    )
     health_timeout_seconds = (
         request.health_timeout_seconds
         or target_record.healthcheck_timeout_seconds
