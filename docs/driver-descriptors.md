@@ -153,6 +153,13 @@ inventory, destroy, and readiness; it does not grant Odoo products access to
 stable generic-web deploy or promotion routes, and it does not make compose
 templates valid for generic-web products.
 
+Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
+instance-scoped action. The first implementation is policy-limited to CM testing
+and reuses the existing devkit `--bootstrap` data workflow through a
+Launchplane-owned Dokploy schedule. It is separate from target replacement:
+replacement reconciles provider/runtime target state, while bootstrap rebuilds
+Odoo application data for lanes that are explicitly safe to recreate.
+
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call
 against that product and verifies the product profile's `driver_id` or driver

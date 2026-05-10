@@ -723,6 +723,18 @@ and writes deployment plus inventory records. Do not manually delete canonical
 stable targets as a replacement shortcut; add the missing Launchplane apply
 coverage first, then use the service-backed workflow.
 
+Target replacement only reconciles the provider target and runtime envelope. If
+an intentionally empty CM testing lane needs its Odoo database and filestore
+rebuilt, use the trusted `Odoo Stable Bootstrap` workflow instead of repairing
+state in Dokploy or a local checkout. The workflow calls
+`POST /v1/drivers/odoo/stable-bootstrap`, requires the exact confirmation
+`bootstrap cm testing`, and is currently limited to `odoo-tenant-cm` `cm/testing`.
+The service runs the existing compose-local devkit data workflow in `--bootstrap`
+mode through a dedicated manual Dokploy schedule, then runs Odoo post-deploy and
+verifies health, canonical URL, and logo routes before writing deployment and
+inventory evidence. Do not use this path for prod until Launchplane has explicit
+backup/restore policy evidence for that lane.
+
 `launchplane-previews write-from-generation` and `launchplane-previews write-destroyed`
 are local preview-evidence ingest adapters that mirror the service ingress
 payload shape. VeriReel preview runtime now flows through Launchplane drivers:

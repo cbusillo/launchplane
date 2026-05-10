@@ -101,6 +101,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertEqual(actions["preview_refresh"].scope, "preview")
         self.assertEqual(actions["preview_inventory"].safety, "safe_write")
         self.assertEqual(actions["preview_destroy"].safety, "destructive")
+        self.assertEqual(actions["stable_bootstrap"].safety, "destructive")
+        self.assertEqual(
+            actions["stable_bootstrap"].route_path,
+            "/v1/drivers/odoo/stable-bootstrap",
+        )
 
     def test_verireel_descriptor_exposes_preview_and_stable_capabilities(self) -> None:
         descriptor = read_driver_descriptor("verireel")
@@ -268,6 +273,11 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     control_plane_service._ODOO_POST_DEPLOY_ROUTE,
                     control_plane_service.OdooPostDeployEnvelope,
                     "post-deploy driver",
+                ),
+                "stable_bootstrap": (
+                    control_plane_service._ODOO_STABLE_BOOTSTRAP_ROUTE,
+                    control_plane_service.OdooStableBootstrapEnvelope,
+                    "stable bootstrap",
                 ),
             },
         )

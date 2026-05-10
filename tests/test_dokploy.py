@@ -1961,6 +1961,72 @@ protected_store_keys = ["yps-your-part-supplier"]
         self.assertIn("manifest.json", script)
         self.assertIn("/api/schedule.runManually", request_paths)
 
+    def test_run_compose_odoo_stable_bootstrap_uses_dedicated_manual_schedule(self) -> None:
+        target_definition = control_plane_dokploy.DokployTargetDefinition(
+            context="cm",
+            instance="testing",
+            target_id="compose-123",
+            target_name="cm-testing",
+        )
+        schedule_payloads: list[dict[str, object]] = []
+        request_paths: list[str] = []
+
+        def capture_schedule_payload(**kwargs: object) -> dict[str, str]:
+            schedule_payloads.append(cast("dict[str, object]", kwargs["schedule_payload"]))
+            return {"scheduleId": "schedule-123"}
+
+        def capture_request_path(**kwargs: object) -> dict[str, bool]:
+            request_paths.append(str(kwargs["path"]))
+            return {"ok": True}
+
+        with (
+            patch(
+                "control_plane.dokploy.fetch_dokploy_target_payload",
+                return_value={
+                    "env": "ODOO_DB_NAME=cm_testing\nODOO_FILESTORE_PATH=/volumes/data/filestore\n",
+                    "appName": "cm-testing-app",
+                    "serverId": "server-123",
+                },
+            ),
+            patch(
+                "control_plane.dokploy.find_matching_dokploy_schedule",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.dokploy.upsert_dokploy_schedule",
+                side_effect=capture_schedule_payload,
+            ),
+            patch(
+                "control_plane.dokploy.latest_deployment_for_schedule",
+                return_value={"deploymentId": "schedule-before"},
+            ),
+            patch(
+                "control_plane.dokploy.wait_for_dokploy_schedule_deployment",
+                side_effect=lambda **_kwargs: None,
+            ),
+            patch(
+                "control_plane.dokploy.dokploy_request",
+                side_effect=capture_request_path,
+            ),
+        ):
+            control_plane_dokploy.run_compose_odoo_stable_bootstrap(
+                host="https://dokploy.example.com",
+                token="secret-token",
+                target_definition=target_definition,
+                env_file=None,
+            )
+
+        self.assertEqual(len(schedule_payloads), 1)
+        self.assertEqual(
+            schedule_payloads[0]["name"],
+            control_plane_dokploy.DOKPLOY_ODOO_BOOTSTRAP_SCHEDULE_NAME,
+        )
+        self.assertEqual(schedule_payloads[0]["command"], "control-plane odoo stable bootstrap")
+        script = str(schedule_payloads[0]["script"])
+        self.assertIn("workflow_arguments=(--bootstrap)", script)
+        self.assertNotIn("workflow_arguments=(--update-only)", script)
+        self.assertIn("/api/schedule.runManually", request_paths)
+
     def test_run_compose_post_deploy_update_rejects_unsupported_env_overlay_keys(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             env_file = Path(temporary_directory_name) / "post-deploy.env"

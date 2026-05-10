@@ -97,6 +97,7 @@ from control_plane.workflows.verireel_environment import VeriReelStableEnvironme
 from control_plane.workflows.verireel_rollout import VeriReelRolloutVerificationResult
 from control_plane.workflows.odoo_artifact_publish import OdooArtifactPublishResult
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
+from control_plane.workflows.odoo_stable_bootstrap import OdooStableBootstrapResult
 from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResult
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
@@ -15351,6 +15352,146 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 400)
             self.assertEqual(payload["error"]["code"], "invalid_request")
+
+    def test_odoo_stable_bootstrap_driver_runs_for_authorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_stable_bootstrap.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_stable_bootstrap",
+                return_value=OdooStableBootstrapResult(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    deployment_record_id="deployment-cm-testing-bootstrap",
+                    bootstrap_status="pass",
+                    post_deploy_status="pass",
+                    health_status="pass",
+                    canonical_status="pass",
+                    logo_status="pass",
+                ),
+            ) as bootstrap_mock:
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/stable-bootstrap",
+                    payload={
+                        "product": "odoo-tenant-cm",
+                        "bootstrap": {
+                            "product": "odoo-tenant-cm",
+                            "context": "cm",
+                            "instance": "testing",
+                            "confirmation": "bootstrap cm testing",
+                            "verify_health": True,
+                            "verify_canonical": True,
+                            "verify_logo": True,
+                        },
+                    },
+                    headers={"Idempotency-Key": "bootstrap-cm-testing"},
+                )
+
+            self.assertEqual(status_code, 202)
+            self.assertEqual(payload["status"], "accepted")
+            self.assertEqual(
+                payload["records"],
+                {"deployment_record_id": "deployment-cm-testing-bootstrap"},
+            )
+            self.assertEqual(payload["result"]["bootstrap_status"], "pass")
+            bootstrap_mock.assert_called_once()
+            request = bootstrap_mock.call_args.kwargs["request"]
+            self.assertEqual(request.confirmation, "bootstrap cm testing")
+
+    def test_odoo_stable_bootstrap_driver_rejects_unauthorized_workflow(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=LaunchplaneAuthzPolicy.model_validate(
+                    {
+                        "github_actions": [
+                            {
+                                "repository": "cbusillo/launchplane",
+                                "workflow_refs": [
+                                    "cbusillo/launchplane/.github/workflows/odoo-stable-bootstrap.yml@refs/heads/main"
+                                ],
+                                "event_names": ["workflow_dispatch"],
+                                "products": ["odoo-tenant-cm"],
+                                "contexts": ["cm"],
+                                "actions": ["odoo_target_replacement_plan.read"],
+                            }
+                        ]
+                    }
+                ),
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/stable-bootstrap",
+                payload={
+                    "product": "odoo-tenant-cm",
+                    "bootstrap": {
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "confirmation": "bootstrap cm testing",
+                    },
+                },
+                headers={"Idempotency-Key": "bootstrap-cm-testing"},
+            )
+
+            self.assertEqual(status_code, 403)
+            self.assertEqual(payload["error"]["code"], "authorization_denied")
 
     def test_odoo_target_replacement_plan_driver_reads_for_authorized_workflow(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
