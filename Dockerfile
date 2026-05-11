@@ -12,6 +12,13 @@ RUN pnpm install --frozen-lockfile
 COPY frontend /app/frontend
 RUN pnpm build
 
+FROM mirror.gcr.io/library/golang:1.26.3-bookworm AS github-cli-build
+
+ENV CGO_ENABLED=0 \
+    GOTOOLCHAIN=local
+
+RUN go install github.com/cli/cli/v2/cmd/gh@v2.92.0
+
 FROM mirror.gcr.io/library/python:3.13-slim
 
 LABEL org.opencontainers.image.source="https://github.com/cbusillo/launchplane"
@@ -22,15 +29,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     UV_LINK_MODE=copy
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates gpg openssh-client wget \
-    && mkdir -p -m 755 /etc/apt/keyrings \
-    && wget -nv -O /etc/apt/keyrings/githubcli-archive-keyring.gpg https://cli.github.com/packages/githubcli-archive-keyring.gpg \
-    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
-    && mkdir -p -m 755 /etc/apt/sources.list.d \
-    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" >/etc/apt/sources.list.d/github-cli.list \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends gh \
+    && apt-get install -y --no-install-recommends ca-certificates openssh-client \
     && rm -rf /var/lib/apt/lists/*
+
+COPY --from=github-cli-build /go/bin/gh /usr/local/bin/gh
 
 RUN pip install --no-cache-dir uv
 
