@@ -68,9 +68,10 @@ state. Use this audit when deciding whether a new GUI or driver field belongs in
 an ORM column/table or remains only in the evidence payload.
 
 - Artifact manifest: modeled fields are `artifact_id`, `source_commit`,
-  `image_repository`, and `image_digest`. Source input details, addon selectors,
-  and provider/build evidence stay payload-only until they become normal query
-  or action fields.
+  `image_repository`, and `image_digest`. The payload also carries typed Odoo
+  build provenance for base images and build tools such as `odoo-devkit`.
+  Source input details, addon selectors, support-repo provenance, and provider
+  evidence stay payload-only until they become normal query or action fields.
 - Backup gate: modeled fields are `record_id`, `context`, `instance`,
   `created_at`, and `status`. Concrete backup paths and provider-specific backup
   evidence stay payload-only.
@@ -376,6 +377,12 @@ state/
 - Artifact manifests may also carry `addon_selectors` metadata so operators can
   inspect the original selector intent, but `addon_sources` remains the exact
   SHA-backed release truth used for tuple minting and deploy execution.
+- Artifact manifests may carry `build_provenance` metadata for Odoo runtime and
+  devtools base images plus build tools such as `odoo-devkit`. That provenance
+  is artifact evidence, not addon ownership: `odoo-docker`, `odoo-devkit`,
+  `odoo-shared-addons`, and `disable_odoo_online` stay support/dependency repos,
+  while Launchplane records the immutable image/build refs used to produce an
+  artifact.
 - For a second product such as VeriReel, the first Launchplane onboarding slice
   should ingest deployment evidence from that product's existing release
   workflows into this record shape before Launchplane owns the deploy execution.
@@ -388,6 +395,9 @@ state/
 - Tuple minting requires artifact manifest source refs to be exact git SHAs;
   branch names such as `main` or `origin/testing` are rejected instead of being
   written as release truth.
+- Tuple minting uses tenant and addon source SHAs only. Base-image and build-tool
+  provenance remains on the artifact manifest payload and does not expand the
+  release tuple `repo_shas` map.
 - Promotion execution copies the source channel tuple to the destination
   channel after the destination deploy passes, retaining the promotion and
   deployment record ids that established the promoted state.

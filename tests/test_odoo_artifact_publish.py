@@ -28,6 +28,36 @@ def _artifact_payload() -> dict[str, object]:
         "artifact_id": "artifact-cm-005c291b63b6",
         "source_commit": "005c291b63b61971ba6b1b29a3a49913cb5975a6",
         "enterprise_base_digest": "sha256:enterprise",
+        "build_provenance": {
+            "base_images": [
+                {
+                    "role": "runtime",
+                    "image": {
+                        "repository": "ghcr.io/cbusillo/odoo-runtime",
+                        "digest": "sha256:runtime",
+                        "tags": ["19.0-stable"],
+                    },
+                    "source_repository": "cbusillo/odoo-docker",
+                    "source_ref": "1111111111111111111111111111111111111111",
+                },
+                {
+                    "role": "devtools",
+                    "image": {
+                        "repository": "ghcr.io/cbusillo/odoo-devtools",
+                        "digest": "sha256:devtools",
+                    },
+                    "source_repository": "cbusillo/odoo-docker",
+                    "source_ref": "2222222222222222222222222222222222222222",
+                },
+            ],
+            "build_tools": [
+                {
+                    "name": "odoo-devkit",
+                    "source_repository": "cbusillo/odoo-devkit",
+                    "source_ref": "3333333333333333333333333333333333333333",
+                }
+            ],
+        },
         "image": {
             "repository": "ghcr.io/cbusillo/odoo-tenant-cm",
             "digest": "sha256:005c291b63b61971ba6b1b29a3a49913cb5975a6005c291b63b6",
@@ -82,6 +112,57 @@ class OdooArtifactPublishWorkflowTests(unittest.TestCase):
                 ),
             ),
         )
+
+    def test_artifact_manifest_keeps_build_provenance(self) -> None:
+        manifest = _artifact_manifest()
+
+        self.assertEqual(len(manifest.build_provenance.base_images), 2)
+        self.assertEqual(manifest.build_provenance.base_images[0].role, "runtime")
+        self.assertEqual(
+            manifest.build_provenance.base_images[0].image.repository,
+            "ghcr.io/cbusillo/odoo-runtime",
+        )
+        self.assertEqual(manifest.build_provenance.build_tools[0].name, "odoo-devkit")
+        self.assertEqual(
+            manifest.build_provenance.build_tools[0].source_repository,
+            "cbusillo/odoo-devkit",
+        )
+
+    def test_artifact_manifest_accepts_legacy_payload_without_build_provenance(self) -> None:
+        payload = _artifact_payload()
+        payload.pop("build_provenance")
+
+        manifest = ArtifactIdentityManifest.model_validate(payload)
+
+        self.assertEqual(manifest.build_provenance.base_images, ())
+        self.assertEqual(manifest.build_provenance.build_tools, ())
+
+    def test_artifact_manifest_rejects_duplicate_base_image_roles(self) -> None:
+        payload = _artifact_payload()
+        build_provenance = payload["build_provenance"]
+        assert isinstance(build_provenance, dict)
+        base_images = build_provenance["base_images"]
+        assert isinstance(base_images, list)
+        duplicate_runtime = dict(base_images[0])
+        duplicate_runtime["image"] = {
+            "repository": "ghcr.io/cbusillo/other-runtime",
+            "digest": "sha256:other",
+        }
+        base_images.append(duplicate_runtime)
+
+        with self.assertRaisesRegex(ValidationError, "duplicate base image role"):
+            ArtifactIdentityManifest.model_validate(payload)
+
+    def test_artifact_manifest_rejects_incomplete_build_tool_provenance(self) -> None:
+        payload = _artifact_payload()
+        build_provenance = payload["build_provenance"]
+        assert isinstance(build_provenance, dict)
+        build_tools = build_provenance["build_tools"]
+        assert isinstance(build_tools, list)
+        build_tools[0] = {"name": "odoo-devkit"}
+
+        with self.assertRaisesRegex(ValidationError, "requires version or source_repository"):
+            ArtifactIdentityManifest.model_validate(payload)
 
     def test_publish_requests_accept_profile_owned_contexts(self) -> None:
         publish_request = OdooArtifactPublishRequest(
