@@ -73,6 +73,7 @@ jobs:
         uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@v4
         with:
           name: launchplane-ci
@@ -88,6 +89,7 @@ jobs:
       - name: Build runtime image
         uses: docker/build-push-action@v7
         with:
+          builder: ${{ steps.buildx.outputs.name }}
           context: .
           load: true
           tags: launchplane-ci:test
