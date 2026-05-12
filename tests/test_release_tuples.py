@@ -9,6 +9,9 @@ from unittest.mock import patch
 from control_plane import release_tuples as control_plane_release_tuples
 from control_plane.contracts.artifact_identity import ArtifactAddonSelector
 from control_plane.contracts.artifact_identity import ArtifactAddonSource
+from control_plane.contracts.artifact_identity import ArtifactBaseImageProvenance
+from control_plane.contracts.artifact_identity import ArtifactBuildProvenance
+from control_plane.contracts.artifact_identity import ArtifactBuildToolProvenance
 from control_plane.contracts.artifact_identity import ArtifactIdentityManifest
 from control_plane.contracts.artifact_identity import ArtifactImageReference
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
@@ -256,6 +259,26 @@ class ReleaseTupleTests(unittest.TestCase):
             artifact_id="artifact-sha256-image456",
             source_commit="abc1234",
             enterprise_base_digest="sha256:enterprise123",
+            build_provenance=ArtifactBuildProvenance(
+                base_images=(
+                    ArtifactBaseImageProvenance(
+                        role="runtime",
+                        image=ArtifactImageReference(
+                            repository="ghcr.io/cbusillo/odoo-runtime",
+                            digest="sha256:runtime",
+                        ),
+                        source_repository="cbusillo/odoo-docker",
+                        source_ref="1111111111111111111111111111111111111111",
+                    ),
+                ),
+                build_tools=(
+                    ArtifactBuildToolProvenance(
+                        name="odoo-devkit",
+                        source_repository="cbusillo/odoo-devkit",
+                        source_ref="2222222222222222222222222222222222222222",
+                    ),
+                ),
+            ),
             addon_sources=(
                 ArtifactAddonSource(
                     repository="cbusillo/odoo-shared-addons",
@@ -278,6 +301,8 @@ class ReleaseTupleTests(unittest.TestCase):
         self.assertEqual(release_tuple.tuple_id, "opw-testing-artifact-sha256-image456")
         self.assertEqual(release_tuple.repo_shas["tenant-opw"], "abc1234")
         self.assertEqual(release_tuple.repo_shas["shared-addons"], "def5678")
+        self.assertNotIn("odoo-docker", release_tuple.repo_shas)
+        self.assertNotIn("odoo-devkit", release_tuple.repo_shas)
         self.assertEqual(release_tuple.provenance, "ship")
 
     def test_build_release_tuple_record_ignores_addon_selector_metadata(self) -> None:
