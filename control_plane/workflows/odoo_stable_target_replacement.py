@@ -3,6 +3,7 @@ from __future__ import annotations
 from collections.abc import Callable, Mapping
 import json
 from pathlib import Path
+import time
 from typing import Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -57,6 +58,7 @@ class OdooStableTargetReplacementStore(Protocol):
 
 
 DokployRequest = Callable[..., JsonValue]
+ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
 
 class OdooStableTargetReplacementRequest(BaseModel):
@@ -382,6 +384,26 @@ def _verify_logo_route(*, base_url: str, timeout_seconds: int) -> None:
         raise click.ClickException(f"Logo check {logo_url} returned HTTP {status_code}.")
     if "text/html" in content_type.lower() and "404" in body[:500].lower():
         raise click.ClickException(f"Logo check {logo_url} returned an HTML 404 body.")
+
+
+def _run_verification_with_retry(
+    verification: Callable[[], None],
+    *,
+    timeout_seconds: int,
+    retry_interval_seconds: int = ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS,
+) -> None:
+    deadline = time.monotonic() + timeout_seconds
+    last_error: click.ClickException | None = None
+    while True:
+        try:
+            verification()
+            return
+        except click.ClickException as error:
+            last_error = error
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise last_error
+            time.sleep(min(retry_interval_seconds, remaining_seconds))
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -999,16 +1021,25 @@ def execute_odoo_stable_target_replacement_apply(
                 raise click.ClickException(
                     "Odoo target replacement health verification has no health URL."
                 )
-            _verify_health_url(health_url=health_url, timeout_seconds=health_timeout_seconds)
+            _run_verification_with_retry(
+                lambda: _verify_health_url(
+                    health_url=health_url,
+                    timeout_seconds=health_timeout_seconds,
+                ),
+                timeout_seconds=health_timeout_seconds,
+            )
             health_status = "pass"
         if request.verify_canonical:
             if not base_url:
                 raise click.ClickException(
                     "Odoo target replacement canonical verification has no base URL."
                 )
-            _verify_canonical_url(
-                base_url=base_url,
-                expected_base_url=base_url,
+            _run_verification_with_retry(
+                lambda: _verify_canonical_url(
+                    base_url=base_url,
+                    expected_base_url=base_url,
+                    timeout_seconds=health_timeout_seconds,
+                ),
                 timeout_seconds=health_timeout_seconds,
             )
             canonical_status = "pass"
@@ -1017,7 +1048,13 @@ def execute_odoo_stable_target_replacement_apply(
                 raise click.ClickException(
                     "Odoo target replacement logo verification has no base URL."
                 )
-            _verify_logo_route(base_url=base_url, timeout_seconds=health_timeout_seconds)
+            _run_verification_with_retry(
+                lambda: _verify_logo_route(
+                    base_url=base_url,
+                    timeout_seconds=health_timeout_seconds,
+                ),
+                timeout_seconds=health_timeout_seconds,
+            )
             logo_status = "pass"
     except click.ClickException as error:
         destination_health = HealthcheckEvidence(
