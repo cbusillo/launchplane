@@ -8,10 +8,12 @@ import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane import dokploy as control_plane_dokploy
+from control_plane import odoo_instance_overrides as control_plane_odoo_instance_overrides
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
@@ -44,6 +46,10 @@ ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS = 5
 
 
 class OdooStableBootstrapStore(Protocol):
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord: ...
+
     def read_product_profile_record(self, product: str) -> LaunchplaneProductProfileRecord: ...
 
     def read_dokploy_target_record(
@@ -318,6 +324,18 @@ def _read_bootstrap_inventory(
         ) from error
 
 
+def _read_odoo_instance_override_record(
+    *, record_store: OdooStableBootstrapStore, context: str, instance: str
+) -> OdooInstanceOverrideRecord | None:
+    try:
+        return record_store.read_odoo_instance_override_record(
+            context_name=context,
+            instance_name=instance,
+        )
+    except FileNotFoundError:
+        return None
+
+
 def execute_odoo_stable_bootstrap(
     *,
     control_plane_root: Path,
@@ -337,6 +355,11 @@ def execute_odoo_stable_bootstrap(
     )
     target_id_record = _read_bootstrap_target_id_record(
         record_store=record_store, context=request.context, instance=request.instance
+    )
+    odoo_override_record = _read_odoo_instance_override_record(
+        record_store=record_store,
+        context=request.context,
+        instance=request.instance,
     )
     if target_record.target_type != "compose":
         raise click.ClickException("Odoo stable bootstrap requires a compose target.")
@@ -424,11 +447,26 @@ def execute_odoo_stable_bootstrap(
             deploy_timeout_seconds=target_record.deploy_timeout_seconds,
             healthcheck_timeout_seconds=target_record.healthcheck_timeout_seconds,
         )
+        workflow_environment_overrides: dict[str, str] = {}
+        required_workflow_environment_keys: tuple[str, ...] = ()
+        if odoo_override_record is not None and "deploy" in odoo_override_record.apply_on:
+            post_deploy_environment = control_plane_odoo_instance_overrides.build_post_deploy_environment(
+                odoo_override_record,
+                protected_shopify_store_keys=control_plane_dokploy.protected_shopify_store_keys_for_target_definition(
+                    target_definition
+                ),
+            )
+            workflow_environment_overrides = post_deploy_environment.inline_environment
+            required_workflow_environment_keys = (
+                post_deploy_environment.required_container_environment_keys
+            )
         control_plane_dokploy.run_compose_odoo_stable_bootstrap(
             host=host,
             token=token,
             target_definition=target_definition,
             env_file=env_file,
+            workflow_environment_overrides=workflow_environment_overrides,
+            required_workflow_environment_keys=required_workflow_environment_keys,
             timeout_seconds=request.timeout_seconds,
         )
     except click.ClickException as error:
