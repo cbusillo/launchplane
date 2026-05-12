@@ -31,6 +31,7 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
+    _run_verification_with_retry,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
 )
@@ -779,6 +780,28 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     ),
                     dokploy_request=cast(DokployRequest, _request),
                 )
+
+    def test_verification_retry_allows_transient_startup_failure(self) -> None:
+        attempts = 0
+
+        def flaky_verification() -> None:
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise click.ClickException("temporary health 404")
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement.time.sleep",
+            side_effect=lambda _seconds: None,
+        ) as sleep_mock:
+            _run_verification_with_retry(
+                flaky_verification,
+                timeout_seconds=30,
+                retry_interval_seconds=5,
+            )
+
+        self.assertEqual(attempts, 2)
+        sleep_mock.assert_called_once()
 
     def test_apply_refuses_blocked_plan(self) -> None:
         with self.assertRaises(click.ClickException):

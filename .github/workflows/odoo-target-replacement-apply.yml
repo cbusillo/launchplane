@@ -242,6 +242,15 @@ jobs:
               >&2
             exit 1
           fi
+          deploy_status="$(jq -r '.result.deploy_status // ""' odoo-target-replacement-apply.json)"
+          post_deploy_status="$(jq -r '.result.post_deploy_status // ""' odoo-target-replacement-apply.json)"
+          if [ "$deploy_status" != "pass" ] || [ "$post_deploy_status" != "pass" ]; then
+            echo \
+              "Odoo target replacement apply did not pass: deploy=${deploy_status} post_deploy=${post_deploy_status}." \
+              >&2
+            jq -r '.result.error_message // ""' odoo-target-replacement-apply.json >&2
+            exit 1
+          fi
 
       - name: Upload replacement apply result
         uses: actions/upload-artifact@v5
