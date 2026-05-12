@@ -2221,6 +2221,7 @@ def _write_odoo_config_parameter_override(
         for override in (existing_record.config_parameters if existing_record is not None else ())
     }
     addon_settings = existing_record.addon_settings if existing_record is not None else ()
+    website_bootstrap = existing_record.website_bootstrap if existing_record is not None else None
     config_parameters[request.key] = OdooConfigParameterOverride(
         key=request.key,
         value=OdooOverrideValue(source="literal", value=request.value),
@@ -2240,6 +2241,7 @@ def _write_odoo_config_parameter_override(
         apply_on=apply_on,
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
+        website_bootstrap=website_bootstrap,
         updated_at=_utc_now_timestamp(),
         source_label=request.source_label,
     )
@@ -4213,9 +4215,9 @@ def _validate_every_code_rerun_write_intent(
     if not record_id:
         return None, None
     try:
-        record = _agent_write_intent_record_store(
-            record_store
-        ).read_agent_write_intent_record(record_id)
+        record = _agent_write_intent_record_store(record_store).read_agent_write_intent_record(
+            record_id
+        )
     except FileNotFoundError:
         return None, _reject_agent_write_intent(
             start_response=start_response,
@@ -4237,7 +4239,10 @@ def _validate_every_code_rerun_write_intent(
             message="Every Code rerun requires an allowed apply-mode every_code_rerun intent record.",
             record_id=record.record_id,
         )
-    if record.evaluation.product != "launchplane" or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT:
+    if (
+        record.evaluation.product != "launchplane"
+        or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT
+    ):
         return record, _reject_agent_write_intent(
             start_response=start_response,
             trace_id=trace_id,
@@ -4296,9 +4301,7 @@ def _matching_every_code_rerun_intent_record(
     source_url: str,
     now: datetime,
 ) -> AgentWriteIntentRecord | None:
-    for record in _agent_write_intent_record_store(
-        record_store
-    ).list_agent_write_intent_records(
+    for record in _agent_write_intent_record_store(record_store).list_agent_write_intent_records(
         product="launchplane",
         context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
         status="allowed",
@@ -4859,9 +4862,7 @@ def _build_preview_lifecycle_sweep(
             )
             inventory_context = verireel_inventory_result.context
             inventory_source = request.source
-            inventory_slugs = tuple(
-                item.previewSlug for item in verireel_inventory_result.previews
-            )
+            inventory_slugs = tuple(item.previewSlug for item in verireel_inventory_result.previews)
         else:
             generic_web_inventory_result = execute_generic_web_preview_inventory(
                 control_plane_root=control_plane_root,

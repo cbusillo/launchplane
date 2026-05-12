@@ -225,6 +225,10 @@ def render_post_deploy_payload(
         )
     payload["config_parameters"] = config_parameters
     payload["addon_settings"] = addon_settings
+    if record.website_bootstrap is not None:
+        payload["website_bootstrap"] = record.website_bootstrap.model_dump(
+            mode="json", exclude_none=True
+        )
     return payload
 
 

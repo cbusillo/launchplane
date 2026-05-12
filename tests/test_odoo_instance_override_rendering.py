@@ -22,6 +22,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
+    OdooWebsiteBootstrapOverride,
+    OdooWebsiteBootstrapRoute,
 )
 
 
@@ -75,6 +77,53 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
                 ],
             },
         )
+
+    def test_render_post_deploy_payload_includes_website_bootstrap(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="cm",
+            instance="testing",
+            website_bootstrap=OdooWebsiteBootstrapOverride(
+                tenant="cm",
+                name="Cell Mechanic",
+                default_lang="en_US",
+                homepage_url="/cell-mechanic",
+                primary_page_xmlid="cm_website.website_page_cell_mechanic",
+                logo_path="addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
+                logo_alt="Cell Mechanic",
+                canonical_url="https://cm-testing.shinycomputers.com",
+                pages_source={"module": "cm_website", "model": "website.page"},
+                routes_source={"module": "cm_website"},
+                routes=(
+                    OdooWebsiteBootstrapRoute(
+                        name="Cell Mechanic",
+                        url="/cell-mechanic",
+                        module="cm_website",
+                        published=True,
+                        homepage=True,
+                    ),
+                ),
+            ),
+            updated_at="2026-05-12T21:00:00Z",
+        )
+
+        payload = render_post_deploy_payload(record)
+        environment = build_post_deploy_environment(record)
+        encoded_payload = environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+        decoded_payload = json.loads(base64.b64decode(encoded_payload).decode("utf-8"))
+
+        self.assertEqual(payload, decoded_payload)
+        self.assertEqual(payload["config_parameters"], [])
+        self.assertEqual(payload["addon_settings"], [])
+        website_bootstrap = payload["website_bootstrap"]
+        assert isinstance(website_bootstrap, dict)
+        self.assertEqual(
+            website_bootstrap["canonical_url"], "https://cm-testing.shinycomputers.com"
+        )
+        self.assertEqual(
+            website_bootstrap["logo_path"],
+            "addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
+        )
+        self.assertEqual(website_bootstrap["routes"][0]["url"], "/cell-mechanic")
 
     def test_build_post_deploy_environment_sets_base64_payload_env(self) -> None:
         record = OdooInstanceOverrideRecord(

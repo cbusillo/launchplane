@@ -20,6 +20,7 @@ from control_plane.contracts.odoo_instance_override_record import OdooAddonSetti
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapOverride
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductImageProfile,
@@ -783,6 +784,13 @@ class FilesystemRecordStoreTests(unittest.TestCase):
                         ),
                     ),
                 ),
+                website_bootstrap=OdooWebsiteBootstrapOverride(
+                    tenant="opw",
+                    name="OPW",
+                    homepage_url="/shop",
+                    logo_path="addons/opw_custom/static/description/icon.png",
+                    canonical_url="https://opw-prod.example.com",
+                ),
                 updated_at="2026-04-21T18:30:00Z",
                 source_label="test",
             )
@@ -800,6 +808,11 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             self.assertEqual(
                 loaded_record.addon_settings[0].value.secret_binding_id,
                 "secret-binding-shopify-token",
+            )
+            assert loaded_record.website_bootstrap is not None
+            self.assertEqual(
+                loaded_record.website_bootstrap.logo_path,
+                "addons/opw_custom/static/description/icon.png",
             )
             self.assertEqual(
                 [(record.context, record.instance) for record in listed_records], [("opw", "prod")]

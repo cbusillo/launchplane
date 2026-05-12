@@ -587,6 +587,8 @@ context only, and `context_instance` has both context and instance.
   record, giving the future Odoo driver a tested result-write path.
 - Compose post-deploy updates consume deploy-phase overrides from these records
   and pass them to the Odoo data-workflow runner as one typed payload env var.
+  The same payload can include non-secret `website_bootstrap` intent such as the
+  homepage route, canonical URL, and logo path used by Odoo stable bootstrap.
 - Launchplane passes one typed payload to the Odoo settings apply path; legacy
   `ENV_OVERRIDE_*` values are migration input only, not the deploy-time
   settings contract.

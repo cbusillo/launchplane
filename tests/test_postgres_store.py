@@ -47,6 +47,7 @@ from control_plane.merge_train import (
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapOverride
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -509,9 +510,7 @@ def _agent_write_intent_record(
     )
 
 
-def _merge_train_run_record(
-    *, recorded_at: str = "2026-05-09T02:05:00Z"
-) -> MergeTrainRunRecord:
+def _merge_train_run_record(*, recorded_at: str = "2026-05-09T02:05:00Z") -> MergeTrainRunRecord:
     policy = build_sellyouroutboard_main_merge_train_policy()
     snapshot = MergeTrainDryRunSnapshot(
         repository="cbusillo/sellyouroutboard",
@@ -1730,9 +1729,44 @@ class PostgresRecordStoreTests(unittest.TestCase):
             store.close()
 
         self.assertEqual(loaded_record.config_parameters[0].key, "web.base.url")
+        self.assertIsNone(loaded_record.website_bootstrap)
         self.assertEqual(
             [(record.context, record.instance) for record in listed_records],
             [("cm", "testing"), ("opw", "prod")],
+        )
+
+    def test_odoo_instance_override_record_persists_website_bootstrap(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    website_bootstrap=OdooWebsiteBootstrapOverride(
+                        tenant="cm",
+                        name="Cell Mechanic",
+                        homepage_url="/cell-mechanic",
+                        logo_path="addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
+                        canonical_url="https://cm-testing.shinycomputers.com",
+                    ),
+                    updated_at="2026-05-12T21:00:00Z",
+                )
+            )
+            loaded_record = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            store.close()
+
+        assert loaded_record.website_bootstrap is not None
+        self.assertEqual(loaded_record.website_bootstrap.homepage_url, "/cell-mechanic")
+        self.assertEqual(
+            loaded_record.website_bootstrap.logo_path,
+            "addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
         )
 
     def test_secret_records_round_trip_and_find_latest(self) -> None:

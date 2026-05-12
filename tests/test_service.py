@@ -35,6 +35,7 @@ from control_plane.contracts.merge_train_policy import (
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_instance_override_record import OdooWebsiteBootstrapOverride
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -16175,6 +16176,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     context="cm",
                     instance="testing",
                     apply_on=("manual",),
+                    website_bootstrap=OdooWebsiteBootstrapOverride(
+                        tenant="cm",
+                        name="Cell Mechanic",
+                        homepage_url="/cell-mechanic",
+                        logo_path="addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
+                        canonical_url="https://old.example.com",
+                    ),
                     config_parameters=(
                         OdooConfigParameterOverride(
                             key="web.base.url",
@@ -16244,6 +16252,11 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(
                 stored_record.config_parameters[0].value.value,
                 "https://cm-testing.shinycomputers.com",
+            )
+            assert stored_record.website_bootstrap is not None
+            self.assertEqual(
+                stored_record.website_bootstrap.logo_path,
+                "addons/cm_website/static/src/img/cell_mechanic_logo_hi_res_v2.png",
             )
 
     def test_odoo_config_parameter_override_driver_rejects_unauthorized_workflow(

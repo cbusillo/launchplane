@@ -442,6 +442,9 @@ state/
   `web.base.url`.
 - `addon_settings` stores addon-shaped intent such as Authentik SSO or Shopify
   settings without coupling Launchplane records to environment variable names.
+- `website_bootstrap` stores non-secret website bootstrap intent, including the
+  expected canonical URL, homepage route, primary page XML id, logo asset path,
+  and route metadata needed by the Odoo data-workflow runner.
 - `apply_on` records the phases where the override is intended to apply, and
   `last_apply` records the latest driver result without making the addon layer
   the durable audit surface.
@@ -452,8 +455,8 @@ state/
   `ENV_OVERRIDE_*` keys remain a migration input to retire, not the final
   override model.
 - The compose post-deploy bridge renders one typed Odoo override payload for
-  the data-workflow runner; it does not make legacy `ENV_OVERRIDE_*` names the
-  deploy-time contract.
+  the data-workflow runner, including website bootstrap intent when present; it
+  does not make legacy `ENV_OVERRIDE_*` names the deploy-time contract.
 - Secret-backed values still avoid Dokploy schedule plaintext. The payload
   points at the already-present neutral `ODOO_OVERRIDE_SECRET__*` container
   environment key for each managed secret binding, and the driver asserts those

@@ -22,6 +22,7 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
     OdooOverrideApplyResult,
     OdooOverrideValue,
+    OdooWebsiteBootstrapOverride,
 )
 from control_plane.contracts.secret_record import SecretBinding, SecretRecord, SecretVersion
 from control_plane.contracts.ship_request import ShipRequest
@@ -457,6 +458,13 @@ class OdooInstanceOverrideTests(unittest.TestCase):
                 OdooInstanceOverrideRecord(
                     context="opw",
                     instance="prod",
+                    website_bootstrap=OdooWebsiteBootstrapOverride(
+                        tenant="opw",
+                        name="OPW",
+                        homepage_url="/shop",
+                        logo_path="addons/opw_custom/static/description/icon.png",
+                        canonical_url="https://opw-prod.example.com",
+                    ),
                     addon_settings=(
                         OdooAddonSettingOverride(
                             addon="shopify",
@@ -523,6 +531,12 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(
             migrated_testing_record.addon_settings[0].value.secret_binding_id,
             "secret-runtime-shopify-token-binding-odoo-override-secret-addon-shopify-api-token",
+        )
+        assert migrated_prod_record.website_bootstrap is not None
+        self.assertEqual(migrated_prod_record.website_bootstrap.homepage_url, "/shop")
+        self.assertEqual(
+            migrated_prod_record.website_bootstrap.logo_path,
+            "addons/opw_custom/static/description/icon.png",
         )
         binding_status_by_key = {binding.binding_key: binding.status for binding in bindings}
         self.assertEqual(binding_status_by_key["ENV_OVERRIDE_SHOPIFY__API_TOKEN"], "disabled")

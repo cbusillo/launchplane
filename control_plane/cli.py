@@ -792,12 +792,16 @@ def _relative_href(*, from_file: Path, to_file: Path) -> str:
     return os.path.relpath(to_file, start=from_file.parent)
 
 
-def _launchplane_preview_profile_rows(record_store: FilesystemRecordStore) -> tuple[tuple[str, str], ...]:
+def _launchplane_preview_profile_rows(
+    record_store: FilesystemRecordStore,
+) -> tuple[tuple[str, str], ...]:
     rows: list[tuple[str, str]] = []
     for profile in record_store.list_product_profile_records():
         if not profile.preview.enabled or not profile.preview.context.strip():
             continue
-        rows.append((profile.repository.strip().rsplit("/", maxsplit=1)[-1], profile.preview.context))
+        rows.append(
+            (profile.repository.strip().rsplit("/", maxsplit=1)[-1], profile.preview.context)
+        )
     return tuple(sorted(rows))
 
 
@@ -8806,6 +8810,7 @@ def _summarize_odoo_instance_override_record(
         ),
         "config_parameter_count": len(record.config_parameters),
         "addon_setting_count": len(record.addon_settings),
+        "website_bootstrap": record.website_bootstrap is not None,
     }
 
 
@@ -9115,6 +9120,7 @@ def _build_odoo_instance_override_record_with_config_parameter(
         for override in (target_record.config_parameters if target_record is not None else ())
     }
     addon_settings = target_record.addon_settings if target_record is not None else ()
+    website_bootstrap = target_record.website_bootstrap if target_record is not None else None
     config_parameters[normalized_key] = OdooConfigParameterOverride(
         key=normalized_key, value=override_value
     )
@@ -9123,6 +9129,7 @@ def _build_odoo_instance_override_record_with_config_parameter(
         instance=normalized_instance,
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
+        website_bootstrap=website_bootstrap,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -9154,6 +9161,7 @@ def _build_odoo_instance_override_record_with_addon_setting(
         instance_name=normalized_instance,
     )
     config_parameters = target_record.config_parameters if target_record is not None else ()
+    website_bootstrap = target_record.website_bootstrap if target_record is not None else None
     addon_settings = {
         (override.addon, override.setting): override
         for override in (target_record.addon_settings if target_record is not None else ())
@@ -9168,6 +9176,7 @@ def _build_odoo_instance_override_record_with_addon_setting(
         instance=normalized_instance,
         config_parameters=config_parameters,
         addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
+        website_bootstrap=website_bootstrap,
         updated_at=utc_now_timestamp(),
         source_label=source_label.strip() or "cli",
     )
@@ -9295,6 +9304,7 @@ def _migrate_odoo_override_secret_transport_record(
             apply_on=record.apply_on,
             config_parameters=tuple(config_parameters),
             addon_settings=tuple(addon_settings),
+            website_bootstrap=record.website_bootstrap,
             last_apply=record.last_apply,
             updated_at=utc_now_timestamp(),
             source_label=source_label.strip() or "odoo-secret-transport-migration",
@@ -9454,9 +9464,7 @@ def work_graph_merge_train_policy(
     default=None,
     help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
 )
-def work_graph_merge_train_dry_run(
-    snapshot_file: Path, policy_file: Path | None
-) -> None:
+def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None) -> None:
     try:
         snapshot_payload = json.loads(snapshot_file.read_text(encoding="utf-8"))
         snapshot = MergeTrainDryRunSnapshot.model_validate(snapshot_payload)
@@ -9524,9 +9532,7 @@ def work_graph_merge_train_run_once(
         token = os.environ.get(token_env, "").strip()
         if not token:
             raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
-        transport = UrllibMergeTrainGitHubTransport(
-            token=token, api_base_url=github_api_base_url
-        )
+        transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
         snapshot_reader = GitHubMergeTrainSnapshotReader(transport=transport)
         snapshot = snapshot_reader.read_merge_train_snapshot(
             repository=repository, base_branch=base_branch
@@ -9591,12 +9597,10 @@ def work_graph_runner_inventory(
         token = os.environ.get(token_env, "").strip()
         if not token:
             raise click.ClickException(f"Missing GitHub token in environment variable {token_env}.")
-        transport = UrllibMergeTrainGitHubTransport(
-            token=token, api_base_url=github_api_base_url
+        transport = UrllibMergeTrainGitHubTransport(token=token, api_base_url=github_api_base_url)
+        inventory = GitHubRunnerLaneInventoryReader(transport=transport).read_runner_lane_inventory(
+            repository=repository
         )
-        inventory = GitHubRunnerLaneInventoryReader(
-            transport=transport
-        ).read_runner_lane_inventory(repository=repository)
     except MergeTrainGitHubError as error:
         detail = str(error)
         if error.status_code is not None:
@@ -13317,9 +13321,7 @@ def authz_policies_grant_workflow(
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
 @click.option("--login", "logins", multiple=True, help="Allowed GitHub login.")
-@click.option(
-    "--organization", "organizations", multiple=True, help="Allowed GitHub organization."
-)
+@click.option("--organization", "organizations", multiple=True, help="Allowed GitHub organization.")
 @click.option("--team", "teams", multiple=True, help="Allowed GitHub team.")
 @click.option(
     "--role",
@@ -13415,7 +13417,9 @@ def authz_policies_grant_human(
     default="",
     help="Launchplane browser session cookie. Use instead of --bearer-token-env.",
 )
-@click.option("--subject", "subjects", multiple=True, required=True, help="Allowed terminal-agent subject.")
+@click.option(
+    "--subject", "subjects", multiple=True, required=True, help="Allowed terminal-agent subject."
+)
 @click.option(
     "--token-label",
     "token_labels",

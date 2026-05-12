@@ -75,6 +75,86 @@ class OdooAddonSettingOverride(BaseModel):
         return normalized
 
 
+class OdooWebsiteBootstrapRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = ""
+    url: str
+    module: str = ""
+    published: bool = True
+    homepage: bool = False
+
+    @field_validator("name", "module", mode="after")
+    @classmethod
+    def _normalize_optional_string(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("url", mode="after")
+    @classmethod
+    def _validate_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if not normalized.startswith("/"):
+            raise ValueError("Odoo website bootstrap route url must start with /")
+        return normalized
+
+
+class OdooWebsiteBootstrapOverride(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant: str = ""
+    name: str = ""
+    default_lang: str = ""
+    homepage_url: str = ""
+    primary_page_xmlid: str = ""
+    logo_path: str = ""
+    logo_alt: str = ""
+    canonical_url: str = ""
+    pages_source: dict[str, ScalarValue] = Field(default_factory=dict)
+    routes_source: dict[str, ScalarValue] = Field(default_factory=dict)
+    routes: tuple[OdooWebsiteBootstrapRoute, ...] = ()
+
+    @field_validator(
+        "tenant",
+        "name",
+        "default_lang",
+        "primary_page_xmlid",
+        "logo_path",
+        "logo_alt",
+        "canonical_url",
+        mode="after",
+    )
+    @classmethod
+    def _normalize_optional_string(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("homepage_url", mode="after")
+    @classmethod
+    def _validate_homepage_url(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized and not normalized.startswith("/"):
+            raise ValueError("Odoo website bootstrap homepage_url must start with /")
+        return normalized
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> "OdooWebsiteBootstrapOverride":
+        if not any(
+            (
+                self.name,
+                self.default_lang,
+                self.homepage_url,
+                self.primary_page_xmlid,
+                self.logo_path,
+                self.logo_alt,
+                self.canonical_url,
+                self.pages_source,
+                self.routes_source,
+                self.routes,
+            )
+        ):
+            raise ValueError("Odoo website bootstrap override requires at least one field")
+        return self
+
+
 class OdooOverrideApplyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -107,6 +187,7 @@ class OdooInstanceOverrideRecord(BaseModel):
     apply_on: tuple[OdooOverrideApplyPhase, ...] = ("deploy", "promotion")
     config_parameters: tuple[OdooConfigParameterOverride, ...] = ()
     addon_settings: tuple[OdooAddonSettingOverride, ...] = ()
+    website_bootstrap: OdooWebsiteBootstrapOverride | None = None
     last_apply: OdooOverrideApplyResult = Field(default_factory=OdooOverrideApplyResult)
     updated_at: str
     source_label: str = ""
@@ -123,7 +204,11 @@ class OdooInstanceOverrideRecord(BaseModel):
             raise ValueError("Odoo instance override record requires instance")
         if not self.updated_at:
             raise ValueError("Odoo instance override record requires updated_at")
-        if not self.config_parameters and not self.addon_settings:
+        if (
+            not self.config_parameters
+            and not self.addon_settings
+            and self.website_bootstrap is None
+        ):
             raise ValueError("Odoo instance override record requires at least one override")
         if not self.apply_on:
             raise ValueError("Odoo instance override record requires at least one apply phase")
