@@ -32,6 +32,9 @@ from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.merge_train_policy import (
     build_sellyouroutboard_main_merge_train_policy,
 )
+from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
+from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
+from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -16151,6 +16154,93 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 context_name="cm", instance_name="testing"
             )
             self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
+            self.assertEqual(
+                stored_record.config_parameters[0].value.value,
+                "https://cm-testing.shinycomputers.com",
+            )
+            self.assertEqual(stored_record.apply_on, ("deploy", "promotion"))
+
+    def test_odoo_config_parameter_override_driver_keeps_existing_phases_and_adds_deploy(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    apply_on=("manual",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal",
+                                value="https://old.example.com",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-10T20:00:00Z",
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "schema_version": 1,
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-config-parameter-override.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_config_parameter_override.write"],
+                        }
+                    ],
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-config-parameter-override.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, _payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/drivers/odoo/config-parameter-override",
+                payload={
+                    "product": "odoo-tenant-cm",
+                    "override": {
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "key": "web.base.url",
+                        "value": "https://cm-testing.shinycomputers.com",
+                    },
+                },
+                headers={"Idempotency-Key": "odoo-cm-testing-web-base-url"},
+            )
+
+            self.assertEqual(status_code, 202)
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="cm", instance_name="testing"
+            )
+            self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
             self.assertEqual(
                 stored_record.config_parameters[0].value.value,
                 "https://cm-testing.shinycomputers.com",

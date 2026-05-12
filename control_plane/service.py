@@ -2225,12 +2225,19 @@ def _write_odoo_config_parameter_override(
         key=request.key,
         value=OdooOverrideValue(source="literal", value=request.value),
     )
+    apply_on = tuple(
+        dict.fromkeys(
+            (
+                *(existing_record.apply_on if existing_record is not None else ()),
+                "deploy",
+                "promotion",
+            )
+        )
+    )
     record = OdooInstanceOverrideRecord(
         context=request.context,
         instance=request.instance,
-        apply_on=existing_record.apply_on
-        if existing_record is not None
-        else ("deploy", "promotion"),
+        apply_on=apply_on,
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
         updated_at=_utc_now_timestamp(),

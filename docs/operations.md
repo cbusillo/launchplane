@@ -573,6 +573,9 @@ context only, and `context_instance` has both context and instance.
   workflow instead of local CLI writes. It calls
   `POST /v1/drivers/odoo/config-parameter-override` with GitHub Actions OIDC and
   is currently limited to the non-secret `web.base.url` key for `cm/testing`.
+  Service-written `web.base.url` records are always marked for `deploy` and
+  `promotion` application so Odoo post-deploy and stable-bootstrap drivers can
+  apply the canonical URL before verification.
 - `odoo-overrides put-addon-setting` writes addon-shaped Odoo override intent
   such as Authentik or Shopify settings for a context and instance.
 - Secret-shaped override names, including `*_TOKEN`, `*_PASSWORD`, and
