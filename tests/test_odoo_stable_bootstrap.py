@@ -9,6 +9,11 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
+from control_plane.contracts.odoo_instance_override_record import (
+    OdooConfigParameterOverride,
+    OdooInstanceOverrideRecord,
+    OdooOverrideValue,
+)
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductOdooStableBootstrapPolicy,
@@ -146,6 +151,11 @@ class _Store:
     def write_environment_inventory(self, record: EnvironmentInventory) -> None:
         self.environment_inventories.append(record)
 
+    def read_odoo_instance_override_record(
+        self, *, context_name: str, instance_name: str
+    ) -> OdooInstanceOverrideRecord:
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
+
 
 class OdooStableBootstrapTests(unittest.TestCase):
     def test_execute_runs_bootstrap_post_deploy_and_verification(self) -> None:
@@ -237,6 +247,79 @@ class OdooStableBootstrapTests(unittest.TestCase):
             store.environment_inventories[0].deployment_record_id,
             "deployment-cm-testing-bootstrap",
         )
+
+    def test_execute_passes_override_payload_to_bootstrap_runner(self) -> None:
+        class OverrideStore(_Store):
+            def read_odoo_instance_override_record(
+                self, *, context_name: str, instance_name: str
+            ) -> OdooInstanceOverrideRecord:
+                if (context_name, instance_name) != ("cm", "testing"):
+                    raise FileNotFoundError(f"{context_name}/{instance_name}")
+                return OdooInstanceOverrideRecord(
+                    context="cm",
+                    instance="testing",
+                    apply_on=("deploy",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal",
+                                value="https://cm-testing.shinycomputers.com",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-10T00:00:00Z",
+                )
+
+        store = OverrideStore()
+        captured_bootstrap_runs: list[dict[str, object]] = []
+        with (
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.read_dokploy_config",
+                return_value=("https://dokploy.example.com", "token-123"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.control_plane_dokploy.run_compose_odoo_stable_bootstrap",
+                side_effect=lambda **kwargs: captured_bootstrap_runs.append(kwargs),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.execute_odoo_post_deploy",
+                return_value=OdooPostDeployResult(
+                    context="cm",
+                    instance="testing",
+                    phase="deploy",
+                    post_deploy_status="pass",
+                ),
+            ),
+            patch("control_plane.workflows.odoo_stable_bootstrap._verify_health_url"),
+            patch("control_plane.workflows.odoo_stable_bootstrap._verify_canonical_url"),
+            patch("control_plane.workflows.odoo_stable_bootstrap._verify_logo_route"),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.utc_now_timestamp",
+                side_effect=("2026-05-10T02:00:00Z", "2026-05-10T02:01:00Z"),
+            ),
+            patch(
+                "control_plane.workflows.odoo_stable_bootstrap.generate_deployment_record_id",
+                return_value="deployment-cm-testing-bootstrap",
+            ),
+        ):
+            result = execute_odoo_stable_bootstrap(
+                control_plane_root=Path("/tmp/launchplane"),
+                record_store=store,
+                request=OdooStableBootstrapRequest(
+                    product="odoo-tenant-cm",
+                    context="cm",
+                    instance="testing",
+                    confirmation=_BOOTSTRAP_CONFIRMATION,
+                ),
+                dokploy_request=cast(DokployRequest, _dokploy_request),
+            )
+
+        self.assertEqual(result.bootstrap_status, "pass")
+        workflow_environment = cast(
+            "dict[str, str]", captured_bootstrap_runs[0]["workflow_environment_overrides"]
+        )
+        self.assertIn("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", workflow_environment)
         self.assertEqual(
             store.environment_inventories[0].bootstrap_record_id,
             "deployment-cm-testing-bootstrap",
