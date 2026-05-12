@@ -4420,9 +4420,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(create_status, 202)
         self.assertEqual(intent_status, 202)
         self.assertEqual(rerun_status, 202)
-        self.assertEqual(
-            rerun_payload["records"]["agent_write_intent_record_id"], intent_record_id
-        )
+        self.assertEqual(rerun_payload["records"]["agent_write_intent_record_id"], intent_record_id)
         self.assertEqual(rerun_payload["records"]["state"], "queued")
         self.assertEqual(rerun_payload["result"]["request"]["trigger_actor"], "cbusillo")
         self.assertEqual(rerun_payload["result"]["request"]["claimed_by_host"], "")
@@ -4538,14 +4536,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
         self.assertEqual(missing_status, 409)
-        self.assertEqual(
-            missing_payload["error"]["code"], "agent_write_intent_required"
-        )
+        self.assertEqual(missing_payload["error"]["code"], "agent_write_intent_required")
         self.assertEqual(wrong_source_status, 202)
         self.assertEqual(mismatched_status, 409)
-        self.assertEqual(
-            mismatched_payload["error"]["code"], "agent_write_intent_source_mismatch"
-        )
+        self.assertEqual(mismatched_payload["error"]["code"], "agent_write_intent_source_mismatch")
 
     def test_every_code_rerun_rejects_stale_and_wrong_context_write_intents(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
@@ -7636,6 +7630,76 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(len(secret_records), 1)
         self.assertEqual(secret_records[0].name, "SMTP_PASSWORD")
         self.assertEqual(secret_binding.binding_key, "SMTP_PASSWORD")
+
+    def test_product_config_api_apply_reports_live_target_runtime_next_action(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "every/verireel",
+                            "workflow_refs": [
+                                "every/verireel/.github/workflows/preview-control-plane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["pull_request"],
+                            "products": ["sellyouroutboard"],
+                            "contexts": ["sellyouroutboard-prod"],
+                            "actions": ["product_config.apply"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            _write_runtime_key_safety_policy(database_url=database_url)
+            _seed_tracked_target_records(
+                database_url=database_url,
+                context="sellyouroutboard-prod",
+                instance="prod",
+                target_id="application-syo-prod",
+                target_type="application",
+                target_name="syo-prod-app",
+            )
+            request_payload = {**_product_config_payload(), "mode": "apply"}
+
+            with patch.dict(
+                os.environ,
+                {control_plane_secrets.LAUNCHPLANE_SECRET_MASTER_KEY_ENV_VAR: "test-master-key"},
+                clear=True,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/product-config/apply",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "product-config-apply-live-sync"},
+                )
+
+        self.assertEqual(status_code, 202, msg=json.dumps(payload, indent=2, sort_keys=True))
+        result = payload["result"]
+        self.assertEqual(result["status"], "records_applied_live_sync_required")
+        next_actions = result["next_actions"]
+        self.assertEqual(len(next_actions), 1)
+        next_action = next_actions[0]
+        self.assertEqual(next_action["kind"], "live_target_runtime_apply")
+        self.assertTrue(next_action["required"])
+        self.assertEqual(next_action["dry_run"]["endpoint"], "/v1/live-target-runtime/apply")
+        self.assertEqual(next_action["dry_run"]["mode"], "dry-run")
+        self.assertEqual(next_action["apply"]["endpoint"], "/v1/live-target-runtime/apply")
+        self.assertEqual(next_action["apply"]["mode"], "apply")
+        self.assertEqual(next_action["target"]["target_type"], "application")
+        self.assertEqual(next_action["target"]["target_name"], "syo-prod-app")
+        self.assertIn("Redeploying the same app image", next_action["instruction"])
+        self.assertNotIn("smtp-secret-value", json.dumps(payload, sort_keys=True))
 
     def test_product_config_api_human_admin_dry_run_returns_redacted_meta_plan(
         self,

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import cast
+from typing import Protocol, cast
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from control_plane import product_config as control_plane_product_config
 from control_plane import product_config_service as control_plane_product_config_service
+from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.product_config import ProductConfigStore
 from control_plane.service_auth import (
     LaunchplaneAuthzPolicy,
@@ -18,6 +19,10 @@ from control_plane.service_auth import (
 
 JsonResponse = Callable[..., list[bytes]]
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
+
+
+class ProductConfigRouteStore(ProductConfigStore, Protocol):
+    def list_dokploy_target_records(self) -> tuple[DokployTargetRecord, ...]: ...
 
 
 class ProductConfigApplyEnvelope(BaseModel):
@@ -73,6 +78,62 @@ class ProductConfigRouteResult:
     driver_result: dict[str, object] | None
 
 
+def product_config_live_target_next_actions(
+    *,
+    request: ProductConfigApplyEnvelope,
+    driver_result: dict[str, object] | None,
+    tracked_targets: tuple[DokployTargetRecord, ...],
+) -> list[dict[str, object]]:
+    if request.mode != "apply" or not driver_result:
+        return []
+    runtime_environment = driver_result.get("runtime_environment")
+    if not isinstance(runtime_environment, dict):
+        return []
+    changed_keys = runtime_environment.get("changed_keys")
+    if not isinstance(changed_keys, list) or not changed_keys:
+        return []
+    context_name = str(runtime_environment.get("context") or "")
+    instance_name = str(runtime_environment.get("instance") or "")
+    target = next(
+        (
+            record
+            for record in tracked_targets
+            if record.context == context_name and record.instance == instance_name
+        ),
+        None,
+    )
+    if target is None:
+        return []
+    return [
+        {
+            "kind": "live_target_runtime_apply",
+            "required": True,
+            "status": "live_sync_required",
+            "target": {
+                "context": context_name,
+                "instance": instance_name,
+                "target_type": target.target_type,
+                "target_name": target.target_name,
+            },
+            "changed_keys": sorted(str(key) for key in changed_keys),
+            "dry_run": {
+                "method": "POST",
+                "endpoint": "/v1/live-target-runtime/apply",
+                "mode": "dry-run",
+            },
+            "apply": {
+                "method": "POST",
+                "endpoint": "/v1/live-target-runtime/apply",
+                "mode": "apply",
+            },
+            "instruction": (
+                "Run live-target-runtime dry-run, then apply with a concrete reason. "
+                "Redeploying the same app image does not sync the live Dokploy target environment."
+            ),
+        }
+    ]
+
+
 def validate_product_config_apply_request(
     *,
     authz_policy: LaunchplaneAuthzPolicy,
@@ -123,7 +184,7 @@ def validate_product_config_apply_request(
 
 def apply_product_config_route(
     *,
-    record_store: ProductConfigStore,
+    record_store: ProductConfigRouteStore,
     request: ProductConfigApplyEnvelope,
     actor: str,
     trace_id: str,
@@ -152,6 +213,17 @@ def apply_product_config_route(
                 },
             },
         )
+    next_actions = product_config_live_target_next_actions(
+        request=request,
+        driver_result=driver_result,
+        tracked_targets=record_store.list_dokploy_target_records(),
+    )
+    if next_actions and driver_result is not None:
+        driver_result = {
+            **driver_result,
+            "status": "records_applied_live_sync_required",
+            "next_actions": next_actions,
+        }
     return ProductConfigRouteResult(driver_result=driver_result)
 
 
