@@ -8,8 +8,16 @@
     "serviceBoundary": "docs/service-boundary.md",
     "dokployServiceDeployments": "docs/dokploy-service-deployments.md",
     "driverDescriptors": "docs/driver-descriptors.md",
+    "driverDevelopment": "docs/driver-development.md",
     "previewWorkflowContract": "docs/preview-workflow-contract.md",
+    "productRepoContract": "docs/product-repo-contract.md",
+    "newProductRepo": "docs/new-product-repo.md",
     "operatorExperience": "docs/operator-experience.md",
+    "uiStandards": "docs/ui-standards.md",
+    "workGraphReadModel": "docs/work-graph-read-model.md",
+    "mergeTrainPolicy": "docs/merge-train-policy.md",
+    "agentContextBoundary": "docs/agent-context-boundary.md",
+    "compatibilityRetirement": "docs/compatibility-retirement.md",
     "operations": "docs/operations.md",
     "records": "docs/records.md",
     "secrets": "docs/secrets.md",
@@ -42,7 +50,7 @@
     },
     "audit": {
       "pythonDependencies": "uv run --with pip-audit pip-audit",
-      "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" aquasec/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test"
+      "container": "docker run --rm -v /var/run/docker.sock:/var/run/docker.sock -v \"${RUNNER_TEMP}/trivy-cache:/root/.cache\" ghcr.io/aquasecurity/trivy:0.70.0 image --scanners vulnerability --ignore-unfixed --severity HIGH,CRITICAL --exit-code 1 launchplane-ci:test"
     },
     "inspection": {
       "tool": "jetbrains",
@@ -68,10 +76,17 @@
     "Security",
     "CodeQL",
     "Deploy Launchplane",
+    "Live Target Runtime",
     "Merge Train Runner",
+    "Odoo Config Parameter Override",
+    "Odoo Stable Bootstrap",
+    "Odoo Target Replacement Plan",
+    "Odoo Target Replacement Apply",
     "Preview Lifecycle",
+    "Product Context Cutover Audit",
     "Product Context Cutover",
     "Product Legacy Context Cleanup",
+    "Work Graph Snapshot Validate",
     "Dependency Graph"
   ],
   "qaLabels": [],
@@ -83,8 +98,11 @@
     "cbusillo/sellyouroutboard",
     "cbusillo/verireel",
     "cbusillo/odoo-devkit",
+    "cbusillo/odoo-docker",
+    "cbusillo/odoo-shared-addons",
     "cbusillo/odoo-tenant-cm",
-    "cbusillo/odoo-tenant-opw"
+    "cbusillo/odoo-tenant-opw",
+    "cbusillo/disable_odoo_online"
   ],
   "githubSignals": {
     "postMerge": {
