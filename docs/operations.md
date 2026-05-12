@@ -453,7 +453,12 @@ Current derived-state behavior:
   that differ from the authorized top-level context/instance. It fails closed
   when secret writes are requested without the Launchplane master encryption key
   in the service runtime or when no active runtime key-safety policy allows the
-  requested binding.
+  requested binding. When apply changes runtime-environment keys for a tracked
+  Dokploy target, the response includes a required `live_target_runtime_apply`
+  `next_actions` item. Treat product-config apply as a record mutation only
+  until that next action has been dry-run and applied through
+  `/v1/live-target-runtime/apply`; redeploying the same app image does not sync
+  the live Dokploy target environment.
 - The operator UI uses the same service route. It requires a successful dry-run
   result before enabling apply, clears rendered secret input values after each
   submit, and shows only key/action/count metadata from Launchplane responses.
