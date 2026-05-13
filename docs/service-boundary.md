@@ -279,13 +279,21 @@ bodies, and must preserve the lower-level redaction/provenance rules.
 
 `POST /v1/work-graph/merge-train/run-once` is the authenticated service ingress
 for one merge-train read or mutation pass. It resolves repository/base policy
-from `control_plane/config/merge-train-policies.toml`, or from
-`LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` / `LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE`
-when the deployment projects an override, before authorization, token lookup, or
-GitHub reads. It authorizes against the policy's `service_authz`, reads a fresh
-GitHub snapshot, and writes a `launchplane_merge_train_runs` record for accepted
-dry-run and mutate calls. Mutation mode still applies at most one worker
-transition from that snapshot.
+from the active DB-backed `launchplane_merge_train_policies` record before
+authorization, token lookup, or GitHub reads. If no active record exists, the
+service fails closed with `merge_train_policy_not_configured`; policy creation
+and updates are explicit record writes, not checked-in config files or
+service-host env overrides. It authorizes against the policy's `service_authz`,
+reads a fresh GitHub snapshot, and writes a `launchplane_merge_train_runs` record
+for accepted dry-run and mutate calls. Mutation mode still applies at most one
+worker transition from that snapshot.
+
+`POST /v1/merge-train/policies/import` is the service-owned write path for merge
+train policy records. It requires database storage and
+`launchplane_service_deploy.execute` on product/context `launchplane`, accepts
+`dry_run` and `apply`, and writes the supplied typed record only in apply mode.
+Shared and production policy changes should use this route rather than direct DB
+CLI writes from an arbitrary checkout.
 
 ## Host Assumption
 

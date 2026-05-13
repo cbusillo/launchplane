@@ -34,6 +34,9 @@ Treat this file as the launch checklist for every Codex session in
   arbitrary checkout as a fallback; add or use a service endpoint first.
 - Treat service-host env as bootstrap-only unless a repo doc explicitly calls
   out a narrower temporary compatibility fallback.
+- Do not hard-code real tenant, product, repository, branch, domain, or operator
+  values into production defaults or fallback behavior; see the coding
+  standards for the docs/tests/import-material boundary.
 - Update docs in the same change when behavior or ownership changes.
 - Fix root causes, not symptoms; avoid workaround-only flows unless the
   operator explicitly asks for a time-boxed mitigation.

@@ -64,8 +64,6 @@ jobs:
       LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT: ${{ vars.LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT }}
       LAUNCHPLANE_WORK_GRAPH_GH_BINARY: ${{ vars.LAUNCHPLANE_WORK_GRAPH_GH_BINARY }}
-      LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML: ${{ vars.LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML }}
-      LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE: ${{ vars.LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE }}
       LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS: ${{ vars.LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS }}
       DISCORD_BLUE_DOKPLOY_TARGET_ID: ${{ vars.DISCORD_BLUE_DOKPLOY_TARGET_ID }}
       LAUNCHPLANE_GITHUB_CLIENT_SECRET: ${{ secrets.LAUNCHPLANE_GITHUB_CLIENT_SECRET }}
@@ -252,8 +250,6 @@ jobs:
                 --arg work_graph_project_signal_limit "${LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT:-}" \
                 --arg work_graph_gh_binary "${LAUNCHPLANE_WORK_GRAPH_GH_BINARY:-}" \
                 --arg work_graph_gh_token "${LAUNCHPLANE_WORK_GRAPH_GH_TOKEN:-}" \
-                --arg merge_train_policy_toml "${LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML:-}" \
-                --arg merge_train_policy_file "${LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE:-}" \
                 --arg enable_every_code_runtime_secrets "${LAUNCHPLANE_ENABLE_EVERY_CODE_RUNTIME_SECRETS:-}" \
                 --arg every_code_worker_token "${LAUNCHPLANE_EVERY_CODE_WORKER_TOKEN:-}" \
                 --arg every_code_webhook_secret "${LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET:-}" \
@@ -309,15 +305,6 @@ jobs:
                         LAUNCHPLANE_WORK_GRAPH_GH_BINARY: $work_graph_gh_binary,
                         GH_TOKEN: $work_graph_gh_token
                       }
-                    else
-                      {}
-                    end
-                  )
-                  + (
-                    if $merge_train_policy_toml != "" then
-                      {LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML: $merge_train_policy_toml}
-                    elif $merge_train_policy_file != "" then
-                      {LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE: $merge_train_policy_file}
                     else
                       {}
                     end

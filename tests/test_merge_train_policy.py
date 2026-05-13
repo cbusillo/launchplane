@@ -1,49 +1,27 @@
 import json
-import os
-import textwrap
-import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+import textwrap
+import unittest
 
 from click.testing import CliRunner
 from pydantic import ValidationError
 
 from control_plane.cli import main
 from control_plane.contracts.merge_train_policy import (
-    build_sellyouroutboard_main_merge_train_policy,
-    load_merge_train_policy_from_default_config,
+    MergeTrainPolicyRecord,
+    build_merge_train_policy_record_id,
     parse_merge_train_policy_toml,
 )
-from control_plane.merge_train_policy_source import load_launchplane_merge_train_policy
+from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissingError
+from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
 
 class MergeTrainPolicyTests(unittest.TestCase):
-    def test_sellyouroutboard_main_policy_is_initial_smoke_target(self) -> None:
-        policy = build_sellyouroutboard_main_merge_train_policy()
-
-        repository_policy = policy.find_repository_policy(
-            repository="cbusillo/sellyouroutboard", base_branch="main"
-        )
-
-        self.assertEqual(repository_policy.enqueue_label, "ready-to-merge")
-        self.assertEqual(repository_policy.blocked_label, "merge-blocked")
-        self.assertEqual(repository_policy.merge_method, "merge")
-        self.assertEqual(repository_policy.failure_policy, "pause_train")
-        self.assertTrue(repository_policy.enqueue.label_required)
-        self.assertEqual(
-            repository_policy.enqueue.allowed_actor_roles, ("repo_owner", "repo_admin")
-        )
-        self.assertEqual(repository_policy.merge_identity.kind, "github_actions_oidc")
-        self.assertEqual(repository_policy.merge_identity.name, "launchplane-merge-train")
-        self.assertEqual(repository_policy.service_authz.action, "merge_train.run_once")
-        self.assertEqual(repository_policy.service_authz.product, "launchplane")
-        self.assertEqual(repository_policy.service_authz.context, "launchplane")
-        self.assertEqual(repository_policy.github_token.env_var, "GH_TOKEN")
-        self.assertEqual(len(policy.policy_sha256), 64)
-
-    def test_default_config_includes_smoke_and_codex_skills_policies(self) -> None:
-        policy = load_merge_train_policy_from_default_config()
+    def test_policy_can_include_multiple_repository_branch_entries(self) -> None:
+        policy = build_test_merge_train_policy_with_codex_skills()
 
         self.assertEqual(len(policy.policies), 2)
         self.assertEqual(
@@ -61,30 +39,46 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(codex_skills_policy.service_authz.product, "launchplane")
         self.assertEqual(codex_skills_policy.service_authz.context, "launchplane")
 
-    def test_launchplane_policy_source_prefers_env_toml(self) -> None:
-        with patch.dict(
-            os.environ,
-            {"LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML": _policy_toml("example/app")},
-            clear=True,
-        ):
-            policy = load_launchplane_merge_train_policy()
+    def test_policy_record_validates_digest(self) -> None:
+        policy = build_test_merge_train_policy_with_codex_skills()
+        record = MergeTrainPolicyRecord(
+            record_id=build_merge_train_policy_record_id(
+                updated_at="2026-05-13T21:00:00Z",
+                policy_sha256=policy.policy_sha256,
+            ),
+            source="test",
+            updated_at="2026-05-13T21:00:00Z",
+            policy=policy,
+        )
 
-        self.assertEqual(len(policy.policies), 1)
-        self.assertEqual(policy.policies[0].policy_key, "example/app:main")
+        self.assertEqual(record.policy_sha256, policy.policy_sha256)
+        self.assertEqual(
+            record.record_id,
+            f"merge-train-policy-20260513T210000Z-{policy.policy_sha256[:12]}",
+        )
 
-    def test_launchplane_policy_source_uses_env_file(self) -> None:
-        with TemporaryDirectory() as temporary_directory_name:
-            policy_file = Path(temporary_directory_name) / "merge-train-policies.toml"
-            policy_file.write_text(_policy_toml("example/file-app"), encoding="utf-8")
-            with patch.dict(
-                os.environ,
-                {"LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE": str(policy_file)},
-                clear=True,
-            ):
-                policy = load_launchplane_merge_train_policy()
+    def test_resolve_merge_train_policy_record_fails_closed_when_missing(self) -> None:
+        store = _PolicyStore()
 
-        self.assertEqual(len(policy.policies), 1)
-        self.assertEqual(policy.policies[0].policy_key, "example/file-app:main")
+        with self.assertRaisesRegex(MergeTrainPolicyStoreMissingError, "missing"):
+            resolve_merge_train_policy_record(store)
+
+        self.assertEqual(store.written_records, [])
+
+    def test_resolve_merge_train_policy_record_prefers_existing_active_record(self) -> None:
+        policy = build_test_merge_train_policy(repository="example/app")
+        existing_record = MergeTrainPolicyRecord(
+            record_id="merge-train-policy-existing",
+            source="test",
+            updated_at="2026-05-13T21:00:00Z",
+            policy=policy,
+        )
+        store = _PolicyStore(existing_record)
+
+        record = resolve_merge_train_policy_record(store)
+
+        self.assertEqual(record.record_id, "merge-train-policy-existing")
+        self.assertEqual(store.written_records, [])
 
     def test_parse_rejects_duplicate_repository_branch_policy(self) -> None:
         policy_toml = textwrap.dedent(
@@ -149,48 +143,74 @@ class MergeTrainPolicyTests(unittest.TestCase):
             parse_merge_train_policy_toml(policy_toml)
 
     def test_work_graph_merge_train_policy_cli_renders_dry_run_contract(self) -> None:
-        result = CliRunner().invoke(
-            main,
-            [
-                "work-graph",
-                "merge-train-policy",
-                "--repository",
-                "cbusillo/sellyouroutboard",
-                "--base-branch",
-                "main",
-            ],
-        )
+        with TemporaryDirectory() as temporary_directory_name:
+            result = CliRunner().invoke(
+                main,
+                [
+                    "work-graph",
+                    "merge-train-policy",
+                    "--policy-file",
+                    str(_write_policy_file(temporary_directory_name)),
+                    "--repository",
+                    "cbusillo/sellyouroutboard",
+                    "--base-branch",
+                    "main",
+                ],
+            )
 
         self.assertEqual(result.exit_code, 0, result.output)
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "ok")
-        self.assertEqual(payload["repository_count"], 2)
+        self.assertEqual(payload["repository_count"], 1)
         self.assertEqual(payload["selected_policy"]["repository"], "cbusillo/sellyouroutboard")
         self.assertEqual(payload["selected_policy"]["base_branch"], "main")
 
 
-def _policy_toml(repository: str) -> str:
-    return textwrap.dedent(
-        f"""
-        schema_version = 1
+def _write_policy_file(directory: str) -> Path:
+    policy_file = Path(directory) / "merge-train-policy.toml"
+    policy_file.write_text(
+        "\n\n".join(
+            (
+                "schema_version = 1",
+                """[[policies]]
+repository = "cbusillo/sellyouroutboard"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+merge_method = "merge"
+failure_policy = "pause_train"
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane"
+[policies.github_token]
+env_var = "GH_TOKEN"
+""",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return policy_file
 
-        [[policies]]
-        repository = "{repository}"
-        base_branch = "main"
-        enqueue_label = "ready-to-merge"
-        blocked_label = "merge-blocked"
-        merge_method = "merge"
-        failure_policy = "pause_train"
-        [policies.enqueue]
-        label_required = true
-        allowed_actor_roles = ["repo_owner"]
-        [policies.merge_identity]
-        kind = "github_app"
-        name = "launchplane"
-        [policies.github_token]
-        env_var = "GH_TOKEN"
-        """
-    ).strip()
+
+class _PolicyStore:
+    def __init__(self, *records: MergeTrainPolicyRecord) -> None:
+        self.records = list(records)
+        self.written_records: list[MergeTrainPolicyRecord] = []
+
+    def list_merge_train_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        records = [record for record in self.records if not status or record.status == status]
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> None:
+        self.records.append(record)
+        self.written_records.append(record)
 
 
 if __name__ == "__main__":

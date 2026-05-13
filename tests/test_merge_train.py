@@ -7,10 +7,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
-from control_plane.contracts.merge_train_policy import (
-    MergeTrainPolicy,
-    build_sellyouroutboard_main_merge_train_policy,
-)
+from control_plane.contracts.merge_train_policy import MergeTrainPolicy
 from control_plane.merge_train import (
     MergeTrainDryRunSnapshot,
     MergeTrainPullRequestSnapshot,
@@ -22,6 +19,8 @@ from control_plane.merge_train import (
     reread_merge_train_after_branch_update,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
 
 class _FakeLabelClient:
@@ -80,9 +79,36 @@ class _FakeSnapshotReader:
 
 
 class MergeTrainDryRunTests(unittest.TestCase):
+    def test_cli_merge_train_dry_run_requires_policy_file(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            snapshot_file = Path(temp_dir) / "snapshot.json"
+            snapshot_file.write_text(
+                json.dumps(
+                    {
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "pull_requests": [],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            result = CliRunner().invoke(
+                main,
+                [
+                    "work-graph",
+                    "merge-train-dry-run",
+                    "--snapshot-file",
+                    str(snapshot_file),
+                ],
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("Missing option '--policy-file'", result.output)
+
     def test_dry_run_orders_oldest_eligible_ready_pull_requests_first(self) -> None:
         result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -102,7 +128,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
     def test_dry_run_fails_closed_when_policy_is_missing(self) -> None:
         with self.assertRaisesRegex(ValueError, "policy not found"):
             build_merge_train_dry_run_result(
-                policy=build_sellyouroutboard_main_merge_train_policy(),
+                policy=build_test_merge_train_policy(),
                 snapshot=MergeTrainDryRunSnapshot(
                     repository="cbusillo/other",
                     base_branch="main",
@@ -112,7 +138,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
 
     def test_dry_run_excludes_missing_label_and_disallowed_actor_role(self) -> None:
         result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -131,7 +157,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
 
     def test_dry_run_reports_block_and_update_actions(self) -> None:
         blocked_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -139,7 +165,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
             ),
         )
         update_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -154,6 +180,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
     def test_cli_renders_merge_train_dry_run_snapshot(self) -> None:
         with TemporaryDirectory() as temp_dir:
             snapshot_file = Path(temp_dir) / "snapshot.json"
+            policy_file = _write_policy_file(Path(temp_dir))
             snapshot_file.write_text(
                 json.dumps(
                     {
@@ -176,6 +203,8 @@ class MergeTrainDryRunTests(unittest.TestCase):
                     "merge-train-dry-run",
                     "--snapshot-file",
                     str(snapshot_file),
+                    "--policy-file",
+                    str(policy_file),
                 ],
             )
 
@@ -195,6 +224,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         )
 
         with (
+            TemporaryDirectory() as temp_dir,
             patch(
                 "control_plane.cli.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
@@ -205,11 +235,14 @@ class MergeTrainDryRunTests(unittest.TestCase):
             ) as reader_class,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
+            policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 main,
                 [
                     "work-graph",
                     "merge-train-run-once",
+                    "--policy-file",
+                    str(policy_file),
                     "--repository",
                     "cbusillo/sellyouroutboard",
                 ],
@@ -266,6 +299,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 raise AssertionError("block path should not merge")
 
         with (
+            TemporaryDirectory() as temp_dir,
             patch(
                 "control_plane.cli.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
@@ -277,11 +311,14 @@ class MergeTrainDryRunTests(unittest.TestCase):
             patch("control_plane.cli.GitHubMergeTrainClient", _FakeGitHubClient),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
+            policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 main,
                 [
                     "work-graph",
                     "merge-train-run-once",
+                    "--policy-file",
+                    str(policy_file),
                     "--repository",
                     "cbusillo/sellyouroutboard",
                     "--mutate",
@@ -299,12 +336,15 @@ class MergeTrainDryRunTests(unittest.TestCase):
         )
 
     def test_cli_merge_train_run_once_requires_github_token(self) -> None:
-        with patch.dict("os.environ", {}, clear=True):
+        with TemporaryDirectory() as temp_dir, patch.dict("os.environ", {}, clear=True):
+            policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 main,
                 [
                     "work-graph",
                     "merge-train-run-once",
+                    "--policy-file",
+                    str(policy_file),
                     "--repository",
                     "cbusillo/sellyouroutboard",
                 ],
@@ -324,6 +364,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
         )
 
         with (
+            TemporaryDirectory() as temp_dir,
             patch(
                 "control_plane.cli.UrllibMergeTrainGitHubTransport",
                 return_value=object(),
@@ -334,9 +375,10 @@ class MergeTrainDryRunTests(unittest.TestCase):
             ),
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
+            policy_file = _write_policy_file(Path(temp_dir))
             result = CliRunner().invoke(
                 main,
-                ["work-graph", "merge-train-run-once"],
+                ["work-graph", "merge-train-run-once", "--policy-file", str(policy_file)],
             )
 
         self.assertNotEqual(result.exit_code, 0)
@@ -348,7 +390,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
 class MergeTrainBlockIntentTests(unittest.TestCase):
     def test_block_intent_applies_blocked_label_and_pauses_train(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -372,7 +414,7 @@ class MergeTrainBlockIntentTests(unittest.TestCase):
 
     def test_block_intent_skips_non_block_actions_without_mutation(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -391,7 +433,7 @@ class MergeTrainBlockIntentTests(unittest.TestCase):
 
     def test_block_intent_is_idempotent_when_blocked_label_exists(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -415,7 +457,7 @@ class MergeTrainBlockIntentTests(unittest.TestCase):
         self.assertEqual(label_client.applied_labels, [])
 
     def test_block_intent_can_continue_train_when_policy_allows_it(self) -> None:
-        base_policy = build_sellyouroutboard_main_merge_train_policy()
+        base_policy = build_test_merge_train_policy()
         repository_policy = base_policy.policies[0].model_copy(
             update={"failure_policy": "continue_after_blocking_pr"}
         )
@@ -439,7 +481,7 @@ class MergeTrainBlockIntentTests(unittest.TestCase):
 class MergeTrainBranchUpdateIntentTests(unittest.TestCase):
     def test_branch_update_intent_updates_selected_pr_and_requires_reread(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -463,7 +505,7 @@ class MergeTrainBranchUpdateIntentTests(unittest.TestCase):
 
     def test_branch_update_intent_skips_other_actions_without_mutation(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -483,7 +525,7 @@ class MergeTrainBranchUpdateIntentTests(unittest.TestCase):
 
 class MergeTrainRereadTests(unittest.TestCase):
     def test_reread_after_branch_update_re_evaluates_fresh_snapshot(self) -> None:
-        policy = build_sellyouroutboard_main_merge_train_policy()
+        policy = build_test_merge_train_policy()
         stale_result = build_merge_train_dry_run_result(
             policy=policy,
             snapshot=MergeTrainDryRunSnapshot(
@@ -523,7 +565,7 @@ class MergeTrainRereadTests(unittest.TestCase):
         self.assertEqual(refreshed_result.intended_next_action, "wait_for_checks")
 
     def test_reread_skips_when_branch_update_was_not_required(self) -> None:
-        policy = build_sellyouroutboard_main_merge_train_policy()
+        policy = build_test_merge_train_policy()
         dry_run_result = build_merge_train_dry_run_result(
             policy=policy,
             snapshot=MergeTrainDryRunSnapshot(
@@ -559,7 +601,7 @@ class MergeTrainWaitTests(unittest.TestCase):
         self,
     ) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -579,7 +621,7 @@ class MergeTrainWaitTests(unittest.TestCase):
 
     def test_wait_result_records_unknown_mergeability(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -597,7 +639,7 @@ class MergeTrainWaitTests(unittest.TestCase):
 
     def test_wait_result_skips_non_wait_actions(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -618,7 +660,7 @@ class MergeTrainWaitTests(unittest.TestCase):
 class MergeTrainMergeIntentTests(unittest.TestCase):
     def test_merge_intent_uses_selected_head_sha_and_policy_method(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -644,7 +686,7 @@ class MergeTrainMergeIntentTests(unittest.TestCase):
 
     def test_merge_intent_skips_non_merge_actions_without_mutation(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
@@ -693,6 +735,37 @@ def _pull_request(
             "branch_update_required": branch_update_required,
         }
     )
+
+
+def _write_policy_file(directory: Path) -> Path:
+    policy_file = directory / "merge-train-policy.toml"
+    policy = build_test_merge_train_policy_with_codex_skills()
+    tables = []
+    for repository_policy in policy.policies:
+        tables.append(
+            f"""[[policies]]
+repository = "{repository_policy.repository}"
+base_branch = "{repository_policy.base_branch}"
+enqueue_label = "{repository_policy.enqueue_label}"
+blocked_label = "{repository_policy.blocked_label}"
+merge_method = "{repository_policy.merge_method}"
+failure_policy = "{repository_policy.failure_policy}"
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+[policies.merge_identity]
+kind = "{repository_policy.merge_identity.kind}"
+name = "{repository_policy.merge_identity.name}"
+[policies.service_authz]
+action = "{repository_policy.service_authz.action}"
+product = "{repository_policy.service_authz.product}"
+context = "{repository_policy.service_authz.context}"
+[policies.github_token]
+env_var = "{repository_policy.github_token.env_var}"
+"""
+        )
+    policy_file.write_text("\n\n".join(("schema_version = 1", *tables)), encoding="utf-8")
+    return policy_file
 
 
 if __name__ == "__main__":

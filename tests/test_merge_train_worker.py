@@ -1,6 +1,5 @@
 import unittest
 
-from control_plane.contracts.merge_train_policy import build_sellyouroutboard_main_merge_train_policy
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainMergeableState
@@ -8,6 +7,7 @@ from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train_github import MergeTrainGitHubStaleHeadError
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
 from control_plane.workflows.merge_train_worker import run_merge_train_worker_step
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
 class _FakeLabelClient:
@@ -43,9 +43,7 @@ class _FakeMergeClient:
         head_sha: str,
         merge_method: str,
     ) -> str:
-        self.merged_pull_requests.append(
-            (repository, pull_request_number, head_sha, merge_method)
-        )
+        self.merged_pull_requests.append((repository, pull_request_number, head_sha, merge_method))
         if self.error is not None:
             raise self.error
         return f"merge-{pull_request_number}"
@@ -57,7 +55,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         clients = _clients(label_client=label_client)
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(_pull_request(11, required_checks_status="fail")),
             clients=clients,
         )
@@ -68,13 +66,15 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         self.assertFalse(result.reread_required)
         self.assertFalse(result.poll_required)
         self.assertIsNotNone(result.block_result)
-        self.assertEqual(label_client.applied_labels, [("cbusillo/sellyouroutboard", 11, "merge-blocked")])
+        self.assertEqual(
+            label_client.applied_labels, [("cbusillo/sellyouroutboard", 11, "merge-blocked")]
+        )
 
     def test_worker_step_does_not_reapply_existing_block_label(self) -> None:
         label_client = _FakeLabelClient()
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(
                 _pull_request(
                     12,
@@ -92,7 +92,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         branch_client = _FakeBranchClient()
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(_pull_request(21, branch_update_required=True)),
             clients=_clients(branch_client=branch_client),
         )
@@ -102,7 +102,9 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         self.assertTrue(result.reread_required)
         self.assertFalse(result.poll_required)
         self.assertIsNotNone(result.branch_update_result)
-        self.assertEqual(branch_client.updated_branches, [("cbusillo/sellyouroutboard", 21, "head-21")])
+        self.assertEqual(
+            branch_client.updated_branches, [("cbusillo/sellyouroutboard", 21, "head-21")]
+        )
 
     def test_worker_step_waits_without_mutating_github(self) -> None:
         label_client = _FakeLabelClient()
@@ -110,7 +112,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         merge_client = _FakeMergeClient()
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(_pull_request(31, required_checks_status="pending")),
             clients=MergeTrainWorkerClients(
                 label_client=label_client,
@@ -132,7 +134,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         merge_client = _FakeMergeClient()
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(_pull_request(41)),
             clients=_clients(merge_client=merge_client),
         )
@@ -142,7 +144,10 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         self.assertTrue(result.reread_required)
         self.assertFalse(result.poll_required)
         self.assertIsNotNone(result.merge_result)
-        self.assertEqual(merge_client.merged_pull_requests, [("cbusillo/sellyouroutboard", 41, "head-41", "merge")])
+        self.assertEqual(
+            merge_client.merged_pull_requests,
+            [("cbusillo/sellyouroutboard", 41, "head-41", "merge")],
+        )
 
     def test_worker_step_treats_guarded_merge_conflict_as_stale_head(self) -> None:
         merge_client = _FakeMergeClient(
@@ -150,7 +155,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         )
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(_pull_request(42)),
             clients=_clients(merge_client=merge_client),
         )
@@ -160,7 +165,10 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         self.assertTrue(result.reread_required)
         self.assertFalse(result.poll_required)
         self.assertIsNone(result.merge_result)
-        self.assertEqual(merge_client.merged_pull_requests, [("cbusillo/sellyouroutboard", 42, "head-42", "merge")])
+        self.assertEqual(
+            merge_client.merged_pull_requests,
+            [("cbusillo/sellyouroutboard", 42, "head-42", "merge")],
+        )
 
     def test_worker_step_idles_without_mutating_github(self) -> None:
         label_client = _FakeLabelClient()
@@ -168,7 +176,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
         merge_client = _FakeMergeClient()
 
         result = run_merge_train_worker_step(
-            policy=build_sellyouroutboard_main_merge_train_policy(),
+            policy=build_test_merge_train_policy(),
             snapshot=_snapshot(_pull_request(51, labels=())),
             clients=MergeTrainWorkerClients(
                 label_client=label_client,
@@ -189,7 +197,7 @@ class MergeTrainWorkerStepTests(unittest.TestCase):
     def test_worker_step_fails_closed_when_policy_is_missing(self) -> None:
         with self.assertRaisesRegex(ValueError, "policy not found"):
             run_merge_train_worker_step(
-                policy=build_sellyouroutboard_main_merge_train_policy(),
+                policy=build_test_merge_train_policy(),
                 snapshot=MergeTrainDryRunSnapshot(
                     repository="cbusillo/other",
                     base_branch="main",

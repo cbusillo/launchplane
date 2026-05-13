@@ -1,23 +1,24 @@
-import os
-from pathlib import Path
+from typing import Protocol, cast
 
-from control_plane.contracts.merge_train_policy import MergeTrainPolicy
-from control_plane.contracts.merge_train_policy import default_merge_train_policy_path
-from control_plane.contracts.merge_train_policy import load_merge_train_policy
-from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 
 
-_MERGE_TRAIN_POLICY_TOML_ENV_KEY = "LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML"
-_MERGE_TRAIN_POLICY_FILE_ENV_KEY = "LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE"
+class MergeTrainPolicyStoreMissingError(RuntimeError):
+    pass
 
 
-def load_launchplane_merge_train_policy() -> MergeTrainPolicy:
-    policy_toml = os.environ.get(_MERGE_TRAIN_POLICY_TOML_ENV_KEY, "").strip()
-    if policy_toml:
-        return parse_merge_train_policy_toml(policy_toml)
+class _MergeTrainPolicyRecordStore(Protocol):
+    def list_merge_train_policy_records(
+        self, *, status: str = "", limit: int | None = None
+    ) -> tuple[MergeTrainPolicyRecord, ...]: ...
 
-    policy_file = os.environ.get(_MERGE_TRAIN_POLICY_FILE_ENV_KEY, "").strip()
-    if policy_file:
-        return load_merge_train_policy(Path(policy_file))
 
-    return load_merge_train_policy(default_merge_train_policy_path())
+def resolve_merge_train_policy_record(record_store: object) -> MergeTrainPolicyRecord:
+    list_records = getattr(record_store, "list_merge_train_policy_records", None)
+    if not callable(list_records):
+        raise MergeTrainPolicyStoreMissingError("merge train policy store is unavailable")
+    store = cast(_MergeTrainPolicyRecordStore, record_store)
+    records = store.list_merge_train_policy_records(status="active", limit=1)
+    if records:
+        return records[0]
+    raise MergeTrainPolicyStoreMissingError("active merge train policy record is missing")

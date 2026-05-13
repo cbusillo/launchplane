@@ -29,9 +29,7 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.deployment_record import DeploymentRecord, ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
-from control_plane.contracts.merge_train_policy import (
-    build_sellyouroutboard_main_merge_train_policy,
-)
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
@@ -108,6 +106,9 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementPlan,
 )
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_record
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 from control_plane.workflows.generic_web_promotion import GenericWebProdPromotionResult
 from control_plane.workflows.generic_web_promotion_workflow import GenericWebPromotionWorkflowResult
 from control_plane.workflows.generic_web_preview import (
@@ -281,13 +282,21 @@ def _merge_train_service_identity() -> GitHubActionsIdentity:
     )
 
 
+def _seed_merge_train_policy(
+    state_dir: Path, *, policy: MergeTrainPolicyRecord | None = None
+) -> MergeTrainPolicyRecord:
+    record = policy or build_test_merge_train_policy_record()
+    FilesystemRecordStore(state_dir).write_merge_train_policy_record(record)
+    return record
+
+
 def _merge_train_run_record(
     *,
     recorded_at: str,
     required_checks_status: MergeTrainCheckStatus = "pass",
     mutate: bool = False,
 ) -> MergeTrainRunRecord:
-    policy = build_sellyouroutboard_main_merge_train_policy()
+    policy = build_test_merge_train_policy()
     snapshot = MergeTrainDryRunSnapshot(
         repository="cbusillo/sellyouroutboard",
         base_branch="main",
@@ -1229,8 +1238,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
+            policy_record = _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1250,9 +1261,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 )
             run_id = payload["records"]["merge_train_run_id"]
-            loaded_record = FilesystemRecordStore(
-                Path(temporary_directory_name) / "state"
-            ).read_merge_train_run_record(run_id)
+            loaded_record = FilesystemRecordStore(state_dir).read_merge_train_run_record(run_id)
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "dry-run")
@@ -1264,6 +1273,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(loaded_record.selected_pr_number, 1)
         self.assertEqual(loaded_record.selected_head_sha, "head-1")
         self.assertEqual(loaded_record.policy_key, "cbusillo/sellyouroutboard:main")
+        self.assertEqual(loaded_record.policy_sha256, policy_record.policy_sha256)
         self.assertEqual(loaded_record.worker_step_result, None)
 
     def test_merge_train_run_once_service_mutates_one_worker_step(self) -> None:
@@ -1293,8 +1303,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1318,9 +1330,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     },
                 )
             run_id = payload["records"]["merge_train_run_id"]
-            loaded_record = FilesystemRecordStore(
-                Path(temporary_directory_name) / "state"
-            ).read_merge_train_run_record(run_id)
+            loaded_record = FilesystemRecordStore(state_dir).read_merge_train_run_record(run_id)
 
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["status"], "merged")
@@ -1335,8 +1345,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
     def test_merge_train_run_once_service_rejects_unauthorized_identity(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate({"github_actions": []})
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1380,8 +1392,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
         )
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1419,8 +1433,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
             }
         )
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1439,13 +1455,46 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
 
+    def test_merge_train_run_once_service_rejects_missing_policy_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/work-graph/merge-train/run-once",
+                payload={
+                    "schema_version": 1,
+                    "repository": "cbusillo/sellyouroutboard",
+                    "base_branch": "main",
+                },
+            )
+
+        self.assertEqual(status_code, 503)
+        self.assertEqual(payload["error"]["code"], "merge_train_policy_not_configured")
+
     def test_merge_train_run_once_service_uses_configured_codex_skills_policy(self) -> None:
         with (
             TemporaryDirectory() as temporary_directory_name,
             patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-codex-skills-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_merge_train_service_identity()),
                 authz_policy=_merge_train_service_policy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1474,8 +1523,19 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_merge_train_admission_service_uses_configured_codex_skills_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(
+                state_dir,
+                policy=MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-codex-skills-test",
+                    status="active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                ),
+            )
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_merge_train_service_identity()),
                 authz_policy=_merge_train_service_policy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1494,8 +1554,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_merge_train_admission_service_admits_without_prior_run(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_merge_train_service_identity()),
                 authz_policy=_merge_train_service_policy(),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1520,6 +1582,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             state_dir = Path(temporary_directory_name) / "state"
             store = FilesystemRecordStore(state_dir)
+            _seed_merge_train_policy(state_dir)
             wait_record = _merge_train_run_record(
                 recorded_at="2999-01-01T00:00:00Z",
                 required_checks_status="pending",
@@ -1548,8 +1611,10 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
     def test_merge_train_admission_service_rejects_unauthorized_identity(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
             app = create_launchplane_service_app(
-                state_dir=Path(temporary_directory_name) / "state",
+                state_dir=state_dir,
                 verifier=_StubVerifier(_identity()),
                 authz_policy=LaunchplaneAuthzPolicy.model_validate({"github_actions": []}),
                 control_plane_root_path=Path(temporary_directory_name),
@@ -1563,6 +1628,204 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         self.assertEqual(status_code, 403)
         self.assertEqual(payload["error"]["code"], "authorization_denied")
+
+    def test_merge_train_policy_import_endpoint_writes_active_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-service-import",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "apply",
+                    "reason": "Configure codex-skills merge train.",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:codex-skills"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            try:
+                records = store.list_merge_train_policy_records(status="active")
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "apply")
+        self.assertEqual(payload["result"]["record"]["policy_keys"], ["cbusillo/codex-skills:main"])
+        self.assertEqual([stored.record_id for stored in records], [record.record_id])
+
+    def test_merge_train_policy_import_endpoint_dry_run_does_not_write_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            identity = _identity(
+                repository="cbusillo/launchplane",
+                workflow_ref=(
+                    "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                ),
+                event_name="workflow_dispatch",
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(identity),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-service-dry-run",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "launchplane",
+                    "mode": "dry_run",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:dry-run"},
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            records = store.list_merge_train_policy_records(status="active")
+            try:
+                idempotency_record = store.read_idempotency_record(
+                    scope="|".join(
+                        (
+                            identity.repository,
+                            identity.workflow_ref,
+                            identity.subject,
+                        )
+                    ),
+                    route_path="/v1/merge-train/policies/import",
+                    idempotency_key="merge-train-policy:dry-run",
+                )
+            except FileNotFoundError:
+                idempotency_record = None
+            finally:
+                store.close()
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "dry_run")
+        self.assertEqual(records, ())
+        self.assertIsNone(idempotency_record)
+
+    def test_merge_train_policy_import_endpoint_rejects_non_launchplane_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane", "other-product"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-wrong-product",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "other-product",
+                    "mode": "apply",
+                    "reason": "Attempt cross-product policy import.",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:wrong-product"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_every_code_github_webhook_creates_work_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

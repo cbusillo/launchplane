@@ -1,7 +1,6 @@
 import unittest
 
 from control_plane.contracts.merge_train_admission import evaluate_merge_train_admission
-from control_plane.contracts.merge_train_policy import build_sellyouroutboard_main_merge_train_policy
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -11,6 +10,7 @@ from control_plane.merge_train import build_merge_train_dry_run_result
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
 from control_plane.workflows.merge_train_worker import MergeTrainWorkerClients
 from control_plane.workflows.merge_train_worker import run_merge_train_worker_step
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 
 
 class _FakeMergeClient:
@@ -176,7 +176,7 @@ def _run_record(
     recorded_at: str,
     mutation: str = "",
 ) -> MergeTrainRunRecord:
-    policy = build_sellyouroutboard_main_merge_train_policy()
+    policy = build_test_merge_train_policy()
     pull_request = _pull_request(42)
     if mutation == "wait":
         pull_request = _pull_request(42, required_checks_status="pending")

@@ -77,8 +77,12 @@ from control_plane.contracts.every_code_summary_read_model import (
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
-from control_plane.merge_train_policy_source import load_launchplane_merge_train_policy
+from control_plane.merge_train_policy_source import (
+    MergeTrainPolicyStoreMissingError,
+    resolve_merge_train_policy_record,
+)
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
@@ -453,8 +457,6 @@ _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT",
         "LAUNCHPLANE_WORK_GRAPH_GH_BINARY",
         "GH_TOKEN",
-        "LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML",
-        "LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE",
     }
 )
 
@@ -920,6 +922,26 @@ def _validate_driver_envelope_product(product: str, *, label: str) -> None:
 
 class ProductDriverMismatchError(ValueError):
     pass
+
+
+class MergeTrainPolicyImportEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    product: str = "launchplane"
+    mode: Literal["dry_run", "apply"] = "dry_run"
+    reason: str = ""
+    record: MergeTrainPolicyRecord
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "MergeTrainPolicyImportEnvelope":
+        self.product = self.product.strip() or "launchplane"
+        if self.product != "launchplane":
+            raise ValueError("merge train policy import requires product 'launchplane'")
+        self.reason = self.reason.strip()
+        if self.mode == "apply" and not self.reason:
+            raise ValueError("merge train policy import apply requires reason")
+        return self
 
 
 class OdooPostDeployEnvelope(_ProductRouteEnvelope):
@@ -1488,6 +1510,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
+        "/v1/merge-train/policies/import",
     }
 )
 _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
@@ -2173,6 +2196,7 @@ def _build_write_routes() -> frozenset[str]:
         "/v1/authz-policies/github-actions/grants",
         "/v1/authz-policies/github-humans/grants",
         "/v1/authz-policies/terminal-agents/grants",
+        "/v1/merge-train/policies/import",
         "/v1/runtime-key-safety/policies/apply",
         "/v1/live-target-runtime/apply",
         "/v1/product-onboarding/apply",
@@ -3663,6 +3687,12 @@ def _should_store_idempotency_record(
         and driver_result.get("mode") == "dry_run"
     ):
         return False
+    if (
+        path == "/v1/merge-train/policies/import"
+        and isinstance(driver_result, dict)
+        and driver_result.get("mode") == "dry_run"
+    ):
+        return False
     if driver_result is None:
         return True
     if _driver_result_contains_status(driver_result, "blocked"):
@@ -4213,9 +4243,9 @@ def _validate_every_code_rerun_write_intent(
     if not record_id:
         return None, None
     try:
-        record = _agent_write_intent_record_store(
-            record_store
-        ).read_agent_write_intent_record(record_id)
+        record = _agent_write_intent_record_store(record_store).read_agent_write_intent_record(
+            record_id
+        )
     except FileNotFoundError:
         return None, _reject_agent_write_intent(
             start_response=start_response,
@@ -4237,7 +4267,10 @@ def _validate_every_code_rerun_write_intent(
             message="Every Code rerun requires an allowed apply-mode every_code_rerun intent record.",
             record_id=record.record_id,
         )
-    if record.evaluation.product != "launchplane" or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT:
+    if (
+        record.evaluation.product != "launchplane"
+        or record.evaluation.context != _LAUNCHPLANE_SERVICE_CONTEXT
+    ):
         return record, _reject_agent_write_intent(
             start_response=start_response,
             trace_id=trace_id,
@@ -4296,9 +4329,7 @@ def _matching_every_code_rerun_intent_record(
     source_url: str,
     now: datetime,
 ) -> AgentWriteIntentRecord | None:
-    for record in _agent_write_intent_record_store(
-        record_store
-    ).list_agent_write_intent_records(
+    for record in _agent_write_intent_record_store(record_store).list_agent_write_intent_records(
         product="launchplane",
         context_name=_LAUNCHPLANE_SERVICE_CONTEXT,
         status="allowed",
@@ -4859,9 +4890,7 @@ def _build_preview_lifecycle_sweep(
             )
             inventory_context = verireel_inventory_result.context
             inventory_source = request.source
-            inventory_slugs = tuple(
-                item.previewSlug for item in verireel_inventory_result.previews
-            )
+            inventory_slugs = tuple(item.previewSlug for item in verireel_inventory_result.previews)
         else:
             generic_web_inventory_result = execute_generic_web_preview_inventory(
                 control_plane_root=control_plane_root,
@@ -6242,7 +6271,8 @@ def create_launchplane_service_app(
                             "base_branch": str((query.get("base_branch") or ["main"])[0] or ""),
                         }
                     )
-                    policy = load_launchplane_merge_train_policy()
+                    policy_record = resolve_merge_train_policy_record(record_store)
+                    policy = policy_record.policy
                     repository_policy = policy.find_repository_policy(
                         repository=admission_request.repository,
                         base_branch=admission_request.base_branch,
@@ -6649,7 +6679,8 @@ def create_launchplane_service_app(
                 driver_result = {"request": record.model_dump(mode="json")}
             elif path == _MERGE_TRAIN_RUN_ONCE_ROUTE:
                 merge_train_request = MergeTrainRunOnceEnvelope.model_validate(payload)
-                policy = load_launchplane_merge_train_policy()
+                policy_record = resolve_merge_train_policy_record(record_store)
+                policy = policy_record.policy
                 repository_policy = policy.find_repository_policy(
                     repository=merge_train_request.repository,
                     base_branch=merge_train_request.base_branch,
@@ -6736,7 +6767,7 @@ def create_launchplane_service_app(
                 run_record = build_merge_train_run_record(
                     recorded_at=_utc_now_timestamp(),
                     trace_id=request_trace_id,
-                    policy_sha256=policy.policy_sha256,
+                    policy_sha256=policy_record.policy_sha256,
                     snapshot=snapshot,
                     dry_run_result=dry_run_result,
                     worker_step_result=worker_step_result,
@@ -7443,6 +7474,68 @@ def create_launchplane_service_app(
                         audit=audit,
                     )
                 )
+            elif path == "/v1/merge-train/policies/import":
+                merge_train_policy_request = MergeTrainPolicyImportEnvelope.model_validate(payload)
+                if not isinstance(record_store, PostgresRecordStore):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "database_required",
+                                "message": "Merge train policy writes require Launchplane database storage.",
+                            },
+                        },
+                    )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action="launchplane_service_deploy.execute",
+                    product=merge_train_policy_request.product,
+                    context=_LAUNCHPLANE_SERVICE_CONTEXT,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot write Launchplane merge train policies.",
+                            },
+                        },
+                    )
+                if merge_train_policy_request.mode == "apply":
+                    idempotent_response = _check_idempotent_request(
+                        record_store=record_store,
+                        scope=request_scope,
+                        route_path=path,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        start_response=start_response,
+                        trace_id=request_trace_id,
+                    )
+                    if idempotent_response is not None:
+                        return idempotent_response
+                    record_store.write_merge_train_policy_record(merge_train_policy_request.record)
+                result = {
+                    "mode": merge_train_policy_request.mode,
+                    "record": {
+                        "record_id": merge_train_policy_request.record.record_id,
+                        "status": merge_train_policy_request.record.status,
+                        "source": merge_train_policy_request.record.source,
+                        "updated_at": merge_train_policy_request.record.updated_at,
+                        "policy_sha256": merge_train_policy_request.record.policy_sha256,
+                        "repository_count": len(merge_train_policy_request.record.policy.policies),
+                        "policy_keys": [
+                            repository_policy.policy_key
+                            for repository_policy in merge_train_policy_request.record.policy.policies
+                        ],
+                    },
+                }
+                driver_result = result
             elif path == "/v1/runtime-key-safety/policies/apply":
                 runtime_policy_request, runtime_policy_response = (
                     validate_runtime_key_safety_policy_request(
@@ -9599,6 +9692,19 @@ def create_launchplane_service_app(
                     "error": {
                         "code": "github_request_failed",
                         "message": "GitHub merge train request failed; retry after upstream recovers.",
+                    },
+                },
+            )
+        except MergeTrainPolicyStoreMissingError:
+            return _json_response(
+                start_response=start_response,
+                status_code=503,
+                payload={
+                    "status": "rejected",
+                    "trace_id": request_trace_id,
+                    "error": {
+                        "code": "merge_train_policy_not_configured",
+                        "message": "No active DB-backed merge train policy record is configured.",
                     },
                 },
             )

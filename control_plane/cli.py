@@ -42,6 +42,9 @@ from control_plane.contracts.every_code_work_request import build_every_code_wor
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
 from control_plane.contracts.merge_train_policy import (
+    MergeTrainPolicyRecord,
+    MergeTrainPolicyRecordStatus,
+    build_merge_train_policy_record_id,
     load_merge_train_policy,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
@@ -134,7 +137,6 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
 )
-from control_plane.merge_train_policy_source import load_launchplane_merge_train_policy
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -383,6 +385,48 @@ def _summarize_runtime_key_safety_policy_record(
         "rule_count": len(record.rules),
         "binding_keys": [rule.binding_key for rule in record.rules],
     }
+
+
+def _summarize_merge_train_policy_record(record: MergeTrainPolicyRecord) -> dict[str, object]:
+    return {
+        "record_id": record.record_id,
+        "status": record.status,
+        "source": record.source,
+        "updated_at": record.updated_at,
+        "policy_sha256": record.policy_sha256,
+        "repository_count": len(record.policy.policies),
+        "policy_keys": [
+            repository_policy.policy_key for repository_policy in record.policy.policies
+        ],
+    }
+
+
+def _build_merge_train_policy_record(
+    *,
+    policy_file: Path,
+    source_label: str,
+    status: MergeTrainPolicyRecordStatus = "active",
+) -> MergeTrainPolicyRecord:
+    try:
+        policy = load_merge_train_policy(policy_file)
+        updated_at = utc_now_timestamp()
+        return MergeTrainPolicyRecord(
+            record_id=build_merge_train_policy_record_id(
+                updated_at=updated_at,
+                policy_sha256=policy.policy_sha256,
+            ),
+            status=status,
+            source=source_label.strip() or "cli:import-policy",
+            updated_at=updated_at,
+            policy_sha256=policy.policy_sha256,
+            policy=policy,
+        )
+    except (OSError, ValidationError, ValueError) as error:
+        raise click.ClickException(str(error)) from error
+
+
+def _merge_train_policy_record_payload(record: MergeTrainPolicyRecord) -> dict[str, object]:
+    return record.model_dump(mode="json")
 
 
 def _build_runtime_key_safety_policy_record(
@@ -9411,20 +9455,14 @@ def work_graph_rank(snapshot_file: Path, limit: int) -> None:
 @click.option(
     "--policy-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    default=None,
-    help="Optional merge-train policy TOML to validate instead of Launchplane service policy.",
+    required=True,
+    help="Merge-train policy TOML to validate before importing it as a DB record.",
 )
 @click.option("--repository", default="", help="Optional owner/name repository lookup.")
 @click.option("--base-branch", default="main", show_default=True)
-def work_graph_merge_train_policy(
-    policy_file: Path | None, repository: str, base_branch: str
-) -> None:
+def work_graph_merge_train_policy(policy_file: Path, repository: str, base_branch: str) -> None:
     try:
-        policy = (
-            load_merge_train_policy(policy_file)
-            if policy_file is not None
-            else load_launchplane_merge_train_policy()
-        )
+        policy = load_merge_train_policy(policy_file)
         selected_policy = None
         if repository.strip():
             selected_policy = policy.find_repository_policy(
@@ -9455,18 +9493,14 @@ def work_graph_merge_train_policy(
 @click.option(
     "--policy-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    default=None,
-    help="Optional merge-train policy TOML to validate instead of Launchplane service policy.",
+    required=True,
+    help="Merge-train policy TOML to use for this local dry-run.",
 )
-def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None) -> None:
+def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path) -> None:
     try:
         snapshot_payload = json.loads(snapshot_file.read_text(encoding="utf-8"))
         snapshot = MergeTrainDryRunSnapshot.model_validate(snapshot_payload)
-        policy = (
-            load_merge_train_policy(policy_file)
-            if policy_file is not None
-            else load_launchplane_merge_train_policy()
-        )
+        policy = load_merge_train_policy(policy_file)
         result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
         raise click.ClickException(str(error)) from error
@@ -9477,8 +9511,8 @@ def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None
 @click.option(
     "--policy-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
-    default=None,
-    help="Optional merge-train policy TOML to validate instead of Launchplane service policy.",
+    required=True,
+    help="Merge-train policy TOML to use for this local run.",
 )
 @click.option(
     "--repository",
@@ -9506,7 +9540,7 @@ def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None
     help="Apply the selected worker transition. The default only reads GitHub and reports intent.",
 )
 def work_graph_merge_train_run_once(
-    policy_file: Path | None,
+    policy_file: Path,
     repository: str,
     base_branch: str,
     github_token_env: str,
@@ -9514,11 +9548,7 @@ def work_graph_merge_train_run_once(
     mutate: bool,
 ) -> None:
     try:
-        policy = (
-            load_merge_train_policy(policy_file)
-            if policy_file is not None
-            else load_launchplane_merge_train_policy()
-        )
+        policy = load_merge_train_policy(policy_file)
         policy.find_repository_policy(repository=repository, base_branch=base_branch)
         token_env = github_token_env.strip()
         if not token_env:
@@ -13130,6 +13160,11 @@ def runtime_key_safety() -> None:
     """DB-backed runtime key-safety policy and evaluation commands."""
 
 
+@main.group("merge-train-policies")
+def merge_train_policies() -> None:
+    """DB-backed Launchplane merge-train policy commands."""
+
+
 @main.group("product-profiles")
 def product_profiles() -> None:
     """DB-backed Launchplane product profile commands."""
@@ -13510,6 +13545,131 @@ def runtime_key_safety_list_policies(database_url: str, status_filter: str) -> N
                     _summarize_runtime_key_safety_policy_record(record) for record in records
                 ],
             },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@merge_train_policies.command("list")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    required=True,
+    help="Postgres connection string for merge-train policy records.",
+)
+@click.option("--status", "status_filter", default="", help="Optional policy status filter.")
+def merge_train_policies_list(database_url: str, status_filter: str) -> None:
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    try:
+        records = postgres_store.list_merge_train_policy_records(status=status_filter)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {
+                "status": "ok",
+                "count": len(records),
+                "records": [_summarize_merge_train_policy_record(record) for record in records],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+
+
+@merge_train_policies.command("import-policy")
+@click.option(
+    "--database-url",
+    envvar=_DATABASE_URL_ENV_KEYS,
+    default="",
+    help="Postgres connection string for merge-train policy records.",
+)
+@click.option(
+    "--service-url",
+    default="",
+    help="Deployed Launchplane service base URL. Shared/prod imports go through the service API.",
+)
+@click.option(
+    "--bearer-token-env",
+    default="LAUNCHPLANE_SERVICE_TOKEN",
+    show_default=True,
+    help="Environment variable containing a Launchplane bearer token for --service-url.",
+)
+@click.option(
+    "--session-cookie",
+    default="",
+    help="Launchplane browser session cookie for --service-url. Use instead of --bearer-token-env.",
+)
+@click.option(
+    "--policy-file",
+    type=click.Path(exists=True, path_type=Path),
+    required=True,
+    help="TOML policy file containing merge-train repository policies.",
+)
+@click.option("--status", type=click.Choice(["active", "superseded"]), default="active")
+@click.option("--source-label", default="cli:import-policy", show_default=True)
+@click.option("--reason", default="", help="Required audit reason for --service-url apply.")
+@click.option(
+    "--idempotency-key", default="", help="Optional explicit Idempotency-Key for service import."
+)
+@click.option("--dry-run", "mode", flag_value="dry_run", default="dry_run")
+@click.option("--apply", "mode", flag_value="apply")
+def merge_train_policies_import_policy(
+    database_url: str,
+    service_url: str,
+    bearer_token_env: str,
+    session_cookie: str,
+    policy_file: Path,
+    status: MergeTrainPolicyRecordStatus,
+    source_label: str,
+    reason: str,
+    idempotency_key: str,
+    mode: str,
+) -> None:
+    record = _build_merge_train_policy_record(
+        policy_file=policy_file,
+        source_label=source_label,
+        status=status,
+    )
+    if service_url.strip():
+        bearer_token = ""
+        if not session_cookie.strip():
+            token_env_key = bearer_token_env.strip() or "LAUNCHPLANE_SERVICE_TOKEN"
+            bearer_token = os.environ.get(token_env_key, "").strip()
+            if not bearer_token:
+                raise click.ClickException(
+                    f"{token_env_key} is required unless --session-cookie is provided."
+                )
+        response_payload = _post_launchplane_service_json(
+            service_url=service_url,
+            path="/v1/merge-train/policies/import",
+            payload={
+                "schema_version": 1,
+                "product": "launchplane",
+                "mode": mode,
+                "reason": reason,
+                "record": _merge_train_policy_record_payload(record),
+            },
+            bearer_token=bearer_token,
+            session_cookie=session_cookie,
+            idempotency_key=idempotency_key,
+        )
+        click.echo(json.dumps(response_payload, indent=2, sort_keys=True))
+        return
+    if mode != "apply":
+        raise click.ClickException("Direct database import requires --apply.")
+    if not database_url.strip():
+        raise click.ClickException("Provide --service-url or --database-url.")
+    postgres_store = PostgresRecordStore(database_url=database_url)
+    postgres_store.ensure_schema()
+    try:
+        postgres_store.write_merge_train_policy_record(record)
+    finally:
+        postgres_store.close()
+    click.echo(
+        json.dumps(
+            {"status": "ok", "record": _summarize_merge_train_policy_record(record)},
             indent=2,
             sort_keys=True,
         )

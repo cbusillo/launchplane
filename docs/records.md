@@ -690,6 +690,12 @@ preflights.
   product, context, route action, source, or idempotency binding. The first
   consumer is Every Code rerun, which requires approved `every_code_rerun`
   evidence before requeueing a terminal work request.
+- Merge train repository policy is persisted as
+  `launchplane_merge_train_policies` records. The active policy record is the
+  Launchplane-owned authority for supported repository/base branch pairs,
+  enqueue labels, merge method, service authz, and token source metadata.
+  Service routes fail closed when no active policy record exists or when the
+  requested repository/base branch is not represented in the active policy.
 - Merge train service runs are persisted as `launchplane_merge_train_runs`
   records. Each record stores the repository/base branch, mode, status, policy
   key and digest, fresh GitHub snapshot, dry-run decision, selected pull request

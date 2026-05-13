@@ -29,7 +29,6 @@ launchplane = "control_plane.cli:main"
 
 [tool.hatch.build.targets.wheel]
 packages = ["control_plane"]
-artifacts = ["control_plane/config/*.toml"]
 
 [tool.ruff]
 line-length = 100
