@@ -1439,6 +1439,59 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 400)
         self.assertEqual(payload["error"]["code"], "invalid_request")
 
+    def test_merge_train_run_once_service_uses_configured_codex_skills_policy(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/codex-skills",
+                        "base_branch": "main",
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["repository"], "cbusillo/codex-skills")
+        self.assertEqual(payload["result"]["base_branch"], "main")
+        self.assertEqual(
+            payload["result"]["dry_run_result"]["policy_key"], "cbusillo/codex-skills:main"
+        )
+
+    def test_merge_train_admission_service_uses_configured_codex_skills_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            app = create_launchplane_service_app(
+                state_dir=Path(temporary_directory_name) / "state",
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/work-graph/merge-train/admission",
+                query_string="repository=cbusillo/codex-skills&base_branch=main",
+            )
+
+        self.assertEqual(status_code, 200)
+        self.assertEqual(payload["admission"]["repository"], "cbusillo/codex-skills")
+        self.assertEqual(payload["admission"]["base_branch"], "main")
+        self.assertEqual(payload["admission"]["status"], "admitted")
+
     def test_merge_train_admission_service_admits_without_prior_run(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             app = create_launchplane_service_app(

@@ -207,7 +207,12 @@ class MergeTrainDryRunTests(unittest.TestCase):
         ):
             result = CliRunner().invoke(
                 main,
-                ["work-graph", "merge-train-run-once"],
+                [
+                    "work-graph",
+                    "merge-train-run-once",
+                    "--repository",
+                    "cbusillo/sellyouroutboard",
+                ],
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -274,7 +279,13 @@ class MergeTrainDryRunTests(unittest.TestCase):
         ):
             result = CliRunner().invoke(
                 main,
-                ["work-graph", "merge-train-run-once", "--mutate"],
+                [
+                    "work-graph",
+                    "merge-train-run-once",
+                    "--repository",
+                    "cbusillo/sellyouroutboard",
+                    "--mutate",
+                ],
             )
 
         self.assertEqual(result.exit_code, 0, result.output)
@@ -291,7 +302,12 @@ class MergeTrainDryRunTests(unittest.TestCase):
         with patch.dict("os.environ", {}, clear=True):
             result = CliRunner().invoke(
                 main,
-                ["work-graph", "merge-train-run-once"],
+                [
+                    "work-graph",
+                    "merge-train-run-once",
+                    "--repository",
+                    "cbusillo/sellyouroutboard",
+                ],
             )
 
         self.assertNotEqual(result.exit_code, 0)

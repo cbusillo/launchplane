@@ -42,7 +42,6 @@ from control_plane.contracts.every_code_work_request import build_every_code_wor
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
 from control_plane.contracts.github_webhook_replay_envelope import GitHubWebhookReplayEnvelope
 from control_plane.contracts.merge_train_policy import (
-    build_sellyouroutboard_main_merge_train_policy,
     load_merge_train_policy,
 )
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
@@ -135,6 +134,7 @@ from control_plane.merge_train_github import (
     MergeTrainGitHubError,
     UrllibMergeTrainGitHubTransport,
 )
+from control_plane.merge_train_policy_source import load_launchplane_merge_train_policy
 from control_plane.runner_lane_github import GitHubRunnerLaneInventoryReader
 from control_plane.service import serve_launchplane_service
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -9412,7 +9412,7 @@ def work_graph_rank(snapshot_file: Path, limit: int) -> None:
     "--policy-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     default=None,
-    help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
+    help="Optional merge-train policy TOML to validate instead of Launchplane service policy.",
 )
 @click.option("--repository", default="", help="Optional owner/name repository lookup.")
 @click.option("--base-branch", default="main", show_default=True)
@@ -9423,7 +9423,7 @@ def work_graph_merge_train_policy(
         policy = (
             load_merge_train_policy(policy_file)
             if policy_file is not None
-            else build_sellyouroutboard_main_merge_train_policy()
+            else load_launchplane_merge_train_policy()
         )
         selected_policy = None
         if repository.strip():
@@ -9456,7 +9456,7 @@ def work_graph_merge_train_policy(
     "--policy-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     default=None,
-    help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
+    help="Optional merge-train policy TOML to validate instead of Launchplane service policy.",
 )
 def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None) -> None:
     try:
@@ -9465,7 +9465,7 @@ def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None
         policy = (
             load_merge_train_policy(policy_file)
             if policy_file is not None
-            else build_sellyouroutboard_main_merge_train_policy()
+            else load_launchplane_merge_train_policy()
         )
         result = build_merge_train_dry_run_result(policy=policy, snapshot=snapshot)
     except (OSError, JSONDecodeError, ValidationError, ValueError) as error:
@@ -9478,11 +9478,11 @@ def work_graph_merge_train_dry_run(snapshot_file: Path, policy_file: Path | None
     "--policy-file",
     type=click.Path(path_type=Path, exists=True, dir_okay=False),
     default=None,
-    help="Optional merge-train policy TOML to validate instead of the bundled smoke policy.",
+    help="Optional merge-train policy TOML to validate instead of Launchplane service policy.",
 )
 @click.option(
     "--repository",
-    default="cbusillo/sellyouroutboard",
+    default="cbusillo/codex-skills",
     show_default=True,
     help="owner/name repository whose policy should run once.",
 )
@@ -9517,7 +9517,7 @@ def work_graph_merge_train_run_once(
         policy = (
             load_merge_train_policy(policy_file)
             if policy_file is not None
-            else build_sellyouroutboard_main_merge_train_policy()
+            else load_launchplane_merge_train_policy()
         )
         policy.find_repository_policy(repository=repository, base_branch=base_branch)
         token_env = github_token_env.strip()

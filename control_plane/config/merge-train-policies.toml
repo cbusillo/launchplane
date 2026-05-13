@@ -1,0 +1,49 @@
+schema_version = 1
+
+[[policies]]
+repository = "cbusillo/sellyouroutboard"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+merge_method = "merge"
+failure_policy = "pause_train"
+
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+
+[policies.service_authz]
+action = "merge_train.run_once"
+product = "launchplane"
+context = "launchplane"
+
+[policies.github_token]
+env_var = "GH_TOKEN"
+
+[[policies]]
+repository = "cbusillo/codex-skills"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+merge_method = "merge"
+failure_policy = "pause_train"
+
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+
+[policies.service_authz]
+action = "merge_train.run_once"
+product = "launchplane"
+context = "launchplane"
+
+[policies.github_token]
+env_var = "GH_TOKEN"

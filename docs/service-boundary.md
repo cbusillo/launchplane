@@ -279,10 +279,13 @@ bodies, and must preserve the lower-level redaction/provenance rules.
 
 `POST /v1/work-graph/merge-train/run-once` is the authenticated service ingress
 for one merge-train read or mutation pass. It resolves repository/base policy
-before authorization, token lookup, or GitHub reads, authorizes against the
-policy's `service_authz`, reads a fresh GitHub snapshot, and writes a
-`launchplane_merge_train_runs` record for accepted dry-run and mutate calls.
-Mutation mode still applies at most one worker transition from that snapshot.
+from `control_plane/config/merge-train-policies.toml`, or from
+`LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` / `LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE`
+when the deployment projects an override, before authorization, token lookup, or
+GitHub reads. It authorizes against the policy's `service_authz`, reads a fresh
+GitHub snapshot, and writes a `launchplane_merge_train_runs` record for accepted
+dry-run and mutate calls. Mutation mode still applies at most one worker
+transition from that snapshot.
 
 ## Host Assumption
 
