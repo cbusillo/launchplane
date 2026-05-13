@@ -715,6 +715,14 @@ post_grant \
   merge-train-runner
 post_grant \
   "$GITHUB_REPOSITORY" \
+  merge-train-policy-import.yml \
+  launchplane \
+  launchplane \
+  launchplane_service_deploy.execute \
+  deploy:merge-train-policy-import-grant \
+  merge-train-policy-import
+post_grant \
+  "$GITHUB_REPOSITORY" \
   deploy-launchplane.yml \
   launchplane \
   launchplane \
