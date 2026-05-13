@@ -189,8 +189,16 @@ def load_merge_train_policy(policy_file: Path) -> MergeTrainPolicy:
     return parse_merge_train_policy_toml(policy_file.read_text(encoding="utf-8"))
 
 
+def load_merge_train_policy_from_default_config() -> MergeTrainPolicy:
+    return load_merge_train_policy(default_merge_train_policy_path())
+
+
 def build_sellyouroutboard_main_merge_train_policy() -> MergeTrainPolicy:
     return parse_merge_train_policy_toml(SELLYOUROUTBOARD_MAIN_POLICY_TOML)
+
+
+def default_merge_train_policy_path() -> Path:
+    return Path(__file__).resolve().parents[1] / "config" / "merge-train-policies.toml"
 
 
 def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:

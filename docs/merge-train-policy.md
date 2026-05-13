@@ -1,13 +1,15 @@
 # Merge Train Policy Contract
 
 Launchplane merge trains use an explicit repository policy before any worker is
-allowed to enqueue, update, or merge pull requests. The policy is a bootstrap
-contract for the sequential merge train work in #410; it is not a live tracked
-`config/*.toml` authority.
+allowed to enqueue, update, or merge pull requests. The default Launchplane-owned
+policy set lives at `control_plane/config/merge-train-policies.toml`. Deployments
+may override it with `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` or
+`LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE`; when neither env var is set, service
+routes and CLI tools load the checked-in default policy file.
 
-The first live smoke target is SellYourOutboard `main`. The policy is bundled in
-code for CLI and worker dry-runs so the next implementation slice can discover a
-stable contract without adding repo-local runtime config.
+The default policy set keeps the SellYourOutboard `main` smoke policy available
+as seed/test data and opts `cbusillo/codex-skills:main` into the merge train as
+the first real target.
 
 ## Fields
 
@@ -42,7 +44,7 @@ request with `blocked_label` and stops processing later queued pull requests.
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
-## Initial Smoke Policy
+## Default Policy Entries
 
 ```toml
 schema_version = 1
@@ -70,7 +72,45 @@ context = "launchplane"
 
 [policies.github_token]
 env_var = "GH_TOKEN"
+
+[[policies]]
+repository = "cbusillo/codex-skills"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+merge_method = "merge"
+failure_policy = "pause_train"
+
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+
+[policies.service_authz]
+action = "merge_train.run_once"
+product = "launchplane"
+context = "launchplane"
+
+[policies.github_token]
+env_var = "GH_TOKEN"
 ```
+
+## Operator Changes
+
+To add or change a repository policy without editing generic service logic,
+update the TOML policy source and deploy Launchplane. The service resolves
+repository/base branch requests from that typed policy before authorization,
+token lookup, or GitHub calls, so unsupported pairs fail closed.
+
+Use `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` for a deploy-projected inline TOML
+payload or `LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE` for an operator-managed file on
+the service host. `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` takes precedence when
+both are set. The payload must include every policy the service should support;
+env overrides replace the default checked-in policy set rather than merging with
+it.
 
 ## Discoverability
 
@@ -78,12 +118,12 @@ The contract is available to dry-run tooling with:
 
 ```sh
 uv run launchplane work-graph merge-train-policy \
-  --repository cbusillo/sellyouroutboard \
+  --repository cbusillo/codex-skills \
   --base-branch main
 ```
 
-Operators can validate an external bootstrap TOML without treating it as live
-authority:
+Operators can validate an external TOML before projecting it into deployment
+configuration:
 
 ```sh
 uv run launchplane work-graph merge-train-policy \
@@ -102,7 +142,7 @@ uv run launchplane work-graph merge-train-dry-run \
   --snapshot-file path/to/merge-train-snapshot.json
 ```
 
-The smoke-target run-once command reads a live GitHub snapshot for the selected
+The run-once command reads a live GitHub snapshot for the selected
 repository/base branch and reports the same worker-step intent without mutating
 by default:
 
@@ -112,12 +152,12 @@ GH_TOKEN=... uv run launchplane work-graph merge-train-run-once
 
 The deployed Launchplane service projects the work-graph GitHub credential into
 `GH_TOKEN` from the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deployment secret, so the
-bundled smoke policy uses that same service-host token source.
+default policies use that same service-host token source.
 
 Passing `--mutate` applies exactly one worker transition from that fresh
-snapshot. Use it only from the intended operator environment for the smoke
-target; the command is a narrow bootstrap surface, not a long-running train
-scheduler.
+snapshot. Use it only from the intended operator environment for the smoke or
+configured target; the command is a narrow bootstrap surface, not a long-running
+train scheduler.
 
 The dry-run orders eligible pull requests by `created_at` and then PR number. It
 excludes draft, closed, unlabeled, or unauthorized entries and fails closed when

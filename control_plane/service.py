@@ -76,11 +76,9 @@ from control_plane.contracts.every_code_summary_read_model import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
-from control_plane.contracts.merge_train_policy import (
-    build_sellyouroutboard_main_merge_train_policy,
-)
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
+from control_plane.merge_train_policy_source import load_launchplane_merge_train_policy
 from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
@@ -455,6 +453,8 @@ _LAUNCHPLANE_SELF_DEPLOY_OAUTH_ENV_KEYS = frozenset(
         "LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT",
         "LAUNCHPLANE_WORK_GRAPH_GH_BINARY",
         "GH_TOKEN",
+        "LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML",
+        "LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE",
     }
 )
 
@@ -6242,7 +6242,7 @@ def create_launchplane_service_app(
                             "base_branch": str((query.get("base_branch") or ["main"])[0] or ""),
                         }
                     )
-                    policy = build_sellyouroutboard_main_merge_train_policy()
+                    policy = load_launchplane_merge_train_policy()
                     repository_policy = policy.find_repository_policy(
                         repository=admission_request.repository,
                         base_branch=admission_request.base_branch,
@@ -6649,7 +6649,7 @@ def create_launchplane_service_app(
                 driver_result = {"request": record.model_dump(mode="json")}
             elif path == _MERGE_TRAIN_RUN_ONCE_ROUTE:
                 merge_train_request = MergeTrainRunOnceEnvelope.model_validate(payload)
-                policy = build_sellyouroutboard_main_merge_train_policy()
+                policy = load_launchplane_merge_train_policy()
                 repository_policy = policy.find_repository_policy(
                     repository=merge_train_request.repository,
                     base_branch=merge_train_request.base_branch,
