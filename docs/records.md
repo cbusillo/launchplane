@@ -702,11 +702,22 @@ preflights.
   metadata, trace id, recorded timestamp, and optional one-step worker result.
   The record is evidence for a single Level 1 ordered-queue service call, not
   queue authority for a later pass.
-- The full batch train will need additional persisted records for durable queue
-  entries, batch candidates, candidate check evidence, and PR-native landing
-  plans. Those records must preserve the same DB-backed authority boundary:
-  runtime train state belongs in Launchplane storage, not checked-in config,
-  service-host env, logs, or product-repo conditionals.
+- Full batch train candidates are persisted as
+  `launchplane_merge_train_batch_candidates` records. Each record stores the
+  repository/base branch, observed base SHA, ordered PR entries, candidate ref,
+  candidate SHA when available, policy key and digest, candidate status, check
+  status summary, source, and update timestamp. These records are the durable
+  evidence for a speculative batch candidate, not checked-in configuration.
+- Full batch train landing plans are persisted as
+  `launchplane_merge_train_batch_landing_plans` records. Each record stores the
+  candidate identity, repository/base branch, candidate SHA, policy key and
+  digest, and ordered PR-native landing entries with expected head/base SHAs,
+  merge method, and per-entry landing status.
+- The full batch train may add more persisted records for explicit queue entries
+  and detailed candidate check evidence. Those records must preserve the same
+  DB-backed authority boundary: runtime train state belongs in Launchplane
+  storage, not checked-in config, service-host env, logs, or product-repo
+  conditionals.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

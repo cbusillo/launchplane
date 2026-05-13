@@ -37,6 +37,10 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlanRecord,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -604,6 +608,60 @@ class LaunchplaneMergeTrainPolicyRow(Base):
     source: Mapped[str] = mapped_column(String, nullable=False)
     updated_at: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainBatchCandidateRow(Base):
+    __tablename__ = "launchplane_merge_train_batch_candidates"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_batch_candidates_repository_base_idx",
+            "repository",
+            "base_branch",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_merge_train_batch_candidates_status_idx",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    batch_id: Mapped[str] = mapped_column(String, nullable=False)
+    candidate_status: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainBatchLandingPlanRow(Base):
+    __tablename__ = "launchplane_merge_train_batch_landing_plans"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_batch_landing_plans_repository_base_idx",
+            "repository",
+            "base_branch",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_merge_train_batch_landing_plans_status_idx",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    batch_id: Mapped[str] = mapped_column(String, nullable=False)
+    plan_id: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1510,6 +1568,92 @@ class PostgresRecordStore(HumanSessionStore):
                 policy_sha256=record.policy_sha256,
                 payload=self._payload_dict(record),
             )
+        )
+
+    def write_merge_train_batch_candidate_record(
+        self, record: MergeTrainBatchCandidateRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainBatchCandidateRow(
+                record_id=record.record_id,
+                status=record.status,
+                source=record.source,
+                updated_at=record.updated_at,
+                repository=record.candidate.repository,
+                base_branch=record.candidate.base_branch,
+                batch_id=record.candidate.batch_id,
+                candidate_status=record.candidate.status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeTrainBatchCandidateRow.repository == repository)
+        if base_branch:
+            filters.append(LaunchplaneMergeTrainBatchCandidateRow.base_branch == base_branch)
+        if status:
+            filters.append(LaunchplaneMergeTrainBatchCandidateRow.status == status)
+        return self._list_models(
+            model_type=MergeTrainBatchCandidateRecord,
+            orm_model=LaunchplaneMergeTrainBatchCandidateRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainBatchCandidateRow.updated_at.desc(),
+                LaunchplaneMergeTrainBatchCandidateRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
+    def write_merge_train_batch_landing_plan_record(
+        self, record: MergeTrainBatchLandingPlanRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainBatchLandingPlanRow(
+                record_id=record.record_id,
+                status=record.status,
+                source=record.source,
+                updated_at=record.updated_at,
+                repository=record.landing_plan.repository,
+                base_branch=record.landing_plan.base_branch,
+                batch_id=record.landing_plan.batch_id,
+                plan_id=record.landing_plan.plan_id,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_merge_train_batch_landing_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.repository == repository)
+        if base_branch:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.base_branch == base_branch)
+        if status:
+            filters.append(LaunchplaneMergeTrainBatchLandingPlanRow.status == status)
+        return self._list_models(
+            model_type=MergeTrainBatchLandingPlanRecord,
+            orm_model=LaunchplaneMergeTrainBatchLandingPlanRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainBatchLandingPlanRow.updated_at.desc(),
+                LaunchplaneMergeTrainBatchLandingPlanRow.record_id.desc(),
+            ),
+            limit=limit,
         )
 
     def list_merge_train_policy_records(
@@ -2477,6 +2621,8 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_pr_feedback": 0,
             "every_code_preview_gates": 0,
             "agent_write_intents": 0,
+            "merge_train_batch_candidates": 0,
+            "merge_train_batch_landing_plans": 0,
             "merge_train_policies": 0,
             "merge_train_runs": 0,
             "release_tuples": 0,
@@ -2547,6 +2693,14 @@ class PostgresRecordStore(HumanSessionStore):
             for run_record in filesystem_store.list_merge_train_run_records():
                 self.write_merge_train_run_record(run_record)
                 counts["merge_train_runs"] += 1
+        if hasattr(filesystem_store, "list_merge_train_batch_candidate_records"):
+            for candidate_record in filesystem_store.list_merge_train_batch_candidate_records():
+                self.write_merge_train_batch_candidate_record(candidate_record)
+                counts["merge_train_batch_candidates"] += 1
+        if hasattr(filesystem_store, "list_merge_train_batch_landing_plan_records"):
+            for plan_record in filesystem_store.list_merge_train_batch_landing_plan_records():
+                self.write_merge_train_batch_landing_plan_record(plan_record)
+                counts["merge_train_batch_landing_plans"] += 1
         if hasattr(filesystem_store, "list_merge_train_policy_records"):
             for merge_train_policy_record in filesystem_store.list_merge_train_policy_records():
                 self.write_merge_train_policy_record(merge_train_policy_record)

@@ -12,6 +12,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 MergeTrainBatchCandidateStatus = Literal[
     "planned", "building", "ready_for_checks", "passed", "failed", "stale", "blocked"
 ]
+MergeTrainBatchRecordStatus = Literal["active", "superseded"]
 MergeTrainBatchLandingStatus = Literal[
     "planned", "merging", "merged", "blocked", "stale", "skipped"
 ]
@@ -158,6 +159,56 @@ class MergeTrainBatchLandingPlan(BaseModel):
         positions = [entry.position for entry in self.entries]
         if positions != list(range(1, len(positions) + 1)):
             raise ValueError("merge train batch landing plan positions must be contiguous")
+        return self
+
+
+class MergeTrainBatchCandidateRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    record_id: str
+    status: MergeTrainBatchRecordStatus = "active"
+    source: str
+    updated_at: str
+    candidate: MergeTrainBatchCandidate
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> "MergeTrainBatchCandidateRecord":
+        self.record_id = _normalize_required_value(
+            self.record_id, "merge train batch candidate record requires record_id"
+        )
+        self.source = _normalize_required_value(
+            self.source, "merge train batch candidate record requires source"
+        )
+        self.updated_at = _normalize_required_value(
+            self.updated_at,
+            "merge train batch candidate record requires updated_at",
+        )
+        return self
+
+
+class MergeTrainBatchLandingPlanRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    record_id: str
+    status: MergeTrainBatchRecordStatus = "active"
+    source: str
+    updated_at: str
+    landing_plan: MergeTrainBatchLandingPlan
+
+    @model_validator(mode="after")
+    def _validate_record(self) -> "MergeTrainBatchLandingPlanRecord":
+        self.record_id = _normalize_required_value(
+            self.record_id, "merge train batch landing plan record requires record_id"
+        )
+        self.source = _normalize_required_value(
+            self.source, "merge train batch landing plan record requires source"
+        )
+        self.updated_at = _normalize_required_value(
+            self.updated_at,
+            "merge train batch landing plan record requires updated_at",
+        )
         return self
 
 

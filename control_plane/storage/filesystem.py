@@ -17,6 +17,8 @@ from control_plane.contracts.every_code_work_request import (
 )
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -164,6 +166,66 @@ class FilesystemRecordStore:
 
     def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
         return self._write_model("launchplane_merge_train_policies", record.record_id, record)
+
+    def write_merge_train_batch_candidate_record(
+        self, record: MergeTrainBatchCandidateRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_batch_candidates", record.record_id, record
+        )
+
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainBatchCandidateRecord,
+                "launchplane_merge_train_batch_candidates",
+            )
+            if (not repository or record.candidate.repository == repository)
+            and (not base_branch or record.candidate.base_branch == base_branch)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_merge_train_batch_landing_plan_record(
+        self, record: MergeTrainBatchLandingPlanRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_batch_landing_plans", record.record_id, record
+        )
+
+    def list_merge_train_batch_landing_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchLandingPlanRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainBatchLandingPlanRecord,
+                "launchplane_merge_train_batch_landing_plans",
+            )
+            if (not repository or record.landing_plan.repository == repository)
+            and (not base_branch or record.landing_plan.base_branch == base_branch)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def list_merge_train_policy_records(
         self,
