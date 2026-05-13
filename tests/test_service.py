@@ -1227,7 +1227,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -1291,7 +1291,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
         with (
             TemporaryDirectory() as temporary_directory_name,
-            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             app = create_launchplane_service_app(
                 state_dir=Path(temporary_directory_name) / "state",
@@ -1346,7 +1346,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     "control_plane.service.GitHubMergeTrainSnapshotReader",
                     _FakeMergeTrainSnapshotReader,
                 ),
-                patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+                patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
             ):
                 status_code, payload = _invoke_app(
                     app,

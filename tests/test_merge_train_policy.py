@@ -33,7 +33,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(repository_policy.service_authz.action, "merge_train.run_once")
         self.assertEqual(repository_policy.service_authz.product, "launchplane")
         self.assertEqual(repository_policy.service_authz.context, "launchplane")
-        self.assertEqual(repository_policy.github_token.env_var, "GITHUB_TOKEN")
+        self.assertEqual(repository_policy.github_token.env_var, "GH_TOKEN")
         self.assertEqual(len(policy.policy_sha256), 64)
 
     def test_parse_rejects_duplicate_repository_branch_policy(self) -> None:
@@ -115,9 +115,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         payload = json.loads(result.output)
         self.assertEqual(payload["status"], "ok")
         self.assertEqual(payload["repository_count"], 1)
-        self.assertEqual(
-            payload["selected_policy"]["repository"], "cbusillo/sellyouroutboard"
-        )
+        self.assertEqual(payload["selected_policy"]["repository"], "cbusillo/sellyouroutboard")
         self.assertEqual(payload["selected_policy"]["base_branch"], "main")
 
 

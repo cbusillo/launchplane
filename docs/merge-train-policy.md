@@ -69,7 +69,7 @@ product = "launchplane"
 context = "launchplane"
 
 [policies.github_token]
-env_var = "GITHUB_TOKEN"
+env_var = "GH_TOKEN"
 ```
 
 ## Discoverability
@@ -107,8 +107,12 @@ repository/base branch and reports the same worker-step intent without mutating
 by default:
 
 ```sh
-GITHUB_TOKEN=... uv run launchplane work-graph merge-train-run-once
+GH_TOKEN=... uv run launchplane work-graph merge-train-run-once
 ```
+
+The deployed Launchplane service projects the work-graph GitHub credential into
+`GH_TOKEN` from the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deployment secret, so the
+bundled smoke policy uses that same service-host token source.
 
 Passing `--mutate` applies exactly one worker transition from that fresh
 snapshot. Use it only from the intended operator environment for the smoke
