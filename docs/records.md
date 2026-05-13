@@ -700,8 +700,13 @@ preflights.
   records. Each record stores the repository/base branch, mode, status, policy
   key and digest, fresh GitHub snapshot, dry-run decision, selected pull request
   metadata, trace id, recorded timestamp, and optional one-step worker result.
-  The record is evidence for a single service call, not queue authority for a
-  later pass.
+  The record is evidence for a single Level 1 ordered-queue service call, not
+  queue authority for a later pass.
+- The full batch train will need additional persisted records for durable queue
+  entries, batch candidates, candidate check evidence, and PR-native landing
+  plans. Those records must preserve the same DB-backed authority boundary:
+  runtime train state belongs in Launchplane storage, not checked-in config,
+  service-host env, logs, or product-repo conditionals.
 - Scoped agent write-intent evaluation is exposed at
   `POST /v1/agent/write-intents/evaluate`. It validates intent shape, maps the
   intent to an exact existing policy action, evaluates authorization, and returns

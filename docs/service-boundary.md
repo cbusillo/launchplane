@@ -214,13 +214,14 @@ returns the queue payload under `result.queue`. The route requires the
 writes, and does not make Launchplane authoritative for copied GitHub or Code
 Plans state.
 
-`POST /v1/work-graph/merge-train/run-once` executes one policy-backed
-merge-train pass for a requested repository/base branch. It requires the
+`POST /v1/work-graph/merge-train/run-once` executes one policy-backed Level 1
+ordered-queue pass for a requested repository/base branch. It requires the
 `service_authz` action/product/context declared by the matching merge-train
 repository policy, resolves its GitHub token from that policy's
 `github_token.env_var`, and fails closed before GitHub calls when no matching
 policy or token is available. The route is dry-run by default; `mutate: true`
-applies at most one worker transition from one fresh snapshot.
+applies at most one worker transition from one fresh snapshot. This route is the
+deployed sequential baseline, not the full batch train target.
 
 `GET /v1/work-graph/merge-train/admission` returns the stored-history scheduler
 admission decision for a requested `repository` and `base_branch`. It uses the
@@ -278,7 +279,7 @@ silently omitting the failure. The endpoint writes no records, fetches no issue
 bodies, and must preserve the lower-level redaction/provenance rules.
 
 `POST /v1/work-graph/merge-train/run-once` is the authenticated service ingress
-for one merge-train read or mutation pass. It resolves repository/base policy
+for one ordered-queue read or mutation pass. It resolves repository/base policy
 from the active DB-backed `launchplane_merge_train_policies` record before
 authorization, token lookup, or GitHub reads. If no active record exists, the
 service fails closed with `merge_train_policy_not_configured`; policy creation
@@ -287,6 +288,12 @@ service-host env overrides. It authorizes against the policy's `service_authz`,
 reads a fresh GitHub snapshot, and writes a `launchplane_merge_train_runs` record
 for accepted dry-run and mutate calls. Mutation mode still applies at most one
 worker transition from that snapshot.
+
+The full batch train will use additional service contracts and records rather
+than overloading `run-once`. Its target behavior is to build one combined
+candidate from the base branch plus multiple queued PRs, run required checks on
+that candidate commit, and then land the original PRs in queue order through
+GitHub's normal PR merge path after pre-merge invariants are rechecked.
 
 `POST /v1/merge-train/policies/import` is the service-owned write path for merge
 train policy records. It requires database storage and
