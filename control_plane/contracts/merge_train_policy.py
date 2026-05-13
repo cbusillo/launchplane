@@ -85,9 +85,7 @@ class MergeTrainRepositoryPolicy(BaseModel):
     enqueue: MergeTrainEnqueuePolicy
     merge_identity: MergeTrainIdentity
     service_authz: MergeTrainServiceAuthz = Field(default_factory=MergeTrainServiceAuthz)
-    github_token: MergeTrainGitHubTokenSource = Field(
-        default_factory=MergeTrainGitHubTokenSource
-    )
+    github_token: MergeTrainGitHubTokenSource = Field(default_factory=MergeTrainGitHubTokenSource)
 
     @model_validator(mode="after")
     def _validate_repository_policy(self) -> "MergeTrainRepositoryPolicy":
@@ -151,8 +149,7 @@ class MergeTrainPolicy(BaseModel):
             ):
                 return repository_policy
         raise ValueError(
-            "merge train policy not found for "
-            f"{normalized_repository}:{normalized_base_branch}"
+            f"merge train policy not found for {normalized_repository}:{normalized_base_branch}"
         )
 
 
@@ -180,7 +177,7 @@ product = "launchplane"
 context = "launchplane"
 
 [policies.github_token]
-env_var = "GITHUB_TOKEN"
+env_var = "GH_TOKEN"
 """
 
 

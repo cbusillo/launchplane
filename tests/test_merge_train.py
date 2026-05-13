@@ -56,9 +56,7 @@ class _FakeMergeClient:
         head_sha: str,
         merge_method: str,
     ) -> str:
-        self.merged_pull_requests.append(
-            (repository, pull_request_number, head_sha, merge_method)
-        )
+        self.merged_pull_requests.append((repository, pull_request_number, head_sha, merge_method))
         return f"merge-{pull_request_number}"
 
 
@@ -162,8 +160,9 @@ class MergeTrainDryRunTests(unittest.TestCase):
                         "repository": "cbusillo/sellyouroutboard",
                         "base_branch": "main",
                         "pull_requests": [
-                            _pull_request(22, created_at="2026-05-08T22:00:00Z")
-                            .model_dump(mode="json")
+                            _pull_request(22, created_at="2026-05-08T22:00:00Z").model_dump(
+                                mode="json"
+                            )
                         ],
                     }
                 ),
@@ -204,7 +203,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 "control_plane.cli.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ) as reader_class,
-            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             result = CliRunner().invoke(
                 main,
@@ -271,7 +270,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 return_value=snapshot_reader,
             ),
             patch("control_plane.cli.GitHubMergeTrainClient", _FakeGitHubClient),
-            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             result = CliRunner().invoke(
                 main,
@@ -317,7 +316,7 @@ class MergeTrainDryRunTests(unittest.TestCase):
                 "control_plane.cli.GitHubMergeTrainSnapshotReader",
                 return_value=snapshot_reader,
             ),
-            patch.dict("os.environ", {"GITHUB_TOKEN": "token"}, clear=True),
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
         ):
             result = CliRunner().invoke(
                 main,
@@ -548,9 +547,7 @@ class MergeTrainWaitTests(unittest.TestCase):
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
-                pull_requests=(
-                    _pull_request(61, required_checks_status="pending"),
-                ),
+                pull_requests=(_pull_request(61, required_checks_status="pending"),),
             ),
         )
 
@@ -570,9 +567,7 @@ class MergeTrainWaitTests(unittest.TestCase):
             snapshot=MergeTrainDryRunSnapshot(
                 repository="cbusillo/sellyouroutboard",
                 base_branch="main",
-                pull_requests=(
-                    _pull_request(62, mergeable="unknown"),
-                ),
+                pull_requests=(_pull_request(62, mergeable="unknown"),),
             ),
         )
 
