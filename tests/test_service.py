@@ -1697,6 +1697,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            identity = _identity(
+                repository="cbusillo/launchplane",
+                workflow_ref=(
+                    "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                ),
+                event_name="workflow_dispatch",
+            )
             policy = LaunchplaneAuthzPolicy.model_validate(
                 {
                     "github_actions": [
@@ -1715,15 +1722,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             app = create_launchplane_service_app(
                 state_dir=root / "state",
-                verifier=_StubVerifier(
-                    _identity(
-                        repository="cbusillo/launchplane",
-                        workflow_ref=(
-                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
-                        ),
-                        event_name="workflow_dispatch",
-                    )
-                ),
+                verifier=_StubVerifier(identity),
                 authz_policy=policy,
                 control_plane_root_path=root,
                 database_url=database_url,
@@ -1749,7 +1748,13 @@ class LaunchplaneServiceTests(unittest.TestCase):
             records = store.list_merge_train_policy_records(status="active")
             try:
                 idempotency_record = store.read_idempotency_record(
-                    scope="launchplane",
+                    scope="|".join(
+                        (
+                            identity.repository,
+                            identity.workflow_ref,
+                            identity.subject,
+                        )
+                    ),
                     route_path="/v1/merge-train/policies/import",
                     idempotency_key="merge-train-policy:dry-run",
                 )
@@ -1762,6 +1767,65 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(payload["result"]["mode"], "dry_run")
         self.assertEqual(records, ())
         self.assertIsNone(idempotency_record)
+
+    def test_merge_train_policy_import_endpoint_rejects_non_launchplane_product(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(root / "launchplane.sqlite3")
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["launchplane", "other-product"],
+                            "contexts": ["launchplane"],
+                            "actions": ["launchplane_service_deploy.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=root / "state",
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/deploy-launchplane.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+                database_url=database_url,
+            )
+            record = build_test_merge_train_policy_record(
+                repository="cbusillo/codex-skills",
+                record_id="merge-train-policy-codex-skills-wrong-product",
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="POST",
+                path="/v1/merge-train/policies/import",
+                payload={
+                    "schema_version": 1,
+                    "product": "other-product",
+                    "mode": "apply",
+                    "reason": "Attempt cross-product policy import.",
+                    "record": record.model_dump(mode="json"),
+                },
+                headers={"Idempotency-Key": "merge-train-policy:wrong-product"},
+            )
+
+        self.assertEqual(status_code, 400)
+        self.assertEqual(payload["error"]["code"], "invalid_request")
 
     def test_every_code_github_webhook_creates_work_request(self) -> None:
         secret = "launchplane-every-code-webhook-secret"

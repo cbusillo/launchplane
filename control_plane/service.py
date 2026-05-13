@@ -936,6 +936,8 @@ class MergeTrainPolicyImportEnvelope(BaseModel):
     @model_validator(mode="after")
     def _validate_envelope(self) -> "MergeTrainPolicyImportEnvelope":
         self.product = self.product.strip() or "launchplane"
+        if self.product != "launchplane":
+            raise ValueError("merge train policy import requires product 'launchplane'")
         self.reason = self.reason.strip()
         if self.mode == "apply" and not self.reason:
             raise ValueError("merge train policy import apply requires reason")
@@ -3681,6 +3683,12 @@ def _should_store_idempotency_record(
             "/v1/authz-policies/github-humans/grants",
             "/v1/authz-policies/terminal-agents/grants",
         }
+        and isinstance(driver_result, dict)
+        and driver_result.get("mode") == "dry_run"
+    ):
+        return False
+    if (
+        path == "/v1/merge-train/policies/import"
         and isinstance(driver_result, dict)
         and driver_result.get("mode") == "dry_run"
     ):
