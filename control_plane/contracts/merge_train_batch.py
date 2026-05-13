@@ -7,6 +7,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
+from control_plane.merge_train import MergeTrainDryRunResult
 
 
 MergeTrainBatchCandidateStatus = Literal[
@@ -210,6 +211,60 @@ class MergeTrainBatchLandingPlanRecord(BaseModel):
             "merge train batch landing plan record requires updated_at",
         )
         return self
+
+
+def build_merge_train_batch_candidate(
+    *,
+    dry_run_result: MergeTrainDryRunResult,
+    base_sha: str,
+    policy_sha256: str,
+    created_at: str,
+) -> MergeTrainBatchCandidate:
+    if dry_run_result.intended_next_action not in ("merge", "idle"):
+        raise ValueError("merge train batch candidate requires a queue without blocking actions")
+    queue_by_number = {entry.number: entry for entry in dry_run_result.queue}
+    entries: list[MergeTrainBatchEntry] = []
+    for pull_request_number in dry_run_result.queue_order:
+        queue_entry = queue_by_number[pull_request_number]
+        if not queue_entry.eligible:
+            raise ValueError("merge train batch candidate requires eligible queue entries")
+        entries.append(
+            MergeTrainBatchEntry(
+                pull_request_number=queue_entry.number,
+                position=len(entries) + 1,
+                head_sha=queue_entry.head_sha,
+                title=queue_entry.title,
+                url=queue_entry.url,
+            )
+        )
+    if not entries:
+        raise ValueError("merge train batch candidate requires at least one eligible PR")
+    normalized_base_sha = _normalize_required_value(
+        base_sha, "merge train batch candidate builder requires base_sha"
+    )
+    batch_id = build_merge_train_batch_id(
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        base_sha=normalized_base_sha,
+        entry_head_shas=tuple(entry.head_sha for entry in entries),
+    )
+    return MergeTrainBatchCandidate(
+        batch_id=batch_id,
+        repository=dry_run_result.repository,
+        base_branch=dry_run_result.base_branch,
+        base_sha=normalized_base_sha,
+        policy_key=dry_run_result.policy_key,
+        policy_sha256=policy_sha256,
+        candidate_ref=build_merge_train_batch_candidate_ref(
+            repository=dry_run_result.repository,
+            base_branch=dry_run_result.base_branch,
+            batch_id=batch_id,
+        ),
+        status="planned",
+        entries=tuple(entries),
+        created_at=created_at,
+        updated_at=created_at,
+    )
 
 
 def build_merge_train_batch_id(
