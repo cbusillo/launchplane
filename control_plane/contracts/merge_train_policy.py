@@ -11,6 +11,7 @@ MergeTrainActorRole = Literal["repo_owner", "repo_admin"]
 MergeTrainFailurePolicy = Literal["pause_train", "continue_after_blocking_pr"]
 MergeTrainIdentityKind = Literal["github_actions_oidc", "github_app", "github_token_secret"]
 MergeTrainMergeMethod = Literal["merge", "squash", "rebase"]
+MergeTrainPolicyRecordStatus = Literal["active", "superseded"]
 
 
 class MergeTrainEnqueuePolicy(BaseModel):
@@ -153,32 +154,42 @@ class MergeTrainPolicy(BaseModel):
         )
 
 
-SELLYOUROUTBOARD_MAIN_POLICY_TOML = """schema_version = 1
+class MergeTrainPolicyRecord(BaseModel):
+    model_config = ConfigDict(extra="forbid")
 
-[[policies]]
-repository = "cbusillo/sellyouroutboard"
-base_branch = "main"
-enqueue_label = "ready-to-merge"
-blocked_label = "merge-blocked"
-merge_method = "merge"
-failure_policy = "pause_train"
+    schema_version: int = Field(default=1, ge=1)
+    record_id: str
+    status: MergeTrainPolicyRecordStatus = "active"
+    source: str
+    updated_at: str
+    policy_sha256: str = ""
+    policy: MergeTrainPolicy
 
-[policies.enqueue]
-label_required = true
-allowed_actor_roles = ["repo_owner", "repo_admin"]
+    @model_validator(mode="after")
+    def _validate_record(self) -> "MergeTrainPolicyRecord":
+        self.record_id = _normalize_required_value(
+            self.record_id, "merge train policy record requires record_id"
+        )
+        self.source = _normalize_required_value(
+            self.source, "merge train policy record requires source"
+        )
+        self.updated_at = _normalize_required_value(
+            self.updated_at, "merge train policy record requires updated_at"
+        )
+        computed_sha256 = self.policy.policy_sha256
+        if not self.policy_sha256:
+            self.policy_sha256 = computed_sha256
+        if self.policy_sha256 != computed_sha256:
+            raise ValueError(
+                "merge train policy record policy_sha256 does not match policy payload"
+            )
+        return self
 
-[policies.merge_identity]
-kind = "github_actions_oidc"
-name = "launchplane-merge-train"
 
-[policies.service_authz]
-action = "merge_train.run_once"
-product = "launchplane"
-context = "launchplane"
-
-[policies.github_token]
-env_var = "GH_TOKEN"
-"""
+def build_merge_train_policy_record_id(*, updated_at: str, policy_sha256: str) -> str:
+    normalized_timestamp = updated_at.replace("-", "").replace(":", "")
+    normalized_timestamp = normalized_timestamp.replace("+00:00", "Z")
+    return f"merge-train-policy-{normalized_timestamp}-{policy_sha256[:12]}"
 
 
 def parse_merge_train_policy_toml(policy_toml: str) -> MergeTrainPolicy:
@@ -187,18 +198,6 @@ def parse_merge_train_policy_toml(policy_toml: str) -> MergeTrainPolicy:
 
 def load_merge_train_policy(policy_file: Path) -> MergeTrainPolicy:
     return parse_merge_train_policy_toml(policy_file.read_text(encoding="utf-8"))
-
-
-def load_merge_train_policy_from_default_config() -> MergeTrainPolicy:
-    return load_merge_train_policy(default_merge_train_policy_path())
-
-
-def build_sellyouroutboard_main_merge_train_policy() -> MergeTrainPolicy:
-    return parse_merge_train_policy_toml(SELLYOUROUTBOARD_MAIN_POLICY_TOML)
-
-
-def default_merge_train_policy_path() -> Path:
-    return Path(__file__).resolve().parents[1] / "config" / "merge-train-policies.toml"
 
 
 def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:

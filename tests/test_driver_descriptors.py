@@ -434,6 +434,7 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
                     "/v1/authz-policies/github-actions/grants",
                     "/v1/authz-policies/github-humans/grants",
                     "/v1/authz-policies/terminal-agents/grants",
+                    "/v1/merge-train/policies/import",
                 }
             ),
         )

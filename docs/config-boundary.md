@@ -55,18 +55,15 @@ terminal-agent and local-operator keys.
 
 | Work graph GitHub Project read source | `LAUNCHPLANE_WORK_GRAPH_PROJECT_OWNER`, `LAUNCHPLANE_WORK_GRAPH_PROJECT_NUMBER`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_PROJECT_SIGNAL_LIMIT`, optional `LAUNCHPLANE_WORK_GRAPH_GH_BINARY` | Service target env | Opt-in read source for compact Project fields plus bounded dependency, subissue, and PR check signals. Deploy automation forwards these values only when the GitHub Project token secret is present. Requires a `gh` credential with the GitHub CLI `project` scope. Does not store copied issue bodies. |
 | Work graph and merge-train GitHub token | `GH_TOKEN` from deploy secret `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` | Platform secret projected into service target env | Authenticates the service's non-interactive `gh` reads and merge-train GitHub API calls. The token must have enough GitHub access for the configured Project, issue/PR signal reads, and the configured merge-train repository. |
-| Merge-train policy source | `control_plane/config/merge-train-policies.toml`, optional `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML`, optional `LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE` | Launchplane-owned repo config or explicit deploy override | Defines supported repository/base branch merge-train policies. The service fails closed for unsupported pairs before GitHub calls. Env overrides replace the checked-in policy set for operator-managed deployments. |
-
-`LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` takes precedence over
-`LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE` when both are present. Deploy automation
-forwards either override even when the work-graph GitHub token secret is absent,
-but accepted live merge-train runs still require the configured `github_token`
-environment variable to resolve at request time.
 
 ### DB Authoritative
 
 These values are live mutable control-plane config and should resolve from
 Launchplane records/secrets instead of repo files or operator-local env.
+
+| Class | Current surface | Final authority | Notes |
+| --- | --- | --- | --- |
+| Merge-train repository policy | `launchplane_merge_train_policies` | DB-backed Launchplane policy record | Defines supported repository/base branch merge-train policies. The service fails closed when no active policy record exists and for unsupported pairs before GitHub calls. Repo TOML files are not a supported live authority. |
 
 | Class | Current surface(s) | Final authority | Notes |
 | --- | --- | --- | --- |

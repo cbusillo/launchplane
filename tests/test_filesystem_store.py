@@ -16,6 +16,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -39,6 +40,7 @@ from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeSecretSafetyRule,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
 
 def _artifact_identity(artifact_id: str) -> ArtifactIdentityReference:
@@ -237,6 +239,42 @@ class FilesystemRecordStoreTests(unittest.TestCase):
         )
         self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
         self.assertEqual(listed_records[0].rules[0].allowed_contexts, ("opw",))
+
+    def test_write_and_list_merge_train_policy_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            policy = build_test_merge_train_policy_with_codex_skills()
+            older_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-20260513T200000Z-old",
+                status="superseded",
+                source="test",
+                updated_at="2026-05-13T20:00:00Z",
+                policy=policy,
+            )
+            active_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-20260513T210000Z-active",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T21:00:00Z",
+                policy=policy,
+            )
+
+            store.write_merge_train_policy_record(older_record)
+            written_path = store.write_merge_train_policy_record(active_record)
+            listed_records = store.list_merge_train_policy_records(status="active")
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_merge_train_policies/merge-train-policy-20260513T210000Z-active.json",
+        )
+        self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
+        self.assertEqual(
+            listed_records[0]
+            .policy.find_repository_policy(repository="cbusillo/codex-skills", base_branch="main")
+            .enqueue_label,
+            "ready-to-merge",
+        )
 
     def test_write_and_read_artifact_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

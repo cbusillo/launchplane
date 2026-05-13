@@ -32,9 +32,7 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.every_code_work_request import EveryCodeWorkRequestRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
-from control_plane.contracts.merge_train_policy import (
-    build_sellyouroutboard_main_merge_train_policy,
-)
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_run_record import (
     MergeTrainRunRecord,
     build_merge_train_run_record,
@@ -98,6 +96,8 @@ from control_plane.service_auth import (
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.storage.postgres import PostgresRecordStore
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy
+from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -509,10 +509,8 @@ def _agent_write_intent_record(
     )
 
 
-def _merge_train_run_record(
-    *, recorded_at: str = "2026-05-09T02:05:00Z"
-) -> MergeTrainRunRecord:
-    policy = build_sellyouroutboard_main_merge_train_policy()
+def _merge_train_run_record(*, recorded_at: str = "2026-05-09T02:05:00Z") -> MergeTrainRunRecord:
+    policy = build_test_merge_train_policy()
     snapshot = MergeTrainDryRunSnapshot(
         repository="cbusillo/sellyouroutboard",
         base_branch="main",
@@ -1188,6 +1186,69 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(evaluate_result.exit_code, 0, evaluate_result.output)
         self.assertIn('"status": "pass"', evaluate_result.output)
 
+    def test_merge_train_policy_cli_imports_and_lists_policy(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            policy_file = Path(temporary_directory_name) / "merge-train-policy.toml"
+            policy_file.write_text(
+                """
+schema_version = 1
+
+[[policies]]
+repository = "cbusillo/codex-skills"
+base_branch = "main"
+enqueue_label = "ready-to-merge"
+blocked_label = "merge-blocked"
+merge_method = "merge"
+failure_policy = "pause_train"
+[policies.enqueue]
+label_required = true
+allowed_actor_roles = ["repo_owner", "repo_admin"]
+[policies.merge_identity]
+kind = "github_actions_oidc"
+name = "launchplane-merge-train"
+[policies.github_token]
+env_var = "GH_TOKEN"
+""".strip(),
+                encoding="utf-8",
+            )
+            runner = CliRunner()
+
+            import_result = runner.invoke(
+                main,
+                [
+                    "merge-train-policies",
+                    "import-policy",
+                    "--database-url",
+                    database_url,
+                    "--apply",
+                    "--policy-file",
+                    str(policy_file),
+                    "--source-label",
+                    "test",
+                ],
+            )
+            list_result = runner.invoke(
+                main,
+                [
+                    "merge-train-policies",
+                    "list",
+                    "--database-url",
+                    database_url,
+                    "--status",
+                    "active",
+                ],
+            )
+
+        self.assertEqual(import_result.exit_code, 0, import_result.output)
+        self.assertIn('"repository_count": 1', import_result.output)
+        self.assertIn('"cbusillo/codex-skills:main"', import_result.output)
+        self.assertEqual(list_result.exit_code, 0, list_result.output)
+        self.assertIn('"count": 1', list_result.output)
+        self.assertIn('"cbusillo/codex-skills:main"', list_result.output)
+
     def test_product_profile_records_round_trip(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -1562,6 +1623,43 @@ class PostgresRecordStoreTests(unittest.TestCase):
         self.assertEqual(latest_record.recorded_at if latest_record else "", "2026-05-09T02:06:00Z")
         self.assertEqual(len(listed_records), 2)
         self.assertEqual(listed_records[0].recorded_at, "2026-05-09T02:06:00Z")
+
+    def test_merge_train_policy_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            policy = build_test_merge_train_policy_with_codex_skills()
+            older_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-20260513T200000Z-old",
+                status="superseded",
+                source="test",
+                updated_at="2026-05-13T20:00:00Z",
+                policy=policy,
+            )
+            active_record = MergeTrainPolicyRecord(
+                record_id="merge-train-policy-20260513T210000Z-active",
+                status="active",
+                source="test",
+                updated_at="2026-05-13T21:00:00Z",
+                policy=policy,
+            )
+            store.write_merge_train_policy_record(older_record)
+            store.write_merge_train_policy_record(active_record)
+            listed_records = store.list_merge_train_policy_records(status="active")
+            store.close()
+
+        self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
+        self.assertEqual(listed_records[0].policy_sha256, policy.policy_sha256)
+        self.assertEqual(
+            listed_records[0]
+            .policy.find_repository_policy(repository="cbusillo/codex-skills", base_branch="main")
+            .blocked_label,
+            "merge-blocked",
+        )
 
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
@@ -1950,6 +2048,14 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     ),
                 )
             )
+            filesystem_store.write_merge_train_policy_record(
+                MergeTrainPolicyRecord(
+                    record_id="merge-train-policy-20260513T210000Z-active",
+                    source="test",
+                    updated_at="2026-05-13T21:00:00Z",
+                    policy=build_test_merge_train_policy_with_codex_skills(),
+                )
+            )
             filesystem_store.write_merge_train_run_record(_merge_train_run_record())
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
@@ -1973,6 +2079,7 @@ class PostgresRecordStoreTests(unittest.TestCase):
                     "preview_pr_feedback": 1,
                     "every_code_preview_gates": 0,
                     "agent_write_intents": 0,
+                    "merge_train_policies": 1,
                     "merge_train_runs": 1,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,

@@ -38,6 +38,7 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.lane_summary import LaunchplaneLaneSummary
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -584,6 +585,24 @@ class LaunchplaneMergeTrainRunRow(Base):
     intended_next_action: Mapped[str] = mapped_column(String, nullable=False)
     selected_pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     policy_key: Mapped[str] = mapped_column(String, nullable=False)
+    policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainPolicyRow(Base):
+    __tablename__ = "launchplane_merge_train_policies"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_policies_status_updated_idx",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
     policy_sha256: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
@@ -1480,6 +1499,40 @@ class PostgresRecordStore(HumanSessionStore):
                 payload=self._payload_dict(record),
             )
         )
+
+    def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainPolicyRow(
+                record_id=record.record_id,
+                status=record.status,
+                source=record.source,
+                updated_at=record.updated_at,
+                policy_sha256=record.policy_sha256,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_merge_train_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        filters: list[object] = []
+        if status:
+            filters.append(LaunchplaneMergeTrainPolicyRow.status == status)
+        records = self._list_models(
+            model_type=MergeTrainPolicyRecord,
+            orm_model=LaunchplaneMergeTrainPolicyRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainPolicyRow.updated_at.desc(),
+                LaunchplaneMergeTrainPolicyRow.record_id.desc(),
+            ),
+        )
+        if limit is not None:
+            return records[:limit]
+        return records
 
     def read_merge_train_run_record(self, run_id: str) -> MergeTrainRunRecord:
         return self._read_model(
@@ -2424,6 +2477,7 @@ class PostgresRecordStore(HumanSessionStore):
             "preview_pr_feedback": 0,
             "every_code_preview_gates": 0,
             "agent_write_intents": 0,
+            "merge_train_policies": 0,
             "merge_train_runs": 0,
             "release_tuples": 0,
             "runtime_key_safety_policies": 0,
@@ -2493,6 +2547,10 @@ class PostgresRecordStore(HumanSessionStore):
             for run_record in filesystem_store.list_merge_train_run_records():
                 self.write_merge_train_run_record(run_record)
                 counts["merge_train_runs"] += 1
+        if hasattr(filesystem_store, "list_merge_train_policy_records"):
+            for merge_train_policy_record in filesystem_store.list_merge_train_policy_records():
+                self.write_merge_train_policy_record(merge_train_policy_record)
+                counts["merge_train_policies"] += 1
         for release_tuple_record in filesystem_store.list_release_tuple_records():
             self.write_release_tuple_record(release_tuple_record)
             counts["release_tuples"] += 1

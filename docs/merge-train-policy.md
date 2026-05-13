@@ -1,15 +1,12 @@
 # Merge Train Policy Contract
 
 Launchplane merge trains use an explicit repository policy before any worker is
-allowed to enqueue, update, or merge pull requests. The default Launchplane-owned
-policy set lives at `control_plane/config/merge-train-policies.toml`. Deployments
-may override it with `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` or
-`LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE`; when neither env var is set, service
-routes and CLI tools load the checked-in default policy file.
-
-The default policy set keeps the SellYourOutboard `main` smoke policy available
-as seed/test data and opts `cbusillo/codex-skills:main` into the merge train as
-the first real target.
+allowed to enqueue, update, or merge pull requests. Live service routes resolve
+the active `launchplane_merge_train_policies` record from Launchplane storage.
+If no active record exists, service routes fail closed with
+`merge_train_policy_not_configured`. Operators change live policy by writing a
+new DB-backed policy record, not by relying on checked-in config files,
+service-host env, or generic service-code conditionals.
 
 ## Fields
 
@@ -36,15 +33,18 @@ keeps the runner fail-closed until #410 wires live GitHub role checks.
 
 ## Failure Semantics
 
-The default SellYourOutboard policy uses `pause_train`. If any pull request in
-the train cannot update, pass checks, or merge, Launchplane marks that pull
-request with `blocked_label` and stops processing later queued pull requests.
+Policies using `pause_train` stop processing later queued pull requests after a
+selected pull request cannot update, pass checks, or merge. Launchplane marks
+the blocking pull request with `blocked_label` before stopping.
 
 `continue_after_blocking_pr` is reserved for repositories that explicitly choose
 higher throughput over strict ordering. A worker must still mark the failed pull
 request with `blocked_label` before considering later entries.
 
-## Default Policy Entries
+## Example Policy Entries
+
+The example below is documentation/import material only. It is not packaged as a
+runtime config file and the service does not read it implicitly.
 
 ```toml
 schema_version = 1
@@ -101,16 +101,46 @@ env_var = "GH_TOKEN"
 ## Operator Changes
 
 To add or change a repository policy without editing generic service logic,
-update the TOML policy source and deploy Launchplane. The service resolves
-repository/base branch requests from that typed policy before authorization,
-token lookup, or GitHub calls, so unsupported pairs fail closed.
+import a new active `launchplane_merge_train_policies` record. The service
+resolves repository/base branch requests from the active typed policy record
+before authorization, token lookup, or GitHub calls, so unsupported pairs fail
+closed.
 
-Use `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` for a deploy-projected inline TOML
-payload or `LAUNCHPLANE_MERGE_TRAIN_POLICY_FILE` for an operator-managed file on
-the service host. `LAUNCHPLANE_MERGE_TRAIN_POLICY_TOML` takes precedence when
-both are set. The payload must include every policy the service should support;
-env overrides replace the default checked-in policy set rather than merging with
-it.
+Prepare a TOML payload with every repository/base policy the service should
+support, store it outside the repo or generate it from operator automation, then
+import it through the deployed service API:
+
+```sh
+uv run launchplane merge-train-policies import-policy \
+  --service-url "$LAUNCHPLANE_SERVICE_URL" \
+  --policy-file path/to/merge-train-policy.toml \
+  --source-label operator:update \
+  --reason "Configure merge train repositories" \
+  --apply
+```
+
+The command reads the bearer token from `LAUNCHPLANE_SERVICE_TOKEN` unless a
+browser `--session-cookie` is supplied. Direct `--database-url --apply` import is
+reserved for local development and DB repair, not shared or production live
+mutation.
+
+For local development or DB repair only:
+
+```sh
+uv run launchplane merge-train-policies import-policy \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --policy-file path/to/merge-train-policy.toml \
+  --source-label operator:update \
+  --apply
+```
+
+List active policy records with:
+
+```sh
+uv run launchplane merge-train-policies list \
+  --database-url "$LAUNCHPLANE_DATABASE_URL" \
+  --status active
+```
 
 ## Discoverability
 
@@ -118,12 +148,12 @@ The contract is available to dry-run tooling with:
 
 ```sh
 uv run launchplane work-graph merge-train-policy \
+  --policy-file path/to/merge-train-policy.toml \
   --repository cbusillo/codex-skills \
   --base-branch main
 ```
 
-Operators can validate an external TOML before projecting it into deployment
-configuration:
+Operators can validate an external TOML before importing it as a policy record:
 
 ```sh
 uv run launchplane work-graph merge-train-policy \
@@ -139,7 +169,8 @@ and reports queue order plus the next intended action without mutating GitHub:
 
 ```sh
 uv run launchplane work-graph merge-train-dry-run \
-  --snapshot-file path/to/merge-train-snapshot.json
+  --snapshot-file path/to/merge-train-snapshot.json \
+  --policy-file path/to/merge-train-policy.toml
 ```
 
 The run-once command reads a live GitHub snapshot for the selected
@@ -147,12 +178,13 @@ repository/base branch and reports the same worker-step intent without mutating
 by default:
 
 ```sh
-GH_TOKEN=... uv run launchplane work-graph merge-train-run-once
+GH_TOKEN=... uv run launchplane work-graph merge-train-run-once \
+  --policy-file path/to/merge-train-policy.toml
 ```
 
 The deployed Launchplane service projects the work-graph GitHub credential into
 `GH_TOKEN` from the `LAUNCHPLANE_WORK_GRAPH_GH_TOKEN` deployment secret, so the
-default policies use that same service-host token source.
+imported policies normally reference that same service-host token source.
 
 Passing `--mutate` applies exactly one worker transition from that fresh
 snapshot. Use it only from the intended operator environment for the smoke or

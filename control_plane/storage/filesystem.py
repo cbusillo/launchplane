@@ -18,6 +18,7 @@ from control_plane.contracts.every_code_work_request import (
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
+from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -160,6 +161,28 @@ class FilesystemRecordStore:
 
     def write_merge_train_run_record(self, record: MergeTrainRunRecord) -> Path:
         return self._write_model("launchplane_merge_train_runs", record.run_id, record)
+
+    def write_merge_train_policy_record(self, record: MergeTrainPolicyRecord) -> Path:
+        return self._write_model("launchplane_merge_train_policies", record.record_id, record)
+
+    def list_merge_train_policy_records(
+        self,
+        *,
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainPolicyRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainPolicyRecord,
+                "launchplane_merge_train_policies",
+            )
+            if not status or record.status == status
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
 
     def read_merge_train_run_record(self, run_id: str) -> MergeTrainRunRecord:
         return MergeTrainRunRecord.model_validate(
