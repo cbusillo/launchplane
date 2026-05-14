@@ -65,6 +65,10 @@ function choiceDisplayKey(choice: DriverChoice): string {
   return normalizedLabel;
 }
 
+function hasProductBacking(choice: DriverChoice): boolean {
+  return Boolean(choice.repository?.trim());
+}
+
 function labelForDriverContext(
   driver: DriverDescriptor,
   context: string,
@@ -206,17 +210,16 @@ export function useProductSelection({
       ...driverChoices,
       ...DEFAULT_CHOICES,
     ];
-    const productDisplayKeys = new Set(
-      [...overviewChoices, ...profileChoices, ...DEFAULT_CHOICES].map(
-        choiceDisplayKey,
-      ),
+    const productBackedDisplayKeys = new Set(
+      [...overviewChoices, ...profileChoices].map(choiceDisplayKey),
     );
     const seen = new Set<string>();
     return merged.filter((choice) => {
       const displayKey = choiceDisplayKey(choice);
-      const key = productDisplayKeys.has(displayKey)
-        ? displayKey
-        : choiceKey(choice);
+      const key =
+        productBackedDisplayKeys.has(displayKey) && !hasProductBacking(choice)
+          ? `fallback:${displayKey}`
+          : choiceKey(choice);
       if (seen.has(key)) {
         return false;
       }
