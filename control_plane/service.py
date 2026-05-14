@@ -2655,9 +2655,7 @@ def _validate_stack_collapse_record_for_landing(
     )
     if root_entry is None:
         raise ValueError("merge train stack collapse root PR is missing from landing plan")
-    if root_entry.expected_head_sha != _stack_collapse_expected_root_head_sha(
-        stack_collapse_plan
-    ):
+    if root_entry.expected_head_sha != _stack_collapse_expected_root_head_sha(stack_collapse_plan):
         raise ValueError("merge train stack collapse root PR head no longer matches")
 
 
@@ -7129,11 +7127,9 @@ def create_launchplane_service_app(
                                 "message": "Configured merge train GitHub token is not available.",
                             },
                         },
-                )
+                    )
                 batch_store = _merge_train_batch_candidate_record_store(record_store)
-                stack_collapse_store = _merge_train_stack_collapse_plan_record_store(
-                    record_store
-                )
+                stack_collapse_store = _merge_train_stack_collapse_plan_record_store(record_store)
                 transport = UrllibMergeTrainGitHubTransport(
                     token=token,
                     api_base_url=batch_request.github_api_base_url,
@@ -7161,7 +7157,10 @@ def create_launchplane_service_app(
                         )
                     else:
                         stack_discovery = None
-                    if stack_discovery is not None and stack_discovery.status == "ready_for_collapse":
+                    if (
+                        stack_discovery is not None
+                        and stack_discovery.status == "ready_for_collapse"
+                    ):
                         stack_collapse_plan = build_merge_train_stack_collapse_plan(
                             discovery_result=stack_discovery,
                             policy_key=dry_run_result.policy_key,
@@ -7337,6 +7336,10 @@ def create_launchplane_service_app(
                             landing_plan=landing_record.landing_plan,
                             policy_sha256=policy_record.policy_sha256,
                         )
+                        if not repository_policy.stack_child_disposition_label:
+                            raise ValueError(
+                                "merge train stack child disposition requires stack_child_disposition_label policy"
+                            )
                     transport = UrllibMergeTrainGitHubTransport(
                         token=token,
                         api_base_url=landing_request.github_api_base_url,
@@ -7345,6 +7348,12 @@ def create_launchplane_service_app(
                     landing_plan = github_client.land_batch_candidate(
                         landing_plan=landing_record.landing_plan
                     )
+                    landing_record = build_merge_train_batch_landing_plan_record(
+                        landing_plan=landing_plan,
+                        source=f"service:{landing_request.mode}:{request_trace_id}",
+                        updated_at=recorded_at,
+                    )
+                    landing_store.write_merge_train_batch_landing_plan_record(landing_record)
                     if collapse_existing_record is not None:
                         root_entry = next(
                             (
@@ -7364,7 +7373,7 @@ def create_launchplane_service_app(
                                 plan=collapse_existing_record.plan,
                                 disposition_client=github_client,
                                 root_merge_commit_sha=root_entry.merge_commit_sha,
-                                label="stack-landed",
+                                label=repository_policy.stack_child_disposition_label,
                                 updated_at=recorded_at,
                             )
                         )
@@ -7373,15 +7382,14 @@ def create_launchplane_service_app(
                             source=f"service:child-disposition:{request_trace_id}",
                             updated_at=recorded_at,
                         )
-                        collapse_store.write_merge_train_stack_collapse_plan_record(
-                            collapse_record
-                        )
-                landing_record = build_merge_train_batch_landing_plan_record(
-                    landing_plan=landing_plan,
-                    source=f"service:{landing_request.mode}:{request_trace_id}",
-                    updated_at=recorded_at,
-                )
-                landing_store.write_merge_train_batch_landing_plan_record(landing_record)
+                        collapse_store.write_merge_train_stack_collapse_plan_record(collapse_record)
+                if landing_request.mode == "plan":
+                    landing_record = build_merge_train_batch_landing_plan_record(
+                        landing_plan=landing_plan,
+                        source=f"service:{landing_request.mode}:{request_trace_id}",
+                        updated_at=recorded_at,
+                    )
+                    landing_store.write_merge_train_batch_landing_plan_record(landing_record)
                 result = {
                     "merge_train_batch_landing_plan_record_id": landing_record.record_id,
                     "repository": landing_plan.repository,
@@ -7393,10 +7401,11 @@ def create_launchplane_service_app(
                     if collapse_record is None or reconciled_collapse_plan is None:
                         raise ValueError("merge train stack child disposition record missing")
                     result["merge_train_stack_collapse_plan_record_id"] = collapse_record.record_id
-                    result["stack_collapse_plan"] = reconciled_collapse_plan.model_dump(
-                        mode="json"
-                    )
-                driver_result = {"mode": landing_request.mode, "landing_plan": result["landing_plan"]}
+                    result["stack_collapse_plan"] = reconciled_collapse_plan.model_dump(mode="json")
+                driver_result = {
+                    "mode": landing_request.mode,
+                    "landing_plan": result["landing_plan"],
+                }
                 if "stack_collapse_plan" in result:
                     driver_result["stack_collapse_plan"] = result["stack_collapse_plan"]
             elif path == _MERGE_TRAIN_STACK_COLLAPSE_RUN_ONCE_ROUTE:
@@ -7508,8 +7517,7 @@ def create_launchplane_service_app(
                         (
                             pull_request
                             for pull_request in snapshot.pull_requests
-                            if pull_request.number
-                            == stack_collapse_plan.root_pull_request_number
+                            if pull_request.number == stack_collapse_plan.root_pull_request_number
                         ),
                         None,
                     )
@@ -7521,11 +7529,7 @@ def create_launchplane_service_app(
                         raise ValueError(
                             "merge train stack collapse root PR head no longer matches"
                         )
-                    snapshot = snapshot.model_copy(
-                        update={
-                            "pull_requests": (root_pull_request,)
-                        }
-                    )
+                    snapshot = snapshot.model_copy(update={"pull_requests": (root_pull_request,)})
                     dry_run_result = build_merge_train_dry_run_result(
                         policy=policy, snapshot=snapshot
                     )

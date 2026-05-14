@@ -33,6 +33,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
         )
         self.assertEqual(codex_skills_policy.enqueue_label, "ready-to-merge")
         self.assertEqual(codex_skills_policy.blocked_label, "merge-blocked")
+        self.assertEqual(codex_skills_policy.stack_child_disposition_label, "stack-landed")
         self.assertEqual(codex_skills_policy.merge_method, "merge")
         self.assertEqual(codex_skills_policy.github_token.env_var, "GH_TOKEN")
         self.assertEqual(codex_skills_policy.service_authz.action, "merge_train.run_once")
@@ -56,6 +57,55 @@ class MergeTrainPolicyTests(unittest.TestCase):
             record.record_id,
             f"merge-train-policy-20260513T210000Z-{policy.policy_sha256[:12]}",
         )
+
+    def test_policy_record_digest_ignores_missing_optional_stack_child_label(
+        self,
+    ) -> None:
+        policy = parse_merge_train_policy_toml(
+            textwrap.dedent(
+                """
+                schema_version = 1
+
+                [[policies]]
+                repository = "example/app"
+                base_branch = "main"
+                enqueue_label = "ready-to-merge"
+                blocked_label = "merge-blocked"
+                merge_method = "merge"
+                failure_policy = "pause_train"
+                [policies.enqueue]
+                label_required = true
+                allowed_actor_roles = ["repo_owner"]
+                [policies.merge_identity]
+                kind = "github_app"
+                name = "launchplane"
+                """
+            ).strip()
+        )
+        explicit_empty_policy = parse_merge_train_policy_toml(
+            textwrap.dedent(
+                """
+                schema_version = 1
+
+                [[policies]]
+                repository = "example/app"
+                base_branch = "main"
+                enqueue_label = "ready-to-merge"
+                blocked_label = "merge-blocked"
+                stack_child_disposition_label = ""
+                merge_method = "merge"
+                failure_policy = "pause_train"
+                [policies.enqueue]
+                label_required = true
+                allowed_actor_roles = ["repo_owner"]
+                [policies.merge_identity]
+                kind = "github_app"
+                name = "launchplane"
+                """
+            ).strip()
+        )
+
+        self.assertEqual(policy.policy_sha256, explicit_empty_policy.policy_sha256)
 
     def test_resolve_merge_train_policy_record_fails_closed_when_missing(self) -> None:
         store = _PolicyStore()
@@ -128,6 +178,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
             base_branch = "main"
             enqueue_label = "ready-to-merge"
             blocked_label = "ready-to-merge"
+            stack_child_disposition_label = "stack-landed"
             merge_method = "merge"
             failure_policy = "continue_after_blocking_pr"
             [policies.enqueue]
@@ -140,6 +191,33 @@ class MergeTrainPolicyTests(unittest.TestCase):
         ).strip()
 
         with self.assertRaisesRegex(ValidationError, "must differ"):
+            parse_merge_train_policy_toml(policy_toml)
+
+    def test_parse_rejects_stack_child_disposition_label_that_matches_train_label(
+        self,
+    ) -> None:
+        policy_toml = textwrap.dedent(
+            """
+            schema_version = 1
+
+            [[policies]]
+            repository = "example/app"
+            base_branch = "main"
+            enqueue_label = "ready-to-merge"
+            blocked_label = "merge-blocked"
+            stack_child_disposition_label = "merge-blocked"
+            merge_method = "merge"
+            failure_policy = "continue_after_blocking_pr"
+            [policies.enqueue]
+            label_required = true
+            allowed_actor_roles = ["repo_admin"]
+            [policies.merge_identity]
+            kind = "github_token_secret"
+            name = "MERGE_TRAIN_TOKEN"
+            """
+        ).strip()
+
+        with self.assertRaisesRegex(ValidationError, "stack_child_disposition_label"):
             parse_merge_train_policy_toml(policy_toml)
 
     def test_work_graph_merge_train_policy_cli_renders_dry_run_contract(self) -> None:
@@ -177,6 +255,7 @@ repository = "cbusillo/sellyouroutboard"
 base_branch = "main"
 enqueue_label = "ready-to-merge"
 blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
 merge_method = "merge"
 failure_policy = "pause_train"
 [policies.enqueue]
