@@ -133,17 +133,17 @@ class GitHubMergeTrainClient:
     def land_batch_candidate(self, *, landing_plan: MergeTrainBatchLandingPlan) -> MergeTrainBatchLandingPlan:
         repository_path = _repository_path(landing_plan.repository)
         expected_base_sha = landing_plan.entries[0].expected_base_sha
-        current_base_sha = _base_branch_sha(
-            transport=self.transport,
-            repository_path=repository_path,
-            base_branch=landing_plan.base_branch,
-        )
-        if current_base_sha != expected_base_sha:
-            raise MergeTrainGitHubStaleHeadError(
-                "Base branch moved after batch candidate validation.", status_code=409
-            )
         merged_entries = []
         for entry in landing_plan.entries:
+            current_base_sha = _base_branch_sha(
+                transport=self.transport,
+                repository_path=repository_path,
+                base_branch=landing_plan.base_branch,
+            )
+            if current_base_sha != expected_base_sha:
+                raise MergeTrainGitHubStaleHeadError(
+                    "Base branch moved outside the batch landing plan.", status_code=409
+                )
             merge_commit_sha = self.merge_pull_request(
                 repository=landing_plan.repository,
                 pull_request_number=entry.pull_request_number,
@@ -155,6 +155,7 @@ class GitHubMergeTrainClient:
                     update={"status": "merged", "merge_commit_sha": merge_commit_sha}
                 )
             )
+            expected_base_sha = merge_commit_sha
         return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
 
     def add_pull_request_label(
