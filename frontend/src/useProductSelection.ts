@@ -62,10 +62,13 @@ export function choiceKey(choice: DriverChoice): string {
 
 function choiceDisplayKey(choice: DriverChoice): string {
   const normalizedLabel = choice.label.trim().toLowerCase();
-  return `${choice.driverId}:${normalizedLabel}`;
+  return normalizedLabel;
 }
 
-function labelForDriverContext(driver: DriverDescriptor, context: string): string {
+function labelForDriverContext(
+  driver: DriverDescriptor,
+  context: string,
+): string {
   if (driver.driver_id === "odoo") {
     if (context === "cm") {
       return "Odoo CM";
@@ -164,17 +167,15 @@ export function choiceFromProductOverview(
   };
 }
 
-export function useProductSelection(
-  {
-    drivers,
-    productProfiles,
-    productOverviews,
-  }: {
-    drivers: DriverDescriptor[];
-    productProfiles: ProductProfileRecord[];
-    productOverviews: ProductSiteOverview[];
-  },
-) {
+export function useProductSelection({
+  drivers,
+  productProfiles,
+  productOverviews,
+}: {
+  drivers: DriverDescriptor[];
+  productProfiles: ProductProfileRecord[];
+  productOverviews: ProductSiteOverview[];
+}) {
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const choices = useMemo(() => {
     const driverChoices: DriverChoice[] = drivers.flatMap((driver) => {
