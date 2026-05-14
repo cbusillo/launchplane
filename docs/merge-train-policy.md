@@ -318,10 +318,13 @@ The batch-candidate service endpoint
 policy-backed, DB-backed boundary. It accepts `mode: plan`, `mode: build`, or
 `mode: observe`; writes `launchplane_merge_train_batch_candidates` records; and
 does not land original PRs. Plan mode reads a fresh snapshot and records the
-eligible queued PRs as one candidate. Build mode creates or resets the
-Launchplane train ref and merges queued PR heads into that ref in order. Observe
-mode records required-check state for the exact candidate SHA. Landing the
-original PRs remains a later PR-native phase with separate records.
+eligible queued PRs as one candidate. The candidate base SHA comes from the live
+base branch head, not from any individual pull request's base metadata, so stale
+or ineligible open PRs cannot move the candidate off the target branch. Build
+mode creates or resets the Launchplane train ref and merges queued PR heads into
+that ref in order. Observe mode records required-check state for the exact
+candidate SHA. Landing the original PRs remains a later PR-native phase with
+separate records.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
