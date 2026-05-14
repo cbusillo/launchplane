@@ -251,10 +251,19 @@ def execute_merge_train_stack_collapse_plan(
         current_head_shas[mutation.parent_pull_request_number] = merge_commit_sha
     if len(updated_mutations) < len(plan.mutations):
         updated_mutations.extend(plan.mutations[len(updated_mutations) :])
+    updated_child_dispositions = tuple(
+        disposition.model_copy(
+            update={
+                "expected_head_sha": current_head_shas[disposition.pull_request_number]
+            }
+        )
+        for disposition in plan.child_dispositions
+    )
     return plan.model_copy(
         update={
             "status": current_status,
             "mutations": tuple(updated_mutations),
+            "child_dispositions": updated_child_dispositions,
             "updated_at": updated_at,
         }
     )
