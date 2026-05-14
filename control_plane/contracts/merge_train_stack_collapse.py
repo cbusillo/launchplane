@@ -209,13 +209,18 @@ def execute_merge_train_stack_collapse_plan(
     if plan.status not in {"planned", "collapsing"}:
         raise ValueError("merge train stack collapse plan is not executable")
     updated_mutations: list[MergeTrainStackCollapseMutation] = []
+    current_head_shas = {
+        entry.pull_request_number: entry.head_sha for entry in plan.entries
+    }
     current_status: MergeTrainStackCollapseStatus = "waiting_for_root_checks"
     for mutation in plan.mutations:
+        child_head_sha = current_head_shas[mutation.child_pull_request_number]
+        expected_parent_head_sha = current_head_shas[mutation.parent_pull_request_number]
         try:
             merge_commit_sha = branch_client.merge_stack_child_into_parent(
                 repository=plan.repository,
-                child_head_sha=mutation.child_head_sha,
-                expected_parent_head_sha=mutation.expected_parent_head_sha,
+                child_head_sha=child_head_sha,
+                expected_parent_head_sha=expected_parent_head_sha,
                 parent_head_ref=mutation.parent_head_ref,
                 collapse_id=plan.collapse_id,
                 child_pull_request_number=mutation.child_pull_request_number,
@@ -235,12 +240,15 @@ def execute_merge_train_stack_collapse_plan(
         updated_mutations.append(
             mutation.model_copy(
                 update={
+                    "child_head_sha": child_head_sha,
+                    "expected_parent_head_sha": expected_parent_head_sha,
                     "status": "mutated",
                     "merge_commit_sha": merge_commit_sha,
                     "detail": "child head merged into parent feature branch",
                 }
             )
         )
+        current_head_shas[mutation.parent_pull_request_number] = merge_commit_sha
     if len(updated_mutations) < len(plan.mutations):
         updated_mutations.extend(plan.mutations[len(updated_mutations) :])
     return plan.model_copy(
@@ -339,6 +347,7 @@ def build_merge_train_stack_collapse_plan(
     )
     if not entries:
         raise ValueError("merge train stack collapse plan requires entries")
+    parent_child_pairs = tuple(zip(entries, entries[1:]))
     mutations = tuple(
         MergeTrainStackCollapseMutation(
             child_pull_request_number=child.pull_request_number,
@@ -347,7 +356,7 @@ def build_merge_train_stack_collapse_plan(
             expected_parent_head_sha=parent.head_sha,
             parent_head_ref=parent.head_ref,
         )
-        for parent, child in zip(entries, entries[1:])
+        for parent, child in reversed(parent_child_pairs)
     )
     child_dispositions = tuple(
         MergeTrainStackChildDisposition(
@@ -462,8 +471,12 @@ def _normalize_mutations(
     if len(mutations) != len(entries) - 1:
         raise ValueError("merge train stack collapse mutations must connect each stack layer")
     expected_pairs = tuple(
-        (child.pull_request_number, parent.pull_request_number)
-        for parent, child in zip(entries, entries[1:])
+        reversed(
+            tuple(
+                (child.pull_request_number, parent.pull_request_number)
+                for parent, child in zip(entries, entries[1:])
+            )
+        )
     )
     actual_pairs = tuple(
         (mutation.child_pull_request_number, mutation.parent_pull_request_number)

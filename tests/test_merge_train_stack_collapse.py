@@ -64,10 +64,10 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                 (mutation.child_pull_request_number, mutation.parent_pull_request_number)
                 for mutation in plan.mutations
             ],
-            [(11, 10), (12, 11)],
+            [(12, 11), (11, 10)],
         )
-        self.assertEqual(plan.mutations[0].expected_parent_head_sha, "head-10")
-        self.assertEqual(plan.mutations[1].expected_parent_head_sha, "head-11")
+        self.assertEqual(plan.mutations[0].expected_parent_head_sha, "head-11")
+        self.assertEqual(plan.mutations[1].expected_parent_head_sha, "head-10")
 
     def test_plan_requires_a_ready_stack_discovery_result(self) -> None:
         discovery_result = discover_merge_train_stack(
@@ -161,7 +161,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
     def test_execute_plan_mutates_each_child_into_its_parent_branch(self) -> None:
         plan = _collapse_plan()
         branch_client = _RecordingStackCollapseBranchClient(
-            merge_commit_shas=("merge-31-30", "merge-32-31")
+            merge_commit_shas=("merge-32-31", "merge-31-30")
         )
 
         executed_plan = execute_merge_train_stack_collapse_plan(
@@ -177,20 +177,11 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             [mutation.merge_commit_sha for mutation in executed_plan.mutations],
-            ["merge-31-30", "merge-32-31"],
+            ["merge-32-31", "merge-31-30"],
         )
         self.assertEqual(
             branch_client.requests,
             [
-                {
-                    "repository": "example/merge-train-repo",
-                    "child_head_sha": "head-31",
-                    "expected_parent_head_sha": "head-30",
-                    "parent_head_ref": "feature/root",
-                    "collapse_id": plan.collapse_id,
-                    "child_pull_request_number": 31,
-                    "parent_pull_request_number": 30,
-                },
                 {
                     "repository": "example/merge-train-repo",
                     "child_head_sha": "head-32",
@@ -199,6 +190,15 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                     "collapse_id": plan.collapse_id,
                     "child_pull_request_number": 32,
                     "parent_pull_request_number": 31,
+                },
+                {
+                    "repository": "example/merge-train-repo",
+                    "child_head_sha": "merge-32-31",
+                    "expected_parent_head_sha": "head-30",
+                    "parent_head_ref": "feature/root",
+                    "collapse_id": plan.collapse_id,
+                    "child_pull_request_number": 31,
+                    "parent_pull_request_number": 30,
                 },
             ],
         )
@@ -227,7 +227,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         plan = execute_merge_train_stack_collapse_plan(
             plan=_collapse_plan(),
             branch_client=_RecordingStackCollapseBranchClient(
-                merge_commit_shas=("merge-31-30", "merge-32-31")
+                merge_commit_shas=("merge-32-31", "merge-31-30")
             ),
             updated_at="2026-05-14T13:45:00Z",
         )
@@ -264,7 +264,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         plan = execute_merge_train_stack_collapse_plan(
             plan=_collapse_plan(),
             branch_client=_RecordingStackCollapseBranchClient(
-                merge_commit_shas=("merge-31-30", "merge-32-31")
+                merge_commit_shas=("merge-32-31", "merge-31-30")
             ),
             updated_at="2026-05-14T13:45:00Z",
         )

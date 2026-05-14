@@ -101,7 +101,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
     def test_close_pull_request_checks_head_sha_before_closing(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
-            responses=({"head": {"sha": "child-head"}}, {})
+            responses=(
+                {"head": {"sha": "child-head"}},
+                {},
+                {"head": {"sha": "child-head"}},
+            )
         )
 
         GitHubMergeTrainClient(transport=transport).close_pull_request(
@@ -115,7 +119,28 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [
                 ("GET", "/repos/example/merge-train-repo/pulls/11", None),
                 ("PATCH", "/repos/example/merge-train-repo/pulls/11", {"state": "closed"}),
+                ("GET", "/repos/example/merge-train-repo/pulls/11", None),
             ],
+        )
+
+    def test_close_pull_request_rejects_child_head_moved_during_close(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"head": {"sha": "child-head"}},
+                {},
+                {"head": {"sha": "moved-child-head"}},
+            )
+        )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).close_pull_request(
+                repository="example/merge-train-repo",
+                pull_request_number=11,
+                expected_head_sha="child-head",
+            )
+
+        self.assertEqual(
+            [request.method for request in transport.requests], ["GET", "PATCH", "GET"]
         )
 
     def test_close_pull_request_rejects_moved_child_head(self) -> None:

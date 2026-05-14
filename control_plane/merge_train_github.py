@@ -229,15 +229,12 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
         self, *, repository: str, pull_request_number: int, expected_head_sha: str
     ) -> None:
         repository_path = _repository_path(repository)
-        pull_request = _json_object(
-            self.transport.request(
-                method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
-            ),
-            "GitHub pull request detail response",
+        pull_request_path = f"/repos/{repository_path}/pulls/{pull_request_number}"
+        expected_sha = _required_value(
+            expected_head_sha, "Expected pull request head SHA is required."
         )
-        head = _json_object(pull_request.get("head"), "GitHub pull request head")
-        current_head_sha = _required_text(
-            head.get("sha"), "GitHub pull request head requires sha."
+        current_head_sha = self._pull_request_head_sha(
+            pull_request_path=pull_request_path
         )
         if current_head_sha != _required_value(
             expected_head_sha, "Expected pull request head SHA is required."
@@ -248,9 +245,15 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
             )
         self.transport.request(
             method="PATCH",
-            path=f"/repos/{repository_path}/pulls/{pull_request_number}",
+            path=pull_request_path,
             body={"state": "closed"},
         )
+        closed_head_sha = self._pull_request_head_sha(pull_request_path=pull_request_path)
+        if closed_head_sha != expected_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack child PR moved while Launchplane was closing it.",
+                status_code=409,
+            )
 
     def merge_stack_child_into_parent(
         self,
@@ -317,6 +320,14 @@ class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
                 path=f"/repos/{repository_path}/git/refs/{reference_path}",
                 body={"sha": normalized_sha, "force": True},
             )
+
+    def _pull_request_head_sha(self, *, pull_request_path: str) -> str:
+        pull_request = _json_object(
+            self.transport.request(method="GET", path=pull_request_path),
+            "GitHub pull request detail response",
+        )
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        return _required_text(head.get("sha"), "GitHub pull request head requires sha.")
 
 
 class GitHubMergeTrainSnapshotReader:
