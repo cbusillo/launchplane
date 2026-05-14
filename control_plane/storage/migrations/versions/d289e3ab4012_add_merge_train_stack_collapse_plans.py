@@ -39,7 +39,7 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("record_id"),
     )
     op.create_index(
-        "launchplane_merge_train_stack_collapse_plans_repository_base_idx",
+        "launchplane_merge_train_stack_collapse_repository_base_idx",
         "launchplane_merge_train_stack_collapse_plans",
         ["repository", "base_branch", sa.text("updated_at DESC")],
     )
@@ -56,7 +56,7 @@ def downgrade() -> None:
         table_name="launchplane_merge_train_stack_collapse_plans",
     )
     op.drop_index(
-        "launchplane_merge_train_stack_collapse_plans_repository_base_idx",
+        "launchplane_merge_train_stack_collapse_repository_base_idx",
         table_name="launchplane_merge_train_stack_collapse_plans",
     )
     op.drop_table("launchplane_merge_train_stack_collapse_plans")

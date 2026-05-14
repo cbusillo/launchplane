@@ -9,6 +9,7 @@ from alembic import command as alembic_command
 from alembic.config import Config as AlembicConfig
 from click.testing import CliRunner
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.sql.schema import Index
 
 from control_plane.cli import main
 from control_plane.contracts.artifact_identity import (
@@ -113,7 +114,7 @@ from control_plane.service_auth import (
 )
 from control_plane.service_human_auth import LaunchplaneHumanSession
 from control_plane.storage.filesystem import FilesystemRecordStore
-from control_plane.storage.postgres import PostgresRecordStore
+from control_plane.storage.postgres import Base, PostgresRecordStore
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
 
@@ -699,6 +700,20 @@ def _merge_train_stack_collapse_plan_record(
 
 
 class PostgresRecordStoreTests(unittest.TestCase):
+    def test_postgres_metadata_index_names_fit_identifier_limit(self) -> None:
+        index_names = tuple(
+            index.name
+            for table in Base.metadata.tables.values()
+            for index in table.indexes
+            if isinstance(index, Index) and index.name is not None
+        )
+
+        too_long_index_names = tuple(
+            index_name for index_name in index_names if len(index_name) > 63
+        )
+
+        self.assertEqual(too_long_index_names, ())
+
     def test_alembic_baseline_creates_schema_used_by_record_store(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
