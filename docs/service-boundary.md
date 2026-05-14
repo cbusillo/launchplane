@@ -230,6 +230,19 @@ performs no GitHub reads and no storage writes. Schedulers use this route to
 pace calls into `run-once`; execution still re-reads GitHub before any dry-run or
 mutation.
 
+`POST /v1/work-graph/merge-train/batch-candidate/run-once` executes one
+policy-backed batch-candidate phase for a requested repository/base branch. The
+route accepts `mode: plan`, `mode: build`, or `mode: observe`. Plan mode reads a
+fresh GitHub snapshot, derives one deterministic batch candidate from the
+currently eligible queued PRs, and writes a
+`launchplane_merge_train_batch_candidates` record. Build mode requires a prior
+candidate record id, creates or resets the Launchplane train ref, merges queued
+PR heads into that ref in order, and records the resulting candidate SHA. Observe
+mode requires a prior candidate record id, reads required checks for that exact
+candidate SHA, and records whether the candidate is still pending, passed, or
+failed. The route never lands original PRs; PR-native landing remains a later
+phase with separate records and pre-merge invariants.
+
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
 reads admission, and calls `run-once` only when the decision is `admitted`.
@@ -294,6 +307,10 @@ than overloading `run-once`. Its target behavior is to build one combined
 candidate from the base branch plus multiple queued PRs, run required checks on
 that candidate commit, and then land the original PRs in queue order through
 GitHub's normal PR merge path after pre-merge invariants are rechecked.
+The first batch service contract is
+`POST /v1/work-graph/merge-train/batch-candidate/run-once`; it owns only the
+plan/build/observe candidate phases and writes
+`launchplane_merge_train_batch_candidates` records.
 
 `POST /v1/merge-train/policies/import` is the service-owned write path for merge
 train policy records. It requires database storage and

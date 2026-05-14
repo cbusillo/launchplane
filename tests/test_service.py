@@ -30,6 +30,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
@@ -204,6 +205,18 @@ class _FakeMergeTrainGitHubClient:
         merge_method: str,
     ) -> str:
         return f"merge-{pull_request_number}"
+
+    def build_batch_candidate(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainBatchCandidate:
+        return candidate.model_copy(
+            update={"candidate_sha": "candidate-built", "status": "ready_for_checks"}
+        )
+
+    def observe_batch_candidate_checks(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainBatchCandidate:
+        return candidate.model_copy(update={"required_checks_status": "pass", "status": "passed"})
 
 
 class _NoopMergeTrainGitHubClient:
@@ -1520,6 +1533,160 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             payload["result"]["dry_run_result"]["policy_key"], "cbusillo/codex-skills:main"
         )
+
+    def test_merge_train_batch_candidate_service_plans_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            record_id = payload["records"]["merge_train_batch_candidate_record_id"]
+            listed_records = FilesystemRecordStore(
+                state_dir
+            ).list_merge_train_batch_candidate_records(
+                repository="cbusillo/sellyouroutboard", base_branch="main"
+            )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "plan")
+        self.assertEqual(payload["result"]["candidate"]["status"], "planned")
+        self.assertEqual(payload["result"]["candidate"]["entries"][0]["pull_request_number"], 1)
+        self.assertEqual(listed_records[0].record_id, record_id)
+        self.assertEqual(listed_records[0].candidate.policy_key, "cbusillo/sellyouroutboard:main")
+
+    def test_merge_train_batch_candidate_service_builds_existing_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                _, plan_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            with patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient):
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": plan_payload["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "build")
+        self.assertEqual(payload["result"]["candidate"]["status"], "ready_for_checks")
+        self.assertEqual(payload["result"]["candidate"]["candidate_sha"], "candidate-built")
+
+    def test_merge_train_batch_candidate_service_observes_existing_candidate_record(self) -> None:
+        with (
+            TemporaryDirectory() as temporary_directory_name,
+            patch.dict("os.environ", {"GH_TOKEN": "token"}, clear=True),
+        ):
+            state_dir = Path(temporary_directory_name) / "state"
+            _seed_merge_train_policy(state_dir)
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(_merge_train_service_identity()),
+                authz_policy=_merge_train_service_policy(),
+                control_plane_root_path=Path(temporary_directory_name),
+            )
+            with patch(
+                "control_plane.service.GitHubMergeTrainSnapshotReader",
+                _FakeMergeTrainSnapshotReader,
+            ):
+                _, plan_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "plan",
+                    },
+                )
+            with patch("control_plane.service.GitHubMergeTrainClient", _FakeMergeTrainGitHubClient):
+                _, build_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "build",
+                        "candidate_record_id": plan_payload["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+                status_code, payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/batch-candidate/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mode": "observe",
+                        "candidate_record_id": build_payload["records"][
+                            "merge_train_batch_candidate_record_id"
+                        ],
+                    },
+                )
+
+        self.assertEqual(status_code, 202)
+        self.assertEqual(payload["result"]["mode"], "observe")
+        self.assertEqual(payload["result"]["candidate"]["status"], "passed")
+        self.assertEqual(payload["result"]["candidate"]["required_checks_status"], "pass")
 
     def test_merge_train_admission_service_uses_configured_codex_skills_policy(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

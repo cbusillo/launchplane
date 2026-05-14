@@ -311,8 +311,17 @@ result or applies exactly one worker step. Accepted calls write a
 dry-run decision, selected pull request metadata, and optional worker mutation
 result. Unsupported repository/base pairs, missing token configuration, and
 denied authorization all fail closed. Generic service code must not contain
-product repository conditionals. Future batch train service routes must preserve
-that same policy-backed, DB-backed, fail-closed boundary.
+product repository conditionals.
+
+The batch-candidate service endpoint
+`POST /v1/work-graph/merge-train/batch-candidate/run-once` also uses the same
+policy-backed, DB-backed boundary. It accepts `mode: plan`, `mode: build`, or
+`mode: observe`; writes `launchplane_merge_train_batch_candidates` records; and
+does not land original PRs. Plan mode reads a fresh snapshot and records the
+eligible queued PRs as one candidate. Build mode creates or resets the
+Launchplane train ref and merges queued PR heads into that ref in order. Observe
+mode records required-check state for the exact candidate SHA. Landing the
+original PRs remains a later PR-native phase with separate records.
 
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run

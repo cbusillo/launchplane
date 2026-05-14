@@ -76,6 +76,11 @@ from control_plane.contracts.every_code_summary_read_model import (
 )
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.idempotency_record import build_launchplane_idempotency_record_id
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidateRecord,
+    build_merge_train_batch_candidate,
+    build_merge_train_batch_candidate_record,
+)
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.merge_train_admission import evaluate_merge_train_admission_from_store
@@ -328,6 +333,7 @@ from control_plane.workflows.verireel_preview_driver import (
 _LAUNCHPLANE_SERVICE_CONTEXT = "launchplane"
 _EVERY_CODE_GITHUB_WEBHOOK_ROUTE = "/v1/every-code/github-webhook"
 _MERGE_TRAIN_ADMISSION_ROUTE = "/v1/work-graph/merge-train/admission"
+_MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/batch-candidate/run-once"
 _MERGE_TRAIN_RUN_ONCE_ROUTE = "/v1/work-graph/merge-train/run-once"
 _EVERY_CODE_GITHUB_WEBHOOK_SECRET_ENV_KEY = "LAUNCHPLANE_EVERY_CODE_GITHUB_WEBHOOK_SECRET"
 
@@ -352,6 +358,33 @@ class MergeTrainRunOnceEnvelope(BaseModel):
             raise ValueError("merge train repository must be owner/name")
         if not self.base_branch:
             raise ValueError("merge train run-once requires base_branch")
+        return self
+
+
+class MergeTrainBatchCandidateRunOnceEnvelope(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    repository: str
+    base_branch: str = "main"
+    mode: Literal["plan", "build", "observe"] = "plan"
+    candidate_record_id: str = ""
+    github_api_base_url: str = "https://api.github.com"
+
+    @model_validator(mode="after")
+    def _validate_envelope(self) -> "MergeTrainBatchCandidateRunOnceEnvelope":
+        self.repository = self.repository.strip()
+        self.base_branch = self.base_branch.strip()
+        self.candidate_record_id = self.candidate_record_id.strip()
+        self.github_api_base_url = self.github_api_base_url.strip() or "https://api.github.com"
+        if not self.repository:
+            raise ValueError("merge train batch candidate requires repository")
+        if "/" not in self.repository:
+            raise ValueError("merge train repository must be owner/name")
+        if not self.base_branch:
+            raise ValueError("merge train batch candidate requires base_branch")
+        if self.mode in {"build", "observe"} and not self.candidate_record_id:
+            raise ValueError("build and observe require candidate_record_id")
         return self
 
 
@@ -2179,6 +2212,7 @@ def _driver_write_routes_from_descriptors() -> frozenset[str]:
 def _build_write_routes() -> frozenset[str]:
     launchplane_write_routes = {
         _EVERY_CODE_GITHUB_WEBHOOK_ROUTE,
+        _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE,
         _MERGE_TRAIN_RUN_ONCE_ROUTE,
         "/v1/agent/write-intents/evaluate",
         "/v1/every-code/work-requests/create",
@@ -2367,6 +2401,47 @@ def _agent_write_intent_record_store(record_store: object) -> _AgentWriteIntentR
     if hasattr(record_store, "write_agent_write_intent_record"):
         return cast(_AgentWriteIntentRecordStore, record_store)
     raise TypeError("record store does not support agent write intent records")
+
+
+class _MergeTrainBatchCandidateRecordStore(Protocol):
+    def write_merge_train_batch_candidate_record(
+        self, record: MergeTrainBatchCandidateRecord
+    ) -> object: ...
+
+    def list_merge_train_batch_candidate_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainBatchCandidateRecord, ...]: ...
+
+
+def _merge_train_batch_candidate_record_store(
+    record_store: object,
+) -> _MergeTrainBatchCandidateRecordStore:
+    if hasattr(record_store, "write_merge_train_batch_candidate_record") and hasattr(
+        record_store, "list_merge_train_batch_candidate_records"
+    ):
+        return cast(_MergeTrainBatchCandidateRecordStore, record_store)
+    raise TypeError("record store does not support merge train batch candidate records")
+
+
+def _read_merge_train_batch_candidate_record(
+    *,
+    record_store: _MergeTrainBatchCandidateRecordStore,
+    repository: str,
+    base_branch: str,
+    record_id: str,
+) -> MergeTrainBatchCandidateRecord:
+    records = record_store.list_merge_train_batch_candidate_records(
+        repository=repository, base_branch=base_branch
+    )
+    for record in records:
+        if record.record_id == record_id:
+            return record
+    raise ValueError("merge train batch candidate record not found")
 
 
 def _supports_every_code_work_requests(record_store: object) -> bool:
@@ -3453,6 +3528,7 @@ def _accepted_payload(
                 "feedback_id",
                 "state",
                 "agent_write_intent_record_id",
+                "merge_train_batch_candidate_record_id",
                 "merge_train_run_id",
             }
         },
@@ -6774,6 +6850,127 @@ def create_launchplane_service_app(
                 )
                 record_store.write_merge_train_run_record(run_record)
                 result["merge_train_run_id"] = run_record.run_id
+            elif path == _MERGE_TRAIN_BATCH_CANDIDATE_RUN_ONCE_ROUTE:
+                batch_request = MergeTrainBatchCandidateRunOnceEnvelope.model_validate(payload)
+                policy_record = resolve_merge_train_policy_record(record_store)
+                policy = policy_record.policy
+                repository_policy = policy.find_repository_policy(
+                    repository=batch_request.repository,
+                    base_branch=batch_request.base_branch,
+                )
+                if not authz_policy.allows(
+                    identity=identity,
+                    action=repository_policy.service_authz.action,
+                    product=repository_policy.service_authz.product,
+                    context=repository_policy.service_authz.context,
+                ):
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=403,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "authorization_denied",
+                                "message": "Workflow cannot run the requested merge train policy.",
+                            },
+                        },
+                    )
+                token_env = repository_policy.github_token.env_var
+                if not token_env:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_token_not_configured",
+                                "message": "Merge train policy does not define a GitHub token environment variable.",
+                            },
+                        },
+                    )
+                token = os.environ.get(token_env, "").strip()
+                if not token:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=503,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "github_token_not_configured",
+                                "message": "Configured merge train GitHub token is not available.",
+                            },
+                        },
+                    )
+                batch_store = _merge_train_batch_candidate_record_store(record_store)
+                transport = UrllibMergeTrainGitHubTransport(
+                    token=token,
+                    api_base_url=batch_request.github_api_base_url,
+                )
+                github_client = GitHubMergeTrainClient(transport=transport)
+                recorded_at = _utc_now_timestamp()
+                if batch_request.mode == "plan":
+                    snapshot = GitHubMergeTrainSnapshotReader(
+                        transport=transport
+                    ).read_merge_train_snapshot(
+                        repository=batch_request.repository,
+                        base_branch=batch_request.base_branch,
+                    )
+                    dry_run_result = build_merge_train_dry_run_result(
+                        policy=policy, snapshot=snapshot
+                    )
+                    base_sha = next(
+                        (
+                            pull_request.base_sha
+                            for pull_request in snapshot.pull_requests
+                            if pull_request.base_sha
+                        ),
+                        "",
+                    )
+                    candidate = build_merge_train_batch_candidate(
+                        dry_run_result=dry_run_result,
+                        base_sha=base_sha,
+                        policy_sha256=policy_record.policy_sha256,
+                        created_at=recorded_at,
+                    )
+                    driver_result = {
+                        "mode": batch_request.mode,
+                        "dry_run_result": dry_run_result.model_dump(mode="json"),
+                        "candidate": candidate.model_dump(mode="json"),
+                    }
+                else:
+                    existing_record = _read_merge_train_batch_candidate_record(
+                        record_store=batch_store,
+                        repository=batch_request.repository,
+                        base_branch=batch_request.base_branch,
+                        record_id=batch_request.candidate_record_id,
+                    )
+                    candidate = existing_record.candidate
+                    if batch_request.mode == "build":
+                        candidate = github_client.build_batch_candidate(candidate=candidate)
+                    else:
+                        candidate = github_client.observe_batch_candidate_checks(
+                            candidate=candidate
+                        )
+                    driver_result = {
+                        "mode": batch_request.mode,
+                        "candidate": candidate.model_dump(mode="json"),
+                    }
+                candidate_record = build_merge_train_batch_candidate_record(
+                    candidate=candidate,
+                    source=f"service:{batch_request.mode}:{request_trace_id}",
+                    updated_at=recorded_at,
+                )
+                batch_store.write_merge_train_batch_candidate_record(candidate_record)
+                result = {
+                    "merge_train_batch_candidate_record_id": candidate_record.record_id,
+                    "repository": candidate.repository,
+                    "base_branch": candidate.base_branch,
+                    "mode": batch_request.mode,
+                    "candidate": candidate.model_dump(mode="json"),
+                }
             elif path == "/v1/agent/write-intents/evaluate":
                 intent_request = AgentWriteIntentRequest.model_validate(payload)
                 intent_authz_action = authz_action_for_agent_write_intent(intent_request.intent)
