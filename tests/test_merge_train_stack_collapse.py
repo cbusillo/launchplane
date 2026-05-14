@@ -31,7 +31,9 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         )
 
         self.assertEqual(first, second)
-        self.assertTrue(first.startswith("merge-train-stack-collapse-example-merge-train-repo-main-"))
+        self.assertTrue(
+            first.startswith("merge-train-stack-collapse-example-merge-train-repo-main-")
+        )
 
     def test_plan_uses_root_ready_to_merge_intent_and_leaf_to_root_mutations(self) -> None:
         discovery_result = discover_merge_train_stack(
@@ -74,9 +76,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
-                pull_requests=(
-                    _pull_request(20, head_ref="feature/root", base_ref="main"),
-                ),
+                pull_requests=(_pull_request(20, head_ref="feature/root", base_ref="main"),),
             ),
             root_pull_request_number=20,
         )
@@ -153,9 +153,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
 
         self.assertEqual(zulu_record.record_id, offset_record.record_id)
         self.assertTrue(
-            zulu_record.record_id.startswith(
-                "merge-train-stack-collapse-plan-20260514T133100Z-"
-            )
+            zulu_record.record_id.startswith("merge-train-stack-collapse-plan-20260514T133100Z-")
         )
 
     def test_execute_plan_mutates_each_child_into_its_parent_branch(self) -> None:
@@ -180,10 +178,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ["merge-32-31", "merge-31-30"],
         )
         self.assertEqual(
-            [
-                disposition.expected_head_sha
-                for disposition in executed_plan.child_dispositions
-            ],
+            [disposition.expected_head_sha for disposition in executed_plan.child_dispositions],
             ["merge-32-31", "head-32"],
         )
         self.assertEqual(
@@ -208,6 +203,38 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
                     "parent_pull_request_number": 30,
                 },
             ],
+        )
+
+    def test_model_load_accepts_previous_root_to_leaf_mutation_order(self) -> None:
+        plan_payload = _collapse_plan().model_dump(mode="json")
+        plan_payload["mutations"] = tuple(reversed(plan_payload["mutations"]))
+
+        loaded_plan = MergeTrainStackCollapsePlan.model_validate(plan_payload)
+
+        self.assertEqual(
+            [
+                (mutation.child_pull_request_number, mutation.parent_pull_request_number)
+                for mutation in loaded_plan.mutations
+            ],
+            [(32, 31), (31, 30)],
+        )
+
+    def test_model_load_rebuilds_missing_child_dispositions_from_mutations(self) -> None:
+        executed_plan = execute_merge_train_stack_collapse_plan(
+            plan=_collapse_plan(),
+            branch_client=_RecordingStackCollapseBranchClient(
+                merge_commit_shas=("merge-32-31", "merge-31-30")
+            ),
+            updated_at="2026-05-14T13:45:00Z",
+        )
+        plan_payload = executed_plan.model_dump(mode="json")
+        plan_payload.pop("child_dispositions")
+
+        loaded_plan = MergeTrainStackCollapsePlan.model_validate(plan_payload)
+
+        self.assertEqual(
+            [disposition.expected_head_sha for disposition in loaded_plan.child_dispositions],
+            ["merge-32-31", "head-32"],
         )
 
     def test_execute_plan_blocks_at_first_failed_mutation(self) -> None:
@@ -383,9 +410,7 @@ class _RecordingStackChildDispositionClient:
         self.labels: list[tuple[int, str]] = []
         self.closed: list[tuple[int, str]] = []
 
-    def comment_pull_request(
-        self, *, repository: str, pull_request_number: int, body: str
-    ) -> str:
+    def comment_pull_request(self, *, repository: str, pull_request_number: int, body: str) -> str:
         self.comments.append((pull_request_number, body))
         return (
             f"https://github.com/{repository}/pull/{pull_request_number}"

@@ -143,7 +143,7 @@ class MergeTrainStackCollapsePlan(BaseModel):
         self.entries = _normalize_entries(self.entries)
         self.mutations = _normalize_mutations(self.entries, self.mutations)
         self.child_dispositions = _normalize_child_dispositions(
-            self.entries, self.child_dispositions
+            self.entries, self.mutations, self.child_dispositions
         )
         return self
 
@@ -209,9 +209,7 @@ def execute_merge_train_stack_collapse_plan(
     if plan.status not in {"planned", "collapsing"}:
         raise ValueError("merge train stack collapse plan is not executable")
     updated_mutations: list[MergeTrainStackCollapseMutation] = []
-    current_head_shas = {
-        entry.pull_request_number: entry.head_sha for entry in plan.entries
-    }
+    current_head_shas = {entry.pull_request_number: entry.head_sha for entry in plan.entries}
     current_status: MergeTrainStackCollapseStatus = "waiting_for_root_checks"
     for mutation in plan.mutations:
         child_head_sha = current_head_shas[mutation.child_pull_request_number]
@@ -253,9 +251,7 @@ def execute_merge_train_stack_collapse_plan(
         updated_mutations.extend(plan.mutations[len(updated_mutations) :])
     updated_child_dispositions = tuple(
         disposition.model_copy(
-            update={
-                "expected_head_sha": current_head_shas[disposition.pull_request_number]
-            }
+            update={"expected_head_sha": current_head_shas[disposition.pull_request_number]}
         )
         for disposition in plan.child_dispositions
     )
@@ -442,7 +438,9 @@ def build_merge_train_stack_collapse_id(
         json.dumps(
             {
                 "entry_head_shas": [
-                    _normalize_required_value(sha, "merge train stack collapse id requires head sha")
+                    _normalize_required_value(
+                        sha, "merge train stack collapse id requires head sha"
+                    )
                     for sha in entry_head_shas
                 ],
                 "root_pull_request_number": root_pull_request_number,
@@ -451,10 +449,7 @@ def build_merge_train_stack_collapse_id(
             separators=(",", ":"),
         ).encode("utf-8")
     ).hexdigest()[:16]
-    return (
-        f"merge-train-stack-collapse-{normalized_repository}-"
-        f"{normalized_base_branch}-{digest}"
-    )
+    return f"merge-train-stack-collapse-{normalized_repository}-{normalized_base_branch}-{digest}"
 
 
 def _normalize_entries(
@@ -492,30 +487,34 @@ def _normalize_mutations(
         for mutation in mutations
     )
     if actual_pairs != expected_pairs:
-        raise ValueError("merge train stack collapse mutations must be leaf-to-root ordered")
+        root_to_leaf_pairs = tuple(reversed(expected_pairs))
+        if actual_pairs == root_to_leaf_pairs:
+            return tuple(reversed(mutations))
+        raise ValueError("merge train stack collapse mutations must connect adjacent stack layers")
     return mutations
 
 
 def _normalize_child_dispositions(
     entries: tuple[MergeTrainStackCollapseEntry, ...],
+    mutations: tuple[MergeTrainStackCollapseMutation, ...],
     child_dispositions: tuple[MergeTrainStackChildDisposition, ...],
 ) -> tuple[MergeTrainStackChildDisposition, ...]:
     if not child_dispositions:
+        current_head_shas = {entry.pull_request_number: entry.head_sha for entry in entries}
+        for mutation in mutations:
+            if mutation.status == "mutated" and mutation.merge_commit_sha:
+                current_head_shas[mutation.parent_pull_request_number] = mutation.merge_commit_sha
         child_dispositions = tuple(
             MergeTrainStackChildDisposition(
                 pull_request_number=entry.pull_request_number,
-                expected_head_sha=entry.head_sha,
+                expected_head_sha=current_head_shas[entry.pull_request_number],
             )
             for entry in entries[1:]
         )
     expected_numbers = tuple(entry.pull_request_number for entry in entries[1:])
-    actual_numbers = tuple(
-        disposition.pull_request_number for disposition in child_dispositions
-    )
+    actual_numbers = tuple(disposition.pull_request_number for disposition in child_dispositions)
     if actual_numbers != expected_numbers:
-        raise ValueError(
-            "merge train stack child dispositions must match stack child order"
-        )
+        raise ValueError("merge train stack child dispositions must match stack child order")
     return child_dispositions
 
 
@@ -532,7 +531,9 @@ def _child_disposition_comment_body(
 
 
 def _normalize_repository(repository: str) -> str:
-    normalized = _normalize_required_value(repository, "merge train stack collapse requires repository")
+    normalized = _normalize_required_value(
+        repository, "merge train stack collapse requires repository"
+    )
     if "/" not in normalized:
         raise ValueError("merge train stack collapse repository must be owner/name")
     return normalized
