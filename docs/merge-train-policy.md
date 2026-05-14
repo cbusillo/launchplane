@@ -131,6 +131,12 @@ SHAs, mutation sequence, policy digest, and idempotency evidence remain
 auditable. Ambiguous, forked, cyclic, or unsupported branch-protection cases
 must fail closed with operator-visible reasons.
 
+Stack collapse mutates from the leaf PR back toward the root PR. Each child is
+merged into its parent feature branch, and the parent merge commit becomes the
+child head evidence for the next mutation up the stack. Launchplane admits the
+root PR only after the live root head matches the stored final root mutation
+SHA and the root passes required checks from the protected base branch.
+
 ### Blocker Isolation
 
 When the combined candidate fails checks, Launchplane must not assume all queued

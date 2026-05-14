@@ -79,6 +79,7 @@ from control_plane.contracts.idempotency_record import build_launchplane_idempot
 from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidate,
     MergeTrainBatchCandidateRecord,
+    MergeTrainBatchLandingPlan,
     MergeTrainBatchLandingPlanRecord,
     build_merge_train_batch_candidate,
     build_merge_train_batch_candidate_record,
@@ -2623,6 +2624,48 @@ def _read_merge_train_stack_collapse_plan_record(
         if record.record_id == record_id:
             return record
     raise ValueError("merge train stack collapse plan record not found")
+
+
+def _validate_stack_collapse_record_for_landing(
+    *,
+    collapse_record: MergeTrainStackCollapsePlanRecord,
+    landing_plan: MergeTrainBatchLandingPlan,
+    policy_sha256: str,
+) -> None:
+    stack_collapse_plan = collapse_record.plan
+    if stack_collapse_plan.repository != landing_plan.repository:
+        raise ValueError("merge train stack collapse repository does not match landing plan")
+    if stack_collapse_plan.base_branch != landing_plan.base_branch:
+        raise ValueError("merge train stack collapse base branch does not match landing plan")
+    if stack_collapse_plan.policy_key != landing_plan.policy_key:
+        raise ValueError("merge train stack collapse policy key does not match landing plan")
+    if stack_collapse_plan.policy_sha256 != policy_sha256:
+        raise ValueError("merge train stack collapse policy digest no longer matches")
+    if stack_collapse_plan.policy_sha256 != landing_plan.policy_sha256:
+        raise ValueError("merge train stack collapse policy digest does not match landing plan")
+    if stack_collapse_plan.status != "waiting_for_root_checks":
+        raise ValueError("merge train stack collapse plan is not ready for landing")
+    root_entry = next(
+        (
+            entry
+            for entry in landing_plan.entries
+            if entry.pull_request_number == stack_collapse_plan.root_pull_request_number
+        ),
+        None,
+    )
+    if root_entry is None:
+        raise ValueError("merge train stack collapse root PR is missing from landing plan")
+    if root_entry.expected_head_sha != _stack_collapse_expected_root_head_sha(
+        stack_collapse_plan
+    ):
+        raise ValueError("merge train stack collapse root PR head no longer matches")
+
+
+def _stack_collapse_expected_root_head_sha(plan: MergeTrainStackCollapsePlan) -> str:
+    for mutation in plan.mutations:
+        if mutation.parent_pull_request_number == plan.root_pull_request_number:
+            return mutation.merge_commit_sha or plan.root_initial_head_sha
+    return plan.root_initial_head_sha
 
 
 def _supports_every_code_work_requests(record_store: object) -> bool:
@@ -7281,6 +7324,19 @@ def create_launchplane_service_app(
                         base_branch=landing_request.base_branch,
                         record_id=landing_request.landing_plan_record_id,
                     )
+                    collapse_existing_record: MergeTrainStackCollapsePlanRecord | None = None
+                    if landing_request.stack_collapse_plan_record_id:
+                        collapse_existing_record = _read_merge_train_stack_collapse_plan_record(
+                            record_store=collapse_store,
+                            repository=landing_request.repository,
+                            base_branch=landing_request.base_branch,
+                            record_id=landing_request.stack_collapse_plan_record_id,
+                        )
+                        _validate_stack_collapse_record_for_landing(
+                            collapse_record=collapse_existing_record,
+                            landing_plan=landing_record.landing_plan,
+                            policy_sha256=policy_record.policy_sha256,
+                        )
                     transport = UrllibMergeTrainGitHubTransport(
                         token=token,
                         api_base_url=landing_request.github_api_base_url,
@@ -7289,13 +7345,7 @@ def create_launchplane_service_app(
                     landing_plan = github_client.land_batch_candidate(
                         landing_plan=landing_record.landing_plan
                     )
-                    if landing_request.stack_collapse_plan_record_id:
-                        collapse_existing_record = _read_merge_train_stack_collapse_plan_record(
-                            record_store=collapse_store,
-                            repository=landing_request.repository,
-                            base_branch=landing_request.base_branch,
-                            record_id=landing_request.stack_collapse_plan_record_id,
-                        )
+                    if collapse_existing_record is not None:
                         root_entry = next(
                             (
                                 entry
@@ -7465,7 +7515,9 @@ def create_launchplane_service_app(
                     )
                     if root_pull_request is None:
                         raise ValueError("merge train stack collapse root PR is missing")
-                    if root_pull_request.head_sha != stack_collapse_plan.root_initial_head_sha:
+                    if root_pull_request.head_sha != _stack_collapse_expected_root_head_sha(
+                        stack_collapse_plan
+                    ):
                         raise ValueError(
                             "merge train stack collapse root PR head no longer matches"
                         )
