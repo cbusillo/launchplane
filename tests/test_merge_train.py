@@ -16,6 +16,7 @@ from control_plane.merge_train import (
     apply_merge_train_merge_intent,
     build_merge_train_dry_run_result,
     build_merge_train_wait_result,
+    discover_merge_train_stack,
     reread_merge_train_after_branch_update,
 )
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -154,6 +155,37 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertEqual(result.intended_next_action, "idle")
         self.assertIn("missing ready-to-merge label", result.queue[0].ineligible_reasons)
         self.assertIn("actor role is not allowed", result.queue[1].ineligible_reasons[0])
+
+    def test_dry_run_ignores_stack_children_that_do_not_target_base_branch(self) -> None:
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(8, head_ref="feature/root", base_ref="main"),
+                    _pull_request(9, head_ref="feature/child", base_ref="feature/root"),
+                ),
+            ),
+        )
+
+        self.assertEqual(result.queue_order, (8,))
+        self.assertEqual([entry.number for entry in result.queue], [8])
+
+    def test_dry_run_preserves_legacy_snapshot_files_without_base_refs(self) -> None:
+        result = build_merge_train_dry_run_result(
+            policy=build_test_merge_train_policy(),
+            snapshot=MergeTrainDryRunSnapshot(
+                repository="cbusillo/sellyouroutboard",
+                base_branch="main",
+                pull_requests=(
+                    _pull_request(13, head_ref="", base_ref=""),
+                    _pull_request(14, head_ref="", base_ref=""),
+                ),
+            ),
+        )
+
+        self.assertEqual(result.queue_order, (13, 14))
 
     def test_dry_run_reports_block_and_update_actions(self) -> None:
         blocked_result = build_merge_train_dry_run_result(
@@ -385,6 +417,117 @@ class MergeTrainDryRunTests(unittest.TestCase):
         self.assertIn("GitHub merge train request failed", result.output)
         self.assertIn("rate limited", result.output)
         self.assertIn("HTTP 403", result.output)
+
+
+class MergeTrainStackDiscoveryTests(unittest.TestCase):
+    def test_discovers_same_repo_linear_stack_from_root_to_leaf(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/merge-train-repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    10,
+                    head_ref="feature/root",
+                    base_ref="main",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    11,
+                    head_ref="feature/middle",
+                    base_ref="feature/root",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    12,
+                    head_ref="feature/leaf",
+                    base_ref="feature/middle",
+                    repository="example/merge-train-repo",
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=10)
+
+        self.assertEqual(result.status, "ready_for_collapse")
+        self.assertEqual(result.stack_order, (10, 11, 12))
+        self.assertEqual([entry.head_ref for entry in result.entries], ["feature/root", "feature/middle", "feature/leaf"])
+
+    def test_reports_not_stacked_for_single_root_pr(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/merge-train-repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    20,
+                    head_ref="feature/root",
+                    base_ref="main",
+                    repository="example/merge-train-repo",
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=20)
+
+        self.assertEqual(result.status, "not_stacked")
+        self.assertEqual(result.stack_order, (20,))
+        self.assertEqual(result.unsupported_reasons, ())
+
+    def test_rejects_ambiguous_sibling_stack_children(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/merge-train-repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    30,
+                    head_ref="feature/root",
+                    base_ref="main",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    31,
+                    head_ref="feature/child-a",
+                    base_ref="feature/root",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    32,
+                    head_ref="feature/child-b",
+                    base_ref="feature/root",
+                    repository="example/merge-train-repo",
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=30)
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertIn("multiple stacked child", result.unsupported_reasons[0])
+
+    def test_rejects_forked_stack_members(self) -> None:
+        snapshot = MergeTrainDryRunSnapshot(
+            repository="example/merge-train-repo",
+            base_branch="main",
+            pull_requests=(
+                _pull_request(
+                    40,
+                    head_ref="feature/root",
+                    base_ref="main",
+                    repository="example/merge-train-repo",
+                ),
+                _pull_request(
+                    41,
+                    head_ref="feature/child",
+                    base_ref="feature/root",
+                    repository="example/merge-train-repo",
+                    head_repository="fork/merge-train-repo",
+                ),
+            ),
+        )
+
+        result = discover_merge_train_stack(snapshot=snapshot, root_pull_request_number=40)
+
+        self.assertEqual(result.status, "unsupported")
+        self.assertIn("not from the train repository", result.unsupported_reasons[0])
 
 
 class MergeTrainBlockIntentTests(unittest.TestCase):
@@ -718,7 +861,14 @@ def _pull_request(
     mergeable: str = "mergeable",
     required_checks_status: str = "pass",
     branch_update_required: bool = False,
+    head_ref: str = "",
+    base_ref: str = "main",
+    repository: str = "",
+    head_repository: str = "",
+    base_repository: str = "",
 ) -> MergeTrainPullRequestSnapshot:
+    normalized_head_repository = head_repository or repository
+    normalized_base_repository = base_repository or repository
     return MergeTrainPullRequestSnapshot.model_validate(
         {
             "number": number,
@@ -729,7 +879,11 @@ def _pull_request(
             "actor_role": actor_role,
             "is_draft": is_draft,
             "head_sha": f"head-{number}",
+            "head_ref": head_ref,
+            "head_repository": normalized_head_repository,
             "base_sha": "base-main",
+            "base_ref": base_ref,
+            "base_repository": normalized_base_repository,
             "mergeable": mergeable,
             "required_checks_status": required_checks_status,
             "branch_update_required": branch_update_required,
