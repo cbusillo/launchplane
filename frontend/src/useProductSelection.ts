@@ -69,6 +69,13 @@ function hasProductBacking(choice: DriverChoice): boolean {
   return Boolean(choice.repository?.trim());
 }
 
+function productChoiceKey(choice: DriverChoice): string {
+  if (hasProductBacking(choice)) {
+    return `product:${choice.driverId}`;
+  }
+  return choiceKey(choice);
+}
+
 function labelForDriverContext(
   driver: DriverDescriptor,
   context: string,
@@ -222,7 +229,7 @@ export function useProductSelection({
       ) {
         return false;
       }
-      const key = choiceKey(choice);
+      const key = productChoiceKey(choice);
       if (seen.has(key)) {
         return false;
       }
