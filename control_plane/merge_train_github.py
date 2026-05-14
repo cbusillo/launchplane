@@ -107,6 +107,28 @@ class GitHubMergeTrainClient:
             update={"candidate_sha": candidate_sha, "status": "ready_for_checks"}
         )
 
+    def observe_batch_candidate_checks(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainBatchCandidate:
+        repository_path = _repository_path(candidate.repository)
+        candidate_sha = _required_value(
+            candidate.candidate_sha,
+            "Merge train batch candidate SHA is required before observing checks.",
+        )
+        check_status = _required_checks_status(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=quote(candidate_sha, safe=""),
+        )
+        candidate_status = "ready_for_checks"
+        if check_status == "pass":
+            candidate_status = "passed"
+        elif check_status == "fail":
+            candidate_status = "failed"
+        return candidate.model_copy(
+            update={"required_checks_status": check_status, "status": candidate_status}
+        )
+
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
@@ -302,48 +324,18 @@ class GitHubMergeTrainSnapshotReader:
         self, *, repository_path: str, head_sha: str
     ) -> MergeTrainCheckStatus:
         encoded_head_sha = quote(head_sha, safe="")
-        status_payload = _json_object(
-            self.transport.request(
-                method="GET", path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
-            ),
-            "GitHub combined status response",
-        )
-        check_runs_payload = self._list_check_runs(
-            repository_path=repository_path, encoded_head_sha=encoded_head_sha
-        )
-        return _combine_check_statuses(
-            _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
+        return _required_checks_status(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
         )
 
     def _list_check_runs(self, *, repository_path: str, encoded_head_sha: str) -> dict[str, object]:
-        check_runs: list[object] = []
-        page = 1
-        total_count: int | None = None
-        while True:
-            query = urlencode({"per_page": "100", "page": str(page)})
-            payload = _json_object(
-                self.transport.request(
-                    method="GET",
-                    path=(
-                        f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"
-                    ),
-                ),
-                "GitHub check runs response",
-            )
-            raw_check_runs = payload.get("check_runs")
-            if not isinstance(raw_check_runs, list):
-                raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
-            raw_total_count = payload.get("total_count")
-            if isinstance(raw_total_count, int):
-                total_count = raw_total_count
-            check_runs.extend(raw_check_runs)
-            if len(raw_check_runs) < 100:
-                break
-            page += 1
-        return {
-            "total_count": total_count if total_count is not None else len(check_runs),
-            "check_runs": check_runs,
-        }
+        return _list_check_runs(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
+        )
 
 
 class MergeTrainGitHubRequest(BaseModel):
@@ -487,6 +479,62 @@ def _check_runs_status(payload: dict[str, object]) -> MergeTrainCheckStatus:
         check_run = _json_object(item, "GitHub check run")
         statuses.append(_check_run_status(check_run))
     return _combine_check_statuses(*statuses)
+
+
+def _required_checks_status(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_head_sha: str,
+) -> MergeTrainCheckStatus:
+    status_payload = _json_object(
+        transport.request(
+            method="GET", path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
+        ),
+        "GitHub combined status response",
+    )
+    check_runs_payload = _list_check_runs(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
+    )
+    return _combine_check_statuses(
+        _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
+    )
+
+
+def _list_check_runs(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_head_sha: str,
+) -> dict[str, object]:
+    check_runs: list[object] = []
+    page = 1
+    total_count: int | None = None
+    while True:
+        query = urlencode({"per_page": "100", "page": str(page)})
+        payload = _json_object(
+            transport.request(
+                method="GET",
+                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
+            ),
+            "GitHub check runs response",
+        )
+        raw_check_runs = payload.get("check_runs")
+        if not isinstance(raw_check_runs, list):
+            raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
+        raw_total_count = payload.get("total_count")
+        if isinstance(raw_total_count, int):
+            total_count = raw_total_count
+        check_runs.extend(raw_check_runs)
+        if len(raw_check_runs) < 100:
+            break
+        page += 1
+    return {
+        "total_count": total_count if total_count is not None else len(check_runs),
+        "check_runs": check_runs,
+    }
 
 
 def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:

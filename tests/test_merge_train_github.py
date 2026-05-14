@@ -163,6 +163,49 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             [request.method for request in transport.requests], ["POST", "POST", "POST"]
         )
 
+    def test_observe_batch_candidate_checks_marks_passed_candidate(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"state": "success"},
+                {"check_runs": [_check_run("completed", "success")]},
+            )
+        )
+
+        observed_candidate = GitHubMergeTrainClient(
+            transport=transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+
+        self.assertEqual(observed_candidate.status, "passed")
+        self.assertEqual(observed_candidate.required_checks_status, "pass")
+        self.assertEqual(
+            [request.path for request in transport.requests],
+            [
+                "/repos/example/merge-train-repo/commits/candidate-sha/status",
+                "/repos/example/merge-train-repo/commits/candidate-sha/check-runs?per_page=100&page=1",
+            ],
+        )
+
+    def test_observe_batch_candidate_checks_leaves_pending_candidate_unlandable(self) -> None:
+        candidate = _batch_candidate().model_copy(
+            update={"candidate_sha": "candidate-sha", "status": "ready_for_checks"}
+        )
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"state": "pending"},
+                {"check_runs": [_check_run("queued", None)]},
+            )
+        )
+
+        observed_candidate = GitHubMergeTrainClient(
+            transport=transport
+        ).observe_batch_candidate_checks(candidate=candidate)
+
+        self.assertEqual(observed_candidate.status, "ready_for_checks")
+        self.assertEqual(observed_candidate.required_checks_status, "pending")
+
     def test_repository_must_be_owner_name(self) -> None:
         client = GitHubMergeTrainClient(transport=RecordingMergeTrainGitHubTransport())
 
