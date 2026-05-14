@@ -267,6 +267,34 @@ def build_merge_train_batch_candidate(
     )
 
 
+def build_merge_train_batch_candidate_record(
+    *,
+    candidate: MergeTrainBatchCandidate,
+    source: str,
+    updated_at: str,
+) -> MergeTrainBatchCandidateRecord:
+    record_without_id = MergeTrainBatchCandidateRecord(
+        record_id="pending",
+        source=source,
+        updated_at=updated_at,
+        candidate=candidate,
+    )
+    return record_without_id.model_copy(
+        update={"record_id": build_merge_train_batch_candidate_record_id(record_without_id)}
+    )
+
+
+def build_merge_train_batch_candidate_record_id(
+    record: MergeTrainBatchCandidateRecord,
+) -> str:
+    digest_payload = record.model_dump(mode="json", exclude={"record_id"})
+    digest = hashlib.sha256(
+        json.dumps(digest_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()[:16]
+    normalized_timestamp = record.updated_at.replace("-", "").replace(":", "")
+    return f"merge-train-batch-candidate-{normalized_timestamp}-{digest}"
+
+
 def build_merge_train_batch_id(
     *, repository: str, base_branch: str, base_sha: str, entry_head_shas: tuple[str, ...]
 ) -> str:
