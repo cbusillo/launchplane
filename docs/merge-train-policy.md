@@ -326,6 +326,15 @@ that ref in order. Observe mode records required-check state for the exact
 candidate SHA. Landing the original PRs remains a later PR-native phase with
 separate records.
 
+The batch-landing service endpoint
+`POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
+landing phase. It accepts `mode: plan` with a passed candidate record id and
+writes a `launchplane_merge_train_batch_landing_plans` record, or `mode: land`
+with a landing-plan record id and merges the original pull requests in recorded
+queue order. Landing fails closed if the base branch head has moved from the
+candidate base SHA, and each PR merge uses the recorded head SHA guard so a
+changed PR head cannot be merged under stale validation.
+
 Scheduler admission is a deterministic decision over the latest stored
 `launchplane_merge_train_runs` record for the repository/base branch. Dry-run
 records do not throttle the scheduler. Mutation records with `reread_required`

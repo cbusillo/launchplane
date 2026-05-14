@@ -243,6 +243,16 @@ candidate SHA, and records whether the candidate is still pending, passed, or
 failed. The route never lands original PRs; PR-native landing remains a later
 phase with separate records and pre-merge invariants.
 
+`POST /v1/work-graph/merge-train/batch-landing/run-once` executes one
+policy-backed batch-landing phase for a requested repository/base branch. The
+route accepts `mode: plan` with a passed batch-candidate record id or
+`mode: land` with a landing-plan record id. Plan mode writes a
+`launchplane_merge_train_batch_landing_plans` record with the original PR order,
+expected head SHAs, expected base SHA, and policy merge method. Land mode merges
+the original PRs in that order through GitHub's PR merge endpoint, rejects stale
+base-branch movement before merging, and relies on GitHub's SHA guard for each
+PR head.
+
 `.github/workflows/merge-train-runner.yml` is the first external scheduler for
 this route. It mints a GitHub Actions OIDC token for the Launchplane service,
 reads admission, and calls `run-once` only when the decision is `admitted`.
@@ -311,6 +321,10 @@ The first batch service contract is
 `POST /v1/work-graph/merge-train/batch-candidate/run-once`; it owns only the
 plan/build/observe candidate phases and writes
 `launchplane_merge_train_batch_candidates` records.
+The second batch service contract is
+`POST /v1/work-graph/merge-train/batch-landing/run-once`; it owns landing-plan
+creation and guarded PR-native landing, and writes
+`launchplane_merge_train_batch_landing_plans` records.
 
 `POST /v1/merge-train/policies/import` is the service-owned write path for merge
 train policy records. It requires database storage and
