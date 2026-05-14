@@ -672,7 +672,7 @@ class LaunchplaneMergeTrainStackCollapsePlanRow(Base):
     __tablename__ = "launchplane_merge_train_stack_collapse_plans"
     __table_args__ = (
         Index(
-            "launchplane_merge_train_stack_collapse_plans_repository_base_idx",
+            "launchplane_merge_train_stack_collapse_repository_base_idx",
             "repository",
             "base_branch",
             desc("updated_at"),
