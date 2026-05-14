@@ -57,6 +57,22 @@ name: Merge Train Runner
         description: Landing-plan record id required for land mode
         required: false
         default: ""
+      stack_collapse_mode:
+        description: >-
+          Optional stack-collapse phase to run instead of the Level 1 worker:
+          none, execute, or admit.
+        type: choice
+        required: false
+        default: none
+        options:
+          - none
+          - execute
+          - admit
+      stack_collapse_plan_record_id:
+        description: >-
+          Stack-collapse plan record id required for execute or admit mode
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -121,6 +137,18 @@ jobs:
         ${{
           github.event_name != 'schedule' &&
           inputs.batch_landing_plan_record_id ||
+          ''
+        }}
+      MERGE_TRAIN_STACK_COLLAPSE_MODE: >-
+        ${{
+          github.event_name != 'schedule' &&
+          inputs.stack_collapse_mode ||
+          'none'
+        }}
+      MERGE_TRAIN_STACK_COLLAPSE_PLAN_RECORD_ID: >-
+        ${{
+          github.event_name != 'schedule' &&
+          inputs.stack_collapse_plan_record_id ||
           ''
         }}
     steps:
@@ -218,7 +246,8 @@ jobs:
         run: |
           set -euo pipefail
           if [ "${MERGE_TRAIN_BATCH_CANDIDATE_MODE}" != "none" ] || \
-             [ "${MERGE_TRAIN_BATCH_LANDING_MODE}" != "none" ]; then
+             [ "${MERGE_TRAIN_BATCH_LANDING_MODE}" != "none" ] || \
+             [ "${MERGE_TRAIN_STACK_COLLAPSE_MODE}" != "none" ]; then
             echo "Batch mode selected; skipping Level 1 worker pass."
             exit 0
           fi
@@ -363,6 +392,102 @@ jobs:
             echo "- Candidate SHA: ${candidate_sha}"
             echo "- Required checks: ${required_checks}"
             echo "- Record: ${candidate_record}"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Run one stack-collapse phase
+        if: >-
+          steps.admission.outputs.admission_status == 'admitted' &&
+          env.MERGE_TRAIN_STACK_COLLAPSE_MODE != 'none'
+        shell: bash
+        env:
+          SERVICE_ORIGIN: ${{ steps.admission.outputs.service_origin }}
+          SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
+        run: |
+          set -euo pipefail
+          if [ "${MERGE_TRAIN_BATCH_CANDIDATE_MODE}" != "none" ] || \
+             [ "${MERGE_TRAIN_BATCH_LANDING_MODE}" != "none" ]; then
+            echo "Only one batch or stack-collapse mode may run." >&2
+            exit 1
+          fi
+          case "$MERGE_TRAIN_STACK_COLLAPSE_MODE" in
+            execute|admit) ;;
+            *)
+              echo "Unsupported stack collapse mode:" \
+                "${MERGE_TRAIN_STACK_COLLAPSE_MODE}" >&2
+              exit 1
+              ;;
+          esac
+          if [ -z "${MERGE_TRAIN_STACK_COLLAPSE_PLAN_RECORD_ID}" ]; then
+            echo \
+              "stack_collapse_plan_record_id is required." \
+              >&2
+            exit 1
+          fi
+
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          request_payload="$({
+            jq -n \
+              --arg repository "$MERGE_TRAIN_REPOSITORY" \
+              --arg base_branch "$MERGE_TRAIN_BASE_BRANCH" \
+              --arg mode "$MERGE_TRAIN_STACK_COLLAPSE_MODE" \
+              --arg stack_collapse_plan_record_id \
+                "$MERGE_TRAIN_STACK_COLLAPSE_PLAN_RECORD_ID" \
+              '{
+                schema_version: 1,
+                repository: $repository,
+                base_branch: $base_branch,
+                mode: $mode,
+                stack_collapse_plan_record_id: $stack_collapse_plan_record_id
+              }'
+          })"
+          response_file="launchplane-merge-train-stack-collapse.json"
+          stack_collapse_url="${SERVICE_ORIGIN}/v1/work-graph/merge-train"
+          stack_collapse_url="${stack_collapse_url}/stack-collapse/run-once"
+          status_code="$(curl -sS \
+            -o "$response_file" \
+            -w '%{http_code}' \
+            -X POST \
+            -H "Authorization: Bearer ${oidc_token}" \
+            -H 'Content-Type: application/json' \
+            --data "$request_payload" \
+            "$stack_collapse_url")"
+          if [ "$status_code" != "202" ]; then
+            cat "$response_file" >&2
+            echo "Merge-train stack-collapse phase failed" \
+              "with HTTP ${status_code}." >&2
+            exit 1
+          fi
+
+          jq . "$response_file"
+          {
+            echo
+            echo '## Launchplane merge train stack collapse'
+            echo
+            echo "- Mode: $(jq -r '.result.mode' "$response_file")"
+            stack_record="$(
+              jq -r '.records.merge_train_stack_collapse_plan_record_id // ""' \
+                "$response_file"
+            )"
+            candidate_record="$(
+              jq -r '.records.merge_train_batch_candidate_record_id // ""' \
+                "$response_file"
+            )"
+            stack_status="$(
+              jq -r '.result.stack_collapse_plan.status // ""' \
+                "$response_file"
+            )"
+            candidate_status="$(
+              jq -r '.result.candidate.status // ""' "$response_file"
+            )"
+            echo "- Stack-collapse record: ${stack_record}"
+            echo "- Stack status: ${stack_status}"
+            echo "- Candidate record: ${candidate_record}"
+            echo "- Candidate status: ${candidate_status}"
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Run one batch-landing phase
