@@ -216,10 +216,13 @@ export function useProductSelection({
     const seen = new Set<string>();
     return merged.filter((choice) => {
       const displayKey = choiceDisplayKey(choice);
-      const key =
-        productBackedDisplayKeys.has(displayKey) && !hasProductBacking(choice)
-          ? `fallback:${displayKey}`
-          : choiceKey(choice);
+      if (
+        productBackedDisplayKeys.has(displayKey) &&
+        !hasProductBacking(choice)
+      ) {
+        return false;
+      }
+      const key = choiceKey(choice);
       if (seen.has(key)) {
         return false;
       }
