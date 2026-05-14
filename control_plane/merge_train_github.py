@@ -212,6 +212,9 @@ class GitHubMergeTrainSnapshotReader:
         normalized_base_branch = _required_value(
             base_branch, "GitHub pull request base branch is required."
         )
+        base_sha = self._base_branch_sha(
+            repository_path=repository_path, base_branch=normalized_base_branch
+        )
         pull_requests = tuple(
             self._pull_request_snapshot(
                 repository=repository,
@@ -225,8 +228,20 @@ class GitHubMergeTrainSnapshotReader:
         return MergeTrainDryRunSnapshot(
             repository=repository,
             base_branch=normalized_base_branch,
+            base_sha=base_sha,
             pull_requests=pull_requests,
         )
+
+    def _base_branch_sha(self, *, repository_path: str, base_branch: str) -> str:
+        branch = _json_object(
+            self.transport.request(
+                method="GET",
+                path=f"/repos/{repository_path}/branches/{quote(base_branch, safe='')}",
+            ),
+            "GitHub branch response",
+        )
+        commit = _json_object(branch.get("commit"), "GitHub branch commit")
+        return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
 
     def _list_open_pull_requests(
         self, *, repository_path: str, base_branch: str

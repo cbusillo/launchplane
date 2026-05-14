@@ -237,6 +237,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_builds_pull_request_snapshots_from_github(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _github_branch(),
                 [
                     _github_pull_request(42, mergeable=None),
                 ],
@@ -264,9 +265,11 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         self.assertEqual(pull_request.mergeable, "mergeable")
         self.assertEqual(pull_request.required_checks_status, "pass")
         self.assertFalse(pull_request.branch_update_required)
+        self.assertEqual(snapshot.base_sha, "base-main-current")
         self.assertEqual(
             [request.path for request in transport.requests],
             [
+                "/repos/cbusillo/sellyouroutboard/branches/main",
                 "/repos/cbusillo/sellyouroutboard/pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/42",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
@@ -280,6 +283,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     ) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _github_branch(),
                 [_github_pull_request(15, author_association="CONTRIBUTOR")],
                 _github_pull_request(15, author_association="CONTRIBUTOR"),
                 MergeTrainGitHubError("permission not found", status_code=404),
@@ -297,6 +301,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_paginates_check_runs_before_computing_status(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _github_branch(),
                 [_github_pull_request(16)],
                 _github_pull_request(16),
                 {"permission": "admin"},
@@ -325,7 +330,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_paginates_pull_requests(self) -> None:
         first_page = [_github_pull_request(number) for number in range(1, 101)]
         second_page = [_github_pull_request(101)]
-        responses: list[object] = [first_page, second_page]
+        responses: list[object] = [_github_branch(), first_page, second_page]
         for number in range(1, 102):
             responses.extend(
                 [
@@ -348,6 +353,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_maps_owner_association_without_permission_lookup(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _github_branch(),
                 [_github_pull_request(12, author_association="OWNER")],
                 _github_pull_request(12, author_association="OWNER"),
                 {"state": "success"},
@@ -365,6 +371,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_combines_pending_checks_without_mutation(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _github_branch(),
                 [_github_pull_request(13)],
                 _github_pull_request(13, mergeable=None, mergeable_state="behind"),
                 {"permission": "admin"},
@@ -386,6 +393,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
     def test_snapshot_reader_uses_check_runs_when_legacy_statuses_are_absent(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
+                _github_branch(),
                 [_github_pull_request(14)],
                 _github_pull_request(14),
                 {"permission": "admin"},
@@ -401,7 +409,9 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
         self.assertEqual(snapshot.pull_requests[0].required_checks_status, "pass")
 
     def test_snapshot_reader_fails_closed_on_missing_required_shape(self) -> None:
-        transport = RecordingMergeTrainGitHubTransport(responses=([{"number": 1}],))
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(_github_branch(), [{"number": 1}])
+        )
 
         with self.assertRaisesRegex(MergeTrainGitHubError, "head"):
             GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
@@ -431,6 +441,10 @@ def _github_pull_request(
         "mergeable": mergeable,
         "mergeable_state": mergeable_state,
     }
+
+
+def _github_branch() -> dict[str, object]:
+    return {"commit": {"sha": "base-main-current"}}
 
 
 def _check_run(status: str, conclusion: str | None) -> dict[str, object]:

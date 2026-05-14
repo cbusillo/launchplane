@@ -84,6 +84,7 @@ class MergeTrainDryRunSnapshot(BaseModel):
 
     repository: str
     base_branch: str
+    base_sha: str = ""
     pull_requests: tuple[MergeTrainPullRequestSnapshot, ...]
 
     @model_validator(mode="after")
@@ -94,6 +95,7 @@ class MergeTrainDryRunSnapshot(BaseModel):
         self.base_branch = _normalize_required_value(
             self.base_branch, "merge train dry-run snapshot requires base_branch"
         )
+        self.base_sha = self.base_sha.strip()
         return self
 
 

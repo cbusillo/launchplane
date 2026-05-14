@@ -251,6 +251,7 @@ class _FakeMergeTrainSnapshotReader:
         return MergeTrainDryRunSnapshot(
             repository=repository,
             base_branch=base_branch,
+            base_sha="current-base-main",
             pull_requests=(
                 MergeTrainPullRequestSnapshot(
                     number=1,
@@ -1572,6 +1573,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(status_code, 202)
         self.assertEqual(payload["result"]["mode"], "plan")
         self.assertEqual(payload["result"]["candidate"]["status"], "planned")
+        self.assertEqual(payload["result"]["candidate"]["base_sha"], "current-base-main")
         self.assertEqual(payload["result"]["candidate"]["entries"][0]["pull_request_number"], 1)
         self.assertEqual(listed_records[0].record_id, record_id)
         self.assertEqual(listed_records[0].candidate.policy_key, "cbusillo/sellyouroutboard:main")

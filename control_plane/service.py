@@ -6921,17 +6921,9 @@ def create_launchplane_service_app(
                     dry_run_result = build_merge_train_dry_run_result(
                         policy=policy, snapshot=snapshot
                     )
-                    base_sha = next(
-                        (
-                            pull_request.base_sha
-                            for pull_request in snapshot.pull_requests
-                            if pull_request.base_sha
-                        ),
-                        "",
-                    )
                     candidate = build_merge_train_batch_candidate(
                         dry_run_result=dry_run_result,
-                        base_sha=base_sha,
+                        base_sha=snapshot.base_sha,
                         policy_sha256=policy_record.policy_sha256,
                         created_at=recorded_at,
                     )

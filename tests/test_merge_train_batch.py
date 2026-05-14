@@ -99,6 +99,7 @@ class MergeTrainBatchContractTests(unittest.TestCase):
             snapshot=MergeTrainDryRunSnapshot(
                 repository="example/merge-train-repo",
                 base_branch="main",
+                base_sha="current-main",
                 pull_requests=(
                     _pull_request(2, created_at="2026-05-13T10:02:00Z"),
                     _pull_request(1, created_at="2026-05-13T10:01:00Z"),
@@ -108,13 +109,13 @@ class MergeTrainBatchContractTests(unittest.TestCase):
 
         candidate = build_merge_train_batch_candidate(
             dry_run_result=dry_run_result,
-            base_sha="base-main",
+            base_sha="current-main",
             policy_sha256="policy-sha",
             created_at="2026-05-13T23:00:00Z",
         )
 
         self.assertEqual(candidate.status, "planned")
-        self.assertEqual(candidate.base_sha, "base-main")
+        self.assertEqual(candidate.base_sha, "current-main")
         self.assertEqual(candidate.policy_key, "example/merge-train-repo:main")
         self.assertEqual(
             [entry.pull_request_number for entry in candidate.entries],
