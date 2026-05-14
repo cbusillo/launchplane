@@ -350,18 +350,29 @@ jobs:
 
           deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
           expected_image_reference="${{ steps.image.outputs.image_reference }}"
+          last_report_seconds=0
           while [ "$SECONDS" -lt "$deadline" ]; do
             all_healthy=1
+            health_report=""
             while IFS= read -r raw_url; do
               health_url="$(printf '%s' "$raw_url" | xargs)"
               if [ -z "$health_url" ]; then
                 continue
               fi
-              response_body="$(curl -fsSL "$health_url" 2>/dev/null || true)"
-              if [ -z "$response_body" ] || ! printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+              health_response_file="$(mktemp)"
+              health_status_code="$(curl -sS -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
+              health_status_value="$(jq -r '.status // empty' "$health_response_file" 2>/dev/null || true)"
+              if [ -z "$health_report" ]; then
+                health_report="${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
+              else
+                health_report="$health_report,${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
+              fi
+              if [ "$health_status_code" != "200" ] || [ "$health_status_value" != "ok" ]; then
                 all_healthy=0
+                rm -f "$health_response_file"
                 break
               fi
+              rm -f "$health_response_file"
             done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
             oidc_token="$({
@@ -371,14 +382,24 @@ jobs:
               | jq -r '.value'
             })"
 
-            runtime_payload="$(curl -fsSL \
+            runtime_response_file="$(mktemp)"
+            runtime_status_code="$(curl -sS \
+              -o "$runtime_response_file" \
+              -w '%{http_code}' \
               -H "Authorization: Bearer ${oidc_token}" \
               "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
+            actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$runtime_response_file" 2>/dev/null || true)"
+            runtime_error_code="$(jq -r '.error.code // empty' "$runtime_response_file" 2>/dev/null || true)"
 
-            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$expected_image_reference" ]; then
+            if [ "$all_healthy" -eq 1 ] && [ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$expected_image_reference" ]; then
+              rm -f "$runtime_response_file"
               exit 0
             fi
+            if [ "$((SECONDS - last_report_seconds))" -ge 30 ]; then
+              echo "Waiting for Launchplane image. health=${health_report:-none} runtime_http=${runtime_status_code:-curl_failed} runtime_image=${actual_image_reference:-none} runtime_error=${runtime_error_code:-none}"
+              last_report_seconds=$SECONDS
+            fi
+            rm -f "$runtime_response_file"
             sleep 5
           done
 
@@ -514,18 +535,29 @@ jobs:
           fi
 
           deadline=$((SECONDS + ${LAUNCHPLANE_DOKPLOY_DEPLOY_TIMEOUT_SECONDS:-600} + ${LAUNCHPLANE_DEPLOY_HEALTH_TIMEOUT_SECONDS:-180}))
+          last_report_seconds=0
           while [ "$SECONDS" -lt "$deadline" ]; do
             all_healthy=1
+            health_report=""
             while IFS= read -r raw_url; do
               health_url="$(printf '%s' "$raw_url" | xargs)"
               if [ -z "$health_url" ]; then
                 continue
               fi
-              response_body="$(curl -fsSL "$health_url" 2>/dev/null || true)"
-              if [ -z "$response_body" ] || ! printf '%s' "$response_body" | jq -e '.status == "ok"' >/dev/null 2>&1; then
+              health_response_file="$(mktemp)"
+              health_status_code="$(curl -sS -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
+              health_status_value="$(jq -r '.status // empty' "$health_response_file" 2>/dev/null || true)"
+              if [ -z "$health_report" ]; then
+                health_report="${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
+              else
+                health_report="$health_report,${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
+              fi
+              if [ "$health_status_code" != "200" ] || [ "$health_status_value" != "ok" ]; then
                 all_healthy=0
+                rm -f "$health_response_file"
                 break
               fi
+              rm -f "$health_response_file"
             done < <(printf '%s\n' "$LAUNCHPLANE_DEPLOY_HEALTH_URLS" | tr ',' '\n')
 
             oidc_token="$({
@@ -535,15 +567,25 @@ jobs:
               | jq -r '.value'
             })"
 
-            runtime_payload="$(curl -fsSL \
+            runtime_response_file="$(mktemp)"
+            runtime_status_code="$(curl -sS \
+              -o "$runtime_response_file" \
+              -w '%{http_code}' \
               -H "Authorization: Bearer ${oidc_token}" \
               "${{ steps.service.outputs.service_url }}/v1/service/runtime" 2>/dev/null || true)"
-            actual_image_reference="$(printf '%s' "$runtime_payload" | jq -r '.runtime.docker_image_reference // empty' 2>/dev/null || true)"
+            actual_image_reference="$(jq -r '.runtime.docker_image_reference // empty' "$runtime_response_file" 2>/dev/null || true)"
+            runtime_error_code="$(jq -r '.error.code // empty' "$runtime_response_file" 2>/dev/null || true)"
 
-            if [ "$all_healthy" -eq 1 ] && [ "$actual_image_reference" = "$previous_image_reference" ]; then
+            if [ "$all_healthy" -eq 1 ] && [ "$runtime_status_code" = "200" ] && [ "$actual_image_reference" = "$previous_image_reference" ]; then
               echo "Rolled Launchplane back to $previous_image_reference."
+              rm -f "$runtime_response_file"
               exit 0
             fi
+            if [ "$((SECONDS - last_report_seconds))" -ge 30 ]; then
+              echo "Waiting for Launchplane rollback image. health=${health_report:-none} runtime_http=${runtime_status_code:-curl_failed} runtime_image=${actual_image_reference:-none} runtime_error=${runtime_error_code:-none}"
+              last_report_seconds=$SECONDS
+            fi
+            rm -f "$runtime_response_file"
             sleep 5
           done
 
