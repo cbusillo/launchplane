@@ -214,6 +214,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             responses=(
                 _github_branch(sha="base-main"),
                 {"sha": "merge-sha-1"},
+                _github_branch(sha="merge-sha-1"),
                 {"sha": "merge-sha-2"},
             )
         )
@@ -238,6 +239,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                     "/repos/example/merge-train-repo/pulls/1/merge",
                     {"sha": "head-1", "merge_method": "merge"},
                 ),
+                ("GET", "/repos/example/merge-train-repo/branches/main", None),
                 (
                     "PUT",
                     "/repos/example/merge-train-repo/pulls/2/merge",
@@ -246,13 +248,32 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
             ],
         )
 
+    def test_land_batch_candidate_rejects_base_movement_between_prs(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                {"sha": "merge-sha-1"},
+                _github_branch(sha="unexpected-base"),
+            )
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "outside"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
+
+        self.assertEqual(
+            [request.method for request in transport.requests], ["GET", "PUT", "GET"]
+        )
+
     def test_land_batch_candidate_rejects_moved_base_branch(self) -> None:
         landing_plan = _landing_plan()
         transport = RecordingMergeTrainGitHubTransport(
             responses=(_github_branch(sha="new-base-main"),)
         )
 
-        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "Base branch moved"):
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "outside"):
             GitHubMergeTrainClient(transport=transport).land_batch_candidate(
                 landing_plan=landing_plan
             )
