@@ -5,8 +5,10 @@ from urllib.error import HTTPError
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_ref
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_id
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -205,6 +207,57 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
         self.assertEqual(observed_candidate.status, "ready_for_checks")
         self.assertEqual(observed_candidate.required_checks_status, "pending")
+
+    def test_land_batch_candidate_merges_original_prs_in_order(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="base-main"),
+                {"sha": "merge-sha-1"},
+                {"sha": "merge-sha-2"},
+            )
+        )
+
+        landed_plan = GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+            landing_plan=landing_plan
+        )
+
+        self.assertEqual(
+            [entry.status for entry in landed_plan.entries], ["merged", "merged"]
+        )
+        self.assertEqual(
+            [entry.merge_commit_sha for entry in landed_plan.entries],
+            ["merge-sha-1", "merge-sha-2"],
+        )
+        self.assertEqual(
+            [(request.method, request.path, request.body) for request in transport.requests],
+            [
+                ("GET", "/repos/example/merge-train-repo/branches/main", None),
+                (
+                    "PUT",
+                    "/repos/example/merge-train-repo/pulls/1/merge",
+                    {"sha": "head-1", "merge_method": "merge"},
+                ),
+                (
+                    "PUT",
+                    "/repos/example/merge-train-repo/pulls/2/merge",
+                    {"sha": "head-2", "merge_method": "merge"},
+                ),
+            ],
+        )
+
+    def test_land_batch_candidate_rejects_moved_base_branch(self) -> None:
+        landing_plan = _landing_plan()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(_github_branch(sha="new-base-main"),)
+        )
+
+        with self.assertRaisesRegex(MergeTrainGitHubStaleHeadError, "Base branch moved"):
+            GitHubMergeTrainClient(transport=transport).land_batch_candidate(
+                landing_plan=landing_plan
+            )
+
+        self.assertEqual(len(transport.requests), 1)
 
     def test_repository_must_be_owner_name(self) -> None:
         client = GitHubMergeTrainClient(transport=RecordingMergeTrainGitHubTransport())
@@ -443,8 +496,8 @@ def _github_pull_request(
     }
 
 
-def _github_branch() -> dict[str, object]:
-    return {"commit": {"sha": "base-main-current"}}
+def _github_branch(*, sha: str = "base-main-current") -> dict[str, object]:
+    return {"commit": {"sha": sha}}
 
 
 def _check_run(status: str, conclusion: str | None) -> dict[str, object]:
@@ -483,6 +536,17 @@ def _batch_candidate() -> MergeTrainBatchCandidate:
         entries=entries,
         created_at="2026-05-13T23:00:00Z",
         updated_at="2026-05-13T23:00:00Z",
+    )
+
+
+def _landing_plan() -> MergeTrainBatchLandingPlan:
+    candidate = _batch_candidate().model_copy(
+        update={"status": "passed", "candidate_sha": "candidate-sha"}
+    )
+    return build_merge_train_batch_landing_plan(
+        candidate=candidate,
+        merge_method="merge",
+        created_at="2026-05-14T01:10:00Z",
     )
 
 

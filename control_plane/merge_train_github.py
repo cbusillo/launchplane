@@ -7,6 +7,7 @@ from urllib.request import Request, urlopen
 from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -129,6 +130,33 @@ class GitHubMergeTrainClient:
             update={"required_checks_status": check_status, "status": candidate_status}
         )
 
+    def land_batch_candidate(self, *, landing_plan: MergeTrainBatchLandingPlan) -> MergeTrainBatchLandingPlan:
+        repository_path = _repository_path(landing_plan.repository)
+        expected_base_sha = landing_plan.entries[0].expected_base_sha
+        current_base_sha = _base_branch_sha(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=landing_plan.base_branch,
+        )
+        if current_base_sha != expected_base_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Base branch moved after batch candidate validation.", status_code=409
+            )
+        merged_entries = []
+        for entry in landing_plan.entries:
+            merge_commit_sha = self.merge_pull_request(
+                repository=landing_plan.repository,
+                pull_request_number=entry.pull_request_number,
+                head_sha=entry.expected_head_sha,
+                merge_method=entry.merge_method,
+            )
+            merged_entries.append(
+                entry.model_copy(
+                    update={"status": "merged", "merge_commit_sha": merge_commit_sha}
+                )
+            )
+        return landing_plan.model_copy(update={"entries": tuple(merged_entries)})
+
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
     ) -> None:
@@ -233,15 +261,11 @@ class GitHubMergeTrainSnapshotReader:
         )
 
     def _base_branch_sha(self, *, repository_path: str, base_branch: str) -> str:
-        branch = _json_object(
-            self.transport.request(
-                method="GET",
-                path=f"/repos/{repository_path}/branches/{quote(base_branch, safe='')}",
-            ),
-            "GitHub branch response",
+        return _base_branch_sha(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=base_branch,
         )
-        commit = _json_object(branch.get("commit"), "GitHub branch commit")
-        return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
 
     def _list_open_pull_requests(
         self, *, repository_path: str, base_branch: str
@@ -468,6 +492,20 @@ def _mergeable_state(source: dict[str, object]) -> MergeTrainMergeableState:
 def _branch_update_required(source: dict[str, object]) -> bool:
     mergeable_state = str(source.get("mergeable_state") or "").strip().lower()
     return mergeable_state == "behind"
+
+
+def _base_branch_sha(
+    *, transport: MergeTrainGitHubTransport, repository_path: str, base_branch: str
+) -> str:
+    branch = _json_object(
+        transport.request(
+            method="GET",
+            path=f"/repos/{repository_path}/branches/{quote(base_branch, safe='')}",
+        ),
+        "GitHub branch response",
+    )
+    commit = _json_object(branch.get("commit"), "GitHub branch commit")
+    return _required_text(commit.get("sha"), "GitHub branch commit requires sha.")
 
 
 def _combined_status_state(payload: dict[str, object]) -> MergeTrainCheckStatus:

@@ -8,6 +8,7 @@ from control_plane.contracts.merge_train_batch import build_merge_train_batch_ca
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_ref
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_id
 from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_landing_plan_record
 from control_plane.merge_train import MergeTrainDryRunSnapshot
 from control_plane.merge_train import MergeTrainPullRequestSnapshot
 from control_plane.merge_train import build_merge_train_dry_run_result
@@ -92,6 +93,24 @@ class MergeTrainBatchContractTests(unittest.TestCase):
         )
         self.assertEqual({entry.expected_base_sha for entry in plan.entries}, {"base-sha"})
         self.assertEqual({entry.merge_method for entry in plan.entries}, {"merge"})
+
+    def test_landing_plan_record_id_is_deterministic(self) -> None:
+        plan = build_merge_train_batch_landing_plan(
+            candidate=_candidate(status="passed", candidate_sha="candidate-sha"),
+            merge_method="merge",
+            created_at="2026-05-13T23:00:00Z",
+        )
+
+        record = build_merge_train_batch_landing_plan_record(
+            landing_plan=plan,
+            source="test",
+            updated_at="2026-05-14T01:00:00Z",
+        )
+
+        self.assertTrue(
+            record.record_id.startswith("merge-train-batch-landing-plan-20260514T010000Z-")
+        )
+        self.assertEqual(record.landing_plan.plan_id, plan.plan_id)
 
     def test_candidate_builder_uses_all_eligible_queue_entries(self) -> None:
         dry_run_result = build_merge_train_dry_run_result(
