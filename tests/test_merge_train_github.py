@@ -3,6 +3,10 @@ from email.message import Message
 from unittest.mock import patch
 from urllib.error import HTTPError
 
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
+from control_plane.contracts.merge_train_batch import MergeTrainBatchEntry
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_ref
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_id
 from control_plane.merge_train_github import GitHubMergeTrainClient
 from control_plane.merge_train_github import GitHubMergeTrainSnapshotReader
 from control_plane.merge_train_github import MergeTrainGitHubError
@@ -25,9 +29,7 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(len(transport.requests), 1)
         request = transport.requests[0]
         self.assertEqual(request.method, "POST")
-        self.assertEqual(
-            request.path, "/repos/cbusillo/sellyouroutboard/issues/42/labels"
-        )
+        self.assertEqual(request.path, "/repos/cbusillo/sellyouroutboard/issues/42/labels")
         self.assertEqual(request.body, {"labels": ["merge-blocked"]})
 
     def test_update_pull_request_branch_uses_expected_head_sha(self) -> None:
@@ -43,15 +45,11 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
         self.assertEqual(len(transport.requests), 1)
         request = transport.requests[0]
         self.assertEqual(request.method, "PUT")
-        self.assertEqual(
-            request.path, "/repos/cbusillo/sellyouroutboard/pulls/42/update-branch"
-        )
+        self.assertEqual(request.path, "/repos/cbusillo/sellyouroutboard/pulls/42/update-branch")
         self.assertEqual(request.body, {"expected_head_sha": "head-42"})
 
     def test_merge_pull_request_uses_sha_guard_and_policy_method(self) -> None:
-        transport = RecordingMergeTrainGitHubTransport(
-            responses=({"sha": "merge-sha-42"},)
-        )
+        transport = RecordingMergeTrainGitHubTransport(responses=({"sha": "merge-sha-42"},))
         client = GitHubMergeTrainClient(transport=transport)
 
         merge_commit_sha = client.merge_pull_request(
@@ -79,6 +77,91 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 head_sha="head-42",
                 merge_method="merge",
             )
+
+    def test_build_batch_candidate_creates_ref_and_merges_heads_in_order(self) -> None:
+        candidate = _batch_candidate()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                {"sha": "candidate-after-1"},
+                {"sha": "candidate-after-2"},
+            )
+        )
+
+        built_candidate = GitHubMergeTrainClient(transport=transport).build_batch_candidate(
+            candidate=candidate
+        )
+
+        self.assertEqual(built_candidate.status, "ready_for_checks")
+        self.assertEqual(built_candidate.candidate_sha, "candidate-after-2")
+        self.assertEqual(
+            [(request.method, request.path, request.body) for request in transport.requests],
+            [
+                (
+                    "POST",
+                    "/repos/example/merge-train-repo/git/refs",
+                    {"ref": candidate.candidate_ref, "sha": "base-main"},
+                ),
+                (
+                    "POST",
+                    "/repos/example/merge-train-repo/merges",
+                    {
+                        "base": "launchplane/train/example/merge-train-repo/main/"
+                        f"{candidate.batch_id}",
+                        "head": "head-1",
+                        "commit_message": f"Launchplane merge train {candidate.batch_id}: merge PR #1",
+                    },
+                ),
+                (
+                    "POST",
+                    "/repos/example/merge-train-repo/merges",
+                    {
+                        "base": "launchplane/train/example/merge-train-repo/main/"
+                        f"{candidate.batch_id}",
+                        "head": "head-2",
+                        "commit_message": f"Launchplane merge train {candidate.batch_id}: merge PR #2",
+                    },
+                ),
+            ],
+        )
+
+    def test_build_batch_candidate_resets_existing_ref(self) -> None:
+        candidate = _batch_candidate()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                MergeTrainGitHubError("reference exists", status_code=409),
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                {"sha": "candidate-after-1"},
+                {"sha": "candidate-after-2"},
+            )
+        )
+
+        GitHubMergeTrainClient(transport=transport).build_batch_candidate(candidate=candidate)
+
+        self.assertEqual(transport.requests[1].method, "PATCH")
+        self.assertEqual(
+            transport.requests[1].path,
+            "/repos/example/merge-train-repo/git/refs/heads/launchplane/train/example/merge-train-repo/main/"
+            f"{candidate.batch_id}",
+        )
+        self.assertEqual(transport.requests[1].body, {"sha": "base-main", "force": True})
+
+    def test_build_batch_candidate_reports_conflict_without_landing_prs(self) -> None:
+        candidate = _batch_candidate()
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                {"ref": candidate.candidate_ref, "object": {"sha": "base-main"}},
+                {"sha": "candidate-after-1"},
+                MergeTrainGitHubStaleHeadError("conflict", status_code=409),
+            )
+        )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).build_batch_candidate(candidate=candidate)
+
+        self.assertEqual(
+            [request.method for request in transport.requests], ["POST", "POST", "POST"]
+        )
 
     def test_repository_must_be_owner_name(self) -> None:
         client = GitHubMergeTrainClient(transport=RecordingMergeTrainGitHubTransport())
@@ -312,6 +395,38 @@ def _check_run(status: str, conclusion: str | None) -> dict[str, object]:
     if conclusion is not None:
         payload["conclusion"] = conclusion
     return payload
+
+
+def _batch_candidate() -> MergeTrainBatchCandidate:
+    repository = "example/merge-train-repo"
+    base_branch = "main"
+    base_sha = "base-main"
+    entries = (
+        MergeTrainBatchEntry(pull_request_number=1, position=1, head_sha="head-1"),
+        MergeTrainBatchEntry(pull_request_number=2, position=2, head_sha="head-2"),
+    )
+    batch_id = build_merge_train_batch_id(
+        repository=repository,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        entry_head_shas=tuple(entry.head_sha for entry in entries),
+    )
+    return MergeTrainBatchCandidate(
+        batch_id=batch_id,
+        repository=repository,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        policy_key=f"{repository}:{base_branch}",
+        policy_sha256="policy-sha",
+        candidate_ref=build_merge_train_batch_candidate_ref(
+            repository=repository,
+            base_branch=base_branch,
+            batch_id=batch_id,
+        ),
+        entries=entries,
+        created_at="2026-05-13T23:00:00Z",
+        updated_at="2026-05-13T23:00:00Z",
+    )
 
 
 if __name__ == "__main__":
