@@ -2117,6 +2117,17 @@ class LaunchplaneServiceDeployTests(unittest.TestCase):
 
         self.assertEqual(rendered, "KEEP=1\nADD=2")
 
+    def test_launchplane_compose_exports_runtime_image_reference(self) -> None:
+        compose_text = Path("docker-compose.yml").read_text()
+
+        self.assertIn(
+            "image: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}", compose_text
+        )
+        self.assertIn(
+            "DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}",
+            compose_text,
+        )
+
     def test_render_odoo_raw_compose_file_pins_artifact_image_and_services(self) -> None:
         compose_file = control_plane_dokploy.render_odoo_raw_compose_file(
             image_reference="ghcr.io/cbusillo/odoo-tenant-cm@sha256:abc123",

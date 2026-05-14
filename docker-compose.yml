@@ -8,6 +8,7 @@ services:
     command:
       - /app/scripts/start-launchplane-service.sh
     environment:
+      DOCKER_IMAGE_REFERENCE: ${DOCKER_IMAGE_REFERENCE:-launchplane:local}
       LAUNCHPLANE_SERVICE_AUDIENCE: ${LAUNCHPLANE_SERVICE_AUDIENCE:-localhost}
       LAUNCHPLANE_SERVICE_HOST: 0.0.0.0
       LAUNCHPLANE_SERVICE_PORT: 8080
