@@ -16,6 +16,16 @@ from control_plane.contracts.deployment_record import DeploymentRecord, Resolved
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_preview_gate_record import EveryCodePreviewGateRecord
 from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFeedbackRecord
+from control_plane.contracts.merge_train_batch import (
+    MergeTrainBatchCandidate,
+    MergeTrainBatchCandidateRecord,
+    MergeTrainBatchEntry,
+    MergeTrainBatchRecordStatus,
+    MergeTrainBatchLandingPlanRecord,
+    build_merge_train_batch_candidate_ref,
+    build_merge_train_batch_id,
+    build_merge_train_batch_landing_plan,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooAddonSettingOverride
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
@@ -69,6 +79,84 @@ def _health_pass() -> HealthcheckEvidence:
         urls=("https://prod.example.com/web/health",),
         timeout_seconds=45,
         status="pass",
+    )
+
+
+def _merge_train_batch_candidate_record(
+    *,
+    record_id: str = "merge-train-batch-candidate-20260514T010000Z-active",
+    status: MergeTrainBatchRecordStatus = "active",
+    updated_at: str = "2026-05-14T01:00:00Z",
+) -> MergeTrainBatchCandidateRecord:
+    repository = "example/merge-train-repo"
+    base_branch = "main"
+    base_sha = "base-main"
+    entries = (
+        MergeTrainBatchEntry(
+            pull_request_number=10,
+            position=1,
+            head_sha="head-10",
+            title="First queued change",
+            url="https://github.com/example/merge-train-repo/pull/10",
+        ),
+        MergeTrainBatchEntry(
+            pull_request_number=11,
+            position=2,
+            head_sha="head-11",
+            title="Second queued change",
+            url="https://github.com/example/merge-train-repo/pull/11",
+        ),
+    )
+    batch_id = build_merge_train_batch_id(
+        repository=repository,
+        base_branch=base_branch,
+        base_sha=base_sha,
+        entry_head_shas=tuple(entry.head_sha for entry in entries),
+    )
+    return MergeTrainBatchCandidateRecord(
+        record_id=record_id,
+        status=status,
+        source="test",
+        updated_at=updated_at,
+        candidate=MergeTrainBatchCandidate(
+            batch_id=batch_id,
+            repository=repository,
+            base_branch=base_branch,
+            base_sha=base_sha,
+            policy_key=f"{repository}:{base_branch}",
+            policy_sha256="policy-digest",
+            candidate_ref=build_merge_train_batch_candidate_ref(
+                repository=repository,
+                base_branch=base_branch,
+                batch_id=batch_id,
+            ),
+            candidate_sha="candidate-sha",
+            status="passed",
+            entries=entries,
+            required_checks_status="pass",
+            created_at="2026-05-14T00:59:00Z",
+            updated_at=updated_at,
+        ),
+    )
+
+
+def _merge_train_batch_landing_plan_record(
+    *,
+    record_id: str = "merge-train-batch-landing-plan-20260514T010500Z-active",
+    status: MergeTrainBatchRecordStatus = "active",
+    updated_at: str = "2026-05-14T01:05:00Z",
+) -> MergeTrainBatchLandingPlanRecord:
+    landing_plan = build_merge_train_batch_landing_plan(
+        candidate=_merge_train_batch_candidate_record(updated_at=updated_at).candidate,
+        merge_method="squash",
+        created_at=updated_at,
+    )
+    return MergeTrainBatchLandingPlanRecord(
+        record_id=record_id,
+        status=status,
+        source="test",
+        updated_at=updated_at,
+        landing_plan=landing_plan,
     )
 
 
@@ -275,6 +363,60 @@ class FilesystemRecordStoreTests(unittest.TestCase):
             .enqueue_label,
             "ready-to-merge",
         )
+
+    def test_write_and_list_merge_train_batch_candidate_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = _merge_train_batch_candidate_record(
+                record_id="merge-train-batch-candidate-20260514T005900Z-old",
+                status="superseded",
+                updated_at="2026-05-14T00:59:00Z",
+            )
+            active_record = _merge_train_batch_candidate_record()
+
+            store.write_merge_train_batch_candidate_record(older_record)
+            written_path = store.write_merge_train_batch_candidate_record(active_record)
+            listed_records = store.list_merge_train_batch_candidate_records(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                status="active",
+            )
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_merge_train_batch_candidates/"
+            "merge-train-batch-candidate-20260514T010000Z-active.json",
+        )
+        self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
+        self.assertEqual(listed_records[0].candidate.entries[1].pull_request_number, 11)
+
+    def test_write_and_list_merge_train_batch_landing_plan_records(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            state_dir = Path(temporary_directory_name)
+            store = FilesystemRecordStore(state_dir=state_dir)
+            older_record = _merge_train_batch_landing_plan_record(
+                record_id="merge-train-batch-landing-plan-20260514T005900Z-old",
+                status="superseded",
+                updated_at="2026-05-14T00:59:00Z",
+            )
+            active_record = _merge_train_batch_landing_plan_record()
+
+            store.write_merge_train_batch_landing_plan_record(older_record)
+            written_path = store.write_merge_train_batch_landing_plan_record(active_record)
+            listed_records = store.list_merge_train_batch_landing_plan_records(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                status="active",
+            )
+
+        self.assertEqual(
+            written_path.relative_to(state_dir).as_posix(),
+            "launchplane_merge_train_batch_landing_plans/"
+            "merge-train-batch-landing-plan-20260514T010500Z-active.json",
+        )
+        self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
+        self.assertEqual(listed_records[0].landing_plan.entries[0].merge_method, "squash")
 
     def test_write_and_read_artifact_manifest(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

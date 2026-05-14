@@ -6,6 +6,7 @@ from urllib.request import Request, urlopen
 
 from pydantic import BaseModel, ConfigDict, model_validator
 
+from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -33,13 +34,11 @@ class MergeTrainGitHubTransport(Protocol):
 class UrllibMergeTrainGitHubTransport:
     def __init__(self, *, token: str, api_base_url: str = "https://api.github.com") -> None:
         self.token = _required_value(token, "GitHub token is required.")
-        self.api_base_url = _required_value(api_base_url, "GitHub API base URL is required.").rstrip(
-            "/"
-        )
+        self.api_base_url = _required_value(
+            api_base_url, "GitHub API base URL is required."
+        ).rstrip("/")
 
-    def request(
-        self, *, method: str, path: str, body: dict[str, object] | None = None
-    ) -> object:
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         request_body = None
         headers = {
             "Accept": "application/vnd.github+json",
@@ -72,6 +71,63 @@ class UrllibMergeTrainGitHubTransport:
 class GitHubMergeTrainClient:
     def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
         self.transport = transport
+
+    def build_batch_candidate(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainBatchCandidate:
+        repository_path = _repository_path(candidate.repository)
+        candidate_branch = _branch_name_from_ref(candidate.candidate_ref)
+        self._create_or_reset_reference(
+            repository_path=repository_path,
+            reference=candidate.candidate_ref,
+            sha=candidate.base_sha,
+        )
+        candidate_sha = candidate.base_sha
+        for entry in candidate.entries:
+            payload = self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/merges",
+                body={
+                    "base": candidate_branch,
+                    "head": entry.head_sha,
+                    "commit_message": (
+                        f"Launchplane merge train {candidate.batch_id}: "
+                        f"merge PR #{entry.pull_request_number}"
+                    ),
+                },
+            )
+            if payload is None:
+                continue
+            if not isinstance(payload, dict):
+                raise MergeTrainGitHubError("GitHub merge response must be a JSON object.")
+            candidate_sha = _required_text(
+                payload.get("sha"), "GitHub merge response requires sha."
+            )
+        return candidate.model_copy(
+            update={"candidate_sha": candidate_sha, "status": "ready_for_checks"}
+        )
+
+    def observe_batch_candidate_checks(
+        self, *, candidate: MergeTrainBatchCandidate
+    ) -> MergeTrainBatchCandidate:
+        repository_path = _repository_path(candidate.repository)
+        candidate_sha = _required_value(
+            candidate.candidate_sha,
+            "Merge train batch candidate SHA is required before observing checks.",
+        )
+        check_status = _required_checks_status(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=quote(candidate_sha, safe=""),
+        )
+        candidate_status = "ready_for_checks"
+        if check_status == "pass":
+            candidate_status = "passed"
+        elif check_status == "fail":
+            candidate_status = "failed"
+        return candidate.model_copy(
+            update={"required_checks_status": check_status, "status": candidate_status}
+        )
 
     def add_pull_request_label(
         self, *, repository: str, pull_request_number: int, label: str
@@ -126,6 +182,24 @@ class GitHubMergeTrainClient:
             )
         return merge_commit_sha
 
+    def _create_or_reset_reference(self, *, repository_path: str, reference: str, sha: str) -> None:
+        normalized_sha = _required_value(sha, "GitHub reference SHA is required.")
+        try:
+            self.transport.request(
+                method="POST",
+                path=f"/repos/{repository_path}/git/refs",
+                body={"ref": reference, "sha": normalized_sha},
+            )
+        except MergeTrainGitHubError as error:
+            if error.status_code != 409:
+                raise
+            reference_path = _reference_path(reference)
+            self.transport.request(
+                method="PATCH",
+                path=f"/repos/{repository_path}/git/refs/{reference_path}",
+                body={"sha": normalized_sha, "force": True},
+            )
+
 
 class GitHubMergeTrainSnapshotReader:
     def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
@@ -177,7 +251,9 @@ class GitHubMergeTrainSnapshotReader:
                 raise MergeTrainGitHubError(
                     "GitHub pull request list response must be a JSON array."
                 )
-            page_pull_requests = [_json_object(item, "GitHub pull request entry") for item in payload]
+            page_pull_requests = [
+                _json_object(item, "GitHub pull request entry") for item in payload
+            ]
             pull_requests.extend(page_pull_requests)
             if len(page_pull_requests) < 100:
                 return tuple(pull_requests)
@@ -248,47 +324,18 @@ class GitHubMergeTrainSnapshotReader:
         self, *, repository_path: str, head_sha: str
     ) -> MergeTrainCheckStatus:
         encoded_head_sha = quote(head_sha, safe="")
-        status_payload = _json_object(
-            self.transport.request(
-                method="GET", path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
-            ),
-            "GitHub combined status response",
-        )
-        check_runs_payload = self._list_check_runs(
-            repository_path=repository_path, encoded_head_sha=encoded_head_sha
-        )
-        return _combine_check_statuses(
-            _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
+        return _required_checks_status(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
         )
 
-    def _list_check_runs(
-        self, *, repository_path: str, encoded_head_sha: str
-    ) -> dict[str, object]:
-        check_runs: list[object] = []
-        page = 1
-        total_count: int | None = None
-        while True:
-            query = urlencode({"per_page": "100", "page": str(page)})
-            payload = _json_object(
-                self.transport.request(
-                    method="GET",
-                    path=(
-                        f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"
-                    ),
-                ),
-                "GitHub check runs response",
-            )
-            raw_check_runs = payload.get("check_runs")
-            if not isinstance(raw_check_runs, list):
-                raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
-            raw_total_count = payload.get("total_count")
-            if isinstance(raw_total_count, int):
-                total_count = raw_total_count
-            check_runs.extend(raw_check_runs)
-            if len(raw_check_runs) < 100:
-                break
-            page += 1
-        return {"total_count": total_count if total_count is not None else len(check_runs), "check_runs": check_runs}
+    def _list_check_runs(self, *, repository_path: str, encoded_head_sha: str) -> dict[str, object]:
+        return _list_check_runs(
+            transport=self.transport,
+            repository_path=repository_path,
+            encoded_head_sha=encoded_head_sha,
+        )
 
 
 class MergeTrainGitHubRequest(BaseModel):
@@ -312,13 +359,9 @@ class RecordingMergeTrainGitHubTransport:
         self.responses = list(responses)
         self.requests: list[MergeTrainGitHubRequest] = []
 
-    def request(
-        self, *, method: str, path: str, body: dict[str, object] | None = None
-    ) -> object:
+    def request(self, *, method: str, path: str, body: dict[str, object] | None = None) -> object:
         self.requests.append(
-            MergeTrainGitHubRequest.model_validate(
-                {"method": method, "path": path, "body": body}
-            )
+            MergeTrainGitHubRequest.model_validate({"method": method, "path": path, "body": body})
         )
         if self.responses:
             response = self.responses.pop(0)
@@ -334,6 +377,22 @@ def _repository_path(repository: str) -> str:
     if len(parts) != 2 or not all(part.strip() for part in parts):
         raise ValueError("GitHub repository must be formatted as owner/name.")
     return "/".join(quote(part.strip(), safe="") for part in parts)
+
+
+def _branch_name_from_ref(reference: str) -> str:
+    normalized = _required_value(reference, "GitHub branch ref is required.")
+    prefix = "refs/heads/"
+    if not normalized.startswith(prefix):
+        raise ValueError("GitHub branch ref must start with refs/heads/.")
+    return normalized.removeprefix(prefix)
+
+
+def _reference_path(reference: str) -> str:
+    normalized = _required_value(reference, "GitHub reference is required.")
+    prefix = "refs/"
+    if not normalized.startswith(prefix):
+        raise ValueError("GitHub reference must start with refs/.")
+    return "/".join(quote(part, safe="") for part in normalized.removeprefix(prefix).split("/"))
 
 
 def _json_object(value: object, label: str) -> dict[str, object]:
@@ -420,6 +479,62 @@ def _check_runs_status(payload: dict[str, object]) -> MergeTrainCheckStatus:
         check_run = _json_object(item, "GitHub check run")
         statuses.append(_check_run_status(check_run))
     return _combine_check_statuses(*statuses)
+
+
+def _required_checks_status(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_head_sha: str,
+) -> MergeTrainCheckStatus:
+    status_payload = _json_object(
+        transport.request(
+            method="GET", path=f"/repos/{repository_path}/commits/{encoded_head_sha}/status"
+        ),
+        "GitHub combined status response",
+    )
+    check_runs_payload = _list_check_runs(
+        transport=transport,
+        repository_path=repository_path,
+        encoded_head_sha=encoded_head_sha,
+    )
+    return _combine_check_statuses(
+        _combined_status_state(status_payload), _check_runs_status(check_runs_payload)
+    )
+
+
+def _list_check_runs(
+    *,
+    transport: MergeTrainGitHubTransport,
+    repository_path: str,
+    encoded_head_sha: str,
+) -> dict[str, object]:
+    check_runs: list[object] = []
+    page = 1
+    total_count: int | None = None
+    while True:
+        query = urlencode({"per_page": "100", "page": str(page)})
+        payload = _json_object(
+            transport.request(
+                method="GET",
+                path=(f"/repos/{repository_path}/commits/{encoded_head_sha}/check-runs?{query}"),
+            ),
+            "GitHub check runs response",
+        )
+        raw_check_runs = payload.get("check_runs")
+        if not isinstance(raw_check_runs, list):
+            raise MergeTrainGitHubError("GitHub check runs response must include check_runs.")
+        raw_total_count = payload.get("total_count")
+        if isinstance(raw_total_count, int):
+            total_count = raw_total_count
+        check_runs.extend(raw_check_runs)
+        if len(raw_check_runs) < 100:
+            break
+        page += 1
+    return {
+        "total_count": total_count if total_count is not None else len(check_runs),
+        "check_runs": check_runs,
+    }
 
 
 def _check_run_status(check_run: dict[str, object]) -> MergeTrainCheckStatus:
