@@ -46,6 +46,7 @@ repository = "{repository}"
 base_branch = "main"
 enqueue_label = "ready-to-merge"
 blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
 merge_method = "merge"
 failure_policy = "pause_train"
 

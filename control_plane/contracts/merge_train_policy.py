@@ -81,6 +81,7 @@ class MergeTrainRepositoryPolicy(BaseModel):
     base_branch: str
     enqueue_label: str
     blocked_label: str
+    stack_child_disposition_label: str = ""
     merge_method: MergeTrainMergeMethod
     failure_policy: MergeTrainFailurePolicy
     enqueue: MergeTrainEnqueuePolicy
@@ -104,8 +105,16 @@ class MergeTrainRepositoryPolicy(BaseModel):
         self.blocked_label = _normalize_required_value(
             self.blocked_label, "merge train policy requires blocked_label"
         )
+        self.stack_child_disposition_label = self.stack_child_disposition_label.strip()
         if self.enqueue_label == self.blocked_label:
             raise ValueError("merge train enqueue_label and blocked_label must differ")
+        if self.stack_child_disposition_label in {
+            self.enqueue_label,
+            self.blocked_label,
+        }:
+            raise ValueError(
+                "merge train stack_child_disposition_label must differ from enqueue_label and blocked_label"
+            )
         return self
 
     @property
@@ -201,9 +210,13 @@ def load_merge_train_policy(policy_file: Path) -> MergeTrainPolicy:
 
 
 def merge_train_policy_sha256(policy: MergeTrainPolicy) -> str:
-    encoded = json.dumps(
-        policy.model_dump(mode="json"), sort_keys=True, separators=(",", ":")
-    ).encode("utf-8")
+    policy_payload = policy.model_dump(mode="json")
+    for repository_policy in policy_payload.get("policies", ()):
+        if isinstance(repository_policy, dict) and not repository_policy.get(
+            "stack_child_disposition_label"
+        ):
+            repository_policy.pop("stack_child_disposition_label", None)
+    encoded = json.dumps(policy_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
 
 

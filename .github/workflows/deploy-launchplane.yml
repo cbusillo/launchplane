@@ -360,7 +360,7 @@ jobs:
                 continue
               fi
               health_response_file="$(mktemp)"
-              health_status_code="$(curl -sS -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
+              health_status_code="$(curl -sSL -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
               health_status_value="$(jq -r '.status // empty' "$health_response_file" 2>/dev/null || true)"
               if [ -z "$health_report" ]; then
                 health_report="${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"
@@ -545,7 +545,7 @@ jobs:
                 continue
               fi
               health_response_file="$(mktemp)"
-              health_status_code="$(curl -sS -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
+              health_status_code="$(curl -sSL -o "$health_response_file" -w '%{http_code}' "$health_url" 2>/dev/null || true)"
               health_status_value="$(jq -r '.status // empty' "$health_response_file" 2>/dev/null || true)"
               if [ -z "$health_report" ]; then
                 health_report="${health_url}=${health_status_code:-curl_failed}:${health_status_value:-unknown}"

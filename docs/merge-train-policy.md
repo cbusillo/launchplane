@@ -39,6 +39,10 @@ Each repository policy contains:
 - `base_branch`: Branch the train protects and merges into.
 - `enqueue_label`: Label required before a pull request can enter the train.
 - `blocked_label`: Label Launchplane applies when a queued pull request blocks.
+- `stack_child_disposition_label`: Label Launchplane applies to child PRs after
+  a same-repository stack has landed through its root PR. It must be configured
+  for stack child disposition and must differ from `enqueue_label` and
+  `blocked_label`.
 - `merge_method`: GitHub merge strategy, one of `merge`, `squash`, or `rebase`.
 - `failure_policy`: Whether Launchplane pauses the whole train or continues
   after marking the blocked pull request.
@@ -158,6 +162,7 @@ repository = "cbusillo/sellyouroutboard"
 base_branch = "main"
 enqueue_label = "ready-to-merge"
 blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
 merge_method = "merge"
 failure_policy = "pause_train"
 
@@ -182,6 +187,7 @@ repository = "cbusillo/codex-skills"
 base_branch = "main"
 enqueue_label = "ready-to-merge"
 blocked_label = "merge-blocked"
+stack_child_disposition_label = "stack-landed"
 merge_method = "merge"
 failure_policy = "pause_train"
 

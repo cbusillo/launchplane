@@ -62,10 +62,17 @@ export function choiceKey(choice: DriverChoice): string {
 
 function choiceDisplayKey(choice: DriverChoice): string {
   const normalizedLabel = choice.label.trim().toLowerCase();
-  return `${choice.driverId}:${normalizedLabel}`;
+  return normalizedLabel;
 }
 
-function labelForDriverContext(driver: DriverDescriptor, context: string): string {
+function hasProductBacking(choice: DriverChoice): boolean {
+  return Boolean(choice.repository?.trim());
+}
+
+function labelForDriverContext(
+  driver: DriverDescriptor,
+  context: string,
+): string {
   if (driver.driver_id === "odoo") {
     if (context === "cm") {
       return "Odoo CM";
@@ -164,17 +171,15 @@ export function choiceFromProductOverview(
   };
 }
 
-export function useProductSelection(
-  {
-    drivers,
-    productProfiles,
-    productOverviews,
-  }: {
-    drivers: DriverDescriptor[];
-    productProfiles: ProductProfileRecord[];
-    productOverviews: ProductSiteOverview[];
-  },
-) {
+export function useProductSelection({
+  drivers,
+  productProfiles,
+  productOverviews,
+}: {
+  drivers: DriverDescriptor[];
+  productProfiles: ProductProfileRecord[];
+  productOverviews: ProductSiteOverview[];
+}) {
   const [selected, setSelected] = useState<DriverChoice>(DEFAULT_CHOICES[0]);
   const choices = useMemo(() => {
     const driverChoices: DriverChoice[] = drivers.flatMap((driver) => {
@@ -205,17 +210,19 @@ export function useProductSelection(
       ...driverChoices,
       ...DEFAULT_CHOICES,
     ];
-    const productDisplayKeys = new Set(
-      [...overviewChoices, ...profileChoices, ...DEFAULT_CHOICES].map(
-        choiceDisplayKey,
-      ),
+    const productBackedDisplayKeys = new Set(
+      [...overviewChoices, ...profileChoices].map(choiceDisplayKey),
     );
     const seen = new Set<string>();
     return merged.filter((choice) => {
       const displayKey = choiceDisplayKey(choice);
-      const key = productDisplayKeys.has(displayKey)
-        ? displayKey
-        : choiceKey(choice);
+      if (
+        productBackedDisplayKeys.has(displayKey) &&
+        !hasProductBacking(choice)
+      ) {
+        return false;
+      }
+      const key = choiceKey(choice);
       if (seen.has(key)) {
         return false;
       }

@@ -261,6 +261,9 @@ variables, not service code. Manual dispatch defaults to dry-run mode; scheduled
 runs also dry-run unless the repository variable `LAUNCHPLANE_MERGE_TRAIN_MUTATE`
 is set to `true`. This keeps activation explicit after setting
 `LAUNCHPLANE_MERGE_TRAIN_REPOSITORY`.
+Workflow dispatches may select at most one non-`none` phase input across
+batch-candidate, batch-landing, and stack-collapse modes; the runner validates
+that exclusivity before any phase step mutates state.
 
 `GET /v1/repo-product-mapping` returns the repository ownership/awareness read
 model used by work graph and future agent context. The route requires

@@ -304,6 +304,31 @@ jobs:
             echo "- Next action: ${next_action}"
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Validate merge-train phase selection
+        if: steps.admission.outputs.admission_status == 'admitted'
+        shell: bash
+        run: |
+          set -euo pipefail
+          selected_modes=()
+
+          if [ "${MERGE_TRAIN_BATCH_CANDIDATE_MODE}" != "none" ]; then
+            selected_modes+=("batch-candidate:${MERGE_TRAIN_BATCH_CANDIDATE_MODE}")
+          fi
+
+          if [ "${MERGE_TRAIN_BATCH_LANDING_MODE}" != "none" ]; then
+            selected_modes+=("batch-landing:${MERGE_TRAIN_BATCH_LANDING_MODE}")
+          fi
+
+          if [ "${MERGE_TRAIN_STACK_COLLAPSE_MODE}" != "none" ]; then
+            selected_modes+=("stack-collapse:${MERGE_TRAIN_STACK_COLLAPSE_MODE}")
+          fi
+
+          if [ "${#selected_modes[@]}" -gt 1 ]; then
+            echo "Only one merge-train phase may run per workflow dispatch." >&2
+            printf 'Selected modes: %s\n' "${selected_modes[*]}" >&2
+            exit 1
+          fi
+
       - name: Run one batch-candidate phase
         if: >-
           steps.admission.outputs.admission_status == 'admitted' &&
@@ -404,11 +429,6 @@ jobs:
           SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
         run: |
           set -euo pipefail
-          if [ "${MERGE_TRAIN_BATCH_CANDIDATE_MODE}" != "none" ] || \
-             [ "${MERGE_TRAIN_BATCH_LANDING_MODE}" != "none" ]; then
-            echo "Only one batch or stack-collapse mode may run." >&2
-            exit 1
-          fi
           case "$MERGE_TRAIN_STACK_COLLAPSE_MODE" in
             execute|admit) ;;
             *)
@@ -500,10 +520,6 @@ jobs:
           SERVICE_AUDIENCE: ${{ steps.admission.outputs.service_audience }}
         run: |
           set -euo pipefail
-          if [ "${MERGE_TRAIN_BATCH_CANDIDATE_MODE}" != "none" ]; then
-            echo "Only one batch mode may run per workflow dispatch." >&2
-            exit 1
-          fi
           case "$MERGE_TRAIN_BATCH_LANDING_MODE" in
             plan|land) ;;
             *)
