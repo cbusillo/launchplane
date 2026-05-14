@@ -180,6 +180,13 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
             ["merge-32-31", "merge-31-30"],
         )
         self.assertEqual(
+            [
+                disposition.expected_head_sha
+                for disposition in executed_plan.child_dispositions
+            ],
+            ["merge-32-31", "head-32"],
+        )
+        self.assertEqual(
             branch_client.requests,
             [
                 {
@@ -255,7 +262,7 @@ class MergeTrainStackCollapseContractTests(unittest.TestCase):
         )
         self.assertEqual(
             disposition_client.closed,
-            [(31, "head-31"), (32, "head-32")],
+            [(31, "merge-32-31"), (32, "head-32")],
         )
         self.assertEqual(disposition_client.labels, [(31, "stack-landed"), (32, "stack-landed")])
         self.assertIn("root PR #30", disposition_client.comments[0][1])
