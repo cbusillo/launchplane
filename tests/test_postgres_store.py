@@ -42,6 +42,14 @@ from control_plane.contracts.merge_train_batch import (
     build_merge_train_batch_id,
     build_merge_train_batch_landing_plan,
 )
+from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapseEntry,
+    MergeTrainStackCollapseMutation,
+    MergeTrainStackCollapsePlan,
+    MergeTrainStackCollapsePlanRecord,
+    MergeTrainStackCollapseRecordStatus,
+    build_merge_train_stack_collapse_id,
+)
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_run_record import (
     MergeTrainRunRecord,
@@ -533,6 +541,7 @@ def _merge_train_run_record(*, recorded_at: str = "2026-05-09T02:05:00Z") -> Mer
                 labels=("ready-to-merge",),
                 actor_role="repo_admin",
                 head_sha="head-42",
+                base_ref="main",
                 base_sha="base-main",
                 mergeable="mergeable",
                 required_checks_status="pass",
@@ -624,6 +633,68 @@ def _merge_train_batch_landing_plan_record(
         source="test",
         updated_at=updated_at,
         landing_plan=landing_plan,
+    )
+
+
+def _merge_train_stack_collapse_plan_record(
+    *,
+    record_id: str = "merge-train-stack-collapse-plan-20260514T013000Z-active",
+    status: MergeTrainStackCollapseRecordStatus = "active",
+    updated_at: str = "2026-05-14T01:30:00Z",
+) -> MergeTrainStackCollapsePlanRecord:
+    repository = "example/merge-train-repo"
+    base_branch = "main"
+    entries = (
+        MergeTrainStackCollapseEntry(
+            pull_request_number=10,
+            position=1,
+            head_sha="head-10",
+            head_ref="feature/root",
+            base_sha="base-10",
+            base_ref="main",
+        ),
+        MergeTrainStackCollapseEntry(
+            pull_request_number=11,
+            position=2,
+            head_sha="head-11",
+            head_ref="feature/child",
+            base_sha="base-11",
+            base_ref="feature/root",
+        ),
+    )
+    collapse_id = build_merge_train_stack_collapse_id(
+        repository=repository,
+        base_branch=base_branch,
+        root_pull_request_number=10,
+        entry_head_shas=tuple(entry.head_sha for entry in entries),
+    )
+    return MergeTrainStackCollapsePlanRecord(
+        record_id=record_id,
+        status=status,
+        source="test",
+        updated_at=updated_at,
+        plan=MergeTrainStackCollapsePlan(
+            collapse_id=collapse_id,
+            repository=repository,
+            base_branch=base_branch,
+            root_pull_request_number=10,
+            root_initial_head_sha="head-10",
+            root_head_ref="feature/root",
+            policy_key=f"{repository}:{base_branch}",
+            policy_sha256="policy-digest",
+            entries=entries,
+            mutations=(
+                MergeTrainStackCollapseMutation(
+                    child_pull_request_number=11,
+                    parent_pull_request_number=10,
+                    child_head_sha="head-11",
+                    expected_parent_head_sha="head-10",
+                    parent_head_ref="feature/root",
+                ),
+            ),
+            created_at="2026-05-14T01:29:00Z",
+            updated_at=updated_at,
+        ),
     )
 
 
@@ -1803,6 +1874,33 @@ env_var = "GH_TOKEN"
         self.assertEqual(listed_records[0].landing_plan.entries[0].merge_method, "squash")
         self.assertEqual(listed_records[0].landing_plan.entries[1].pull_request_number, 11)
 
+    def test_merge_train_stack_collapse_plan_records_round_trip(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            store = PostgresRecordStore(
+                database_url=_sqlite_database_url(
+                    Path(temporary_directory_name) / "launchplane.sqlite3"
+                )
+            )
+            store.ensure_schema()
+            older_record = _merge_train_stack_collapse_plan_record(
+                record_id="merge-train-stack-collapse-plan-20260514T012900Z-old",
+                status="superseded",
+                updated_at="2026-05-14T01:29:00Z",
+            )
+            active_record = _merge_train_stack_collapse_plan_record()
+            store.write_merge_train_stack_collapse_plan_record(older_record)
+            store.write_merge_train_stack_collapse_plan_record(active_record)
+            listed_records = store.list_merge_train_stack_collapse_plan_records(
+                repository="example/merge-train-repo",
+                base_branch="main",
+                status="active",
+            )
+            store.close()
+
+        self.assertEqual([record.record_id for record in listed_records], [active_record.record_id])
+        self.assertEqual(listed_records[0].plan.intent_source, "root_ready_to_merge")
+        self.assertEqual(listed_records[0].plan.mutations[0].parent_pull_request_number, 10)
+
     def test_write_and_list_dokploy_target_id_records(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             store = PostgresRecordStore(
@@ -2205,6 +2303,9 @@ env_var = "GH_TOKEN"
             filesystem_store.write_merge_train_batch_landing_plan_record(
                 _merge_train_batch_landing_plan_record()
             )
+            filesystem_store.write_merge_train_stack_collapse_plan_record(
+                _merge_train_stack_collapse_plan_record()
+            )
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
             self.assertEqual(
@@ -2229,6 +2330,7 @@ env_var = "GH_TOKEN"
                     "agent_write_intents": 0,
                     "merge_train_batch_candidates": 1,
                     "merge_train_batch_landing_plans": 1,
+                    "merge_train_stack_collapse_plans": 1,
                     "merge_train_policies": 1,
                     "merge_train_runs": 1,
                     "release_tuples": 1,

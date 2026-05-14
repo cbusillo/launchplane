@@ -244,6 +244,7 @@ def _pull_request(
         labels=labels,
         actor_role="repo_owner",
         head_sha=f"head-{number}",
+        base_ref="main",
         base_sha="base-sha",
         mergeable=mergeable,
         required_checks_status=required_checks_status,

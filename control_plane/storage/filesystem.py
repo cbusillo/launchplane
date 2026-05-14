@@ -19,6 +19,9 @@ from control_plane.contracts.every_code_pr_feedback_record import EveryCodePrFee
 from control_plane.contracts.idempotency_record import LaunchplaneIdempotencyRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidateRecord
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlanRecord
+from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapsePlanRecord,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -220,6 +223,36 @@ class FilesystemRecordStore:
             )
             if (not repository or record.landing_plan.repository == repository)
             and (not base_branch or record.landing_plan.base_branch == base_branch)
+            and (not status or record.status == status)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_merge_train_stack_collapse_plan_record(
+        self, record: MergeTrainStackCollapsePlanRecord
+    ) -> Path:
+        return self._write_model(
+            "launchplane_merge_train_stack_collapse_plans", record.record_id, record
+        )
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                MergeTrainStackCollapsePlanRecord,
+                "launchplane_merge_train_stack_collapse_plans",
+            )
+            if (not repository or record.plan.repository == repository)
+            and (not base_branch or record.plan.base_branch == base_branch)
             and (not status or record.status == status)
         ]
         records.sort(key=lambda record: (record.updated_at, record.record_id), reverse=True)

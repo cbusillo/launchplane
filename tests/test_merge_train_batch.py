@@ -240,6 +240,7 @@ def _pull_request(
             "labels": ("ready-to-merge",),
             "actor_role": "repo_admin",
             "head_sha": f"head-{number}",
+            "base_ref": "main",
             "base_sha": "base-main",
             "mergeable": "mergeable",
             "required_checks_status": required_checks_status,

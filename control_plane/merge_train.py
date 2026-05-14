@@ -13,6 +13,9 @@ MergeTrainDryRunAction = Literal[
 ]
 MergeTrainMergeableState = Literal["mergeable", "conflicting", "unknown"]
 MergeTrainPullRequestState = Literal["open", "closed", "merged"]
+MergeTrainStackDiscoveryStatus = Literal[
+    "ready_for_collapse", "not_stacked", "unsupported"
+]
 
 
 class MergeTrainLabelClient(Protocol):
@@ -56,7 +59,11 @@ class MergeTrainPullRequestSnapshot(BaseModel):
     labels: tuple[str, ...] = ()
     actor_role: str = "unknown"
     head_sha: str
+    head_ref: str = ""
+    head_repository: str = ""
     base_sha: str = ""
+    base_ref: str = ""
+    base_repository: str = ""
     mergeable: MergeTrainMergeableState = "unknown"
     required_checks_status: MergeTrainCheckStatus = "unknown"
     branch_update_required: bool = False
@@ -75,7 +82,11 @@ class MergeTrainPullRequestSnapshot(BaseModel):
         self.head_sha = _normalize_required_value(
             self.head_sha, "merge train pull request snapshot requires head_sha"
         )
+        self.head_ref = self.head_ref.strip()
+        self.head_repository = self.head_repository.strip()
         self.base_sha = self.base_sha.strip()
+        self.base_ref = self.base_ref.strip()
+        self.base_repository = self.base_repository.strip()
         return self
 
 
@@ -132,6 +143,28 @@ class MergeTrainDryRunResult(BaseModel):
     selected_pr: MergeTrainQueueEntry | None = None
     intended_next_action: MergeTrainDryRunAction
     next_action_detail: str
+
+
+class MergeTrainStackEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    number: int
+    head_sha: str
+    head_ref: str
+    base_sha: str = ""
+    base_ref: str
+
+
+class MergeTrainStackDiscoveryResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: MergeTrainStackDiscoveryStatus
+    repository: str
+    base_branch: str
+    root_pull_request_number: int
+    stack_order: tuple[int, ...] = ()
+    entries: tuple[MergeTrainStackEntry, ...] = ()
+    unsupported_reasons: tuple[str, ...] = ()
 
 
 class MergeTrainBlockResult(BaseModel):
@@ -202,11 +235,14 @@ def build_merge_train_dry_run_result(
     repository_policy = policy.find_repository_policy(
         repository=snapshot.repository, base_branch=snapshot.base_branch
     )
+    base_pull_requests = tuple(
+        pull_request
+        for pull_request in snapshot.pull_requests
+        if _targets_merge_train_base(pull_request=pull_request, base_branch=snapshot.base_branch)
+    )
     queue = tuple(
         _build_queue_entry(repository_policy, pull_request)
-        for pull_request in sorted(
-            snapshot.pull_requests, key=lambda item: (item.created_at, item.number)
-        )
+        for pull_request in sorted(base_pull_requests, key=lambda item: (item.created_at, item.number))
     )
     selected_pr = next((entry for entry in queue if entry.eligible), None)
     intended_next_action, next_action_detail = _next_action_for_selected_pr(
@@ -225,6 +261,82 @@ def build_merge_train_dry_run_result(
         selected_pr=selected_pr,
         intended_next_action=intended_next_action,
         next_action_detail=next_action_detail,
+    )
+
+
+def discover_merge_train_stack(
+    *, snapshot: MergeTrainDryRunSnapshot, root_pull_request_number: int
+) -> MergeTrainStackDiscoveryResult:
+    pull_requests_by_number = {pull_request.number: pull_request for pull_request in snapshot.pull_requests}
+    root_pull_request = pull_requests_by_number.get(root_pull_request_number)
+    if root_pull_request is None:
+        return MergeTrainStackDiscoveryResult(
+            status="unsupported",
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            root_pull_request_number=root_pull_request_number,
+            unsupported_reasons=("root pull request was not present in the snapshot",),
+        )
+    unsupported_reasons = _stack_pull_request_reasons(
+        snapshot=snapshot, pull_request=root_pull_request
+    )
+    if root_pull_request.base_ref != snapshot.base_branch:
+        unsupported_reasons = (*unsupported_reasons, "root pull request does not target base branch")
+    if unsupported_reasons:
+        return _unsupported_stack_result(
+            snapshot=snapshot,
+            root_pull_request_number=root_pull_request_number,
+            unsupported_reasons=unsupported_reasons,
+        )
+
+    children_by_base_ref = _stack_children_by_base_ref(snapshot=snapshot)
+    chain = [root_pull_request]
+    seen_numbers = {root_pull_request.number}
+    current_head_ref = root_pull_request.head_ref
+    while current_head_ref:
+        children = tuple(
+            child
+            for child in children_by_base_ref.get(current_head_ref, ())
+            if child.number not in seen_numbers
+        )
+        if not children:
+            break
+        if len(children) > 1:
+            return _unsupported_stack_result(
+                snapshot=snapshot,
+                root_pull_request_number=root_pull_request_number,
+                unsupported_reasons=(
+                    f"branch {current_head_ref} has multiple stacked child pull requests",
+                ),
+            )
+        child = children[0]
+        child_reasons = _stack_pull_request_reasons(snapshot=snapshot, pull_request=child)
+        if child_reasons:
+            return _unsupported_stack_result(
+                snapshot=snapshot,
+                root_pull_request_number=root_pull_request_number,
+                unsupported_reasons=child_reasons,
+            )
+        chain.append(child)
+        seen_numbers.add(child.number)
+        current_head_ref = child.head_ref
+
+    if len(chain) == 1:
+        return MergeTrainStackDiscoveryResult(
+            status="not_stacked",
+            repository=snapshot.repository,
+            base_branch=snapshot.base_branch,
+            root_pull_request_number=root_pull_request_number,
+            stack_order=(root_pull_request.number,),
+            entries=(_stack_entry(root_pull_request),),
+        )
+    return MergeTrainStackDiscoveryResult(
+        status="ready_for_collapse",
+        repository=snapshot.repository,
+        base_branch=snapshot.base_branch,
+        root_pull_request_number=root_pull_request_number,
+        stack_order=tuple(pull_request.number for pull_request in chain),
+        entries=tuple(_stack_entry(pull_request) for pull_request in chain),
     )
 
 
@@ -428,6 +540,71 @@ def _build_queue_entry(
         branch_update_required=pull_request.branch_update_required,
         eligible=not ineligible_reasons,
         ineligible_reasons=tuple(ineligible_reasons),
+    )
+
+
+def _targets_merge_train_base(
+    *, pull_request: MergeTrainPullRequestSnapshot, base_branch: str
+) -> bool:
+    return not pull_request.base_ref or pull_request.base_ref == base_branch
+
+
+def _stack_children_by_base_ref(
+    *, snapshot: MergeTrainDryRunSnapshot
+) -> dict[str, tuple[MergeTrainPullRequestSnapshot, ...]]:
+    children_by_base_ref: dict[str, list[MergeTrainPullRequestSnapshot]] = {}
+    for pull_request in snapshot.pull_requests:
+        if pull_request.base_ref:
+            children_by_base_ref.setdefault(pull_request.base_ref, []).append(pull_request)
+    return {
+        base_ref: tuple(sorted(children, key=lambda item: (item.created_at, item.number)))
+        for base_ref, children in children_by_base_ref.items()
+    }
+
+
+def _stack_pull_request_reasons(
+    *, snapshot: MergeTrainDryRunSnapshot, pull_request: MergeTrainPullRequestSnapshot
+) -> tuple[str, ...]:
+    reasons: list[str] = []
+    if pull_request.state != "open":
+        reasons.append(f"pull request #{pull_request.number} is not open")
+    if not pull_request.head_ref:
+        reasons.append(f"pull request #{pull_request.number} is missing head ref")
+    if not pull_request.base_ref:
+        reasons.append(f"pull request #{pull_request.number} is missing base ref")
+    if not pull_request.head_repository or not pull_request.base_repository:
+        reasons.append(f"pull request #{pull_request.number} is missing repository identity")
+    if pull_request.head_repository != snapshot.repository:
+        reasons.append(f"pull request #{pull_request.number} is not from the train repository")
+    if pull_request.base_repository != snapshot.repository:
+        reasons.append(f"pull request #{pull_request.number} does not target the train repository")
+    if pull_request.head_ref == pull_request.base_ref:
+        reasons.append(f"pull request #{pull_request.number} has identical head and base refs")
+    return tuple(reasons)
+
+
+def _unsupported_stack_result(
+    *,
+    snapshot: MergeTrainDryRunSnapshot,
+    root_pull_request_number: int,
+    unsupported_reasons: tuple[str, ...],
+) -> MergeTrainStackDiscoveryResult:
+    return MergeTrainStackDiscoveryResult(
+        status="unsupported",
+        repository=snapshot.repository,
+        base_branch=snapshot.base_branch,
+        root_pull_request_number=root_pull_request_number,
+        unsupported_reasons=unsupported_reasons,
+    )
+
+
+def _stack_entry(pull_request: MergeTrainPullRequestSnapshot) -> MergeTrainStackEntry:
+    return MergeTrainStackEntry(
+        number=pull_request.number,
+        head_sha=pull_request.head_sha,
+        head_ref=pull_request.head_ref,
+        base_sha=pull_request.base_sha,
+        base_ref=pull_request.base_ref,
     )
 
 

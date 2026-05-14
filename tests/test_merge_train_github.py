@@ -80,6 +80,138 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
                 merge_method="merge",
             )
 
+    def test_comment_pull_request_posts_issue_comment(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"html_url": "https://github.com/example/repo/pull/11#issuecomment-1"},)
+        )
+
+        comment_url = GitHubMergeTrainClient(transport=transport).comment_pull_request(
+            repository="example/merge-train-repo",
+            pull_request_number=11,
+            body="landed through root",
+        )
+
+        self.assertEqual(comment_url, "https://github.com/example/repo/pull/11#issuecomment-1")
+        self.assertEqual(transport.requests[0].method, "POST")
+        self.assertEqual(
+            transport.requests[0].path,
+            "/repos/example/merge-train-repo/issues/11/comments",
+        )
+        self.assertEqual(transport.requests[0].body, {"body": "landed through root"})
+
+    def test_close_pull_request_checks_head_sha_before_closing(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"head": {"sha": "child-head"}}, {})
+        )
+
+        GitHubMergeTrainClient(transport=transport).close_pull_request(
+            repository="example/merge-train-repo",
+            pull_request_number=11,
+            expected_head_sha="child-head",
+        )
+
+        self.assertEqual(
+            [(request.method, request.path, request.body) for request in transport.requests],
+            [
+                ("GET", "/repos/example/merge-train-repo/pulls/11", None),
+                ("PATCH", "/repos/example/merge-train-repo/pulls/11", {"state": "closed"}),
+            ],
+        )
+
+    def test_close_pull_request_rejects_moved_child_head(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=({"head": {"sha": "moved-child-head"}},)
+        )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).close_pull_request(
+                repository="example/merge-train-repo",
+                pull_request_number=11,
+                expected_head_sha="child-head",
+            )
+
+        self.assertEqual(len(transport.requests), 1)
+
+    def test_merge_stack_child_into_parent_checks_parent_sha_then_merges_child_head(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(
+                _github_branch(sha="parent-head"),
+                {"sha": "parent-after-child"},
+            )
+        )
+
+        merge_commit_sha = GitHubMergeTrainClient(
+            transport=transport
+        ).merge_stack_child_into_parent(
+            repository="example/merge-train-repo",
+            child_head_sha="child-head",
+            expected_parent_head_sha="parent-head",
+            parent_head_ref="feature/root",
+            collapse_id="collapse-123",
+            child_pull_request_number=11,
+            parent_pull_request_number=10,
+        )
+
+        self.assertEqual(merge_commit_sha, "parent-after-child")
+        self.assertEqual(
+            [(request.method, request.path, request.body) for request in transport.requests],
+            [
+                (
+                    "GET",
+                    "/repos/example/merge-train-repo/branches/feature%2Froot",
+                    None,
+                ),
+                (
+                    "POST",
+                    "/repos/example/merge-train-repo/merges",
+                    {
+                        "base": "feature/root",
+                        "head": "child-head",
+                        "commit_message": (
+                            "Launchplane stack collapse collapse-123: merge PR "
+                            "#11 into PR #10"
+                        ),
+                    },
+                ),
+            ],
+        )
+
+    def test_merge_stack_child_into_parent_rejects_stale_parent_branch(self) -> None:
+        transport = RecordingMergeTrainGitHubTransport(
+            responses=(_github_branch(sha="moved-parent-head"),)
+        )
+
+        with self.assertRaises(MergeTrainGitHubStaleHeadError):
+            GitHubMergeTrainClient(transport=transport).merge_stack_child_into_parent(
+                repository="example/merge-train-repo",
+                child_head_sha="child-head",
+                expected_parent_head_sha="parent-head",
+                parent_head_ref="feature/root",
+                collapse_id="collapse-123",
+                child_pull_request_number=11,
+                parent_pull_request_number=10,
+            )
+
+        self.assertEqual(len(transport.requests), 1)
+        self.assertEqual(
+            transport.requests[0].path,
+            "/repos/example/merge-train-repo/branches/feature%2Froot",
+        )
+
+    def test_merge_stack_child_into_parent_rejects_main_branch_mutation(self) -> None:
+        with self.assertRaisesRegex(MergeTrainGitHubError, "protected base branch"):
+            GitHubMergeTrainClient(
+                transport=RecordingMergeTrainGitHubTransport()
+            ).merge_stack_child_into_parent(
+                repository="example/merge-train-repo",
+                child_head_sha="child-head",
+                expected_parent_head_sha="parent-head",
+                parent_head_ref="main",
+                collapse_id="collapse-123",
+                child_pull_request_number=11,
+                parent_pull_request_number=10,
+            )
+
     def test_build_batch_candidate_creates_ref_and_merges_heads_in_order(self) -> None:
         candidate = _batch_candidate()
         transport = RecordingMergeTrainGitHubTransport(
@@ -308,14 +440,20 @@ class GitHubMergeTrainClientTests(unittest.TestCase):
 
 
 class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
-    def test_snapshot_reader_builds_pull_request_snapshots_from_github(self) -> None:
+    def test_snapshot_reader_builds_pull_request_snapshots_from_base_rooted_graph(self) -> None:
         transport = RecordingMergeTrainGitHubTransport(
             responses=(
                 _github_branch(),
                 [
-                    _github_pull_request(42, mergeable=None),
+                    _github_pull_request(42, mergeable=None, head_ref="feature-root"),
+                    _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
+                    _github_pull_request(44, base_ref="other-base", head_ref="unrelated"),
                 ],
                 _github_pull_request(42, mergeable=True),
+                {"permission": "admin"},
+                {"state": "success"},
+                {"check_runs": [_check_run("completed", "success")]},
+                _github_pull_request(43, base_ref="feature-root", head_ref="feature-child"),
                 {"permission": "admin"},
                 {"state": "success"},
                 {"check_runs": [_check_run("completed", "success")]},
@@ -329,28 +467,39 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
 
         self.assertEqual(snapshot.repository, "cbusillo/sellyouroutboard")
         self.assertEqual(snapshot.base_branch, "main")
-        self.assertEqual(len(snapshot.pull_requests), 1)
+        self.assertEqual(len(snapshot.pull_requests), 2)
         pull_request = snapshot.pull_requests[0]
         self.assertEqual(pull_request.number, 42)
         self.assertEqual(pull_request.labels, ("ready-to-merge",))
         self.assertEqual(pull_request.actor_role, "repo_admin")
         self.assertEqual(pull_request.head_sha, "head-42")
+        self.assertEqual(pull_request.head_ref, "feature-42")
+        self.assertEqual(pull_request.head_repository, "cbusillo/sellyouroutboard")
         self.assertEqual(pull_request.base_sha, "base-42")
+        self.assertEqual(pull_request.base_ref, "main")
+        self.assertEqual(pull_request.base_repository, "cbusillo/sellyouroutboard")
         self.assertEqual(pull_request.mergeable, "mergeable")
         self.assertEqual(pull_request.required_checks_status, "pass")
         self.assertFalse(pull_request.branch_update_required)
+        self.assertEqual(snapshot.pull_requests[1].number, 43)
+        self.assertEqual(snapshot.pull_requests[1].base_ref, "feature-root")
         self.assertEqual(snapshot.base_sha, "base-main-current")
         self.assertEqual(
             [request.path for request in transport.requests],
             [
                 "/repos/cbusillo/sellyouroutboard/branches/main",
-                "/repos/cbusillo/sellyouroutboard/pulls?state=open&base=main&sort=created&direction=asc&per_page=100&page=1",
+                "/repos/cbusillo/sellyouroutboard/pulls?state=open&sort=created&direction=asc&per_page=100&page=1",
                 "/repos/cbusillo/sellyouroutboard/pulls/42",
                 "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/status",
                 "/repos/cbusillo/sellyouroutboard/commits/head-42/check-runs?per_page=100&page=1",
+                "/repos/cbusillo/sellyouroutboard/pulls/43",
+                "/repos/cbusillo/sellyouroutboard/collaborators/cbusillo/permission",
+                "/repos/cbusillo/sellyouroutboard/commits/head-43/status",
+                "/repos/cbusillo/sellyouroutboard/commits/head-43/check-runs?per_page=100&page=1",
             ],
         )
+        self.assertNotIn("/pulls/44", "\n".join(request.path for request in transport.requests))
 
     def test_snapshot_reader_downgrades_missing_collaborator_permission_to_unknown(
         self,
@@ -487,7 +636,7 @@ class GitHubMergeTrainSnapshotReaderTests(unittest.TestCase):
             responses=(_github_branch(), [{"number": 1}])
         )
 
-        with self.assertRaisesRegex(MergeTrainGitHubError, "head"):
+        with self.assertRaisesRegex(MergeTrainGitHubError, "base"):
             GitHubMergeTrainSnapshotReader(transport=transport).read_merge_train_snapshot(
                 repository="cbusillo/sellyouroutboard", base_branch="main"
             )
@@ -499,7 +648,14 @@ def _github_pull_request(
     mergeable: bool | None = True,
     mergeable_state: str = "clean",
     author_association: str = "COLLABORATOR",
+    head_ref: str | None = None,
+    base_ref: str = "main",
+    repository: str = "cbusillo/sellyouroutboard",
+    head_repository: str = "",
+    base_repository: str = "",
 ) -> dict[str, object]:
+    normalized_head_repository = head_repository or repository
+    normalized_base_repository = base_repository or repository
     return {
         "number": number,
         "html_url": f"https://github.com/cbusillo/sellyouroutboard/pull/{number}",
@@ -510,8 +666,16 @@ def _github_pull_request(
         "labels": [{"name": "ready-to-merge"}],
         "user": {"login": "cbusillo"},
         "author_association": author_association,
-        "head": {"sha": f"head-{number}"},
-        "base": {"sha": f"base-{number}"},
+        "head": {
+            "sha": f"head-{number}",
+            "ref": head_ref or f"feature-{number}",
+            "repo": {"full_name": normalized_head_repository},
+        },
+        "base": {
+            "sha": f"base-{number}",
+            "ref": base_ref,
+            "repo": {"full_name": normalized_base_repository},
+        },
         "mergeable": mergeable,
         "mergeable_state": mergeable_state,
     }

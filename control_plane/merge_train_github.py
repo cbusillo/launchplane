@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, model_validator
 
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
+from control_plane.contracts.merge_train_stack_collapse import MergeTrainStackCollapseBranchClient
 from control_plane.contracts.merge_train_policy import MergeTrainMergeMethod
 from control_plane.merge_train import MergeTrainCheckStatus
 from control_plane.merge_train import MergeTrainDryRunSnapshot
@@ -69,7 +70,7 @@ class UrllibMergeTrainGitHubTransport:
             ) from error
 
 
-class GitHubMergeTrainClient:
+class GitHubMergeTrainClient(MergeTrainStackCollapseBranchClient):
     def __init__(self, *, transport: MergeTrainGitHubTransport) -> None:
         self.transport = transport
 
@@ -211,6 +212,94 @@ class GitHubMergeTrainClient:
             )
         return merge_commit_sha
 
+    def comment_pull_request(
+        self, *, repository: str, pull_request_number: int, body: str
+    ) -> str:
+        repository_path = _repository_path(repository)
+        payload = self.transport.request(
+            method="POST",
+            path=f"/repos/{repository_path}/issues/{pull_request_number}/comments",
+            body={"body": _required_value(body, "GitHub pull request comment body is required.")},
+        )
+        if not isinstance(payload, dict):
+            raise MergeTrainGitHubError("GitHub comment response must be a JSON object.")
+        return str(payload.get("html_url") or "").strip()
+
+    def close_pull_request(
+        self, *, repository: str, pull_request_number: int, expected_head_sha: str
+    ) -> None:
+        repository_path = _repository_path(repository)
+        pull_request = _json_object(
+            self.transport.request(
+                method="GET", path=f"/repos/{repository_path}/pulls/{pull_request_number}"
+            ),
+            "GitHub pull request detail response",
+        )
+        head = _json_object(pull_request.get("head"), "GitHub pull request head")
+        current_head_sha = _required_text(
+            head.get("sha"), "GitHub pull request head requires sha."
+        )
+        if current_head_sha != _required_value(
+            expected_head_sha, "Expected pull request head SHA is required."
+        ):
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack child PR moved outside the stored collapse plan.",
+                status_code=409,
+            )
+        self.transport.request(
+            method="PATCH",
+            path=f"/repos/{repository_path}/pulls/{pull_request_number}",
+            body={"state": "closed"},
+        )
+
+    def merge_stack_child_into_parent(
+        self,
+        *,
+        repository: str,
+        child_head_sha: str,
+        expected_parent_head_sha: str,
+        parent_head_ref: str,
+        collapse_id: str,
+        child_pull_request_number: int,
+        parent_pull_request_number: int,
+    ) -> str:
+        repository_path = _repository_path(repository)
+        normalized_parent_ref = _required_value(
+            parent_head_ref, "Stack collapse parent head ref is required."
+        )
+        if normalized_parent_ref in {"main", "master"}:
+            raise MergeTrainGitHubError("Stack collapse cannot mutate a protected base branch.")
+        current_parent_sha = _base_branch_sha(
+            transport=self.transport,
+            repository_path=repository_path,
+            base_branch=normalized_parent_ref,
+        )
+        expected_sha = _required_value(
+            expected_parent_head_sha, "Stack collapse expected parent SHA is required."
+        )
+        if current_parent_sha != expected_sha:
+            raise MergeTrainGitHubStaleHeadError(
+                "Stack collapse parent branch moved outside the stored plan.",
+                status_code=409,
+            )
+        payload = self.transport.request(
+            method="POST",
+            path=f"/repos/{repository_path}/merges",
+            body={
+                "base": normalized_parent_ref,
+                "head": _required_value(
+                    child_head_sha, "Stack collapse child head SHA is required."
+                ),
+                "commit_message": (
+                    f"Launchplane stack collapse {collapse_id}: merge PR "
+                    f"#{child_pull_request_number} into PR #{parent_pull_request_number}"
+                ),
+            },
+        )
+        if not isinstance(payload, dict):
+            raise MergeTrainGitHubError("GitHub stack merge response must be a JSON object.")
+        return _required_text(payload.get("sha"), "GitHub stack merge response requires sha.")
+
     def _create_or_reset_reference(self, *, repository_path: str, reference: str, sha: str) -> None:
         normalized_sha = _required_value(sha, "GitHub reference SHA is required.")
         try:
@@ -244,15 +333,19 @@ class GitHubMergeTrainSnapshotReader:
         base_sha = self._base_branch_sha(
             repository_path=repository_path, base_branch=normalized_base_branch
         )
+        open_pull_requests = self._list_open_pull_requests(repository_path=repository_path)
+        relevant_pull_requests = _base_rooted_pull_requests(
+            pull_requests=open_pull_requests,
+            repository=repository,
+            base_branch=normalized_base_branch,
+        )
         pull_requests = tuple(
             self._pull_request_snapshot(
                 repository=repository,
                 repository_path=repository_path,
                 pull_request=pull_request,
             )
-            for pull_request in self._list_open_pull_requests(
-                repository_path=repository_path, base_branch=normalized_base_branch
-            )
+            for pull_request in relevant_pull_requests
         )
         return MergeTrainDryRunSnapshot(
             repository=repository,
@@ -268,16 +361,13 @@ class GitHubMergeTrainSnapshotReader:
             base_branch=base_branch,
         )
 
-    def _list_open_pull_requests(
-        self, *, repository_path: str, base_branch: str
-    ) -> tuple[dict[str, object], ...]:
+    def _list_open_pull_requests(self, *, repository_path: str) -> tuple[dict[str, object], ...]:
         pull_requests: list[dict[str, object]] = []
         page = 1
         while True:
             query = urlencode(
                 {
                     "state": "open",
-                    "base": base_branch,
                     "sort": "created",
                     "direction": "asc",
                     "per_page": "100",
@@ -315,6 +405,12 @@ class GitHubMergeTrainSnapshotReader:
         head = _json_object(source.get("head"), "GitHub pull request head")
         base = _json_object(source.get("base"), "GitHub pull request base")
         head_sha = _required_text(head.get("sha"), "GitHub pull request head requires sha.")
+        head_repository = _repository_full_name(
+            head.get("repo"), "GitHub pull request head repo"
+        )
+        base_repository = _repository_full_name(
+            base.get("repo"), "GitHub pull request base repo"
+        )
         user = _json_object(source.get("user"), "GitHub pull request user")
         actor_role = self._actor_role_for_pull_request(
             repository_path=repository_path,
@@ -333,7 +429,11 @@ class GitHubMergeTrainSnapshotReader:
             labels=_labels(source.get("labels")),
             actor_role=actor_role,
             head_sha=head_sha,
+            head_ref=_required_text(head.get("ref"), "GitHub pull request head requires ref."),
+            head_repository=head_repository,
             base_sha=str(base.get("sha") or "").strip(),
+            base_ref=_required_text(base.get("ref"), "GitHub pull request base requires ref."),
+            base_repository=base_repository,
             mergeable=_mergeable_state(source),
             required_checks_status=self._required_checks_status(
                 repository_path=repository_path, head_sha=head_sha
@@ -439,6 +539,62 @@ def _json_object(value: object, label: str) -> dict[str, object]:
     if not isinstance(value, dict):
         raise MergeTrainGitHubError(f"{label} must be a JSON object.")
     return value
+
+
+def _repository_full_name(value: object, label: str) -> str:
+    repository = _json_object(value, label)
+    return _required_text(repository.get("full_name"), f"{label} requires full_name.")
+
+
+def _base_rooted_pull_requests(
+    *,
+    pull_requests: tuple[dict[str, object], ...],
+    repository: str,
+    base_branch: str,
+) -> tuple[dict[str, object], ...]:
+    by_base_ref: dict[str, list[dict[str, object]]] = {}
+    relevant_numbers: set[int] = set()
+    for pull_request in pull_requests:
+        base = _json_object(pull_request.get("base"), "GitHub pull request base")
+        base_repository = _repository_full_name(
+            base.get("repo"), "GitHub pull request base repo"
+        )
+        if base_repository != repository:
+            continue
+        base_ref = _required_text(base.get("ref"), "GitHub pull request base requires ref.")
+        by_base_ref.setdefault(base_ref, []).append(pull_request)
+
+    branch_refs = [base_branch]
+    seen_branch_refs: set[str] = set()
+    while branch_refs:
+        branch_ref = branch_refs.pop(0)
+        if branch_ref in seen_branch_refs:
+            continue
+        seen_branch_refs.add(branch_ref)
+        for pull_request in by_base_ref.get(branch_ref, ()):
+            pull_request_number = _required_int(
+                pull_request.get("number"), "GitHub pull request entry requires number."
+            )
+            if pull_request_number in relevant_numbers:
+                continue
+            relevant_numbers.add(pull_request_number)
+            head = _json_object(pull_request.get("head"), "GitHub pull request head")
+            head_repository = _repository_full_name(
+                head.get("repo"), "GitHub pull request head repo"
+            )
+            if head_repository != repository:
+                continue
+            branch_refs.append(
+                _required_text(head.get("ref"), "GitHub pull request head requires ref.")
+            )
+    return tuple(
+        pull_request
+        for pull_request in pull_requests
+        if _required_int(
+            pull_request.get("number"), "GitHub pull request entry requires number."
+        )
+        in relevant_numbers
+    )
 
 
 def _required_int(value: object, message: str) -> int:

@@ -111,6 +111,26 @@ preferred first implementation because it hides the normal PR-by-PR merge UX and
 can make repository history and GitHub review state harder to inspect. It should
 remain a separate, explicit future decision if ever needed.
 
+### Stacked Pull Requests
+
+The batch train remains flat: queued entries must target the repository policy's
+`base_branch`. Launchplane may read broader pull request topology so it can see
+stacked PRs, but PRs whose base is another feature branch are not admitted as
+independent train entries.
+
+Stacked PR support is a pre-train normalization workflow. For same-repository
+linear stacks, Launchplane should detect the stack rooted at a PR targeting the
+protected base branch, collapse child changes into that root with explicit
+stored evidence and fresh SHA guards, wait for the root PR to pass required
+checks against the base branch, then admit only the root PR to the flat batch
+train. The root PR's `enqueue_label` is the operator/agent intent: it means
+"land this work through Launchplane," including any required same-repository
+linear stack collapse before train admission. Launchplane records a stack
+collapse plan before mutating branches so the root PR, child order, expected
+SHAs, mutation sequence, policy digest, and idempotency evidence remain
+auditable. Ambiguous, forked, cyclic, or unsupported branch-protection cases
+must fail closed with operator-visible reasons.
+
 ### Blocker Isolation
 
 When the combined candidate fails checks, Launchplane must not assume all queued

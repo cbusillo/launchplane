@@ -41,6 +41,9 @@ from control_plane.contracts.merge_train_batch import (
     MergeTrainBatchCandidateRecord,
     MergeTrainBatchLandingPlanRecord,
 )
+from control_plane.contracts.merge_train_stack_collapse import (
+    MergeTrainStackCollapsePlanRecord,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
@@ -662,6 +665,34 @@ class LaunchplaneMergeTrainBatchLandingPlanRow(Base):
     base_branch: Mapped[str] = mapped_column(String, nullable=False)
     batch_id: Mapped[str] = mapped_column(String, nullable=False)
     plan_id: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
+
+
+class LaunchplaneMergeTrainStackCollapsePlanRow(Base):
+    __tablename__ = "launchplane_merge_train_stack_collapse_plans"
+    __table_args__ = (
+        Index(
+            "launchplane_merge_train_stack_collapse_plans_repository_base_idx",
+            "repository",
+            "base_branch",
+            desc("updated_at"),
+        ),
+        Index(
+            "launchplane_merge_train_stack_collapse_plans_status_idx",
+            "status",
+            desc("updated_at"),
+        ),
+    )
+
+    record_id: Mapped[str] = mapped_column(String, primary_key=True)
+    status: Mapped[str] = mapped_column(String, nullable=False)
+    source: Mapped[str] = mapped_column(String, nullable=False)
+    updated_at: Mapped[str] = mapped_column(String, nullable=False)
+    repository: Mapped[str] = mapped_column(String, nullable=False)
+    base_branch: Mapped[str] = mapped_column(String, nullable=False)
+    collapse_id: Mapped[str] = mapped_column(String, nullable=False)
+    root_pull_request_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    plan_status: Mapped[str] = mapped_column(String, nullable=False)
     payload: Mapped[PayloadDict] = mapped_column(PayloadJsonType, nullable=False)
 
 
@@ -1656,6 +1687,50 @@ class PostgresRecordStore(HumanSessionStore):
             limit=limit,
         )
 
+    def write_merge_train_stack_collapse_plan_record(
+        self, record: MergeTrainStackCollapsePlanRecord
+    ) -> None:
+        self._write_row(
+            LaunchplaneMergeTrainStackCollapsePlanRow(
+                record_id=record.record_id,
+                status=record.status,
+                source=record.source,
+                updated_at=record.updated_at,
+                repository=record.plan.repository,
+                base_branch=record.plan.base_branch,
+                collapse_id=record.plan.collapse_id,
+                root_pull_request_number=record.plan.root_pull_request_number,
+                plan_status=record.plan.status,
+                payload=self._payload_dict(record),
+            )
+        )
+
+    def list_merge_train_stack_collapse_plan_records(
+        self,
+        *,
+        repository: str = "",
+        base_branch: str = "",
+        status: str = "",
+        limit: int | None = None,
+    ) -> tuple[MergeTrainStackCollapsePlanRecord, ...]:
+        filters: list[object] = []
+        if repository:
+            filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.repository == repository)
+        if base_branch:
+            filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.base_branch == base_branch)
+        if status:
+            filters.append(LaunchplaneMergeTrainStackCollapsePlanRow.status == status)
+        return self._list_models(
+            model_type=MergeTrainStackCollapsePlanRecord,
+            orm_model=LaunchplaneMergeTrainStackCollapsePlanRow,
+            filters=filters,
+            order_by=(
+                LaunchplaneMergeTrainStackCollapsePlanRow.updated_at.desc(),
+                LaunchplaneMergeTrainStackCollapsePlanRow.record_id.desc(),
+            ),
+            limit=limit,
+        )
+
     def list_merge_train_policy_records(
         self,
         *,
@@ -2623,6 +2698,7 @@ class PostgresRecordStore(HumanSessionStore):
             "agent_write_intents": 0,
             "merge_train_batch_candidates": 0,
             "merge_train_batch_landing_plans": 0,
+            "merge_train_stack_collapse_plans": 0,
             "merge_train_policies": 0,
             "merge_train_runs": 0,
             "release_tuples": 0,
@@ -2701,6 +2777,10 @@ class PostgresRecordStore(HumanSessionStore):
             for plan_record in filesystem_store.list_merge_train_batch_landing_plan_records():
                 self.write_merge_train_batch_landing_plan_record(plan_record)
                 counts["merge_train_batch_landing_plans"] += 1
+        if hasattr(filesystem_store, "list_merge_train_stack_collapse_plan_records"):
+            for collapse_record in filesystem_store.list_merge_train_stack_collapse_plan_records():
+                self.write_merge_train_stack_collapse_plan_record(collapse_record)
+                counts["merge_train_stack_collapse_plans"] += 1
         if hasattr(filesystem_store, "list_merge_train_policy_records"):
             for merge_train_policy_record in filesystem_store.list_merge_train_policy_records():
                 self.write_merge_train_policy_record(merge_train_policy_record)

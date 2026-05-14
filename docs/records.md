@@ -104,6 +104,13 @@ an ORM column/table or remains only in the evidence payload.
   previous/new policy ids and shas, trace id, mode, and requested grant details;
   service responses redact that requested-grant detail to counts and scope
   summaries.
+- Merge train stack collapse plan: modeled fields are `record_id`, `status`,
+  `source`, `updated_at`, `repository`, `base_branch`, `collapse_id`,
+  `root_pull_request_number`, and `plan_status`. The payload carries the typed
+  stack entries, expected SHAs, planned child-to-parent mutations, policy digest,
+  and intent source. The initial intent source is the root PR's merge-train
+  enqueue label; no file-backed or hardcoded repository config participates in
+  live collapse authority.
 - Dokploy target id: modeled fields are `context`, `instance`, `target_id`, and
   `updated_at`. Provider lookup/import evidence stays payload-only.
 - Dokploy target: modeled fields are `context`, `instance`, and `updated_at`.
