@@ -2666,7 +2666,7 @@ def _latest_merge_train_batch_candidate_record(
     latest_record = _latest_merge_train_batch_candidate_progress_record(records)
     if latest_record is None:
         return None
-    terminal_statuses = {"passed", "failed", "stale", "blocked"}
+    terminal_statuses = {"passed", "stale", "blocked"}
     if latest_record.candidate.status in terminal_statuses:
         return None
     return latest_record
@@ -2755,6 +2755,18 @@ def _validate_merge_train_landing_record_for_controller(
         raise ValueError("merge train landing plan policy key no longer matches")
     if landing_record.landing_plan.policy_sha256 != policy_sha256:
         raise ValueError("merge train landing plan policy digest no longer matches")
+
+
+def _validate_merge_train_stack_collapse_record_for_controller(
+    *,
+    collapse_record: MergeTrainStackCollapsePlanRecord,
+    policy_key: str,
+    policy_sha256: str,
+) -> None:
+    if collapse_record.plan.policy_key != policy_key:
+        raise ValueError("merge train stack collapse policy key no longer matches")
+    if collapse_record.plan.policy_sha256 != policy_sha256:
+        raise ValueError("merge train stack collapse policy digest no longer matches")
 
 
 def _latest_merge_train_batch_candidate_progress_record(
@@ -7941,45 +7953,61 @@ def create_launchplane_service_app(
                             policy_key=repository_policy.policy_key,
                             policy_sha256=policy_record.policy_sha256,
                         )
-                        if active_candidate_record.candidate.status in {"planned", "building"}:
-                            controller_action = "build_candidate"
-                            if controller_request.mutate:
-                                candidate = github_client.build_batch_candidate(
-                                    candidate=active_candidate_record.candidate
-                                )
-                            else:
-                                candidate = active_candidate_record.candidate
+                        if active_candidate_record.candidate.status == "failed":
+                            result = {
+                                "repository": controller_request.repository,
+                                "base_branch": controller_request.base_branch,
+                                "mode": "dry-run",
+                                "controller_action": "candidate_failed",
+                                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                                "candidate": active_candidate_record.candidate.model_dump(
+                                    mode="json"
+                                ),
+                            }
+                            driver_result = result
                         else:
-                            controller_action = "observe_candidate"
-                            if controller_request.mutate:
-                                candidate = github_client.observe_batch_candidate_checks(
-                                    candidate=active_candidate_record.candidate
-                                )
+                            if active_candidate_record.candidate.status in {
+                                "planned",
+                                "building",
+                            }:
+                                controller_action = "build_candidate"
+                                if controller_request.mutate:
+                                    candidate = github_client.build_batch_candidate(
+                                        candidate=active_candidate_record.candidate
+                                    )
+                                else:
+                                    candidate = active_candidate_record.candidate
                             else:
-                                candidate = active_candidate_record.candidate
-                        result = {
-                            "repository": controller_request.repository,
-                            "base_branch": controller_request.base_branch,
-                            "mode": "dry-run"
-                            if not controller_request.mutate
-                            else controller_action,
-                            "controller_action": controller_action,
-                            "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
-                        }
-                        if controller_request.mutate:
-                            updated_candidate_record = build_merge_train_batch_candidate_record(
-                                candidate=candidate,
-                                source=f"service:controller:{controller_action}:{request_trace_id}",
-                                updated_at=recorded_at,
-                            )
-                            candidate_store.write_merge_train_batch_candidate_record(
-                                updated_candidate_record
-                            )
-                            result["merge_train_batch_candidate_record_id"] = (
-                                updated_candidate_record.record_id
-                            )
-                        result["candidate"] = candidate.model_dump(mode="json")
-                        driver_result = result
+                                controller_action = "observe_candidate"
+                                if controller_request.mutate:
+                                    candidate = github_client.observe_batch_candidate_checks(
+                                        candidate=active_candidate_record.candidate
+                                    )
+                                else:
+                                    candidate = active_candidate_record.candidate
+                            result = {
+                                "repository": controller_request.repository,
+                                "base_branch": controller_request.base_branch,
+                                "mode": "dry-run"
+                                if not controller_request.mutate
+                                else controller_action,
+                                "controller_action": controller_action,
+                                "merge_train_batch_candidate_record_id": active_candidate_record.record_id,
+                            }
+                            if controller_request.mutate:
+                                updated_candidate_record = build_merge_train_batch_candidate_record(
+                                    candidate=candidate,
+                                    source=f"service:controller:{controller_action}:{request_trace_id}",
+                                    updated_at=recorded_at,
+                                )
+                                candidate_store.write_merge_train_batch_candidate_record(
+                                    updated_candidate_record
+                                )
+                                result["merge_train_batch_candidate_record_id"] = (
+                                    updated_candidate_record.record_id
+                                )
+                            result["candidate"] = candidate.model_dump(mode="json")
+                            driver_result = result
                     elif passed_candidate_record is not None:
                         _validate_merge_train_candidate_record_for_controller(
                             candidate_record=passed_candidate_record,
@@ -8026,6 +8054,11 @@ def create_launchplane_service_app(
                             plan_status="waiting_for_root_checks",
                         )
                         if waiting_collapse_record is not None:
+                            _validate_merge_train_stack_collapse_record_for_controller(
+                                collapse_record=waiting_collapse_record,
+                                policy_key=repository_policy.policy_key,
+                                policy_sha256=policy_record.policy_sha256,
+                            )
                             snapshot = GitHubMergeTrainSnapshotReader(
                                 transport=transport
                             ).read_merge_train_snapshot(
@@ -8111,6 +8144,11 @@ def create_launchplane_service_app(
                                 )
                             )
                             if planned_collapse_record is not None:
+                                _validate_merge_train_stack_collapse_record_for_controller(
+                                    collapse_record=planned_collapse_record,
+                                    policy_key=repository_policy.policy_key,
+                                    policy_sha256=policy_record.policy_sha256,
+                                )
                                 result = {
                                     "repository": controller_request.repository,
                                     "base_branch": controller_request.base_branch,

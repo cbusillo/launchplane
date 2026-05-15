@@ -123,6 +123,67 @@ post_terminal_agent_grant() {
   return 1
 }
 
+post_product_config_human_grant() {
+  local action_name="$1"
+  local source_label="$2"
+  local idempotency_suffix="$3"
+  local operator_logins="${LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS:-}"
+  local operator_products="${LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS:-}"
+  local operator_contexts="${LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS:-}"
+  local request_payload response_file status_code
+
+  if [ -z "$operator_logins" ] || [ -z "$operator_products" ] || [ -z "$operator_contexts" ]; then
+    echo "Skipping product-config human grant ${source_label}; operator login/product/context variables are not fully configured."
+    return 0
+  fi
+
+  request_payload="$({
+    jq -n \
+      --arg logins "$operator_logins" \
+      --arg products "$operator_products" \
+      --arg contexts "$operator_contexts" \
+      --arg action_name "$action_name" \
+      --arg source_label "$source_label" \
+      'def csv_list($value):
+        $value
+        | split(",")
+        | map(gsub("^\\s+|\\s+$"; ""))
+        | map(select(length > 0));
+      {
+        schema_version: 1,
+        product: "launchplane",
+        mode: "apply",
+        reason: ("Deploy workflow ensuring product-config human authz grant " + $source_label),
+        related_issue: "cbusillo/launchplane#521",
+        grant: {
+          logins: csv_list($logins),
+          roles: ["admin"],
+          products: csv_list($products),
+          contexts: csv_list($contexts),
+          actions: [$action_name],
+          source_label: $source_label
+        }
+      }'
+  })"
+  response_file="$(mktemp)"
+  status_code="$(curl -sS \
+    -o "$response_file" \
+    -w '%{http_code}' \
+    -X POST \
+    -H "Authorization: Bearer ${oidc_token}" \
+    -H 'Content-Type: application/json' \
+    -H "Idempotency-Key: launchplane-product-config-human-grant:${idempotency_suffix}:${GITHUB_SHA}" \
+    --data "$request_payload" \
+    "${LAUNCHPLANE_SERVICE_URL}/v1/authz-policies/github-humans/grants")"
+  if [ "$status_code" = "200" ] || [ "$status_code" = "202" ]; then
+    cat "$response_file"
+    return 0
+  fi
+  cat "$response_file" >&2
+  echo "Launchplane product-config human authz grant request failed with HTTP ${status_code}." >&2
+  return 1
+}
+
 apply_product_onboarding() {
   local idempotency_suffix="$1"
   local request_payload response_file status_code
@@ -772,6 +833,14 @@ post_terminal_agent_grant \
   every_code_preview_gate.read \
   deploy:terminal-agent-agent-context-preview-grant \
   terminal-agent-agent-context-preview
+post_product_config_human_grant \
+  product_config.plan \
+  deploy:product-config-human-plan-grant \
+  product-config-human-plan
+post_product_config_human_grant \
+  product_config.apply \
+  deploy:product-config-human-apply-grant \
+  product-config-human-apply
 post_grant \
   "$GITHUB_REPOSITORY" \
   live-target-runtime.yml \
