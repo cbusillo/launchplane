@@ -1847,6 +1847,27 @@ class LaunchplaneServiceTests(unittest.TestCase):
                         "mutate": True,
                     },
                 )
+                landing_records_before_retire = FilesystemRecordStore(
+                    state_dir
+                ).list_merge_train_batch_landing_plan_records(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
+                retire_status, retire_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
+                landing_records_after_retire = FilesystemRecordStore(
+                    state_dir
+                ).list_merge_train_batch_landing_plan_records(
+                    repository="cbusillo/sellyouroutboard", base_branch="main"
+                )
 
         self.assertEqual(plan_status, 202)
         self.assertEqual(plan_payload["result"]["controller_action"], "plan_candidate")
@@ -1861,6 +1882,17 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(land_status, 202)
         self.assertEqual(land_payload["result"]["controller_action"], "land_batch")
         self.assertEqual(land_payload["result"]["landing_plan"]["entries"][0]["status"], "merged")
+        self.assertEqual(retire_status, 202)
+        self.assertEqual(retire_payload["result"]["controller_action"], "batch_landed")
+        self.assertEqual(retire_payload["result"]["mode"], "dry-run")
+        self.assertEqual(
+            retire_payload["result"]["merge_train_batch_landing_plan_record_id"],
+            land_payload["records"]["merge_train_batch_landing_plan_record_id"],
+        )
+        self.assertEqual(
+            tuple(record.record_id for record in landing_records_after_retire),
+            tuple(record.record_id for record in landing_records_before_retire),
+        )
 
     def test_merge_train_controller_stops_after_candidate_failure(self) -> None:
         with (
