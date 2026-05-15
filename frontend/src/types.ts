@@ -391,6 +391,13 @@ export interface ProductConfigApplyPayload {
   };
 }
 
+export interface ProductConfigApplyResponsePayload {
+  status: "accepted";
+  trace_id: string;
+  records: Record<string, string>;
+  result: ProductConfigApplyPayload;
+}
+
 export interface ProductProfileRecord {
   schema_version: number;
   product: string;

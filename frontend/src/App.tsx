@@ -1537,7 +1537,7 @@ function fixtureProductConfigApply(
   payload: ProductConfigApplyRequest,
 ): Promise<ProductConfigApplyPayload> {
   const runtimeKeys = Object.keys(payload.runtime_env?.env ?? {});
-  return Promise.resolve({
+  const response = {
     status: "ok",
     mode: payload.mode,
     product: payload.product,
@@ -1574,7 +1574,8 @@ function fixtureProductConfigApply(
       runtime_changed_key_count: runtimeKeys.length,
       secret_change_count: (payload.secrets ?? []).length,
     },
-  });
+  } satisfies ProductConfigApplyPayload;
+  return Promise.resolve(response);
 }
 
 function ActionReviewDialog({
