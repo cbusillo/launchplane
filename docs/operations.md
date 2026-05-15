@@ -127,6 +127,17 @@ short-lived bearer token or a Launchplane browser session cookie, and the
 service validates the caller, writes any new active policy record, stores audit
 metadata, and reloads the current service worker's active policy.
 
+The Launchplane deploy workflow also reconciles configured signed-in operator
+grants for product-config writes. Set
+`LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_LOGINS`,
+`LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_PRODUCTS`, and
+`LAUNCHPLANE_PRODUCT_CONFIG_OPERATOR_CONTEXTS` as comma-separated repository
+variables. During deploy, `scripts/deploy/ensure-authz-grants.sh` writes
+DB-backed GitHub-human grants for `product_config.plan` and
+`product_config.apply` through `/v1/authz-policies/github-humans/grants`.
+Leave those variables unset to skip reconciliation; do not hard-code human
+logins or product-specific operator grants in source.
+
 The deploy workflow maintains DB-backed grants for SellYourOutboard operational
 workflows, including product profile cutover reads/writes, production promotion,
 and generic-web preview refresh/destroy requests. The grant request returns only
