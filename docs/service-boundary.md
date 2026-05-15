@@ -230,6 +230,18 @@ performs no GitHub reads and no storage writes. Schedulers use this route to
 pace calls into `run-once`; execution still re-reads GitHub before any dry-run or
 mutation.
 
+`POST /v1/work-graph/merge-train/controller/run-once` is the operator-facing
+one-action controller for the full batch train. Request payloads name
+`repository`, `base_branch`, and optional `mutate`; the route uses the same
+policy, authorization, and GitHub token boundary as the lower-level merge-train
+routes. Each call advances at most one safe phase from DB-backed records and
+fresh GitHub evidence: plan stack collapse, execute stack collapse, admit the
+collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
+the original PRs. Dry-run calls return the next controller action without
+writing records or mutating GitHub. Mutation calls reuse the same persisted
+candidate, stack-collapse, and landing-plan records as the phase-specific
+routes, and reject stale policy digests before advancing stored records.
+
 `POST /v1/work-graph/merge-train/batch-candidate/run-once` executes one
 policy-backed batch-candidate phase for a requested repository/base branch. The
 route accepts `mode: plan`, `mode: build`, or `mode: observe`. Plan mode reads a

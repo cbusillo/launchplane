@@ -358,6 +358,18 @@ that ref in order. Observe mode records required-check state for the exact
 candidate SHA. Landing the original PRs remains a later PR-native phase with
 separate records.
 
+The controller service endpoint
+`POST /v1/work-graph/merge-train/controller/run-once` is the preferred operator
+entrypoint for the full train. It accepts the same repository/base selector and
+`mutate` flag as the Level 1 route, but chooses the next safe batch phase from
+the latest DB-backed records. Repeated calls can drive an unstacked train through
+candidate plan, build, observe, landing plan, and landing. For a same-repo
+linear stack, repeated calls first plan and execute stack collapse, then admit
+only the collapsed root PR into the same candidate/build/observe/landing path.
+The controller does not introduce new live configuration or repo-specific
+conditionals; it fails closed on missing policy, missing token, stale policy
+digests, stale root heads, and the existing batch landing guards.
+
 The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
 landing phase. It accepts `mode: plan` with a passed candidate record id and
