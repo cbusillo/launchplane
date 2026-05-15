@@ -2712,6 +2712,28 @@ def _latest_merge_train_batch_landing_plan_record(
     return latest_record
 
 
+def _latest_completed_merge_train_batch_landing_plan_record(
+    *,
+    record_store: _MergeTrainBatchLandingPlanRecordStore,
+    repository: str,
+    base_branch: str,
+) -> MergeTrainBatchLandingPlanRecord | None:
+    records = record_store.list_merge_train_batch_landing_plan_records(
+        repository=repository,
+        base_branch=base_branch,
+        status="active",
+        limit=25,
+    )
+    latest_record = _latest_merge_train_batch_landing_progress_record(records)
+    if latest_record is None:
+        return None
+    if not latest_record.landing_plan.entries:
+        return None
+    if any(entry.status != "merged" for entry in latest_record.landing_plan.entries):
+        return None
+    return latest_record
+
+
 def _latest_merge_train_stack_collapse_plan_record(
     *,
     record_store: _MergeTrainStackCollapsePlanRecordStore,
@@ -7843,7 +7865,33 @@ def create_launchplane_service_app(
                     repository=controller_request.repository,
                     base_branch=controller_request.base_branch,
                 )
-                if active_landing_record is not None:
+                completed_landing_record = None
+                if active_landing_record is None:
+                    completed_landing_record = (
+                        _latest_completed_merge_train_batch_landing_plan_record(
+                            record_store=landing_store,
+                            repository=controller_request.repository,
+                            base_branch=controller_request.base_branch,
+                        )
+                    )
+                if completed_landing_record is not None:
+                    _validate_merge_train_landing_record_for_controller(
+                        landing_record=completed_landing_record,
+                        policy_key=repository_policy.policy_key,
+                        policy_sha256=policy_record.policy_sha256,
+                    )
+                    result = {
+                        "repository": controller_request.repository,
+                        "base_branch": controller_request.base_branch,
+                        "mode": "dry-run",
+                        "controller_action": "batch_landed",
+                        "merge_train_batch_landing_plan_record_id": completed_landing_record.record_id,
+                        "landing_plan": completed_landing_record.landing_plan.model_dump(
+                            mode="json"
+                        ),
+                    }
+                    driver_result = result
+                elif active_landing_record is not None:
                     _validate_merge_train_landing_record_for_controller(
                         landing_record=active_landing_record,
                         policy_key=repository_policy.policy_key,
