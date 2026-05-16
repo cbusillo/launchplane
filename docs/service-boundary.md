@@ -240,7 +240,10 @@ collapsed root PR, plan/build/observe a batch candidate, plan landing, or land
 the original PRs. Dry-run calls return the next controller action without
 writing records or mutating GitHub. Mutation calls reuse the same persisted
 candidate, stack-collapse, and landing-plan records as the phase-specific
-routes, and reject stale policy digests before advancing stored records.
+routes, and reject stale policy digests before advancing stored records. The
+response `result.controller_action` is the helper contract for retry/stop
+behavior; see [merge-train-policy.md](merge-train-policy.md) for the action
+matrix and public-safe reporting fields.
 
 `POST /v1/work-graph/merge-train/batch-candidate/run-once` executes one
 policy-backed batch-candidate phase for a requested repository/base branch. The
@@ -653,17 +656,96 @@ dedicated local-operator bearer credential with a non-empty `reason`, but
 terminal-agent read bearer credentials remain read-only and cannot execute the
 mutation. Local-operator apply requests additionally require a previously
 recorded matching local-operator dry-run. The route authorizes the top-level
-product/context/instance target and
-rejects nested runtime or secret targets that try to broaden or change that
-authorized target. It reuses the same planner/writer as
-`launchplane product-config apply`, returns only actions, keys, counts,
-actor/source metadata, and secret IDs, uses generic validation messages for
-rejected requests, and fails closed when a secret bundle is submitted without
-`LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane runtime or without
-an active runtime key-safety policy that allows the requested managed secret
-binding for the target runtime class. Request bodies for this route must not be
-copied into logs, issues, docs, or workflow artifacts because they can contain
-plaintext secret values.
+product/context/instance target and rejects nested runtime or secret targets
+that try to broaden or change that authorized target. It reuses the same
+planner/writer as `launchplane product-config apply`, returns only actions,
+keys, counts, actor/source metadata, and secret IDs, uses generic validation
+messages for rejected requests, and fails closed when a secret bundle is
+submitted without `LAUNCHPLANE_MASTER_ENCRYPTION_KEY` in the trusted Launchplane
+runtime or without an active runtime key-safety policy that allows the requested
+managed secret binding for the target runtime class. Request bodies for this
+route must not be copied into logs, issues, docs, or workflow artifacts because
+they can contain plaintext secret values.
+
+#### Product-config secret source contract
+
+The product-config apply route supports exactly one secret value source today:
+write-only plaintext supplied inside the HTTPS request by an approval-capable
+operator surface. The value is accepted only for the duration of request
+processing, is written into Launchplane managed-secret storage on apply, and is
+never returned. This source is appropriate for the signed-in operator UI and for
+explicit local-owner operator automation that already holds private credentials
+outside the repository.
+
+Helpers and agents must not ask for, echo, persist, or pass plaintext secret
+values through chat messages, CLI arguments, issue/PR bodies, workflow logs, or
+helper output. For helper-driven product-config work, use this sequence instead:
+
+1. Preflight intent and policy with `POST /v1/agent/write-intents/evaluate`,
+   naming `intent: "product_config_apply"`, `mode: "dry_run"`, product/context,
+   source URL, reason, optional `secret_bindings`, and the runtime destination.
+2. Report only the returned status, reason code, record id, binding keys,
+   runtime key-safety finding codes, trace id, and next action.
+3. Hand off any new or changed plaintext secret value entry to the signed-in
+   operator UI or to explicitly configured local-owner operator automation.
+4. Call `POST /v1/product-config/apply` only when the caller has a safe private
+   value source and explicit operator intent; dry-run before apply.
+
+The service does not currently support committed secret references, provider env
+lookups, stdin/stdout secret transport, arbitrary secret IDs supplied by an
+agent, or a request shape that says "reuse the current managed secret value".
+Those shapes are unsupported and must fail closed in clients instead of being
+translated into a product-config request. Existing managed-secret binding keys
+are safe to name only as metadata for intent evaluation, runtime key-safety
+checks, and redacted reporting. They are not a plaintext source for this route.
+
+Public-safe examples may show key names and placeholder binding keys, but never
+real values:
+
+```json
+{
+  "intent": "product_config_apply",
+  "mode": "dry_run",
+  "product": "example-product",
+  "context": "example-testing",
+  "source_url": "https://github.com/example/repo/issues/123",
+  "reason": "Preflight managed secret-backed product config.",
+  "secret_bindings": ["EXAMPLE_API_TOKEN"],
+  "destination": {
+    "kind": "runtime_environment",
+    "context": "example-testing",
+    "instance": "web"
+  }
+}
+```
+
+Product-config responses are public-safe only after redaction. Clients may
+report `status`, `trace_id`, record ids, `result.mode`, runtime key names,
+secret `binding_key` values, action names such as `created` or `unchanged`,
+counts, `runtime_key_safety.status`, finding codes, and `next_actions`. Clients
+must not report request bodies, runtime values, secret plaintext, ciphertext,
+provider environment dumps, token prefixes, master-key env names from service
+internals, or private hostnames.
+
+Common failure classes are stable enough for helper summaries:
+
+- `authentication_required`: no valid OIDC token, browser session, or allowed
+  local-operator bearer credential.
+- `authorization_denied`: caller lacks `product_config.plan`,
+  `product_config.apply`, or the product/context grant.
+- `reason_required`: local-operator calls omitted a concrete reason.
+- `local_operator_dry_run_required`: local-operator apply did not match a prior
+  recorded dry-run request.
+- `secret_configuration_required`: trusted Launchplane runtime cannot write
+  managed secrets.
+- `runtime_key_safety_unavailable` or `runtime_key_safety_failed`: the active
+  runtime key-safety policy is missing or rejects the requested binding.
+- `invalid_request`: malformed payload, secret-shaped runtime key, or nested
+  runtime/secret target override.
+
+After apply, `next_actions` can require `live_target_runtime_apply`; helpers
+should surface that action and stop. Applying product-config records does not by
+itself guarantee the live target process has been synchronized.
 
 Runtime key-safety policy reconciliation uses
 `POST /v1/runtime-key-safety/policies/apply`. The route is restricted to

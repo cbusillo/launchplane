@@ -370,6 +370,92 @@ The controller does not introduce new live configuration or repo-specific
 conditionals; it fails closed on missing policy, missing token, stale policy
 digests, stale root heads, and the existing batch landing guards.
 
+Controller requests use this shape:
+
+```json
+{
+  "schema_version": 1,
+  "repository": "example/repo",
+  "base_branch": "main",
+  "mutate": false
+}
+```
+
+`github_api_base_url` may be supplied only for a controlled GitHub-compatible
+test endpoint. Normal callers omit it. The service resolves the DB-backed
+repository/base policy, authorizes the policy's declared `service_authz` action,
+loads the GitHub token named by that policy, and then returns a public-safe
+envelope:
+
+```json
+{
+  "status": "accepted",
+  "trace_id": "launchplane_req_example",
+  "records": {
+    "merge_train_batch_candidate_record_id": "merge-train-batch-candidate-example"
+  },
+  "result": {
+    "repository": "example/repo",
+    "base_branch": "main",
+    "mode": "dry-run",
+    "controller_action": "build_candidate",
+    "merge_train_batch_candidate_record_id": "merge-train-batch-candidate-example"
+  }
+}
+```
+
+The response `records` object contains durable record ids for records written or
+selected by this call. The response `result` object is the controller decision.
+It always includes `repository`, `base_branch`, `mode`, and
+`controller_action`; it may also include redacted `dry_run_result`, `candidate`,
+`landing_plan`, `stack_discovery`, `stack_collapse_plan`, and matching record id
+fields. Callers may report controller action, record ids, PR numbers, check
+states, binding-safe labels from policy, trace id, and compact details. They
+must not report GitHub tokens, raw request headers, private API base URLs, local
+paths, or unchecked provider responses.
+
+Controller actions have these retry/stop semantics:
+
+- `plan_stack_collapse`: A same-repo linear stack was found and a collapse plan
+  is next. Dry-run may report. Mutate once, then call again.
+- `execute_stack_collapse`: A stored collapse plan should be applied. Mutate
+  once, then call again. Stop if the resulting plan is `blocked` or `stale`.
+- `wait_for_root_checks`: The collapsed root PR needs fresh required checks.
+  Stop and poll later; do not call phase endpoints.
+- `admit_collapsed_root`: The collapsed root PR is ready to enter the batch
+  candidate path. Mutate once, then call again.
+- `stack_unsupported`: A stack exists but is not a supported same-repo linear
+  stack. Stop and surface the redacted stack discovery details.
+- `plan_candidate`: The queue can produce the next batch candidate. Mutate once,
+  then call again.
+- `build_candidate`: A stored candidate needs its train ref built or refreshed.
+  Mutate once, then call again.
+- `observe_candidate`: A built candidate needs check observation. Mutate or
+  dry-run later until checks pass, fail, or remain pending.
+- `candidate_failed`: Candidate checks failed. Stop and surface the candidate
+  record id and failed check evidence.
+- `plan_landing`: A passed candidate is ready for PR-native landing-plan
+  creation. Mutate once, then call again.
+- `land_batch`: A landing plan is ready to merge original PRs in order. Mutate
+  once only after operator intent; call again to verify terminal state.
+- `batch_landed`: The batch already landed. Stop; the train phase is complete
+  for that batch.
+- `block`: The selected PR is blocked by conflicts or failed checks. Stop and
+  surface `dry_run_result.next_action_detail`.
+- `update_branch`: The selected PR needs a branch update before it can be
+  checked. Stop or use the lower-level recovery workflow deliberately.
+- `wait_for_checks`: Required PR checks are pending. Stop and poll later.
+- `idle`: No eligible queued work exists. Stop.
+
+All controller calls are one-action calls. A caller that wants to drive the
+train should repeat `run-once` only after reading the returned action and should
+stop on terminal or attention states: `batch_landed`, `candidate_failed`,
+`stack_unsupported`, `block`, `update_branch`, `wait_for_checks`,
+`wait_for_root_checks`, and `idle`. A failed HTTP response with `status:
+"rejected"` is also terminal for that attempt. Public-safe helper summaries
+should include `error.code`, `trace_id`, and the retry/stop recommendation, not
+the original request body.
+
 The batch-landing service endpoint
 `POST /v1/work-graph/merge-train/batch-landing/run-once` owns that PR-native
 landing phase. It accepts `mode: plan` with a passed candidate record id and
