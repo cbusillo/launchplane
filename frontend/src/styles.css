@@ -1588,6 +1588,33 @@ p {
   padding: 12px 14px;
 }
 
+.config-action-status {
+  display: inline-flex;
+  flex: 1 1 280px;
+  min-width: min(100%, 220px);
+  align-items: center;
+  gap: 8px;
+  color: var(--fg-muted);
+}
+
+.config-action-status span,
+.config-action-status code {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.config-action-status-pass {
+  color: var(--status-ok);
+}
+
+.config-action-status-fail {
+  color: var(--status-fail);
+}
+
+.config-action-status-pending {
+  color: var(--status-warn);
+}
+
 .config-review-check {
   display: flex;
   align-items: center;
