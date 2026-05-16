@@ -30,7 +30,8 @@ GITHUB_ORGS_URL = "https://api.github.com/user/orgs"
 GITHUB_TEAMS_URL = "https://api.github.com/user/teams"
 GITHUB_EMAILS_URL = "https://api.github.com/user/emails"
 SESSION_COOKIE_NAME = "launchplane_session"
-SESSION_TTL_SECONDS = 12 * 60 * 60
+SESSION_TTL_SECONDS = 14 * 24 * 60 * 60
+SESSION_RENEW_AFTER_SECONDS = 24 * 60 * 60
 OAUTH_STATE_TTL_SECONDS = 10 * 60
 
 
@@ -312,6 +313,26 @@ class HumanSessionManager:
         if not session_id:
             return None
         return self._session_store.read_session(session_id)
+
+    def renew_if_needed(
+        self, session: LaunchplaneHumanSession
+    ) -> LaunchplaneHumanSession | None:
+        now = self._now()
+        if session.expires_at <= now:
+            self._session_store.delete_session(session.session_id)
+            return None
+        if session.expires_at - now > timedelta(
+            seconds=SESSION_TTL_SECONDS - SESSION_RENEW_AFTER_SECONDS
+        ):
+            return session
+        renewed_session = LaunchplaneHumanSession(
+            session_id=session.session_id,
+            identity=session.identity,
+            created_at=session.created_at,
+            expires_at=now + timedelta(seconds=SESSION_TTL_SECONDS),
+        )
+        self._session_store.write_session(renewed_session)
+        return renewed_session
 
     def delete_cookie_session(self, cookie_header: str) -> None:
         signed_session_id = _cookie_value(cookie_header, SESSION_COOKIE_NAME)

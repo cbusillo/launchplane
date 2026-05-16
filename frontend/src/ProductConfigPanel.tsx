@@ -1,4 +1,12 @@
-import { AlertTriangle, Loader2, Play, Plus, Save, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  CheckCircle2,
+  Loader2,
+  Play,
+  Plus,
+  Save,
+  Trash2,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { LaunchplaneApiError, applyProductConfig } from "./api";
@@ -60,6 +68,7 @@ export function ProductConfigPanel({
   >(null);
   const [panelError, setPanelError] = useState("");
   const [traceId, setTraceId] = useState("");
+  const [successMessage, setSuccessMessage] = useState("");
   const requestSequence = useRef(0);
 
   const environmentOptions = useMemo(
@@ -132,6 +141,7 @@ export function ProductConfigPanel({
     setSubmitting(null);
     setPanelError("");
     setTraceId("");
+    setSuccessMessage("");
   }
 
   function clearRenderedSecretValues() {
@@ -223,6 +233,7 @@ export function ProductConfigPanel({
     setSubmitting("dry-run");
     setPanelError("");
     setTraceId("");
+    setSuccessMessage("");
     clearRenderedSecretValues();
     applyConfig(payload)
       .then((payloadResult) => {
@@ -232,6 +243,9 @@ export function ProductConfigPanel({
         setResult(payloadResult);
         setPendingApplyPayload({ ...payload, mode: "apply" });
         setReviewed(false);
+        setSuccessMessage(
+          "Dry run completed. Review the plan before applying.",
+        );
       })
       .catch((apiError: unknown) => {
         if (requestSequence.current !== requestId) {
@@ -263,6 +277,7 @@ export function ProductConfigPanel({
     setSubmitting("apply");
     setPanelError("");
     setTraceId("");
+    setSuccessMessage("");
     setPendingApplyPayload(null);
     setReviewed(false);
     clearRenderedSecretValues();
@@ -272,6 +287,7 @@ export function ProductConfigPanel({
           return;
         }
         setResult(payloadResult);
+        setSuccessMessage(applySuccessMessage(payloadResult));
       })
       .catch((apiError: unknown) => {
         if (requestSequence.current !== requestId) {
@@ -499,6 +515,15 @@ export function ProductConfigPanel({
           {traceId ? <code>{traceId}</code> : null}
         </div>
       ) : null}
+      {successMessage ? (
+        <div
+          className="config-inline-alert config-inline-alert-success"
+          role="status"
+        >
+          <CheckCircle2 size={15} aria-hidden="true" />
+          <span>{successMessage}</span>
+        </div>
+      ) : null}
       {result ? <ProductConfigResult result={result} /> : null}
       <div className="config-actions">
         <button
@@ -541,6 +566,19 @@ export function ProductConfigPanel({
   );
 }
 
+function applySuccessMessage(result: ProductConfigApplyPayload): string {
+  if (result.status === "records_applied_live_sync_required") {
+    return "Apply completed. Launchplane records are current; live runtime sync is still required.";
+  }
+  if (
+    result.runtime_environment.action === "unchanged" &&
+    result.summary.secret_change_count === 0
+  ) {
+    return "Apply completed. No record changes were needed.";
+  }
+  return "Apply completed. Launchplane records are current.";
+}
+
 function ProductConfigResult({
   result,
 }: {
@@ -568,6 +606,15 @@ function ProductConfigResult({
         />
       </div>
       <div className="config-result-list">
+        {result.next_actions?.length ? (
+          <div className="config-result-row config-result-row-note">
+            <strong>Next action</strong>
+            <span>
+              {result.next_actions[0].instruction ??
+                "Live runtime sync required."}
+            </span>
+          </div>
+        ) : null}
         {runtime.keys.length ? (
           <div className="config-result-row">
             <strong>Runtime keys</strong>

@@ -1317,10 +1317,9 @@ p {
 
 .config-status-row {
   display: grid;
-  grid-template-columns: max-content minmax(120px, 0.75fr) minmax(
-      0,
-      1fr
-    ) minmax(90px, auto);
+  grid-template-columns:
+    max-content minmax(120px, 0.75fr) minmax(0, 1fr)
+    minmax(90px, auto);
   gap: 9px;
   align-items: center;
   min-height: 34px;
@@ -1520,6 +1519,11 @@ p {
   padding: 10px 14px;
 }
 
+.config-inline-alert-success {
+  border-top-color: color-mix(in oklab, var(--status-ok) 52%, var(--hair));
+  color: var(--status-ok);
+}
+
 .config-inline-alert code {
   color: var(--fg-faint);
 }
@@ -1566,6 +1570,11 @@ p {
 }
 
 .config-result-row code {
+  color: var(--fg);
+}
+
+.config-result-row-note span {
+  min-width: 0;
   color: var(--fg);
 }
 

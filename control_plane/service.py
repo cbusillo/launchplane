@@ -181,6 +181,7 @@ from control_plane.service_human_auth import (
     HumanSessionManager,
     HumanSessionStore,
     InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
     OAuthLoginStateStore,
     build_pkce_verifier,
     load_github_oauth_config_from_env,
@@ -4897,12 +4898,21 @@ def _matching_every_code_rerun_intent_record(
     return None
 
 
-def _session_identity(
+def _session(
     *, environ: dict[str, object], session_manager: HumanSessionManager | None
-) -> GitHubHumanIdentity | None:
+) -> LaunchplaneHumanSession | None:
     if session_manager is None:
         return None
     session = session_manager.read_cookie(str(environ.get("HTTP_COOKIE", "")))
+    if session is None:
+        return None
+    return session_manager.renew_if_needed(session)
+
+
+def _session_identity(
+    *, environ: dict[str, object], session_manager: HumanSessionManager | None
+) -> GitHubHumanIdentity | None:
+    session = _session(environ=environ, session_manager=session_manager)
     return session.identity if session is not None else None
 
 
@@ -6162,8 +6172,8 @@ def create_launchplane_service_app(
                 headers=[("Set-Cookie", clear_cookie)],
             )
         if method == "GET" and path == "/v1/auth/session":
-            session_identity = _session_identity(environ=environ, session_manager=session_manager)
-            if session_identity is None:
+            auth_session = _session(environ=environ, session_manager=session_manager)
+            if auth_session is None:
                 return _json_response(
                     start_response=start_response,
                     status_code=401,
@@ -6177,14 +6187,20 @@ def create_launchplane_service_app(
                         },
                     },
                 )
+            session_cookie = (
+                session_manager.session_cookie_header(auth_session)
+                if session_manager is not None
+                else ""
+            )
             return _json_response(
                 start_response=start_response,
                 status_code=200,
                 payload={
                     "status": "ok",
                     "trace_id": request_trace_id,
-                    "identity": _human_identity_payload(session_identity),
+                    "identity": _human_identity_payload(auth_session.identity),
                 },
+                headers=[("Set-Cookie", session_cookie)] if session_cookie else None,
             )
         if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
             return _serve_ui_route(

@@ -376,7 +376,7 @@ export interface ProductConfigSecretResult {
 }
 
 export interface ProductConfigApplyPayload {
-  status: "ok";
+  status: "ok" | "records_applied_live_sync_required";
   mode: ProductConfigMode;
   product: string;
   context: string;
@@ -388,6 +388,17 @@ export interface ProductConfigApplyPayload {
   summary: {
     runtime_changed_key_count: number;
     secret_change_count: number;
+  };
+  next_actions?: ProductConfigNextAction[];
+}
+
+export interface ProductConfigNextAction {
+  kind: string;
+  required: boolean;
+  instruction?: string;
+  target?: {
+    target_type?: string;
+    target_name?: string;
   };
 }
 
