@@ -1262,6 +1262,47 @@ class GitHubHumanAuthTests(unittest.TestCase):
         self.assertIn("launchplane_session=", headers["Set-Cookie"])
         self.assertIn("Max-Age=1209600", headers["Set-Cookie"])
 
+    def test_authenticated_api_response_renews_human_session_cookie(self) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_humans": [
+                    {
+                        "logins": ["alice"],
+                        "roles": ["read_only"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["driver.read"],
+                    }
+                ]
+            }
+        )
+        oauth_client = _StubGitHubOAuthClient(_human_identity())
+        with TemporaryDirectory() as tmpdir:
+            database_url = f"sqlite+pysqlite:///{Path(tmpdir) / 'launchplane.sqlite3'}"
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir) / "state",
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                database_url=database_url,
+                github_oauth_config=_github_oauth_config(),
+                github_oauth_client=oauth_client,  # type: ignore[arg-type]
+            )
+            cookie = _signed_in_cookie(app)
+
+            status_code, headers, body = _invoke_raw_app(
+                app,
+                method="GET",
+                path="/v1/drivers",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "ok")
+        self.assertIn("launchplane_session=", headers["Set-Cookie"])
+        self.assertIn("Max-Age=1209600", headers["Set-Cookie"])
+
     def test_database_backed_human_session_survives_app_recreation(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {"github_humans": [{"logins": ["alice"], "roles": ["read_only"]}]}

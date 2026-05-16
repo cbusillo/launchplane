@@ -263,6 +263,7 @@ export function ProductConfigPanel({
         if (requestSequence.current !== requestId) {
           return;
         }
+        setSuccessMessage("");
         if (apiError instanceof LaunchplaneApiError) {
           setPanelError(apiError.message);
           setTraceId(apiError.traceId);
