@@ -7,6 +7,7 @@ import os
 import tempfile
 import unittest
 from collections.abc import Callable, Iterable, Mapping
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
@@ -81,6 +82,8 @@ from control_plane.service_human_auth import (
     GITHUB_USER_URL,
     GitHubOAuthClient,
     GitHubOAuthConfig,
+    InMemoryHumanSessionStore,
+    LaunchplaneHumanSession,
     load_github_oauth_config_from_env,
 )
 from control_plane.storage.filesystem import FilesystemRecordStore
@@ -536,6 +539,13 @@ def _github_oauth_config() -> GitHubOAuthConfig:
         session_secret="test-session-secret",
         cookie_secure=False,
     )
+
+
+def _signed_human_session_cookie(session_id: str, session_secret: str) -> str:
+    signature = hmac.new(
+        session_secret.encode("utf-8"), session_id.encode("utf-8"), hashlib.sha256
+    ).hexdigest()
+    return f"launchplane_session={session_id}.{signature}"
 
 
 def _signed_in_cookie(app: WsgiApp) -> str:
@@ -1262,7 +1272,9 @@ class GitHubHumanAuthTests(unittest.TestCase):
         self.assertIn("launchplane_session=", headers["Set-Cookie"])
         self.assertIn("Max-Age=1209600", headers["Set-Cookie"])
 
-    def test_authenticated_api_response_renews_human_session_cookie(self) -> None:
+    def test_authenticated_api_response_does_not_refresh_fresh_session_cookie(
+        self,
+    ) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(
             {
                 "github_humans": [
@@ -1278,12 +1290,10 @@ class GitHubHumanAuthTests(unittest.TestCase):
         )
         oauth_client = _StubGitHubOAuthClient(_human_identity())
         with TemporaryDirectory() as tmpdir:
-            database_url = f"sqlite+pysqlite:///{Path(tmpdir) / 'launchplane.sqlite3'}"
             app = create_launchplane_service_app(
-                state_dir=Path(tmpdir) / "state",
+                state_dir=Path(tmpdir),
                 verifier=_StubVerifier(_identity()),
                 authz_policy=policy,
-                database_url=database_url,
                 github_oauth_config=_github_oauth_config(),
                 github_oauth_client=oauth_client,  # type: ignore[arg-type]
             )
@@ -1300,8 +1310,61 @@ class GitHubHumanAuthTests(unittest.TestCase):
         self.assertEqual(status_code, 200)
         payload = json.loads(body)
         self.assertEqual(payload["status"], "ok")
+        self.assertNotIn("Set-Cookie", headers)
+
+    def test_authenticated_api_response_renews_expiring_human_session_cookie(
+        self,
+    ) -> None:
+        policy = LaunchplaneAuthzPolicy.model_validate(
+            {
+                "github_humans": [
+                    {
+                        "logins": ["alice"],
+                        "roles": ["read_only"],
+                        "products": ["launchplane"],
+                        "contexts": ["launchplane"],
+                        "actions": ["driver.read"],
+                    }
+                ]
+            }
+        )
+        session_store = InMemoryHumanSessionStore()
+        session = LaunchplaneHumanSession(
+            session_id="expiring-session",
+            identity=_human_identity(),
+            created_at=datetime.now(timezone.utc) - timedelta(days=13),
+            expires_at=datetime.now(timezone.utc) + timedelta(hours=12),
+        )
+        session_store.write_session(session)
+        with TemporaryDirectory() as tmpdir:
+            app = create_launchplane_service_app(
+                state_dir=Path(tmpdir),
+                verifier=_StubVerifier(_identity()),
+                authz_policy=policy,
+                github_oauth_config=_github_oauth_config(),
+                human_session_store=session_store,
+            )
+            cookie = _signed_human_session_cookie(
+                "expiring-session", "test-session-secret"
+            )
+
+            status_code, headers, body = _invoke_raw_app(
+                app,
+                method="GET",
+                path="/v1/drivers",
+                authorization="",
+                headers={"Cookie": cookie},
+            )
+
+        self.assertEqual(status_code, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["status"], "ok")
         self.assertIn("launchplane_session=", headers["Set-Cookie"])
         self.assertIn("Max-Age=1209600", headers["Set-Cookie"])
+        renewed_session = session_store.read_session("expiring-session")
+        self.assertIsNotNone(renewed_session)
+        assert renewed_session is not None
+        self.assertGreater(renewed_session.expires_at, session.expires_at)
 
     def test_database_backed_human_session_survives_app_recreation(self) -> None:
         policy = LaunchplaneAuthzPolicy.model_validate(

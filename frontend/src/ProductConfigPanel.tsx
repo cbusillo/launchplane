@@ -254,6 +254,7 @@ export function ProductConfigPanel({
         }
         setResult(payloadResult);
         setPendingApplyPayload({ ...payload, mode: "apply" });
+        clearRenderedSecretValues();
         setReviewed(false);
         setSuccessMessage(
           "Dry run completed. Review the plan before applying.",
