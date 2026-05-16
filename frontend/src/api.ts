@@ -12,6 +12,7 @@ import type {
   LogoutPayload,
   ProductConfigApplyPayload,
   ProductConfigApplyRequest,
+  ProductConfigApplyResponsePayload,
   ProductEnvironmentConfigStatusPayload,
   ProductListPayload,
   ProductProfileListPayload,
@@ -162,11 +163,11 @@ export function rankWorkGraphSnapshot(
 export function applyProductConfig(
   payload: ProductConfigApplyRequest,
 ): Promise<ProductConfigApplyPayload> {
-  return requestJson<ProductConfigApplyPayload>(
+  return requestJson<ProductConfigApplyResponsePayload>(
     "/v1/product-config/apply",
     "POST",
     payload,
-  );
+  ).then((response) => response.result);
 }
 
 export function dryRunGenericWebProdPromotion(
