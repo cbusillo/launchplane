@@ -33,6 +33,7 @@ from control_plane.contracts.merge_train_policy import MergeTrainPolicyRecord
 from control_plane.contracts.merge_train_policy import parse_merge_train_policy_toml
 from control_plane.contracts.merge_train_batch import MergeTrainBatchCandidate
 from control_plane.contracts.merge_train_batch import MergeTrainBatchLandingPlan
+from control_plane.contracts.merge_train_batch import build_merge_train_batch_candidate_record
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
@@ -1868,6 +1869,42 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 ).list_merge_train_batch_landing_plan_records(
                     repository="cbusillo/sellyouroutboard", base_branch="main"
                 )
+                superseding_candidate = MergeTrainBatchCandidate.model_validate(
+                    {
+                        **observe_payload["result"]["candidate"],
+                        "batch_id": "merge-train-batch-cbusillo-sellyouroutboard-main-next",
+                        "base_sha": "current-base-after-landing",
+                        "candidate_ref": "refs/heads/launchplane/train/cbusillo/sellyouroutboard/main/next",
+                        "candidate_sha": "candidate-next-built",
+                        "status": "passed",
+                        "updated_at": "9999-01-01T00:00:00Z",
+                        "entries": [
+                            {
+                                **observe_payload["result"]["candidate"]["entries"][0],
+                                "head_sha": "head-next",
+                            }
+                        ],
+                    }
+                )
+                superseding_candidate_record = build_merge_train_batch_candidate_record(
+                    candidate=superseding_candidate,
+                    source="test:superseding-candidate",
+                    updated_at="9999-01-01T00:00:00Z",
+                )
+                FilesystemRecordStore(state_dir).write_merge_train_batch_candidate_record(
+                    superseding_candidate_record
+                )
+                next_observe_status, next_observe_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/work-graph/merge-train/controller/run-once",
+                    payload={
+                        "schema_version": 1,
+                        "repository": "cbusillo/sellyouroutboard",
+                        "base_branch": "main",
+                        "mutate": True,
+                    },
+                )
 
         self.assertEqual(plan_status, 202)
         self.assertEqual(plan_payload["result"]["controller_action"], "plan_candidate")
@@ -1892,6 +1929,12 @@ class LaunchplaneServiceTests(unittest.TestCase):
         self.assertEqual(
             tuple(record.record_id for record in landing_records_after_retire),
             tuple(record.record_id for record in landing_records_before_retire),
+        )
+        self.assertEqual(next_observe_status, 202)
+        self.assertEqual(next_observe_payload["result"]["controller_action"], "plan_landing")
+        self.assertEqual(
+            next_observe_payload["result"]["landing_plan"]["batch_id"],
+            superseding_candidate.batch_id,
         )
 
     def test_merge_train_controller_stops_after_candidate_failure(self) -> None:
