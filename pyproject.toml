@@ -13,15 +13,15 @@ dependencies = [
     "pydantic>=2.13.4",
     "psycopg[binary]>=3.3.4",
     "pyjwt[crypto]>=2.12.1",
-    "requests>=2.32.0",
+    "requests>=2.34.2",
     "sqlalchemy>=2.0",
     "alembic>=1.18.4",
 ]
 
 [project.optional-dependencies]
 dev = [
-    "mypy>=2.0.0",
-    "ruff>=0.15.12",
+    "mypy>=2.1.0",
+    "ruff>=0.15.13",
 ]
 
 [project.scripts]
