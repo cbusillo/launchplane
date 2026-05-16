@@ -6216,7 +6216,11 @@ def create_launchplane_service_app(
                 headers=[("Set-Cookie", clear_cookie)],
             )
         if method == "GET" and path == "/v1/auth/session":
-            auth_session = _session(environ=environ, session_manager=session_manager)
+            auth_session = _session(
+                environ=environ,
+                session_manager=session_manager,
+                on_renewed_session=record_renewed_session,
+            )
             if auth_session is None:
                 return _json_response(
                     start_response=start_response,
@@ -6231,11 +6235,6 @@ def create_launchplane_service_app(
                         },
                     },
                 )
-            session_cookie = (
-                session_manager.session_cookie_header(auth_session)
-                if session_manager is not None
-                else ""
-            )
             return _json_response(
                 start_response=start_response,
                 status_code=200,
@@ -6244,7 +6243,6 @@ def create_launchplane_service_app(
                     "trace_id": request_trace_id,
                     "identity": _human_identity_payload(auth_session.identity),
                 },
-                headers=[("Set-Cookie", session_cookie)] if session_cookie else None,
             )
         if method == "GET" and (path == "/" or path == "/ui" or path.startswith("/ui/")):
             return _serve_ui_route(
