@@ -129,7 +129,7 @@ jobs:
           fi
 
       - name: Upload override result
-        uses: actions/upload-artifact@v5
+        uses: actions/upload-artifact@v7
         with:
           name: odoo-config-parameter-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
           path: odoo-config-parameter-override.json
