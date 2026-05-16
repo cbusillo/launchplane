@@ -162,11 +162,13 @@ export function rankWorkGraphSnapshot(
 
 export function applyProductConfig(
   payload: ProductConfigApplyRequest,
+  signal?: AbortSignal,
 ): Promise<ProductConfigApplyPayload> {
   return requestJson<ProductConfigApplyResponsePayload>(
     "/v1/product-config/apply",
     "POST",
     payload,
+    signal,
   ).then((response) => response.result);
 }
 

@@ -34,6 +34,8 @@ type SecretConfigRow = {
   description: string;
 };
 
+const PRODUCT_CONFIG_REQUEST_TIMEOUT_MS = 30_000;
+
 export function ProductConfigPanel({
   productDefault,
   contextDefault,
@@ -49,6 +51,7 @@ export function ProductConfigPanel({
   disabled: boolean;
   applyConfig?: (
     payload: ProductConfigApplyRequest,
+    signal?: AbortSignal,
   ) => Promise<ProductConfigApplyPayload>;
 }) {
   const [targetEnvironment, setTargetEnvironment] = useState(instanceDefault);
@@ -118,6 +121,11 @@ export function ProductConfigPanel({
       value.trim(),
     ).length;
     return filledFields > 0 && filledFields < 3;
+  });
+  const actionStatus = productConfigActionStatus({
+    submitting,
+    panelError,
+    successMessage,
   });
   const showPartialSecretWarning =
     partialSecretRows.length > 0 && !result && !panelError && !submitting;
@@ -230,12 +238,16 @@ export function ProductConfigPanel({
     const payload = buildPayload("dry-run");
     requestSequence.current += 1;
     const requestId = requestSequence.current;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      PRODUCT_CONFIG_REQUEST_TIMEOUT_MS,
+    );
     setSubmitting("dry-run");
     setPanelError("");
     setTraceId("");
-    setSuccessMessage("");
-    clearRenderedSecretValues();
-    applyConfig(payload)
+    setSuccessMessage("Running dry run...");
+    applyConfig(payload, controller.signal)
       .then((payloadResult) => {
         if (requestSequence.current !== requestId) {
           return;
@@ -255,12 +267,13 @@ export function ProductConfigPanel({
           setPanelError(apiError.message);
           setTraceId(apiError.traceId);
         } else if (apiError instanceof Error) {
-          setPanelError(apiError.message);
+          setPanelError(productConfigRequestErrorMessage(apiError, "dry run"));
         } else {
           setPanelError("Product config request failed.");
         }
       })
       .finally(() => {
+        window.clearTimeout(timeoutId);
         if (requestSequence.current === requestId) {
           setSubmitting(null);
         }
@@ -274,35 +287,44 @@ export function ProductConfigPanel({
     const payload = pendingApplyPayload;
     requestSequence.current += 1;
     const requestId = requestSequence.current;
+    const controller = new AbortController();
+    const timeoutId = window.setTimeout(
+      () => controller.abort(),
+      PRODUCT_CONFIG_REQUEST_TIMEOUT_MS,
+    );
     setSubmitting("apply");
     setPanelError("");
     setTraceId("");
-    setSuccessMessage("");
-    setPendingApplyPayload(null);
-    setReviewed(false);
-    clearRenderedSecretValues();
-    applyConfig(payload)
+    setSuccessMessage("Applying product config...");
+    applyConfig(payload, controller.signal)
       .then((payloadResult) => {
         if (requestSequence.current !== requestId) {
           return;
         }
+        clearRenderedSecretValues();
         setResult(payloadResult);
+        setPendingApplyPayload(null);
+        setReviewed(false);
         setSuccessMessage(applySuccessMessage(payloadResult));
       })
       .catch((apiError: unknown) => {
         if (requestSequence.current !== requestId) {
           return;
         }
+        setPendingApplyPayload(payload);
+        setReviewed(true);
+        setSuccessMessage("");
         if (apiError instanceof LaunchplaneApiError) {
           setPanelError(apiError.message);
           setTraceId(apiError.traceId);
         } else if (apiError instanceof Error) {
-          setPanelError(apiError.message);
+          setPanelError(productConfigRequestErrorMessage(apiError, "apply"));
         } else {
           setPanelError("Product config apply failed.");
         }
       })
       .finally(() => {
+        window.clearTimeout(timeoutId);
         if (requestSequence.current === requestId) {
           setSubmitting(null);
         }
@@ -561,9 +583,61 @@ export function ProductConfigPanel({
           )}
           <span>Apply</span>
         </button>
+        {actionStatus ? (
+          <div
+            className={`config-action-status config-action-status-${actionStatus.tone}`}
+            role={actionStatus.tone === "fail" ? "alert" : "status"}
+          >
+            {actionStatus.tone === "pending" ? (
+              <Loader2 className="spin" size={15} aria-hidden="true" />
+            ) : actionStatus.tone === "fail" ? (
+              <AlertTriangle size={15} aria-hidden="true" />
+            ) : (
+              <CheckCircle2 size={15} aria-hidden="true" />
+            )}
+            <span>{actionStatus.message}</span>
+            {traceId && actionStatus.tone === "fail" ? (
+              <code>{traceId}</code>
+            ) : null}
+          </div>
+        ) : null}
       </div>
     </section>
   );
+}
+
+function productConfigActionStatus({
+  submitting,
+  panelError,
+  successMessage,
+}: {
+  submitting: ProductConfigApplyRequest["mode"] | null;
+  panelError: string;
+  successMessage: string;
+}): { tone: "pending" | "pass" | "fail"; message: string } | null {
+  if (submitting === "dry-run") {
+    return { tone: "pending", message: "Running dry run..." };
+  }
+  if (submitting === "apply") {
+    return { tone: "pending", message: "Applying product config..." };
+  }
+  if (panelError) {
+    return { tone: "fail", message: panelError };
+  }
+  if (successMessage) {
+    return { tone: "pass", message: successMessage };
+  }
+  return null;
+}
+
+function productConfigRequestErrorMessage(
+  error: Error,
+  phase: "dry run" | "apply",
+): string {
+  if (error.name === "AbortError") {
+    return `Product config ${phase} timed out. The request may still have reached Launchplane; refresh status before retrying.`;
+  }
+  return error.message;
 }
 
 function applySuccessMessage(result: ProductConfigApplyPayload): string {
