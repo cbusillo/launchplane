@@ -4899,20 +4899,33 @@ def _matching_every_code_rerun_intent_record(
 
 
 def _session(
-    *, environ: dict[str, object], session_manager: HumanSessionManager | None
+    *,
+    environ: dict[str, object],
+    session_manager: HumanSessionManager | None,
+    on_authenticated_session: Callable[[LaunchplaneHumanSession], None] | None = None,
 ) -> LaunchplaneHumanSession | None:
     if session_manager is None:
         return None
     session = session_manager.read_cookie(str(environ.get("HTTP_COOKIE", "")))
     if session is None:
         return None
-    return session_manager.renew_if_needed(session)
+    renewed_session = session_manager.renew_if_needed(session)
+    if renewed_session is not None and on_authenticated_session is not None:
+        on_authenticated_session(renewed_session)
+    return renewed_session
 
 
 def _session_identity(
-    *, environ: dict[str, object], session_manager: HumanSessionManager | None
+    *,
+    environ: dict[str, object],
+    session_manager: HumanSessionManager | None,
+    on_authenticated_session: Callable[[LaunchplaneHumanSession], None] | None = None,
 ) -> GitHubHumanIdentity | None:
-    session = _session(environ=environ, session_manager=session_manager)
+    session = _session(
+        environ=environ,
+        session_manager=session_manager,
+        on_authenticated_session=on_authenticated_session,
+    )
     return session.identity if session is not None else None
 
 
@@ -4921,8 +4934,13 @@ def _read_identity(
     environ: dict[str, object],
     verifier: TokenVerifier,
     session_manager: HumanSessionManager | None,
+    on_authenticated_session: Callable[[LaunchplaneHumanSession], None] | None = None,
 ) -> LaunchplaneIdentity:
-    human_identity = _session_identity(environ=environ, session_manager=session_manager)
+    human_identity = _session_identity(
+        environ=environ,
+        session_manager=session_manager,
+        on_authenticated_session=on_authenticated_session,
+    )
     if human_identity is not None:
         return human_identity
     local_operator_identity = _local_operator_identity_from_bearer(environ)
@@ -6055,6 +6073,28 @@ def create_launchplane_service_app(
     ) -> list[bytes]:
         nonlocal authz_policy, resolved_authz_policy_sha256, resolved_authz_policy_source
 
+        authenticated_session: LaunchplaneHumanSession | None = None
+
+        def record_authenticated_session(session: LaunchplaneHumanSession) -> None:
+            nonlocal authenticated_session
+            authenticated_session = session
+
+        original_start_response = start_response
+
+        def start_response_with_session_cookie(
+            status: str, headers: list[tuple[str, str]]
+        ) -> None:
+            response_headers = list(headers)
+            if session_manager is not None and authenticated_session is not None:
+                response_headers.append(
+                    (
+                        "Set-Cookie",
+                        session_manager.session_cookie_header(authenticated_session),
+                    )
+                )
+            original_start_response(status, response_headers)
+
+        start_response = start_response_with_session_cookie
         request_trace_id = _trace_id()
         method = str(environ.get("REQUEST_METHOD", "GET")).upper()
         path = str(environ.get("PATH_INFO", ""))
@@ -6339,6 +6379,7 @@ def create_launchplane_service_app(
                     environ=environ,
                     verifier=verifier,
                     session_manager=session_manager,
+                    on_authenticated_session=record_authenticated_session,
                 )
             else:
                 if (
@@ -6349,6 +6390,7 @@ def create_launchplane_service_app(
                         environ=environ,
                         verifier=verifier,
                         session_manager=session_manager,
+                        on_authenticated_session=record_authenticated_session,
                     )
                 else:
                     token = _bearer_token(environ)
