@@ -407,7 +407,10 @@ def _extract_same_origin_logo_urls(*, base_url: str, body: str) -> tuple[str, ..
     base_origin = _url_origin(base_url)
     logo_urls: list[str] = []
     for match in re.finditer(
-        r"(?:src|href)\s*=\s*([\"'])(?P<url>[^\"']*/web/image/website/[^\"']*/logo[^\"']*)\1",
+        (
+            r"(?:src|href|content)\s*=\s*([\"'])"
+            r"(?P<url>[^\"']*/web/(?:image/website/[^\"']*/logo|content[^\"']*logo)[^\"']*)\1"
+        ),
         body,
         re.IGNORECASE,
     ):

@@ -313,6 +313,50 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
             ("https://cm-testing.example.com/web/image/website/7/logo?unique=abc&download=1",),
         )
 
+    def test_logo_verification_accepts_odoo_web_content_logo_url(self) -> None:
+        calls: list[str] = []
+
+        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            self.assertEqual(timeout_seconds, 5)
+            calls.append(url)
+            if url == "https://cm-testing.example.com":
+                return (
+                    200,
+                    '<meta property="og:image" content="/web/content?model=website&amp;id=1&amp;field=logo">',
+                    "text/html",
+                )
+            if url == "https://cm-testing.example.com/web/content?model=website&id=1&field=logo":
+                return 200, "image-bytes", "image/png"
+            return 404, "missing", "text/plain"
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement._http_text",
+            side_effect=fake_http_text,
+        ):
+            _verify_logo_route(base_url="https://cm-testing.example.com", timeout_seconds=5)
+
+        self.assertEqual(
+            calls,
+            [
+                "https://cm-testing.example.com",
+                "https://cm-testing.example.com/web/content?model=website&id=1&field=logo",
+            ],
+        )
+
+    def test_extract_logo_urls_accepts_same_origin_web_content_logo_assets(self) -> None:
+        urls = _extract_same_origin_logo_urls(
+            base_url="https://cm-testing.example.com",
+            body=(
+                '<meta property="og:image" content="https://evil.example.com/web/content?model=website&amp;id=1&amp;field=logo">'
+                '<meta name="twitter:image" content="/web/content/website/1/logo/Cell%20Mechanic.png">'
+            ),
+        )
+
+        self.assertEqual(
+            urls,
+            ("https://cm-testing.example.com/web/content/website/1/logo/Cell%20Mechanic.png",),
+        )
+
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
             patch(
