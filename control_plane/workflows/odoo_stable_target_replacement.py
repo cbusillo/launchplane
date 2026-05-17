@@ -1,15 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-import html
-import json
 from pathlib import Path
-import re
-import time
 from typing import Literal, Protocol
-from urllib.parse import urljoin, urlparse
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -31,6 +24,11 @@ from control_plane.contracts.ship_request import ShipRequest
 from control_plane.dokploy import JsonObject, JsonValue
 from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployRequest, execute_odoo_post_deploy
+from control_plane.workflows.odoo_verification import (
+    OdooVerificationEvidence,
+    default_odoo_health_url,
+    verify_odoo_stable_readiness,
+)
 from control_plane.workflows.ship import (
     build_deployment_record,
     generate_deployment_record_id,
@@ -177,6 +175,10 @@ class OdooStableTargetReplacementApplyResult(BaseModel):
     health_status: Literal["pass", "fail", "skipped"] = "skipped"
     canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
     logo_status: Literal["pass", "fail", "skipped"] = "skipped"
+    health_url: str = ""
+    canonical_url: str = ""
+    logo_urls: tuple[str, ...] = ()
+    verification_evidence: OdooVerificationEvidence = Field(default_factory=OdooVerificationEvidence)
     runtime_identity_injected: bool = False
     target_id: str = ""
     target_name: str = ""
@@ -205,6 +207,10 @@ class _ApplyResultBase(BaseModel):
         health_status: Literal["pass", "fail", "skipped"] = "skipped",
         canonical_status: Literal["pass", "fail", "skipped"] = "skipped",
         logo_status: Literal["pass", "fail", "skipped"] = "skipped",
+        health_url: str = "",
+        canonical_url: str = "",
+        logo_urls: tuple[str, ...] = (),
+        verification_evidence: OdooVerificationEvidence | None = None,
         runtime_identity_injected: bool = False,
         error_message: str = "",
     ) -> OdooStableTargetReplacementApplyResult:
@@ -219,6 +225,10 @@ class _ApplyResultBase(BaseModel):
             health_status=health_status,
             canonical_status=canonical_status,
             logo_status=logo_status,
+            health_url=health_url,
+            canonical_url=canonical_url,
+            logo_urls=logo_urls,
+            verification_evidence=verification_evidence or OdooVerificationEvidence(),
             runtime_identity_injected=runtime_identity_injected,
             target_id=self.target_id,
             target_name=self.target_name,
@@ -330,122 +340,7 @@ def _target_health_url(
     if lane.health_url.strip():
         return lane.health_url.strip()
     base_url = _target_base_url(lane=lane, domains=domains)
-    if not base_url:
-        return ""
-    health_path = profile.health_path.strip() or "/web/health"
-    if not health_path.startswith("/"):
-        health_path = f"/{health_path}"
-    return f"{base_url}{health_path}"
-
-
-def _http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
-    request = Request(url, headers={"User-Agent": "Launchplane-Odoo-Recreate/1"})
-    try:
-        with urlopen(request, timeout=timeout_seconds) as response:  # noqa: S310 - operator-configured URLs only.
-            body = response.read(1024 * 512).decode("utf-8", errors="replace")
-            content_type = response.headers.get("Content-Type", "")
-            return response.status, body, content_type
-    except HTTPError as error:
-        body = error.read(4096).decode("utf-8", errors="replace")
-        return error.code, body, error.headers.get("Content-Type", "")
-    except (TimeoutError, URLError) as error:
-        raise click.ClickException(f"Could not reach {url}: {error}") from error
-
-
-def _verify_health_url(*, health_url: str, timeout_seconds: int) -> None:
-    status_code, body, _content_type = _http_text(health_url, timeout_seconds=timeout_seconds)
-    if status_code >= 400:
-        raise click.ClickException(f"Health check {health_url} returned HTTP {status_code}.")
-    try:
-        payload = json.loads(body)
-    except ValueError:
-        return
-    if isinstance(payload, dict):
-        raw_status = str(payload.get("status") or "").strip().lower()
-        if raw_status and raw_status not in {"ok", "pass", "healthy"}:
-            raise click.ClickException(f"Health check {health_url} returned status={raw_status!r}.")
-
-
-def _verify_canonical_url(*, base_url: str, expected_base_url: str, timeout_seconds: int) -> None:
-    status_code, body, _content_type = _http_text(base_url, timeout_seconds=timeout_seconds)
-    if status_code >= 400:
-        raise click.ClickException(f"Canonical check {base_url} returned HTTP {status_code}.")
-    expected = expected_base_url.rstrip("/")
-    stale_preview_marker = ".cm-preview."
-    if stale_preview_marker in body:
-        raise click.ClickException("Canonical page still contains a cm-preview hostname.")
-    canonical_href = f'rel="canonical" href="{expected}'
-    alternate_canonical_href = f"rel='canonical' href='{expected}"
-    if canonical_href not in body and alternate_canonical_href not in body:
-        raise click.ClickException(f"Canonical page does not advertise {expected}.")
-
-
-def _verify_logo_route(*, base_url: str, timeout_seconds: int) -> None:
-    checked_urls: list[str] = []
-    for logo_url in _candidate_logo_urls(base_url=base_url, timeout_seconds=timeout_seconds):
-        if logo_url in checked_urls:
-            continue
-        checked_urls.append(logo_url)
-        status_code, body, content_type = _http_text(logo_url, timeout_seconds=timeout_seconds)
-        if status_code < 400 and not ("text/html" in content_type.lower() and "404" in body[:500].lower()):
-            return
-    checked = ", ".join(checked_urls) if checked_urls else base_url
-    raise click.ClickException(f"Logo check failed for {checked}.")
-
-
-def _candidate_logo_urls(*, base_url: str, timeout_seconds: int) -> tuple[str, ...]:
-    normalized_base_url = base_url.rstrip("/")
-    status_code, body, _content_type = _http_text(normalized_base_url, timeout_seconds=timeout_seconds)
-    if status_code < 400:
-        urls = tuple(_extract_same_origin_logo_urls(base_url=normalized_base_url, body=body))
-        if urls:
-            return urls
-    return (f"{normalized_base_url}/web/image/website/1/logo",)
-
-
-def _extract_same_origin_logo_urls(*, base_url: str, body: str) -> tuple[str, ...]:
-    base_origin = _url_origin(base_url)
-    logo_urls: list[str] = []
-    for match in re.finditer(
-        (
-            r"(?:src|href|content)\s*=\s*"
-            r"(?P<quote>[\"'])?"
-            r"(?P<url>[^\s\"'<>]*/web/(?:image/website/[^\s\"'<>]*/logo|content[^\s\"'<>]*logo)[^\s\"'<>]*)"
-            r"(?P=quote)?"
-        ),
-        body,
-        re.IGNORECASE,
-    ):
-        raw_url = html.unescape(match.group("url")).strip()
-        absolute_url = urljoin(f"{base_url.rstrip('/')}/", raw_url)
-        if _url_origin(absolute_url) == base_origin and absolute_url not in logo_urls:
-            logo_urls.append(absolute_url)
-    return tuple(logo_urls)
-
-
-def _url_origin(raw_url: str) -> str:
-    parsed = urlparse(raw_url)
-    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
-
-
-def _run_verification_with_retry(
-    verification: Callable[[], None],
-    *,
-    timeout_seconds: int,
-    retry_interval_seconds: int = ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    last_error: click.ClickException | None = None
-    while True:
-        try:
-            verification()
-            return
-        except click.ClickException as error:
-            last_error = error
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
-                raise last_error
-            time.sleep(min(retry_interval_seconds, remaining_seconds))
+    return default_odoo_health_url(base_url=base_url, health_path=profile.health_path)
 
 
 def _normalize_domain(raw_domain: str) -> str:
@@ -1054,51 +949,19 @@ def execute_odoo_stable_target_replacement_apply(
 
     base_url = _target_base_url(lane=lane, domains=plan.expected_domain_hosts)
     health_url = _target_health_url(profile=profile, lane=lane, domains=plan.expected_domain_hosts)
-    health_status: Literal["pass", "fail", "skipped"] = "skipped"
-    canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
-    logo_status: Literal["pass", "fail", "skipped"] = "skipped"
-    try:
-        if request.verify_health:
-            if not health_url:
-                raise click.ClickException(
-                    "Odoo target replacement health verification has no health URL."
-                )
-            _run_verification_with_retry(
-                lambda: _verify_health_url(
-                    health_url=health_url,
-                    timeout_seconds=health_timeout_seconds,
-                ),
-                timeout_seconds=health_timeout_seconds,
-            )
-            health_status = "pass"
-        if request.verify_canonical:
-            if not base_url:
-                raise click.ClickException(
-                    "Odoo target replacement canonical verification has no base URL."
-                )
-            _run_verification_with_retry(
-                lambda: _verify_canonical_url(
-                    base_url=base_url,
-                    expected_base_url=base_url,
-                    timeout_seconds=health_timeout_seconds,
-                ),
-                timeout_seconds=health_timeout_seconds,
-            )
-            canonical_status = "pass"
-        if request.verify_logo:
-            if not base_url:
-                raise click.ClickException(
-                    "Odoo target replacement logo verification has no base URL."
-                )
-            _run_verification_with_retry(
-                lambda: _verify_logo_route(
-                    base_url=base_url,
-                    timeout_seconds=health_timeout_seconds,
-                ),
-                timeout_seconds=health_timeout_seconds,
-            )
-            logo_status = "pass"
-    except click.ClickException as error:
+    verification = verify_odoo_stable_readiness(
+        base_url=base_url,
+        health_url=health_url,
+        verify_health=request.verify_health,
+        verify_canonical=request.verify_canonical,
+        verify_logo=request.verify_logo,
+        timeout_seconds=health_timeout_seconds,
+        retry_interval_seconds=ODOO_STABLE_TARGET_REPLACEMENT_VERIFY_RETRY_INTERVAL_SECONDS,
+    )
+    health_status = verification.health_status
+    canonical_status = verification.canonical_status
+    logo_status = verification.logo_status
+    if verification.error_message:
         destination_health = HealthcheckEvidence(
             verified=health_status == "pass",
             urls=(health_url,) if health_url else (),
@@ -1121,8 +984,12 @@ def execute_odoo_stable_target_replacement_apply(
             health_status=health_status if health_status == "pass" else "fail",
             canonical_status=canonical_status if canonical_status == "pass" else "fail",
             logo_status=logo_status if logo_status == "pass" else "fail",
+            health_url=verification.evidence.health_url,
+            canonical_url=verification.evidence.canonical_url,
+            logo_urls=verification.evidence.logo_urls,
+            verification_evidence=verification.evidence,
             runtime_identity_injected=True,
-            error_message=str(error),
+            error_message=verification.error_message,
         )
 
     finished_at = utc_now_timestamp()
@@ -1155,5 +1022,9 @@ def execute_odoo_stable_target_replacement_apply(
         health_status=health_status,
         canonical_status=canonical_status,
         logo_status=logo_status,
+        health_url=verification.evidence.health_url,
+        canonical_url=verification.evidence.canonical_url,
+        logo_urls=verification.evidence.logo_urls,
+        verification_evidence=verification.evidence,
         runtime_identity_injected=True,
     )

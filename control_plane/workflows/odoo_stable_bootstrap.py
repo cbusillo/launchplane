@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-import time
-from typing import Callable, Literal, Protocol
+from typing import Literal, Protocol
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -32,9 +31,10 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     _read_lane,
     _target_base_url,
     _target_health_url,
-    _verify_canonical_url,
-    _verify_health_url,
-    _verify_logo_route,
+)
+from control_plane.workflows.odoo_verification import (
+    OdooVerificationEvidence,
+    verify_odoo_stable_readiness,
 )
 from control_plane.workflows.ship import (
     build_deployment_record,
@@ -112,6 +112,10 @@ class OdooStableBootstrapResult(BaseModel):
     health_status: Literal["pass", "fail", "skipped"] = "skipped"
     canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
     logo_status: Literal["pass", "fail", "skipped"] = "skipped"
+    health_url: str = ""
+    canonical_url: str = ""
+    logo_urls: tuple[str, ...] = ()
+    verification_evidence: OdooVerificationEvidence = Field(default_factory=OdooVerificationEvidence)
     target_id: str = ""
     target_name: str = ""
     artifact_id: str = ""
@@ -230,26 +234,6 @@ def _write_bootstrap_inventory_pointer(
     )
 
 
-def _run_verification_with_retry(
-    verification: Callable[[], None],
-    *,
-    timeout_seconds: int,
-    retry_interval_seconds: int = ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS,
-) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    last_error: click.ClickException | None = None
-    while True:
-        try:
-            verification()
-            return
-        except click.ClickException as error:
-            last_error = error
-            remaining_seconds = deadline - time.monotonic()
-            if remaining_seconds <= 0:
-                raise last_error
-            time.sleep(min(retry_interval_seconds, remaining_seconds))
-
-
 def _base_result(
     *,
     request: OdooStableBootstrapRequest,
@@ -264,6 +248,10 @@ def _base_result(
     health_status: Literal["pass", "fail", "skipped"] = "skipped",
     canonical_status: Literal["pass", "fail", "skipped"] = "skipped",
     logo_status: Literal["pass", "fail", "skipped"] = "skipped",
+    health_url: str = "",
+    canonical_url: str = "",
+    logo_urls: tuple[str, ...] = (),
+    verification_evidence: OdooVerificationEvidence | None = None,
     error_message: str = "",
 ) -> OdooStableBootstrapResult:
     artifact_id = ""
@@ -281,6 +269,10 @@ def _base_result(
         health_status=health_status,
         canonical_status=canonical_status,
         logo_status=logo_status,
+        health_url=health_url,
+        canonical_url=canonical_url,
+        logo_urls=logo_urls,
+        verification_evidence=verification_evidence or OdooVerificationEvidence(),
         target_id=target_id_record.target_id,
         target_name=target_record.target_name,
         artifact_id=artifact_id,
@@ -595,35 +587,19 @@ def execute_odoo_stable_bootstrap(
         or target_record.healthcheck_timeout_seconds
         or control_plane_dokploy.DEFAULT_DOKPLOY_HEALTH_TIMEOUT_SECONDS
     )
-    health_status: Literal["pass", "fail", "skipped"] = "skipped"
-    canonical_status: Literal["pass", "fail", "skipped"] = "skipped"
-    logo_status: Literal["pass", "fail", "skipped"] = "skipped"
-    try:
-        if request.verify_health:
-            if not health_url:
-                raise click.ClickException("Odoo stable bootstrap has no health URL.")
-            _run_verification_with_retry(
-                lambda: _verify_health_url(
-                    health_url=health_url, timeout_seconds=health_timeout_seconds
-                ),
-                timeout_seconds=health_timeout_seconds,
-            )
-            health_status = "pass"
-        if request.verify_canonical:
-            if not base_url:
-                raise click.ClickException("Odoo stable bootstrap has no base URL.")
-            _verify_canonical_url(
-                base_url=base_url,
-                expected_base_url=base_url,
-                timeout_seconds=health_timeout_seconds,
-            )
-            canonical_status = "pass"
-        if request.verify_logo:
-            if not base_url:
-                raise click.ClickException("Odoo stable bootstrap has no base URL.")
-            _verify_logo_route(base_url=base_url, timeout_seconds=health_timeout_seconds)
-            logo_status = "pass"
-    except click.ClickException as error:
+    verification = verify_odoo_stable_readiness(
+        base_url=base_url,
+        health_url=health_url,
+        verify_health=request.verify_health,
+        verify_canonical=request.verify_canonical,
+        verify_logo=request.verify_logo,
+        timeout_seconds=health_timeout_seconds,
+        retry_interval_seconds=ODOO_STABLE_BOOTSTRAP_VERIFY_RETRY_INTERVAL_SECONDS,
+    )
+    health_status = verification.health_status
+    canonical_status = verification.canonical_status
+    logo_status = verification.logo_status
+    if verification.error_message:
         destination_health = HealthcheckEvidence(
             verified=health_status == "pass",
             urls=(health_url,) if health_url else (),
@@ -640,7 +616,7 @@ def execute_odoo_stable_bootstrap(
                 attempted=True,
                 run_status="pass",
                 readiness_status="verification_failed",
-                detail=str(error),
+                detail=verification.error_message,
             ),
             post_deploy_update=post_deploy_evidence,
             destination_health=destination_health,
@@ -663,7 +639,11 @@ def execute_odoo_stable_bootstrap(
             health_status=health_status if health_status == "pass" else "fail",
             canonical_status=canonical_status if canonical_status == "pass" else "fail",
             logo_status=logo_status if logo_status == "pass" else "fail",
-            error_message=str(error),
+            health_url=verification.evidence.health_url,
+            canonical_url=verification.evidence.canonical_url,
+            logo_urls=verification.evidence.logo_urls,
+            verification_evidence=verification.evidence,
+            error_message=verification.error_message,
         )
 
     finished_at = utc_now_timestamp()
@@ -711,4 +691,8 @@ def execute_odoo_stable_bootstrap(
         health_status=health_status,
         canonical_status=canonical_status,
         logo_status=logo_status,
+        health_url=verification.evidence.health_url,
+        canonical_url=verification.evidence.canonical_url,
+        logo_urls=verification.evidence.logo_urls,
+        verification_evidence=verification.evidence,
     )

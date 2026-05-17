@@ -31,11 +31,12 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
-    _extract_same_origin_logo_urls,
-    _verify_logo_route,
-    _run_verification_with_retry,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
+)
+from control_plane.workflows.odoo_verification import (
+    OdooVerificationEvidence,
+    OdooVerificationResult,
 )
 
 
@@ -112,6 +113,20 @@ def _profile(driver_id: str = "odoo") -> LaunchplaneProductProfileRecord:
         preview=ProductPreviewProfile(enabled=True, context="cm"),
         updated_at="2026-05-09T00:00:00Z",
         source="test",
+    )
+
+
+def _verification_result() -> OdooVerificationResult:
+    return OdooVerificationResult(
+        health_status="pass",
+        canonical_status="pass",
+        logo_status="pass",
+        evidence=OdooVerificationEvidence(
+            base_url="https://cm-testing.shinycomputers.com",
+            health_url="https://cm-testing.shinycomputers.com/web/health",
+            canonical_url="https://cm-testing.shinycomputers.com",
+            logo_urls=("https://cm-testing.shinycomputers.com/web/image/website/1/logo",),
+        ),
     )
 
 
@@ -243,137 +258,6 @@ def _request(path: str, query: object | None = None, **_: object) -> JsonValue:
 
 
 class OdooStableTargetReplacementTests(unittest.TestCase):
-    def test_logo_verification_uses_logo_url_from_canonical_page(self) -> None:
-        calls: list[str] = []
-
-        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
-            self.assertEqual(timeout_seconds, 5)
-            calls.append(url)
-            if url == "https://cm-testing.example.com":
-                return (
-                    200,
-                    '<html><img src="/web/image/website/7/logo?unique=abc"></html>',
-                    "text/html",
-                )
-            if url == "https://cm-testing.example.com/web/image/website/7/logo?unique=abc":
-                return 200, "image-bytes", "image/png"
-            return 404, "missing", "text/plain"
-
-        with patch(
-            "control_plane.workflows.odoo_stable_target_replacement._http_text",
-            side_effect=fake_http_text,
-        ):
-            _verify_logo_route(base_url="https://cm-testing.example.com", timeout_seconds=5)
-
-        self.assertEqual(
-            calls,
-            [
-                "https://cm-testing.example.com",
-                "https://cm-testing.example.com/web/image/website/7/logo?unique=abc",
-            ],
-        )
-
-    def test_logo_verification_falls_back_to_legacy_website_one_route(self) -> None:
-        calls: list[str] = []
-
-        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
-            self.assertEqual(timeout_seconds, 5)
-            calls.append(url)
-            if url == "https://cm-testing.example.com":
-                return 200, "<html>No logo route here</html>", "text/html"
-            if url == "https://cm-testing.example.com/web/image/website/1/logo":
-                return 200, "image-bytes", "image/png"
-            return 404, "missing", "text/plain"
-
-        with patch(
-            "control_plane.workflows.odoo_stable_target_replacement._http_text",
-            side_effect=fake_http_text,
-        ):
-            _verify_logo_route(base_url="https://cm-testing.example.com/", timeout_seconds=5)
-
-        self.assertEqual(
-            calls,
-            [
-                "https://cm-testing.example.com",
-                "https://cm-testing.example.com/web/image/website/1/logo",
-            ],
-        )
-
-    def test_extract_logo_urls_ignores_cross_origin_assets(self) -> None:
-        urls = _extract_same_origin_logo_urls(
-            base_url="https://cm-testing.example.com",
-            body=(
-                '<img src="https://evil.example.com/web/image/website/9/logo">'
-                '<img src="/web/image/website/7/logo?unique=abc&amp;download=1">'
-            ),
-        )
-
-        self.assertEqual(
-            urls,
-            ("https://cm-testing.example.com/web/image/website/7/logo?unique=abc&download=1",),
-        )
-
-    def test_logo_verification_accepts_odoo_web_content_logo_url(self) -> None:
-        calls: list[str] = []
-
-        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
-            self.assertEqual(timeout_seconds, 5)
-            calls.append(url)
-            if url == "https://cm-testing.example.com":
-                return (
-                    200,
-                    '<meta property="og:image" content="/web/content?model=website&amp;id=1&amp;field=logo">',
-                    "text/html",
-                )
-            if url == "https://cm-testing.example.com/web/content?model=website&id=1&field=logo":
-                return 200, "image-bytes", "image/png"
-            return 404, "missing", "text/plain"
-
-        with patch(
-            "control_plane.workflows.odoo_stable_target_replacement._http_text",
-            side_effect=fake_http_text,
-        ):
-            _verify_logo_route(base_url="https://cm-testing.example.com", timeout_seconds=5)
-
-        self.assertEqual(
-            calls,
-            [
-                "https://cm-testing.example.com",
-                "https://cm-testing.example.com/web/content?model=website&id=1&field=logo",
-            ],
-        )
-
-    def test_extract_logo_urls_accepts_same_origin_web_content_logo_assets(self) -> None:
-        urls = _extract_same_origin_logo_urls(
-            base_url="https://cm-testing.example.com",
-            body=(
-                '<meta property="og:image" content="https://evil.example.com/web/content?model=website&amp;id=1&amp;field=logo">'
-                '<meta name="twitter:image" content="/web/content/website/1/logo/Cell%20Mechanic.png">'
-            ),
-        )
-
-        self.assertEqual(
-            urls,
-            ("https://cm-testing.example.com/web/content/website/1/logo/Cell%20Mechanic.png",),
-        )
-
-    def test_extract_logo_urls_accepts_unquoted_same_origin_logo_assets(self) -> None:
-        urls = _extract_same_origin_logo_urls(
-            base_url="https://cm-testing.example.com",
-            body=(
-                "<img src=/web/image/website/7/logo?unique=abc&amp;download=1>"
-                "<meta property=og:image content=/web/content?model=website&amp;id=1&amp;field=logo>"
-            ),
-        )
-
-        self.assertEqual(
-            urls,
-            (
-                "https://cm-testing.example.com/web/image/website/7/logo?unique=abc&download=1",
-                "https://cm-testing.example.com/web/content?model=website&id=1&field=logo",
-            ),
-        )
-
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
             patch(
@@ -692,14 +576,9 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 return_value=post_deploy_result,
             ) as post_deploy,
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement._verify_health_url"
-            ) as verify_health,
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement._verify_canonical_url"
-            ) as verify_canonical,
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement._verify_logo_route"
-            ) as verify_logo,
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
+            ) as verify_readiness,
         ):
             result = execute_odoo_stable_target_replacement_apply(
                 control_plane_root=Path("."),
@@ -739,9 +618,22 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
         trigger_deploy.assert_called_once()
         wait_deploy.assert_called_once()
         post_deploy.assert_called_once()
-        verify_health.assert_called_once()
-        verify_canonical.assert_called_once()
-        verify_logo.assert_called_once()
+        verify_readiness.assert_called_once_with(
+            base_url="https://cm-testing.shinycomputers.com",
+            health_url="https://cm-testing.shinycomputers.com/web/health",
+            verify_health=True,
+            verify_canonical=True,
+            verify_logo=True,
+            timeout_seconds=180,
+            retry_interval_seconds=5,
+        )
+        self.assertEqual(result.health_url, "https://cm-testing.shinycomputers.com/web/health")
+        self.assertEqual(result.canonical_url, "https://cm-testing.shinycomputers.com")
+        self.assertEqual(
+            result.logo_urls,
+            ("https://cm-testing.shinycomputers.com/web/image/website/1/logo",),
+        )
+        self.assertEqual(result.verification_evidence.health_url, result.health_url)
         self.assertIn("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=", persisted_env)
         self.assertIn("LAUNCHPLANE_DEPLOYMENT_RECORD_ID=", persisted_env)
         self.assertIn("LAUNCHPLANE_ARTIFACT_ID=artifact-cm-testing", persisted_env)
@@ -838,13 +730,8 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                 ),
             ),
             patch(
-                "control_plane.workflows.odoo_stable_target_replacement._verify_health_url"
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement._verify_canonical_url"
-            ),
-            patch(
-                "control_plane.workflows.odoo_stable_target_replacement._verify_logo_route"
+                "control_plane.workflows.odoo_stable_target_replacement.verify_odoo_stable_readiness",
+                return_value=_verification_result(),
             ),
         ):
             result = execute_odoo_stable_target_replacement_apply(
@@ -913,28 +800,6 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
                     ),
                     dokploy_request=cast(DokployRequest, _request),
                 )
-
-    def test_verification_retry_allows_transient_startup_failure(self) -> None:
-        attempts = 0
-
-        def flaky_verification() -> None:
-            nonlocal attempts
-            attempts += 1
-            if attempts == 1:
-                raise click.ClickException("temporary health 404")
-
-        with patch(
-            "control_plane.workflows.odoo_stable_target_replacement.time.sleep",
-            side_effect=lambda _seconds: None,
-        ) as sleep_mock:
-            _run_verification_with_retry(
-                flaky_verification,
-                timeout_seconds=30,
-                retry_interval_seconds=5,
-            )
-
-        self.assertEqual(attempts, 2)
-        sleep_mock.assert_called_once()
 
     def test_apply_refuses_blocked_plan(self) -> None:
         with self.assertRaises(click.ClickException):
