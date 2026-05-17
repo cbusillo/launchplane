@@ -298,12 +298,14 @@ def _verify_logo_route(
 
 def _candidate_logo_urls(*, base_url: str, timeout_seconds: int) -> tuple[str, ...]:
     normalized_base_url = base_url.rstrip("/")
+    fallback_url = f"{normalized_base_url}/web/image/website/1/logo"
+    candidates: list[str] = []
     status_code, body, _content_type = _http_text(normalized_base_url, timeout_seconds=timeout_seconds)
     if status_code < 400:
-        urls = tuple(_extract_same_origin_logo_urls(base_url=normalized_base_url, body=body))
-        if urls:
-            return urls
-    return (f"{normalized_base_url}/web/image/website/1/logo",)
+        candidates.extend(_extract_same_origin_logo_urls(base_url=normalized_base_url, body=body))
+    if fallback_url not in candidates:
+        candidates.append(fallback_url)
+    return tuple(candidates)
 
 
 def _extract_same_origin_logo_urls(*, base_url: str, body: str) -> tuple[str, ...]:
@@ -313,7 +315,7 @@ def _extract_same_origin_logo_urls(*, base_url: str, body: str) -> tuple[str, ..
         (
             r"(?:src|href|content)\s*=\s*"
             r"(?P<quote>[\"'])?"
-            r"(?P<url>[^\s\"'<>]*/web/(?:image/website/[^\s\"'<>]*/logo|content[^\s\"'<>]*logo)[^\s\"'<>]*)"
+            r"(?P<url>[^\s\"'<>]*/web/(?:image|content)[^\s\"'<>]*)"
             r"(?P=quote)?"
         ),
         body,
@@ -321,9 +323,26 @@ def _extract_same_origin_logo_urls(*, base_url: str, body: str) -> tuple[str, ..
     ):
         raw_url = html.unescape(match.group("url")).strip()
         absolute_url = urljoin(f"{base_url.rstrip('/')}/", raw_url)
-        if _url_origin(absolute_url) == base_origin and absolute_url not in logo_urls:
+        if (
+            _url_origin(absolute_url) == base_origin
+            and _is_odoo_website_logo_url(absolute_url)
+            and absolute_url not in logo_urls
+        ):
             logo_urls.append(absolute_url)
     return tuple(logo_urls)
+
+
+def _is_odoo_website_logo_url(raw_url: str) -> bool:
+    parsed = urlparse(raw_url)
+    path = parsed.path.lower()
+    query = parsed.query.lower()
+    if path.startswith("/web/image/website/") and "/logo" in path:
+        return True
+    if path.startswith("/web/content/website/") and "/logo" in path:
+        return True
+    if path == "/web/content" and "model=website" in query and "field=logo" in query:
+        return True
+    return False
 
 
 def _url_origin(raw_url: str) -> str:

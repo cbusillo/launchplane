@@ -55,6 +55,49 @@ class OdooVerificationTests(unittest.TestCase):
             ("https://cm-testing.example.com/web/image/website/7/logo?unique=abc",),
         )
 
+    def test_verification_keeps_canonical_logo_fallback_after_bad_logo_asset(self) -> None:
+        calls: list[str] = []
+
+        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            self.assertEqual(timeout_seconds, 5)
+            calls.append(url)
+            if url == "https://cm-testing.example.com":
+                return (
+                    200,
+                    '<link rel="canonical" href="https://cm-testing.example.com">'
+                    '<img src="/web/image/product.template/7/logo_badge">',
+                    "text/html",
+                )
+            if url == "https://cm-testing.example.com/web/image/website/1/logo":
+                return 200, "image-bytes", "image/png"
+            if url == "https://cm-testing.example.com/web/image/product.template/7/logo_badge":
+                return 200, "wrong-image", "image/png"
+            return 404, "missing", "text/plain"
+
+        with patch(
+            "control_plane.workflows.odoo_verification._http_text",
+            side_effect=fake_http_text,
+        ):
+            result = verify_odoo_stable_readiness(
+                base_url="https://cm-testing.example.com",
+                verify_health=False,
+                verify_canonical=False,
+                timeout_seconds=5,
+            )
+
+        self.assertEqual(result.logo_status, "pass")
+        self.assertEqual(
+            result.evidence.logo_urls,
+            ("https://cm-testing.example.com/web/image/website/1/logo",),
+        )
+        self.assertEqual(
+            calls,
+            [
+                "https://cm-testing.example.com",
+                "https://cm-testing.example.com/web/image/website/1/logo",
+            ],
+        )
+
     def test_verification_falls_back_to_legacy_website_one_logo_route(self) -> None:
         calls: list[str] = []
 
@@ -168,6 +211,7 @@ class OdooVerificationTests(unittest.TestCase):
             base_url="https://cm-testing.example.com",
             body=(
                 '<img src="https://evil.example.com/web/image/website/9/logo">'
+                '<img src="/web/image/product.template/7/logo_badge">'
                 '<img src="/web/image/website/7/logo?unique=abc&amp;download=1">'
             ),
         )
