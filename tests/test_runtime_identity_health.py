@@ -78,6 +78,62 @@ class RuntimeIdentityHealthTests(unittest.TestCase):
         self.assertEqual(result.payload, {"status": "ok"})
         self.assertEqual(seen_calls, [("https://example.com/health", 30)])
 
+    def test_wait_for_healthcheck_retries_unparseable_json(self) -> None:
+        attempts = iter(
+            (
+                HealthcheckPass(json_parse_failed=True),
+                HealthcheckPass(payload={"status": "ok"}),
+            )
+        )
+        sleeps: list[float] = []
+
+        result = wait_for_healthcheck_with_retry(
+            url="https://example.com/health",
+            timeout_seconds=30,
+            sleep=sleeps.append,
+            monotonic=lambda: 0,
+            wait_once=lambda **_kwargs: next(attempts),
+        )
+
+        self.assertEqual(result.payload, {"status": "ok"})
+        self.assertEqual(sleeps, [1])
+
+    def test_wait_for_runtime_identity_healthcheck_retries_until_identity_parseable(
+        self,
+    ) -> None:
+        identity = RuntimeIdentity(
+            product="sellyouroutboard",
+            context="sellyouroutboard-testing",
+            instance="testing",
+            deployment_record_id="deployment-123",
+            artifact_id="artifact-a",
+            source_git_ref="abc123",
+        )
+        attempts = iter(
+            (
+                HealthcheckPass(payload={"status": "ok"}),
+                HealthcheckPass(payload={"runtime_identity": {"deployment_record_id": "deployment-123"}}),
+                HealthcheckPass(payload={"runtime_identity": identity.model_dump(mode="json")}),
+            )
+        )
+        sleeps: list[float] = []
+
+        from control_plane.workflows.runtime_identity_health import (
+            wait_for_runtime_identity_healthcheck_with_retry,
+        )
+
+        result = wait_for_runtime_identity_healthcheck_with_retry(
+            url="https://example.com/health",
+            timeout_seconds=30,
+            expected_runtime_identity=identity,
+            sleep=sleeps.append,
+            monotonic=lambda: 0,
+            wait_once=lambda **_kwargs: next(attempts),
+        )
+
+        self.assertEqual(result.payload, {"runtime_identity": identity.model_dump(mode="json")})
+        self.assertEqual(sleeps, [1, 1])
+
 
 if __name__ == "__main__":
     unittest.main()

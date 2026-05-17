@@ -236,7 +236,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 return_value=None,
             ) as healthcheck,
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(
                     payload={"runtime_identity": _runtime_identity_payload()}
                 ),
@@ -301,7 +301,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(
                     payload={
                         "runtime_identity": _runtime_identity_payload(
@@ -358,7 +358,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(
                     payload={"runtime_identity": _runtime_identity_payload()}
                 ),
@@ -436,7 +436,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 return_value=None,
             ),
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(
                     payload={"runtime_identity": _runtime_identity_payload()}
                 ),
@@ -524,7 +524,7 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 return_value=None,
             ) as healthcheck,
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(
                     payload={"runtime_identity": _runtime_identity_payload()}
                 ),
@@ -621,7 +621,11 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 side_effect=fake_deploy,
             ),
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(payload={"status": "ok"}),
             ),
         ):
@@ -637,7 +641,8 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertNotIn(("sellyouroutboard-testing", "prod"), store.inventories)
         promotion = next(iter(store.promotions.values()))
         self.assertEqual(promotion.destination_health.status, "fail")
-        self.assertEqual(promotion.deploy.status, "fail")
+        self.assertEqual(promotion.destination_health.runtime_identity_status, "missing")
+        self.assertEqual(promotion.deploy.status, "pass")
 
     def test_runtime_identity_mismatch_fails_promotion_without_inventory_refresh(self) -> None:
         store = _GenericWebPromotionStore(_profile())
@@ -661,7 +666,11 @@ class GenericWebProdPromotionTests(unittest.TestCase):
                 side_effect=fake_deploy,
             ),
             patch(
-                "control_plane.workflows.generic_web_promotion.wait_for_healthcheck_with_retry",
+                "control_plane.workflows.generic_web_promotion._wait_for_healthcheck",
+                return_value=None,
+            ),
+            patch(
+                "control_plane.workflows.generic_web_promotion.wait_for_runtime_identity_healthcheck_with_retry",
                 return_value=HealthcheckPass(
                     payload={"runtime_identity": observed_identity.model_dump(mode="json")}
                 ),
@@ -677,6 +686,10 @@ class GenericWebProdPromotionTests(unittest.TestCase):
         self.assertEqual(result.destination_health_status, "fail")
         self.assertIn("Runtime identity mismatched fields", result.error_message)
         self.assertNotIn(("sellyouroutboard-testing", "prod"), store.inventories)
+        promotion = next(iter(store.promotions.values()))
+        self.assertEqual(promotion.destination_health.status, "fail")
+        self.assertEqual(promotion.destination_health.runtime_identity_status, "mismatch")
+        self.assertEqual(promotion.destination_health.observed_runtime_identity, observed_identity)
 
     def test_execute_rejects_stale_source_inventory(self) -> None:
         store = _GenericWebPromotionStore(_profile())
