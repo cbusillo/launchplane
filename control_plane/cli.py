@@ -4573,19 +4573,23 @@ def _render_launchplane_promotion_status_page_html(
     testing_live = _json_object(payload.get("testing_live"))
     prod_live = _json_object(payload.get("prod_live"))
 
-    evidence_html = (
-        "".join(
+    evidence_cards: list[str] = []
+    for check in evidence_checks:
+        check_status = str(check.get("status", "pending"))
+        check_tone = _status_tone(check_status)
+        evidence_cards.append(
             f"""
-        <article class=\"promotion-detail-check promotion-detail-check-{("good" if str(check.get("status", "")).strip().lower() == "pass" else "bad" if str(check.get("status", "")).strip().lower() == "fail" else "warn")}\">
+        <article class=\"promotion-detail-check promotion-detail-check-{check_tone}\">
           <div class=\"promotion-detail-check-head\">
             <h4>{escape(str(check.get("label", "Evidence")))}</h4>
-            <span class=\"signal-chip signal-{("good" if str(check.get("status", "")).strip().lower() == "pass" else "bad" if str(check.get("status", "")).strip().lower() == "fail" else "warn")}\">{escape(_status_label(str(check.get("status", "pending"))))}</span>
+            <span class=\"signal-chip signal-{check_tone}\">{escape(_status_label(check_status))}</span>
           </div>
           <p>{escape(str(check.get("detail", "No evidence detail recorded.")))}</p>
         </article>
         """
-            for check in evidence_checks
         )
+    evidence_html = (
+        "".join(evidence_cards)
         or '<p class="table-empty">No promotion evidence checks recorded yet.</p>'
     )
 

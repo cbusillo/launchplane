@@ -2637,9 +2637,40 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertIn('href="../../policy.html"', promotion_detail_html)
             self.assertIn("Recent promotions into prod", promotion_detail_html)
             self.assertIn("Recent prod backup authorization", promotion_detail_html)
+            self.assertIn("promotion-detail-check-good", promotion_detail_html)
+            self.assertIn("signal-chip signal-good", promotion_detail_html)
             self.assertIn(
                 "promotion-2026-04-14T11:10:00Z-opw-testing-to-prod", promotion_detail_html
             )
+
+    def test_launchplane_promotion_status_html_uses_shared_status_tone_for_evidence(
+        self,
+    ) -> None:
+        html = control_plane_cli._render_launchplane_promotion_status_page_html(
+            {
+                "context": "opw",
+                "path_label": "opw/testing-to-prod",
+                "evidence_checks": [
+                    {
+                        "label": "Deployment health",
+                        "status": "healthy",
+                        "detail": "Destination is serving.",
+                    },
+                    {
+                        "label": "Backup gate",
+                        "status": "failed",
+                        "detail": "Backup gate failed.",
+                    },
+                ],
+            }
+        )
+
+        self.assertIn("promotion-detail-check-good", html)
+        self.assertIn("signal-chip signal-good", html)
+        self.assertIn("promotion-detail-check-bad", html)
+        self.assertIn("signal-chip signal-bad", html)
+        self.assertNotIn("promotion-detail-check promotion-detail-check-warn", html)
+        self.assertNotIn("signal-chip signal-warn", html)
 
     def test_launchplane_previews_render_status_page_calls_out_failed_latest_replacement(
         self,
