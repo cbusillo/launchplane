@@ -5,6 +5,7 @@ from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.runtime_identity_health import (
     HealthcheckPass,
     healthcheck_evidence_with_runtime_identity,
+    wait_for_healthcheck_with_retry,
 )
 
 
@@ -58,6 +59,24 @@ class RuntimeIdentityHealthTests(unittest.TestCase):
 
         self.assertEqual(evidence.runtime_identity_status, "missing")
         self.assertIsNone(evidence.observed_runtime_identity)
+
+    def test_wait_for_healthcheck_calls_keyword_only_probe(self) -> None:
+        seen_calls: list[tuple[str, int]] = []
+
+        def wait_once(*, url: str, timeout_seconds: int) -> HealthcheckPass:
+            seen_calls.append((url, timeout_seconds))
+            return HealthcheckPass(payload={"status": "ok"})
+
+        result = wait_for_healthcheck_with_retry(
+            url="https://example.com/health",
+            timeout_seconds=30,
+            sleep=lambda _seconds: None,
+            monotonic=lambda: 0,
+            wait_once=wait_once,
+        )
+
+        self.assertEqual(result.payload, {"status": "ok"})
+        self.assertEqual(seen_calls, [("https://example.com/health", 30)])
 
 
 if __name__ == "__main__":

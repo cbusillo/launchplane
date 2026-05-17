@@ -533,7 +533,7 @@ def _verify_health_evidence_with_identity(
                 sleep=time.sleep,
                 monotonic=time.monotonic,
             )
-            return healthcheck_evidence_with_runtime_identity(
+            verified_evidence = healthcheck_evidence_with_runtime_identity(
                 HealthcheckEvidence(
                     verified=True,
                     urls=evidence.urls,
@@ -543,6 +543,9 @@ def _verify_health_evidence_with_identity(
                 expected_runtime_identity=expected_runtime_identity,
                 healthcheck_pass=healthcheck_pass,
             )
+            if verified_evidence.runtime_identity_status != "match":
+                raise click.ClickException(verified_evidence.runtime_identity_detail)
+            return verified_evidence
         except click.ClickException as error:
             healthcheck_errors.append(str(error))
     raise click.ClickException(
