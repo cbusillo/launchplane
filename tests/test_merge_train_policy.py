@@ -3,8 +3,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import textwrap
 import unittest
+from typing import cast
 
 import click
+from click import Command
 from click.testing import CliRunner
 from pydantic import ValidationError
 
@@ -21,6 +23,9 @@ from control_plane.merge_train_policy_source import MergeTrainPolicyStoreMissing
 from control_plane.merge_train_policy_source import resolve_merge_train_policy_record
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy_with_codex_skills
+
+
+CLI_MAIN = cast(Command, main)
 
 
 class MergeTrainPolicyTests(unittest.TestCase):
@@ -340,7 +345,7 @@ class MergeTrainPolicyTests(unittest.TestCase):
     def test_work_graph_merge_train_policy_cli_renders_dry_run_contract(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             result = CliRunner().invoke(
-                main,
+                CLI_MAIN,
                 [
                     "work-graph",
                     "merge-train-policy",
