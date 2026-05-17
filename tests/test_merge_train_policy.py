@@ -4,6 +4,7 @@ from tempfile import TemporaryDirectory
 import textwrap
 import unittest
 
+import click
 from click.testing import CliRunner
 from pydantic import ValidationError
 
@@ -83,6 +84,47 @@ class MergeTrainPolicyTests(unittest.TestCase):
             summary["policy_keys"],
             ["cbusillo/sellyouroutboard:main", "cbusillo/codex-skills:main"],
         )
+
+    def test_cli_choice_normalizers_share_trimmed_case_insensitive_choices(self) -> None:
+        self.assertEqual(control_plane_cli._normalize_secret_scope(" Context "), "context")
+        self.assertEqual(control_plane_cli._normalize_odoo_apply_status(" PASS "), "pass")
+        self.assertEqual(
+            control_plane_cli._normalize_odoo_prod_rollback_source_channel(" testing "),
+            "testing",
+        )
+        self.assertEqual(
+            control_plane_cli._normalize_dokploy_target_type(" APPLICATION "),
+            "application",
+        )
+
+    def test_cli_choice_normalizer_preserves_domain_error_messages(self) -> None:
+        invalid_cases = [
+            (
+                control_plane_cli._normalize_secret_scope,
+                "environment",
+                "Secret scope must be one of global, context, or context_instance.",
+            ),
+            (
+                control_plane_cli._normalize_odoo_apply_status,
+                "success",
+                "Odoo override apply status must be skipped, pending, pass, or fail.",
+            ),
+            (
+                control_plane_cli._normalize_odoo_prod_rollback_source_channel,
+                "prod",
+                "Odoo prod rollback source channel must be testing.",
+            ),
+            (
+                control_plane_cli._normalize_dokploy_target_type,
+                "service",
+                "Dokploy target type must be compose or application.",
+            ),
+        ]
+
+        for normalizer, value, expected_message in invalid_cases:
+            with self.subTest(value=value):
+                with self.assertRaisesRegex(click.ClickException, expected_message):
+                    normalizer(value)
 
     def test_policy_record_digest_ignores_missing_optional_stack_child_label(
         self,
