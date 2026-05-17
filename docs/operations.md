@@ -785,6 +785,18 @@ current deployment pointer and records the failed attempt in `bootstrap_record_i
 Do not use this path for prod until Launchplane has explicit backup/restore
 policy evidence for that lane.
 
+The service route creates a durable Odoo stable-bootstrap operation and returns
+an operation id immediately. The GitHub workflow polls
+`GET /v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` until the
+operation status is `pass` or `fail`, then uploads the final operation payload as
+the workflow artifact. `Idempotency-Key` is required: a repeated request with the
+same key returns the existing operation, while a different key for the same
+product/context/instance is rejected while a `pending` or `running` operation is
+active. The operation record stores the request, status, phase,
+deployment-record linkage when known, final bootstrap result, and any terminal
+error message so operators can inspect progress after the original HTTP request
+has ended.
+
 For OPW prelaunch lanes that should be rebuilt from the current upstream
 non-Docker source, encode `odoo_prelaunch_rebuild` on the product profile lane
 with `data_source_mode="upstream_restore"`, the approval issue URL, expected

@@ -64,6 +64,9 @@ from control_plane.merge_train import (
 from control_plane.contracts.odoo_instance_override_record import OdooConfigParameterOverride
 from control_plane.contracts.odoo_instance_override_record import OdooInstanceOverrideRecord
 from control_plane.contracts.odoo_instance_override_record import OdooOverrideValue
+from control_plane.contracts.odoo_stable_bootstrap_operation import (
+    OdooStableBootstrapOperationRecord,
+)
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import (
     PreviewGenerationRecord,
@@ -2321,6 +2324,29 @@ env_var = "GH_TOKEN"
             filesystem_store.write_merge_train_stack_collapse_plan_record(
                 _merge_train_stack_collapse_plan_record()
             )
+            filesystem_store.write_odoo_stable_bootstrap_operation_record(
+                OdooStableBootstrapOperationRecord.model_validate(
+                    {
+                        "operation_id": "odoo-stable-bootstrap-cm-testing-test",
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "idempotency_key": "bootstrap-cm-testing",
+                        "request_fingerprint": "fingerprint-123",
+                        "request": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "context": "cm",
+                            "instance": "testing",
+                            "confirmation": "bootstrap cm testing",
+                        },
+                        "status": "pending",
+                        "phase": "created",
+                        "created_at": "2026-05-17T00:00:00Z",
+                        "updated_at": "2026-05-17T00:00:00Z",
+                    }
+                )
+            )
 
             counts = store.import_core_records_from_filesystem(filesystem_store)
             self.assertEqual(
@@ -2348,6 +2374,7 @@ env_var = "GH_TOKEN"
                     "merge_train_stack_collapse_plans": 1,
                     "merge_train_policies": 1,
                     "merge_train_runs": 1,
+                    "odoo_stable_bootstrap_operations": 1,
                     "release_tuples": 1,
                     "runtime_key_safety_policies": 1,
                 },
@@ -2377,6 +2404,15 @@ env_var = "GH_TOKEN"
                     limit=1,
                 )[0].desired_state_id,
                 "preview-desired-state-verireel-testing-20260420T100550Z",
+            )
+            self.assertEqual(
+                store.list_odoo_stable_bootstrap_operation_records(
+                    context_name="cm",
+                    instance_name="testing",
+                    statuses=("pending",),
+                    limit=1,
+                )[0].operation_id,
+                "odoo-stable-bootstrap-cm-testing-test",
             )
             self.assertEqual(
                 store.list_preview_lifecycle_plan_records(

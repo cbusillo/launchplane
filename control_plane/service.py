@@ -10,6 +10,7 @@ import mimetypes
 import os
 import re
 import secrets
+import threading
 from socketserver import ThreadingMixIn
 import uuid
 from pathlib import Path
@@ -106,6 +107,11 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
     OdooWebsiteBootstrapPayload,
+)
+from control_plane.contracts.odoo_stable_bootstrap_operation import (
+    OdooStableBootstrapOperationRecord,
+    build_odoo_stable_bootstrap_operation_id,
+    odoo_stable_bootstrap_operation_is_terminal,
 )
 from control_plane.contracts.preview_mutation_request import (
     PreviewDestroyMutationRequest,
@@ -284,8 +290,11 @@ from control_plane.workflows.odoo_post_deploy import (
     OdooPostDeployRequest,
     execute_odoo_post_deploy,
 )
-from control_plane.workflows.odoo_stable_bootstrap import (
+from control_plane.contracts.odoo_stable_bootstrap import (
     OdooStableBootstrapRequest,
+    OdooStableBootstrapResult,
+)
+from control_plane.workflows.odoo_stable_bootstrap import (
     OdooStableBootstrapStore,
     execute_odoo_stable_bootstrap,
 )
@@ -551,6 +560,27 @@ class _IdempotencyCapableStore(Protocol):
     ) -> LaunchplaneIdempotencyRecord: ...
 
     def write_idempotency_record(self, record: LaunchplaneIdempotencyRecord) -> object: ...
+
+
+class _OdooStableBootstrapOperationStore(Protocol):
+    def write_odoo_stable_bootstrap_operation_record(
+        self, record: OdooStableBootstrapOperationRecord
+    ) -> object: ...
+
+    def read_odoo_stable_bootstrap_operation_record(
+        self, operation_id: str
+    ) -> OdooStableBootstrapOperationRecord: ...
+
+    def list_odoo_stable_bootstrap_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooStableBootstrapOperationRecord, ...]: ...
 
 
 _StartResponse = Callable[[str, list[tuple[str, str]]], None]
@@ -1699,6 +1729,7 @@ _HUMAN_IDENTITY_MUTATION_ROUTES = frozenset(
 _HUMAN_IDENTITY_READ_MODEL_POST_ROUTES = frozenset({"/v1/work-graph/rank"})
 _NON_IDEMPOTENT_DRIVER_RESULT_ROUTES = frozenset(
     {
+        _ODOO_STABLE_BOOTSTRAP_ROUTE.route_path,
         _VERIREEL_STABLE_ENVIRONMENT_ROUTE.route_path,
         _VERIREEL_RUNTIME_VERIFICATION_ROUTE.route_path,
         _VERIREEL_PREVIEW_INVENTORY_ROUTE.route_path,
@@ -2238,6 +2269,12 @@ def _match_read_route(path: str) -> tuple[str, dict[str, str]] | None:
         return "driver.read", {}
     if len(segments) == 3 and segments[:2] == ["v1", "drivers"]:
         return "driver.read", {"driver_id": segments[2]}
+    if (
+        len(segments) == 6
+        and segments[:4] == ["v1", "drivers", "odoo", "stable-bootstrap"]
+        and segments[4] == "operations"
+    ):
+        return "odoo_stable_bootstrap.execute", {"operation_id": segments[5]}
     if len(segments) == 4 and segments[:2] == ["v1", "contexts"] and segments[3] == "driver-view":
         return "driver.read", {"context": segments[2]}
     if (
@@ -4082,6 +4119,7 @@ def _accepted_payload(
                 "merge_train_batch_landing_plan_record_id",
                 "merge_train_stack_collapse_plan_record_id",
                 "merge_train_run_id",
+                "odoo_stable_bootstrap_operation_id",
             }
         },
         **({"result": serialized_driver_result} if serialized_driver_result else {}),
@@ -4090,6 +4128,184 @@ def _accepted_payload(
         payload["replayed"] = True
         payload["original_trace_id"] = original_trace_id
     return payload
+
+
+def _operation_payload(
+    operation: OdooStableBootstrapOperationRecord,
+) -> dict[str, object]:
+    payload = operation.model_dump(mode="json")
+    payload["poll_url"] = _odoo_stable_bootstrap_operation_poll_url(operation.operation_id)
+    return payload
+
+
+def _odoo_stable_bootstrap_operation_poll_url(operation_id: str) -> str:
+    return f"/v1/drivers/odoo/stable-bootstrap/operations/{operation_id.strip()}"
+
+
+def _odoo_stable_bootstrap_operation_store(
+    record_store: object,
+) -> _OdooStableBootstrapOperationStore:
+    required_methods = (
+        "write_odoo_stable_bootstrap_operation_record",
+        "read_odoo_stable_bootstrap_operation_record",
+        "list_odoo_stable_bootstrap_operation_records",
+    )
+    if all(hasattr(record_store, method_name) for method_name in required_methods):
+        return cast(_OdooStableBootstrapOperationStore, record_store)
+    raise click.ClickException(
+        "Odoo stable bootstrap operations require Launchplane operation-record storage."
+    )
+
+
+def _find_odoo_stable_bootstrap_operation_by_idempotency_key(
+    *,
+    operation_store: _OdooStableBootstrapOperationStore,
+    idempotency_key: str,
+) -> OdooStableBootstrapOperationRecord | None:
+    records = operation_store.list_odoo_stable_bootstrap_operation_records(
+        idempotency_key=idempotency_key,
+        limit=1,
+    )
+    return records[0] if records else None
+
+
+def _find_active_odoo_stable_bootstrap_operation(
+    *,
+    operation_store: _OdooStableBootstrapOperationStore,
+    product: str,
+    context: str,
+    instance: str,
+) -> OdooStableBootstrapOperationRecord | None:
+    records = operation_store.list_odoo_stable_bootstrap_operation_records(
+        product=product,
+        context_name=context,
+        instance_name=instance,
+        statuses=("pending", "running"),
+        limit=1,
+    )
+    return records[0] if records else None
+
+
+def _build_odoo_stable_bootstrap_operation_record(
+    *,
+    bootstrap_request: OdooStableBootstrapRequest,
+    idempotency_key: str,
+    request_fingerprint: str,
+    created_at: str,
+) -> OdooStableBootstrapOperationRecord:
+    return OdooStableBootstrapOperationRecord(
+        operation_id=build_odoo_stable_bootstrap_operation_id(
+            product=bootstrap_request.product,
+            context=bootstrap_request.context,
+            instance=bootstrap_request.instance,
+            created_at=created_at,
+            idempotency_key=idempotency_key,
+        ),
+        product=bootstrap_request.product,
+        context=bootstrap_request.context,
+        instance=bootstrap_request.instance,
+        idempotency_key=idempotency_key,
+        request_fingerprint=request_fingerprint,
+        request=bootstrap_request,
+        status="pending",
+        phase="created",
+        created_at=created_at,
+        updated_at=created_at,
+    )
+
+
+def _start_odoo_stable_bootstrap_operation_worker(
+    *,
+    operation_id: str,
+    control_plane_root_path: Path,
+    record_store: object,
+    trace_id: str,
+) -> None:
+    worker = threading.Thread(
+        target=_run_odoo_stable_bootstrap_operation_worker,
+        kwargs={
+            "operation_id": operation_id,
+            "control_plane_root_path": control_plane_root_path,
+            "record_store": record_store,
+            "trace_id": trace_id,
+        },
+        name=f"odoo-stable-bootstrap-{operation_id}",
+        daemon=True,
+    )
+    worker.start()
+
+
+def _run_odoo_stable_bootstrap_operation_worker(
+    *,
+    operation_id: str,
+    control_plane_root_path: Path,
+    record_store: object,
+    trace_id: str,
+) -> None:
+    operation_store = _odoo_stable_bootstrap_operation_store(record_store)
+    operation = operation_store.read_odoo_stable_bootstrap_operation_record(operation_id)
+    if odoo_stable_bootstrap_operation_is_terminal(operation):
+        return
+    started_at = _utc_now_timestamp()
+    running_operation = operation.model_copy(
+        update={
+            "status": "running",
+            "phase": "running",
+            "started_at": operation.started_at or started_at,
+            "updated_at": started_at,
+            "runner_trace_id": trace_id,
+        }
+    )
+    operation_store.write_odoo_stable_bootstrap_operation_record(running_operation)
+    try:
+        result = execute_odoo_stable_bootstrap(
+            control_plane_root=control_plane_root_path,
+            record_store=cast(OdooStableBootstrapStore, record_store),
+            request=running_operation.request,
+        )
+    except Exception as error:
+        logging.exception(
+            "Odoo stable bootstrap operation %s failed before producing a result.",
+            operation_id,
+        )
+        finished_at = _utc_now_timestamp()
+        failed_operation = running_operation.model_copy(
+            update={
+                "status": "fail",
+                "phase": "failed",
+                "updated_at": finished_at,
+                "finished_at": finished_at,
+                "error_message": str(error),
+            }
+        )
+        operation_store.write_odoo_stable_bootstrap_operation_record(failed_operation)
+        return
+    finished_at = _utc_now_timestamp()
+    passed = _odoo_stable_bootstrap_operation_result_passed(result)
+    terminal_operation = running_operation.model_copy(
+        update={
+            "status": "pass" if passed else "fail",
+            "phase": "completed" if passed else "failed",
+            "deployment_record_id": result.deployment_record_id,
+            "updated_at": finished_at,
+            "finished_at": finished_at,
+            "result": result,
+            "error_message": "" if passed else (result.error_message or "Odoo stable bootstrap failed."),
+        }
+    )
+    operation_store.write_odoo_stable_bootstrap_operation_record(terminal_operation)
+
+
+def _odoo_stable_bootstrap_operation_result_passed(
+    result: OdooStableBootstrapResult,
+) -> bool:
+    return (
+        result.bootstrap_status == "pass"
+        and result.post_deploy_status == "pass"
+        and result.health_status != "fail"
+        and result.canonical_status != "fail"
+        and result.logo_status != "fail"
+    )
 
 
 def _replay_idempotent_response(
@@ -6504,6 +6720,51 @@ def create_launchplane_service_app(
             if method == "GET":
                 assert read_route is not None
                 action, params = read_route
+                if action == "odoo_stable_bootstrap.execute":
+                    operation_id = params["operation_id"]
+                    operation_store = _odoo_stable_bootstrap_operation_store(record_store)
+                    try:
+                        operation = operation_store.read_odoo_stable_bootstrap_operation_record(
+                            operation_id
+                        )
+                    except FileNotFoundError:
+                        return _not_found_response(
+                            start_response=start_response,
+                            trace_id=request_trace_id,
+                            path=path,
+                        )
+                    if not authz_policy.allows(
+                        identity=identity,
+                        action=action,
+                        product=operation.product,
+                        context=operation.context,
+                    ):
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=403,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "authorization_denied",
+                                    "message": "Workflow cannot read Odoo stable bootstrap operation status for the requested product/context.",
+                                },
+                            },
+                        )
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=200,
+                        payload={
+                            "status": "ok",
+                            "trace_id": request_trace_id,
+                            "operation": _operation_payload(operation),
+                            **(
+                                {"result": operation.result.model_dump(mode="json")}
+                                if operation.result is not None
+                                else {}
+                            ),
+                        },
+                    )
                 if action == "driver.read":
                     context_name = params.get("context", _LAUNCHPLANE_SERVICE_CONTEXT)
                     if not authz_policy.allows(
@@ -9945,23 +10206,83 @@ def create_launchplane_service_app(
                 )
                 if authorization_response is not None:
                     return authorization_response
-                idempotent_response = _check_idempotent_request(
-                    record_store=record_store,
-                    scope=request_scope,
-                    route_path=path,
+                if not request_idempotency_key:
+                    return _json_response(
+                        start_response=start_response,
+                        status_code=400,
+                        payload={
+                            "status": "rejected",
+                            "trace_id": request_trace_id,
+                            "error": {
+                                "code": "idempotency_key_required",
+                                "message": "Odoo stable bootstrap operations require an Idempotency-Key header.",
+                            },
+                        },
+                    )
+                operation_store = _odoo_stable_bootstrap_operation_store(record_store)
+                existing_operation = _find_odoo_stable_bootstrap_operation_by_idempotency_key(
+                    operation_store=operation_store,
                     idempotency_key=request_idempotency_key,
-                    request_fingerprint=request_fingerprint,
-                    start_response=start_response,
-                    trace_id=request_trace_id,
                 )
-                if idempotent_response is not None:
-                    return idempotent_response
-                driver_result = execute_odoo_stable_bootstrap(
-                    control_plane_root=resolved_root,
-                    record_store=cast(OdooStableBootstrapStore, record_store),
-                    request=odoo_bootstrap_request.bootstrap,
-                )
-                result = {"deployment_record_id": driver_result.deployment_record_id}
+                if existing_operation is not None:
+                    if existing_operation.request_fingerprint != request_fingerprint:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=409,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "idempotency_key_reused",
+                                    "message": "Idempotency-Key was already used for a different Odoo stable bootstrap request.",
+                                },
+                            },
+                        )
+                    driver_result = _operation_payload(existing_operation)
+                    result = {
+                        "odoo_stable_bootstrap_operation_id": existing_operation.operation_id,
+                        **(
+                            {"deployment_record_id": existing_operation.deployment_record_id}
+                            if existing_operation.deployment_record_id
+                            else {}
+                        ),
+                    }
+                else:
+                    active_operation = _find_active_odoo_stable_bootstrap_operation(
+                        operation_store=operation_store,
+                        product=odoo_bootstrap_request.product,
+                        context=odoo_bootstrap_request.bootstrap.context,
+                        instance=odoo_bootstrap_request.bootstrap.instance,
+                    )
+                    if active_operation is not None:
+                        return _json_response(
+                            start_response=start_response,
+                            status_code=409,
+                            payload={
+                                "status": "rejected",
+                                "trace_id": request_trace_id,
+                                "error": {
+                                    "code": "odoo_stable_bootstrap_operation_active",
+                                    "message": "An Odoo stable bootstrap operation is already active for this product/context/instance.",
+                                },
+                                "operation": _operation_payload(active_operation),
+                            },
+                        )
+                    operation = _build_odoo_stable_bootstrap_operation_record(
+                        bootstrap_request=odoo_bootstrap_request.bootstrap,
+                        idempotency_key=request_idempotency_key,
+                        request_fingerprint=request_fingerprint,
+                        created_at=_utc_now_timestamp(),
+                    )
+                    operation_store.write_odoo_stable_bootstrap_operation_record(operation)
+                    _start_odoo_stable_bootstrap_operation_worker(
+                        operation_id=operation.operation_id,
+                        control_plane_root_path=resolved_root,
+                        record_store=record_store,
+                        trace_id=request_trace_id,
+                    )
+                    driver_result = _operation_payload(operation)
+                    result = {"odoo_stable_bootstrap_operation_id": operation.operation_id}
             elif path == _ODOO_ARTIFACT_PUBLISH_ROUTE.route_path:
                 odoo_publish_request = _ODOO_ARTIFACT_PUBLISH_ROUTE.envelope_model.model_validate(
                     payload

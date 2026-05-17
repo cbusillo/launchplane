@@ -387,6 +387,13 @@ state/
   same record as `deployment_record_id`; failed or partially verified bootstrap
   attempts leave the current deployment inventory unchanged and update only
   `bootstrap_record_id` so operators can see the latest bootstrap attempt.
+- Odoo stable bootstrap also writes durable operation records under
+  `odoo_stable_bootstrap_operations`. These operation records are the
+  create/read/poll boundary for the service-backed workflow: they store the
+  original request, idempotency key, request fingerprint, active status/phase,
+  deployment-record id when available, final driver result, and terminal error.
+  A `pending` or `running` record is the single-flight guard for that
+  product/context/instance.
 - Odoo prod rollback writes a normal deployment record for the rollback deploy,
   refreshes prod inventory, mints the prod release tuple from the selected
   artifact manifest, and annotates the current prod promotion record's
