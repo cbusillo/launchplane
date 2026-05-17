@@ -7,6 +7,7 @@ import unittest
 from click.testing import CliRunner
 from pydantic import ValidationError
 
+from control_plane import cli as control_plane_cli
 from control_plane.cli import main
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
@@ -56,6 +57,31 @@ class MergeTrainPolicyTests(unittest.TestCase):
         self.assertEqual(
             record.record_id,
             f"merge-train-policy-20260513T210000Z-{policy.policy_sha256[:12]}",
+        )
+
+    def test_cli_merge_train_policy_summary_uses_shared_policy_base(self) -> None:
+        policy = build_test_merge_train_policy_with_codex_skills()
+        record = MergeTrainPolicyRecord(
+            record_id=build_merge_train_policy_record_id(
+                updated_at="2026-05-13T21:00:00Z",
+                policy_sha256=policy.policy_sha256,
+            ),
+            source="test",
+            updated_at="2026-05-13T21:00:00Z",
+            policy=policy,
+        )
+
+        summary = control_plane_cli._summarize_merge_train_policy_record(record)
+
+        self.assertEqual(summary["record_id"], record.record_id)
+        self.assertEqual(summary["status"], "active")
+        self.assertEqual(summary["source"], "test")
+        self.assertEqual(summary["updated_at"], "2026-05-13T21:00:00Z")
+        self.assertEqual(summary["policy_sha256"], policy.policy_sha256)
+        self.assertEqual(summary["repository_count"], 2)
+        self.assertEqual(
+            summary["policy_keys"],
+            ["cbusillo/sellyouroutboard:main", "cbusillo/codex-skills:main"],
         )
 
     def test_policy_record_digest_ignores_missing_optional_stack_child_label(
