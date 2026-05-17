@@ -1445,11 +1445,9 @@ class OdooPreviewVerificationRequest(BaseModel):
     @field_validator("checked_urls", mode="before")
     @classmethod
     def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
-        if value in (None, ""):
+        if value is None:
             return ()
-        if isinstance(value, str):
-            raw_values: tuple[object, ...] = (value,)
-        elif isinstance(value, (list, tuple)):
+        if isinstance(value, (list, tuple)):
             raw_values = tuple(value)
         else:
             raise ValueError("Odoo preview verification checked_urls must be a list.")
