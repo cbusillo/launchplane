@@ -1,3 +1,5 @@
+import base64
+import json
 import unittest
 from pathlib import Path
 from typing import cast
@@ -13,6 +15,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
+    OdooWebsiteBootstrapPayload,
+    OdooWebsiteBootstrapRoute,
 )
 from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
@@ -268,6 +272,22 @@ class OdooStableBootstrapTests(unittest.TestCase):
                             ),
                         ),
                     ),
+                    website_bootstrap=OdooWebsiteBootstrapPayload(
+                        tenant="cm",
+                        name="Cell Mechanic",
+                        canonical_url="https://cm-testing.shinycomputers.com",
+                        homepage_url="/cell-mechanic",
+                        logo_path="addons/cm_website/static/src/img/logo.png",
+                        logo_alt="Cell Mechanic",
+                        routes=(
+                            OdooWebsiteBootstrapRoute(
+                                name="Cell Mechanic",
+                                url="/cell-mechanic",
+                                module="cm_website",
+                                homepage=True,
+                            ),
+                        ),
+                    ),
                     updated_at="2026-05-10T00:00:00Z",
                 )
 
@@ -320,6 +340,16 @@ class OdooStableBootstrapTests(unittest.TestCase):
             "dict[str, str]", captured_bootstrap_runs[0]["workflow_environment_overrides"]
         )
         self.assertIn("ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64", workflow_environment)
+        decoded_payload = json.loads(
+            base64.b64decode(workflow_environment["ODOO_INSTANCE_OVERRIDES_PAYLOAD_B64"]).decode(
+                "utf-8"
+            )
+        )
+        self.assertEqual(decoded_payload["website_bootstrap"]["name"], "Cell Mechanic")
+        self.assertEqual(
+            decoded_payload["website_bootstrap"]["canonical_url"],
+            "https://cm-testing.shinycomputers.com",
+        )
         self.assertEqual(
             store.environment_inventories[0].bootstrap_record_id,
             "deployment-cm-testing-bootstrap",

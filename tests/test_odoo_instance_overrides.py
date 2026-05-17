@@ -177,6 +177,77 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(payload["records"][0]["addon_settings"], ["shopify.api_token"])
         self.assertNotIn("secret-binding-shopify-token", list_result.output)
 
+    def test_cli_put_website_bootstrap_preserves_existing_overrides(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temp_dir = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temp_dir / "launchplane.sqlite3")
+            payload_file = temp_dir / "website-bootstrap.json"
+            payload_file.write_text(
+                json.dumps(
+                    {
+                        "tenant": "opw",
+                        "name": "OPW",
+                        "canonical_url": "https://opw-testing.example.com",
+                        "homepage_url": "/shop",
+                        "routes": [
+                            {
+                                "name": "Shop",
+                                "url": "/shop",
+                                "module": "website_sale",
+                                "homepage": True,
+                            }
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            runner = CliRunner()
+            put_config_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-config-param",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--key",
+                    "web.base.url",
+                    "--value",
+                    "https://opw-testing.example.com",
+                ],
+            )
+            put_bootstrap_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-website-bootstrap",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--payload-file",
+                    str(payload_file),
+                ],
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="testing"
+            )
+            store.close()
+
+        self.assertEqual(put_config_result.exit_code, 0, msg=put_config_result.output)
+        self.assertEqual(put_bootstrap_result.exit_code, 0, msg=put_bootstrap_result.output)
+        self.assertEqual(stored_record.config_parameters[0].key, "web.base.url")
+        self.assertIsNotNone(stored_record.website_bootstrap)
+        assert stored_record.website_bootstrap is not None
+        self.assertEqual(stored_record.website_bootstrap.name, "OPW")
+        self.assertEqual(stored_record.website_bootstrap.routes[0].url, "/shop")
+
     def test_cli_mark_apply_updates_result_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(

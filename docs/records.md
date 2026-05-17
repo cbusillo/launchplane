@@ -449,6 +449,10 @@ state/
   `web.base.url`.
 - `addon_settings` stores addon-shaped intent such as Authentik SSO or Shopify
   settings without coupling Launchplane records to environment variable names.
+- `website_bootstrap` stores the typed devkit website bootstrap payload,
+  including site identity, canonical URL, logo path, source metadata, and route
+  definitions. Product repos remain the source of that intent; Launchplane
+  persists the typed payload and renders it during Odoo post-deploy.
 - `apply_on` records the phases where the override is intended to apply, and
   `last_apply` records the latest driver result without making the addon layer
   the durable audit surface.

@@ -1,4 +1,5 @@
 from typing import Literal
+import json
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -75,6 +76,81 @@ class OdooAddonSettingOverride(BaseModel):
         return normalized
 
 
+class OdooWebsiteBootstrapRoute(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    name: str
+    url: str
+    module: str = ""
+    published: bool = True
+    homepage: bool = False
+
+    @field_validator("name", "url", "module", mode="after")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @model_validator(mode="after")
+    def _validate_route(self) -> "OdooWebsiteBootstrapRoute":
+        if not self.name:
+            raise ValueError("Odoo website bootstrap routes require name")
+        if not self.url:
+            raise ValueError("Odoo website bootstrap routes require url")
+        return self
+
+
+class OdooWebsiteBootstrapPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    tenant: str = ""
+    name: str
+    default_lang: str = ""
+    homepage_url: str = ""
+    primary_page_xmlid: str = ""
+    logo_path: str = ""
+    logo_alt: str = ""
+    canonical_url: str = ""
+    pages_source: dict[str, object] = Field(default_factory=dict)
+    routes_source: dict[str, object] = Field(default_factory=dict)
+    routes: tuple[OdooWebsiteBootstrapRoute, ...] = ()
+
+    @field_validator(
+        "tenant",
+        "name",
+        "default_lang",
+        "homepage_url",
+        "primary_page_xmlid",
+        "logo_path",
+        "logo_alt",
+        "canonical_url",
+        mode="after",
+    )
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("pages_source", "routes_source", mode="after")
+    @classmethod
+    def _validate_json_object(cls, value: dict[str, object]) -> dict[str, object]:
+        try:
+            json.dumps(value, sort_keys=True)
+        except TypeError as error:
+            raise ValueError("Odoo website bootstrap source metadata must be JSON-safe") from error
+        return value
+
+    @model_validator(mode="after")
+    def _validate_payload(self) -> "OdooWebsiteBootstrapPayload":
+        if not self.name:
+            raise ValueError("Odoo website bootstrap requires name")
+        route_urls = [route.url for route in self.routes]
+        if len(route_urls) != len(set(route_urls)):
+            raise ValueError("Odoo website bootstrap has duplicate route urls")
+        route_names = [route.name for route in self.routes]
+        if len(route_names) != len(set(route_names)):
+            raise ValueError("Odoo website bootstrap has duplicate route names")
+        return self
+
+
 class OdooOverrideApplyResult(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -107,6 +183,7 @@ class OdooInstanceOverrideRecord(BaseModel):
     apply_on: tuple[OdooOverrideApplyPhase, ...] = ("deploy", "promotion")
     config_parameters: tuple[OdooConfigParameterOverride, ...] = ()
     addon_settings: tuple[OdooAddonSettingOverride, ...] = ()
+    website_bootstrap: OdooWebsiteBootstrapPayload | None = None
     last_apply: OdooOverrideApplyResult = Field(default_factory=OdooOverrideApplyResult)
     updated_at: str
     source_label: str = ""
@@ -123,7 +200,7 @@ class OdooInstanceOverrideRecord(BaseModel):
             raise ValueError("Odoo instance override record requires instance")
         if not self.updated_at:
             raise ValueError("Odoo instance override record requires updated_at")
-        if not self.config_parameters and not self.addon_settings:
+        if not self.config_parameters and not self.addon_settings and self.website_bootstrap is None:
             raise ValueError("Odoo instance override record requires at least one override")
         if not self.apply_on:
             raise ValueError("Odoo instance override record requires at least one apply phase")

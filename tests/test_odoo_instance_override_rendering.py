@@ -1,6 +1,7 @@
 import base64
 import json
 import unittest
+from typing import cast
 
 import click
 
@@ -22,6 +23,8 @@ from control_plane.contracts.odoo_instance_override_record import (
     OdooConfigParameterOverride,
     OdooInstanceOverrideRecord,
     OdooOverrideValue,
+    OdooWebsiteBootstrapPayload,
+    OdooWebsiteBootstrapRoute,
 )
 
 
@@ -98,6 +101,56 @@ class OdooInstanceOverrideRenderingTests(unittest.TestCase):
         self.assertEqual(
             set(environment.inline_environment), {ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY}
         )
+
+    def test_render_post_deploy_payload_preserves_website_bootstrap(self) -> None:
+        record = OdooInstanceOverrideRecord(
+            context="example",
+            instance="testing",
+            website_bootstrap=OdooWebsiteBootstrapPayload(
+                tenant="example",
+                name="Example Site",
+                default_lang="en_US",
+                homepage_url="/home",
+                primary_page_xmlid="example_website.page_home",
+                logo_path="addons/example_website/static/src/img/logo.png",
+                logo_alt="Example Site",
+                canonical_url="https://example-testing.example.com",
+                pages_source={
+                    "module": "example_website",
+                    "data_files": ["views/pages.xml"],
+                    "model": "website.page",
+                },
+                routes_source={"kind": "controller", "module": "website"},
+                routes=(
+                    OdooWebsiteBootstrapRoute(
+                        name="Home",
+                        url="/home",
+                        module="website",
+                        homepage=True,
+                    ),
+                ),
+            ),
+            updated_at="2026-05-16T00:00:00Z",
+        )
+
+        payload = render_post_deploy_payload(record)
+        environment = build_post_deploy_environment(record)
+        decoded_payload = json.loads(
+            base64.b64decode(
+                environment.inline_environment[ODOO_INSTANCE_OVERRIDES_PAYLOAD_ENV_KEY]
+            ).decode("utf-8")
+        )
+
+        self.assertEqual(payload["config_parameters"], [])
+        self.assertEqual(payload["addon_settings"], [])
+        website_bootstrap = cast("dict[str, object]", payload["website_bootstrap"])
+        routes = cast("list[dict[str, object]]", website_bootstrap["routes"])
+        self.assertEqual(website_bootstrap["name"], "Example Site")
+        self.assertEqual(
+            website_bootstrap["canonical_url"], "https://example-testing.example.com"
+        )
+        self.assertEqual(routes[0]["url"], "/home")
+        self.assertEqual(decoded_payload, payload)
 
     def test_build_post_deploy_environment_requires_container_env_for_secret_backed_values(
         self,
