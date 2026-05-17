@@ -190,8 +190,10 @@ from control_plane.workflows.odoo_prod_rollback import (
     OdooProdRollbackRequest,
     execute_odoo_prod_rollback,
 )
-from control_plane.workflows.odoo_stable_target_replacement import (
+from control_plane.contracts.odoo_stable_target_replacement import (
     OdooStableTargetReplacementRequest,
+)
+from control_plane.workflows.odoo_stable_target_replacement import (
     build_odoo_stable_target_replacement_plan,
 )
 from control_plane.workflows.promote import (

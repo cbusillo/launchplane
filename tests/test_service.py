@@ -42,6 +42,12 @@ from control_plane.contracts.odoo_instance_override_record import OdooOverrideVa
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyResult,
+)
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.merge_train_run_record import MergeTrainRunRecord
 from control_plane.contracts.merge_train_run_record import build_merge_train_run_record
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
@@ -114,7 +120,6 @@ from control_plane.workflows.odoo_prod_backup_gate import OdooProdBackupGateResu
 from control_plane.workflows.odoo_prod_promotion import OdooProdPromotionResult
 from control_plane.workflows.odoo_prod_rollback import OdooProdRollbackResult
 from control_plane.workflows.odoo_stable_target_replacement import (
-    OdooStableTargetReplacementApplyResult,
     OdooStableTargetReplacementPlan,
 )
 from tests.merge_train_policy_fixtures import build_test_merge_train_policy
@@ -1297,9 +1302,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 github_oauth_config=_github_oauth_config(),
                 human_session_store=session_store,
             )
-            cookie = _signed_human_session_cookie(
-                "expiring-session", "test-session-secret"
-            )
+            cookie = _signed_human_session_cookie("expiring-session", "test-session-secret")
 
             status_code, headers, body = _invoke_raw_app(
                 app,
@@ -1391,9 +1394,7 @@ class GitHubHumanAuthTests(unittest.TestCase):
                 github_oauth_config=_github_oauth_config(),
                 human_session_store=session_store,
             )
-            cookie = _signed_human_session_cookie(
-                "expiring-session", "test-session-secret"
-            )
+            cookie = _signed_human_session_cookie("expiring-session", "test-session-secret")
 
             status_code, headers, body = _invoke_raw_app(
                 app,
@@ -18897,7 +18898,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 control_plane_root_path=root,
             )
 
-            with patch("control_plane.service._start_odoo_stable_bootstrap_operation_worker") as worker_mock:
+            with patch(
+                "control_plane.service._start_odoo_stable_bootstrap_operation_worker"
+            ) as worker_mock:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -18930,9 +18933,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
             worker_mock.assert_called_once()
             self.assertEqual(worker_mock.call_args.kwargs["operation_id"], operation_id)
-            stored_operation = store.read_odoo_stable_bootstrap_operation_record(
-                str(operation_id)
-            )
+            stored_operation = store.read_odoo_stable_bootstrap_operation_record(str(operation_id))
             self.assertEqual(stored_operation.status, "pending")
             self.assertEqual(stored_operation.idempotency_key, "bootstrap-cm-testing")
 
@@ -18987,7 +18988,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 },
             }
 
-            with patch("control_plane.service._start_odoo_stable_bootstrap_operation_worker") as worker_mock:
+            with patch(
+                "control_plane.service._start_odoo_stable_bootstrap_operation_worker"
+            ) as worker_mock:
                 first_status, first_payload = _invoke_app(
                     app,
                     method="POST",
@@ -19215,9 +19218,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     trace_id="launchplane_req_worker",
                 )
 
-            operation = store.read_odoo_stable_bootstrap_operation_record(
-                "operation-cm-testing"
-            )
+            operation = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
             self.assertEqual(operation.status, "pass")
             self.assertEqual(operation.phase, "completed")
             self.assertEqual(operation.deployment_record_id, "deployment-cm-testing")
@@ -19280,9 +19281,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
                     trace_id="launchplane_req_worker",
                 )
 
-            operation = store.read_odoo_stable_bootstrap_operation_record(
-                "operation-cm-testing"
-            )
+            operation = store.read_odoo_stable_bootstrap_operation_record("operation-cm-testing")
             self.assertEqual(operation.status, "fail")
             self.assertEqual(operation.phase, "failed")
             self.assertEqual(operation.error_message, "Canonical verification failed.")
@@ -19476,7 +19475,9 @@ class LaunchplaneServiceTests(unittest.TestCase):
             self.assertEqual(status_code, 403)
             self.assertEqual(payload["error"]["code"], "authorization_denied")
 
-    def test_odoo_target_replacement_apply_driver_runs_for_authorized_workflow(self) -> None:
+    def test_odoo_target_replacement_apply_driver_creates_operation_for_authorized_workflow(
+        self,
+    ) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             root = Path(temporary_directory_name)
             state_dir = root / "state"
@@ -19516,21 +19517,8 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             with patch(
-                "control_plane.service.execute_odoo_stable_target_replacement_apply",
-                return_value=OdooStableTargetReplacementApplyResult(
-                    product="odoo-tenant-cm",
-                    context="cm",
-                    instance="testing",
-                    strategy="recreate-in-place",
-                    deployment_record_id="deployment-cm-testing",
-                    deploy_status="pass",
-                    post_deploy_status="pass",
-                    health_status="pass",
-                    canonical_status="pass",
-                    logo_status="pass",
-                    runtime_identity_injected=True,
-                ),
-            ) as apply_mock:
+                "control_plane.service._start_odoo_stable_target_replacement_operation_worker"
+            ) as worker_mock:
                 status_code, payload = _invoke_app(
                     app,
                     method="POST",
@@ -19552,11 +19540,311 @@ class LaunchplaneServiceTests(unittest.TestCase):
 
             self.assertEqual(status_code, 202)
             self.assertEqual(payload["status"], "accepted")
-            self.assertEqual(payload["result"]["deployment_record_id"], "deployment-cm-testing")
-            apply_mock.assert_called_once()
-            request = apply_mock.call_args.kwargs["request"]
-            self.assertTrue(request.verify_health)
-            self.assertFalse(request.allow_empty_data)
+            operation_id = payload["records"]["odoo_stable_target_replacement_operation_id"]
+            self.assertTrue(str(operation_id).startswith("odoo-target-replacement-cm-testing-"))
+            self.assertEqual(payload["result"]["status"], "pending")
+            self.assertEqual(payload["result"]["phase"], "created")
+            self.assertEqual(
+                payload["result"]["poll_url"],
+                f"/v1/drivers/odoo/target-replacement/operations/{operation_id}",
+            )
+            worker_mock.assert_called_once()
+            self.assertEqual(worker_mock.call_args.kwargs["operation_id"], operation_id)
+            stored_operation = store.read_odoo_stable_target_replacement_operation_record(
+                str(operation_id)
+            )
+            self.assertEqual(stored_operation.status, "pending")
+            self.assertTrue(stored_operation.request.verify_health)
+            self.assertFalse(stored_operation.request.allow_empty_data)
+
+    def test_odoo_target_replacement_apply_driver_replays_existing_operation(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_target_replacement_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo-tenant-cm",
+                "replacement": {
+                    "product": "odoo-tenant-cm",
+                    "instance": "testing",
+                    "strategy": "recreate-in-place",
+                    "allow_empty_data": False,
+                },
+            }
+
+            with patch(
+                "control_plane.service._start_odoo_stable_target_replacement_operation_worker"
+            ) as worker_mock:
+                first_status, first_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "apply-cm-testing"},
+                )
+                second_status, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "apply-cm-testing"},
+                )
+
+            self.assertEqual(first_status, 202)
+            self.assertEqual(second_status, 202)
+            self.assertEqual(
+                first_payload["records"]["odoo_stable_target_replacement_operation_id"],
+                second_payload["records"]["odoo_stable_target_replacement_operation_id"],
+            )
+            worker_mock.assert_called_once()
+
+    def test_odoo_target_replacement_apply_driver_blocks_second_active_lane_operation(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_product_profile_record(
+                LaunchplaneProductProfileRecord.model_validate(_odoo_preview_profile_payload())
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_target_replacement_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+            request_payload = {
+                "product": "odoo-tenant-cm",
+                "replacement": {
+                    "product": "odoo-tenant-cm",
+                    "instance": "testing",
+                    "strategy": "recreate-in-place",
+                    "allow_empty_data": False,
+                },
+            }
+
+            with patch(
+                "control_plane.service._start_odoo_stable_target_replacement_operation_worker"
+            ):
+                first_status, _ = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "apply-cm-testing-1"},
+                )
+                second_status, second_payload = _invoke_app(
+                    app,
+                    method="POST",
+                    path="/v1/drivers/odoo/target-replacement-apply",
+                    payload=request_payload,
+                    headers={"Idempotency-Key": "apply-cm-testing-2"},
+                )
+
+            self.assertEqual(first_status, 202)
+            self.assertEqual(second_status, 409)
+            self.assertEqual(
+                second_payload["error"]["code"],
+                "odoo_stable_target_replacement_operation_active",
+            )
+
+    def test_odoo_target_replacement_operation_status_reads_for_authorized_workflow(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        "operation_id": "operation-cm-testing",
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "idempotency_key": "apply-cm-testing",
+                        "request_fingerprint": "abc123",
+                        "request": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "instance": "testing",
+                            "strategy": "recreate-in-place",
+                            "allow_empty_data": False,
+                        },
+                        "status": "running",
+                        "phase": "running",
+                        "created_at": "2026-05-17T00:00:00Z",
+                        "updated_at": "2026-05-17T00:01:00Z",
+                        "started_at": "2026-05-17T00:01:00Z",
+                    }
+                )
+            )
+            policy = LaunchplaneAuthzPolicy.model_validate(
+                {
+                    "github_actions": [
+                        {
+                            "repository": "cbusillo/launchplane",
+                            "workflow_refs": [
+                                "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                            ],
+                            "event_names": ["workflow_dispatch"],
+                            "products": ["odoo-tenant-cm"],
+                            "contexts": ["cm"],
+                            "actions": ["odoo_target_replacement_apply.execute"],
+                        }
+                    ]
+                }
+            )
+            app = create_launchplane_service_app(
+                state_dir=state_dir,
+                verifier=_StubVerifier(
+                    _identity(
+                        repository="cbusillo/launchplane",
+                        workflow_ref=(
+                            "cbusillo/launchplane/.github/workflows/odoo-target-replacement-apply.yml@refs/heads/main"
+                        ),
+                        event_name="workflow_dispatch",
+                    )
+                ),
+                authz_policy=policy,
+                control_plane_root_path=root,
+            )
+
+            status_code, payload = _invoke_app(
+                app,
+                method="GET",
+                path="/v1/drivers/odoo/target-replacement/operations/operation-cm-testing",
+            )
+
+            self.assertEqual(status_code, 200)
+            self.assertEqual(payload["status"], "ok")
+            self.assertEqual(payload["operation"]["status"], "running")
+            self.assertEqual(
+                payload["operation"]["poll_url"],
+                "/v1/drivers/odoo/target-replacement/operations/operation-cm-testing",
+            )
+
+    def test_odoo_target_replacement_operation_worker_records_terminal_result(
+        self,
+    ) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            root = Path(temporary_directory_name)
+            state_dir = root / "state"
+            store = FilesystemRecordStore(state_dir=state_dir)
+            store.write_odoo_stable_target_replacement_operation_record(
+                OdooStableTargetReplacementOperationRecord.model_validate(
+                    {
+                        "operation_id": "operation-cm-testing",
+                        "product": "odoo-tenant-cm",
+                        "context": "cm",
+                        "instance": "testing",
+                        "idempotency_key": "apply-cm-testing",
+                        "request_fingerprint": "abc123",
+                        "request": {
+                            "schema_version": 1,
+                            "product": "odoo-tenant-cm",
+                            "instance": "testing",
+                            "strategy": "recreate-in-place",
+                            "allow_empty_data": False,
+                        },
+                        "status": "pending",
+                        "phase": "created",
+                        "created_at": "2026-05-17T00:00:00Z",
+                        "updated_at": "2026-05-17T00:00:00Z",
+                    }
+                )
+            )
+            result = OdooStableTargetReplacementApplyResult(
+                product="odoo-tenant-cm",
+                context="cm",
+                instance="testing",
+                strategy="recreate-in-place",
+                deployment_record_id="deployment-cm-testing",
+                deploy_status="pass",
+                post_deploy_status="pass",
+                health_status="pass",
+                canonical_status="pass",
+                logo_status="pass",
+                runtime_identity_injected=True,
+            )
+
+            with patch(
+                "control_plane.service.execute_odoo_stable_target_replacement_apply",
+                return_value=result,
+            ):
+                control_plane_service._run_odoo_stable_target_replacement_operation_worker(
+                    operation_id="operation-cm-testing",
+                    control_plane_root_path=root,
+                    record_store=store,
+                    trace_id="launchplane_req_worker",
+                )
+
+            operation = store.read_odoo_stable_target_replacement_operation_record(
+                "operation-cm-testing"
+            )
+            self.assertEqual(operation.status, "pass")
+            self.assertEqual(operation.phase, "completed")
+            self.assertEqual(operation.deployment_record_id, "deployment-cm-testing")
+            self.assertEqual(operation.runner_trace_id, "launchplane_req_worker")
+            self.assertIsNotNone(operation.result)
 
     def test_odoo_target_replacement_apply_driver_rejects_unauthorized_workflow(
         self,

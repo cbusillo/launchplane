@@ -394,6 +394,15 @@ state/
   deployment-record id when available, final driver result, and terminal error.
   A `pending` or `running` record is the single-flight guard for that
   product/context/instance.
+- Odoo stable target replacement apply writes durable operation records under
+  `odoo_stable_target_replacement_operations`. These records mirror the stable
+  bootstrap operation boundary for the guarded `recreate-in-place` replacement
+  path: the service stores the apply request, `Idempotency-Key`, request
+  fingerprint, status/phase, deployment-record id when available, final apply
+  result, and terminal error. Reusing the same key with the same request replays
+  the existing operation; reusing it for a different request is rejected; an
+  active `pending` or `running` operation blocks another apply for the same
+  product/context/instance.
 - Odoo prod rollback writes a normal deployment record for the rollback deploy,
   refreshes prod inventory, mints the prod release tuple from the selected
   artifact manifest, and annotates the current prod promotion record's

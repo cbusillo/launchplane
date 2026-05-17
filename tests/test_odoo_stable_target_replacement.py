@@ -26,12 +26,14 @@ from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     DeploymentEvidence,
 )
+from control_plane.contracts.odoo_stable_target_replacement import (
+    OdooStableTargetReplacementApplyRequest,
+    OdooStableTargetReplacementRequest,
+)
 from control_plane.dokploy import JsonValue
 from control_plane.workflows.odoo_post_deploy import OdooPostDeployResult
 from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
-    OdooStableTargetReplacementApplyRequest,
-    OdooStableTargetReplacementRequest,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
 )
@@ -397,9 +399,7 @@ class OdooStableTargetReplacementTests(unittest.TestCase):
 
     def test_build_plan_blocks_upstream_restore_disallowed_by_lane_data_policy(self) -> None:
         profile = _opw_profile_with_prelaunch_policy(enabled=True)
-        lane = profile.lanes[0].model_copy(
-            update={"odoo_data_policy": ProductOdooLaneDataPolicy()}
-        )
+        lane = profile.lanes[0].model_copy(update={"odoo_data_policy": ProductOdooLaneDataPolicy()})
         profile = profile.model_copy(update={"lanes": (lane,)})
         with (
             patch(

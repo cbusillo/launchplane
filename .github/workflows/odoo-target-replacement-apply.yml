@@ -120,6 +120,8 @@ jobs:
       HEALTH_TIMEOUT_SECONDS: ${{ inputs.health_timeout_seconds }}
       LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
       LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
+      POLL_INTERVAL_SECONDS: "15"
+      POLL_TIMEOUT_SECONDS: "3600"
     steps:
       - name: Validate runtime inputs
         shell: bash
@@ -151,7 +153,7 @@ jobs:
             exit 1
           fi
 
-      - name: Apply replacement
+      - name: Create and poll replacement operation
         shell: bash
         run: |
           set -euo pipefail
@@ -237,18 +239,103 @@ jobs:
           })"
           jq . odoo-target-replacement-apply.json
           if [ "$status_code" != "202" ]; then
-            echo \
-              "Odoo target replacement apply failed: ${status_code}." \
-              >&2
+            echo 'Odoo target replacement operation create failed:' \
+              "${status_code}." >&2
+            cat odoo-target-replacement-apply.json >&2
             exit 1
           fi
-          deploy_status="$(jq -r '.result.deploy_status // ""' odoo-target-replacement-apply.json)"
-          post_deploy_status="$(jq -r '.result.post_deploy_status // ""' odoo-target-replacement-apply.json)"
-          if [ "$deploy_status" != "pass" ] || [ "$post_deploy_status" != "pass" ]; then
-            echo \
-              "Odoo target replacement apply did not pass: deploy=${deploy_status} post_deploy=${post_deploy_status}." \
-              >&2
-            jq -r '.result.error_message // ""' odoo-target-replacement-apply.json >&2
+          poll_url="$(
+            jq -r \
+              '.result.poll_url // empty' \
+              odoo-target-replacement-apply.json
+          )"
+          operation_id="$({
+            jq -r \
+              '.records.odoo_stable_target_replacement_operation_id //
+               .result.operation_id //
+               empty' \
+              odoo-target-replacement-apply.json
+          })"
+          if [ -z "$poll_url" ] || [ -z "$operation_id" ]; then
+            echo 'Odoo target replacement response missing poll metadata.' >&2
+            jq . odoo-target-replacement-apply.json >&2
+            exit 1
+          fi
+          deadline=$((SECONDS + POLL_TIMEOUT_SECONDS))
+          while true; do
+            status_code="$({
+              curl -sS \
+                -o odoo-target-replacement-apply.json \
+                -w '%{http_code}' \
+                -H "Authorization: Bearer ${oidc_token}" \
+                "${LAUNCHPLANE_SERVICE_URL}${poll_url}"
+            })"
+            if [ "$status_code" != "200" ]; then
+              echo 'Odoo target replacement operation poll failed:' \
+                "${status_code}." >&2
+              cat odoo-target-replacement-apply.json >&2
+              exit 1
+            fi
+            operation_status="$(
+              jq -r \
+                '.operation.status // empty' \
+                odoo-target-replacement-apply.json
+            )"
+            operation_phase="$(
+              jq -r \
+                '.operation.phase // empty' \
+                odoo-target-replacement-apply.json
+            )"
+            echo 'Odoo target replacement operation:' \
+              "status=${operation_status} phase=${operation_phase}"
+            if [ "$operation_status" = "pass" ] || \
+              [ "$operation_status" = "fail" ]; then
+              break
+            fi
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              echo 'Launchplane Odoo target replacement operation' \
+                "${operation_id} timed out while polling." >&2
+              jq . odoo-target-replacement-apply.json >&2
+              exit 1
+            fi
+            sleep "$POLL_INTERVAL_SECONDS"
+          done
+          jq . odoo-target-replacement-apply.json
+          operation_status="$(
+            jq -r '.operation.status // ""' odoo-target-replacement-apply.json
+          )"
+          deploy_status="$(
+            jq -r \
+              '.operation.result.deploy_status //
+               .result.deploy_status //
+               ""' \
+              odoo-target-replacement-apply.json
+          )"
+          post_deploy_status="$(
+            jq -r \
+              '.operation.result.post_deploy_status //
+               .result.post_deploy_status //
+               ""' \
+              odoo-target-replacement-apply.json
+          )"
+          if [ "$operation_status" != "pass" ]; then
+            echo 'Odoo target replacement operation did not pass:' \
+              "status=${operation_status}." >&2
+            jq -r \
+              '.operation.error_message // .result.error_message // ""' \
+              odoo-target-replacement-apply.json >&2
+            exit 1
+          fi
+          if [ "$deploy_status" != "pass" ] || \
+            [ "$post_deploy_status" != "pass" ]; then
+            echo 'Odoo target replacement apply did not pass:' \
+              "deploy=${deploy_status}" \
+              "post_deploy=${post_deploy_status}." >&2
+            jq -r \
+              '.operation.result.error_message //
+               .result.error_message //
+               ""' \
+              odoo-target-replacement-apply.json >&2
             exit 1
           fi
 

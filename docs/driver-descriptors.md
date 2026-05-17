@@ -178,6 +178,10 @@ The POST route returns a durable operation record instead of holding the request
 open for the whole bootstrap. Callers poll
 `/v1/drivers/odoo/stable-bootstrap/operations/{operation_id}` and treat terminal
 `pass`/`fail` as the source of truth for workflow exit status and artifacts.
+Odoo target replacement apply uses the same durable operation shape for the
+guarded `recreate-in-place` path: `POST /v1/drivers/odoo/target-replacement-apply`
+creates or replays an operation, and callers poll
+`/v1/drivers/odoo/target-replacement/operations/{operation_id}` until terminal.
 
 Driver action routes are owned by the base driver contract. The service accepts
 any product key on Odoo and VeriReel action envelopes, then authorizes the call

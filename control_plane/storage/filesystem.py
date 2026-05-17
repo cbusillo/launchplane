@@ -28,6 +28,9 @@ from control_plane.contracts.odoo_instance_override_record import OdooInstanceOv
 from control_plane.contracts.odoo_stable_bootstrap_operation import (
     OdooStableBootstrapOperationRecord,
 )
+from control_plane.contracts.odoo_stable_target_replacement_operation import (
+    OdooStableTargetReplacementOperationRecord,
+)
 from control_plane.contracts.preview_enablement_record import PreviewEnablementRecord
 from control_plane.contracts.preview_desired_state_record import PreviewDesiredStateRecord
 from control_plane.contracts.preview_generation_record import PreviewGenerationRecord
@@ -553,9 +556,7 @@ class FilesystemRecordStore:
     def write_odoo_stable_bootstrap_operation_record(
         self, record: OdooStableBootstrapOperationRecord
     ) -> Path:
-        return self._write_model(
-            "odoo_stable_bootstrap_operations", record.operation_id, record
-        )
+        return self._write_model("odoo_stable_bootstrap_operations", record.operation_id, record)
 
     def read_odoo_stable_bootstrap_operation_record(
         self, operation_id: str
@@ -583,6 +584,51 @@ class FilesystemRecordStore:
             for record in self._list_models(
                 OdooStableBootstrapOperationRecord,
                 "odoo_stable_bootstrap_operations",
+            )
+            if (not product or record.product == product)
+            and (not context_name or record.context == context_name)
+            and (not instance_name or record.instance == instance_name)
+            and (not idempotency_key or record.idempotency_key == idempotency_key)
+            and (not statuses or record.status in statuses)
+        ]
+        records.sort(key=lambda record: (record.updated_at, record.operation_id), reverse=True)
+        if limit is not None:
+            records = records[:limit]
+        return tuple(records)
+
+    def write_odoo_stable_target_replacement_operation_record(
+        self, record: OdooStableTargetReplacementOperationRecord
+    ) -> Path:
+        return self._write_model(
+            "odoo_stable_target_replacement_operations", record.operation_id, record
+        )
+
+    def read_odoo_stable_target_replacement_operation_record(
+        self, operation_id: str
+    ) -> OdooStableTargetReplacementOperationRecord:
+        return OdooStableTargetReplacementOperationRecord.model_validate(
+            self._read_model(
+                OdooStableTargetReplacementOperationRecord,
+                "odoo_stable_target_replacement_operations",
+                operation_id,
+            ).model_dump(mode="json")
+        )
+
+    def list_odoo_stable_target_replacement_operation_records(
+        self,
+        *,
+        product: str = "",
+        context_name: str = "",
+        instance_name: str = "",
+        idempotency_key: str = "",
+        statuses: tuple[str, ...] = (),
+        limit: int | None = None,
+    ) -> tuple[OdooStableTargetReplacementOperationRecord, ...]:
+        records = [
+            record
+            for record in self._list_models(
+                OdooStableTargetReplacementOperationRecord,
+                "odoo_stable_target_replacement_operations",
             )
             if (not product or record.product == product)
             and (not context_name or record.context == context_name)
