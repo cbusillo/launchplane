@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
+import html
 import json
 from pathlib import Path
+import re
 import time
 from typing import Literal, Protocol
+from urllib.parse import urljoin, urlparse
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -378,12 +381,46 @@ def _verify_canonical_url(*, base_url: str, expected_base_url: str, timeout_seco
 
 
 def _verify_logo_route(*, base_url: str, timeout_seconds: int) -> None:
-    logo_url = f"{base_url.rstrip('/')}/web/image/website/1/logo"
-    status_code, body, content_type = _http_text(logo_url, timeout_seconds=timeout_seconds)
-    if status_code >= 400:
-        raise click.ClickException(f"Logo check {logo_url} returned HTTP {status_code}.")
-    if "text/html" in content_type.lower() and "404" in body[:500].lower():
-        raise click.ClickException(f"Logo check {logo_url} returned an HTML 404 body.")
+    checked_urls: list[str] = []
+    for logo_url in _candidate_logo_urls(base_url=base_url, timeout_seconds=timeout_seconds):
+        if logo_url in checked_urls:
+            continue
+        checked_urls.append(logo_url)
+        status_code, body, content_type = _http_text(logo_url, timeout_seconds=timeout_seconds)
+        if status_code < 400 and not ("text/html" in content_type.lower() and "404" in body[:500].lower()):
+            return
+    checked = ", ".join(checked_urls) if checked_urls else base_url
+    raise click.ClickException(f"Logo check failed for {checked}.")
+
+
+def _candidate_logo_urls(*, base_url: str, timeout_seconds: int) -> tuple[str, ...]:
+    normalized_base_url = base_url.rstrip("/")
+    status_code, body, _content_type = _http_text(normalized_base_url, timeout_seconds=timeout_seconds)
+    if status_code < 400:
+        urls = tuple(_extract_same_origin_logo_urls(base_url=normalized_base_url, body=body))
+        if urls:
+            return urls
+    return (f"{normalized_base_url}/web/image/website/1/logo",)
+
+
+def _extract_same_origin_logo_urls(*, base_url: str, body: str) -> tuple[str, ...]:
+    base_origin = _url_origin(base_url)
+    logo_urls: list[str] = []
+    for match in re.finditer(
+        r"(?:src|href)\s*=\s*([\"'])(?P<url>[^\"']*/web/image/website/[^\"']*/logo[^\"']*)\1",
+        body,
+        re.IGNORECASE,
+    ):
+        raw_url = html.unescape(match.group("url")).strip()
+        absolute_url = urljoin(f"{base_url.rstrip('/')}/", raw_url)
+        if _url_origin(absolute_url) == base_origin and absolute_url not in logo_urls:
+            logo_urls.append(absolute_url)
+    return tuple(logo_urls)
+
+
+def _url_origin(raw_url: str) -> str:
+    parsed = urlparse(raw_url)
+    return f"{parsed.scheme.lower()}://{parsed.netloc.lower()}"
 
 
 def _run_verification_with_retry(

@@ -31,6 +31,8 @@ from control_plane.workflows.odoo_stable_target_replacement import (
     DokployRequest,
     OdooStableTargetReplacementApplyRequest,
     OdooStableTargetReplacementRequest,
+    _extract_same_origin_logo_urls,
+    _verify_logo_route,
     _run_verification_with_retry,
     build_odoo_stable_target_replacement_plan,
     execute_odoo_stable_target_replacement_apply,
@@ -241,6 +243,76 @@ def _request(path: str, query: object | None = None, **_: object) -> JsonValue:
 
 
 class OdooStableTargetReplacementTests(unittest.TestCase):
+    def test_logo_verification_uses_logo_url_from_canonical_page(self) -> None:
+        calls: list[str] = []
+
+        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            self.assertEqual(timeout_seconds, 5)
+            calls.append(url)
+            if url == "https://cm-testing.example.com":
+                return (
+                    200,
+                    '<html><img src="/web/image/website/7/logo?unique=abc"></html>',
+                    "text/html",
+                )
+            if url == "https://cm-testing.example.com/web/image/website/7/logo?unique=abc":
+                return 200, "image-bytes", "image/png"
+            return 404, "missing", "text/plain"
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement._http_text",
+            side_effect=fake_http_text,
+        ):
+            _verify_logo_route(base_url="https://cm-testing.example.com", timeout_seconds=5)
+
+        self.assertEqual(
+            calls,
+            [
+                "https://cm-testing.example.com",
+                "https://cm-testing.example.com/web/image/website/7/logo?unique=abc",
+            ],
+        )
+
+    def test_logo_verification_falls_back_to_legacy_website_one_route(self) -> None:
+        calls: list[str] = []
+
+        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            self.assertEqual(timeout_seconds, 5)
+            calls.append(url)
+            if url == "https://cm-testing.example.com":
+                return 200, "<html>No logo route here</html>", "text/html"
+            if url == "https://cm-testing.example.com/web/image/website/1/logo":
+                return 200, "image-bytes", "image/png"
+            return 404, "missing", "text/plain"
+
+        with patch(
+            "control_plane.workflows.odoo_stable_target_replacement._http_text",
+            side_effect=fake_http_text,
+        ):
+            _verify_logo_route(base_url="https://cm-testing.example.com/", timeout_seconds=5)
+
+        self.assertEqual(
+            calls,
+            [
+                "https://cm-testing.example.com",
+                "https://cm-testing.example.com/web/image/website/1/logo",
+            ],
+        )
+
+    def test_extract_logo_urls_ignores_cross_origin_assets(self) -> None:
+        urls = _extract_same_origin_logo_urls(
+            base_url="https://cm-testing.example.com",
+            body=(
+                '<img src="https://evil.example.com/web/image/website/9/logo">'
+                '<img src="/web/image/website/7/logo?unique=abc&amp;download=1">'
+            ),
+        )
+
+        self.assertEqual(
+            urls,
+            ("https://cm-testing.example.com/web/image/website/7/logo?unique=abc&download=1",),
+        )
+
     def test_build_plan_allows_issue_backed_opw_upstream_restore_policy(self) -> None:
         with (
             patch(
