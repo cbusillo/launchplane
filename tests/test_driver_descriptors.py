@@ -179,6 +179,16 @@ class DriverDescriptorRegistryTests(unittest.TestCase):
         self.assertFalse(
             route_actions["/v1/drivers/verireel/preview-verification"].operator_visible
         )
+        self.assertEqual(
+            route_actions["/v1/drivers/odoo/preview-verification"].authz_action,
+            "preview_generation.write",
+        )
+        self.assertFalse(route_actions["/v1/drivers/odoo/preview-verification"].operator_visible)
+        self.assertEqual(
+            route_actions["/v1/drivers/odoo/stable-verification"].authz_action,
+            "deployment.write",
+        )
+        self.assertFalse(route_actions["/v1/drivers/odoo/stable-verification"].operator_visible)
 
     def test_service_accepts_descriptor_post_driver_routes(self) -> None:
         descriptor_post_route_metadata = {
