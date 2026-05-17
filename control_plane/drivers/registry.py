@@ -544,6 +544,17 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("preview",),
         ),
         _action(
+            "preview_verification",
+            "Record preview verification",
+            "Record Odoo product smoke verification for the latest preview generation.",
+            safety="safe_write",
+            scope="preview",
+            route_path="/v1/drivers/odoo/preview-verification",
+            authz_action="preview_generation.write",
+            operator_visible=False,
+            writes_records=("preview", "preview_generation"),
+        ),
+        _action(
             "prod_backup_gate",
             "Capture prod backup gate",
             "Capture concrete backup evidence before a prod-changing action.",

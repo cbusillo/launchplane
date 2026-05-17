@@ -1418,6 +1418,52 @@ _ODOO_TARGET_REPLACEMENT_APPLY_ROUTE = _DriverRouteExecutionMetadata(
 )
 
 
+class OdooPreviewVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    anchor_repo: str
+    anchor_pr_number: int = Field(ge=1)
+    verification_status: ReleaseStatus
+    verified_at: str
+    failure_summary: str = ""
+
+    @field_validator("verification_status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value: object) -> ReleaseStatus:
+        return _normalize_release_status(value, label="Odoo preview verification status")
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooPreviewVerificationRequest":
+        if not self.context.strip():
+            raise ValueError("Odoo preview verification requires context.")
+        if not self.anchor_repo.strip():
+            raise ValueError("Odoo preview verification requires anchor_repo.")
+        if self.verification_status not in {"pass", "fail"}:
+            raise ValueError("Odoo preview verification status must be pass or fail.")
+        if not self.verified_at.strip():
+            raise ValueError("Odoo preview verification requires verified_at.")
+        return self
+
+
+class OdooPreviewVerificationEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    verification: OdooPreviewVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooPreviewVerificationEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo preview verification")
+        return self
+
+
+_ODOO_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/preview-verification",
+    envelope_model=OdooPreviewVerificationEnvelope,
+    denial_message="Workflow cannot write Odoo preview verification for the requested product/context.",
+)
+
+
 class VeriReelTestingDeployEnvelope(_ProductRouteEnvelope):
     schema_version: int = Field(default=1, ge=1)
     deploy: VeriReelStableDeployRequest
@@ -6383,6 +6429,75 @@ def _apply_verireel_preview_verification_records(
     verified_at = request.verified_at.strip()
     verification_passed = request.verification_status.strip() == "pass"
     failure_summary = request.failure_summary.strip() or "Preview E2E verification failed."
+    return apply_launchplane_generation_evidence(
+        control_plane_root_path=control_plane_root_path,
+        record_store=typed_record_store,
+        preview_request=PreviewMutationRequest(
+            context=preview.context,
+            anchor_repo=preview.anchor_repo,
+            anchor_pr_number=preview.anchor_pr_number,
+            anchor_pr_url=preview.anchor_pr_url,
+            canonical_url=preview.canonical_url,
+            state="active" if verification_passed else "failed",
+            created_at=preview.created_at,
+            updated_at=verified_at,
+            eligible_at=preview.eligible_at,
+        ),
+        generation_request=PreviewGenerationMutationRequest(
+            context=preview.context,
+            anchor_repo=preview.anchor_repo,
+            anchor_pr_number=preview.anchor_pr_number,
+            anchor_pr_url=preview.anchor_pr_url,
+            anchor_head_sha=generation.anchor_summary.head_sha,
+            sequence=generation.sequence,
+            generation_id=generation.generation_id,
+            state="ready" if verification_passed else "failed",
+            requested_reason=generation.requested_reason,
+            requested_at=generation.requested_at,
+            started_at=generation.started_at,
+            ready_at=verified_at if verification_passed else "",
+            finished_at=verified_at,
+            failed_at="" if verification_passed else verified_at,
+            resolved_manifest_fingerprint=generation.resolved_manifest_fingerprint,
+            artifact_id=generation.artifact_id,
+            baseline_release_tuple_id=generation.baseline_release_tuple_id,
+            source_map=generation.source_map,
+            companion_summaries=generation.companion_summaries,
+            deploy_status=generation.deploy_status,
+            verify_status="pass" if verification_passed else "fail",
+            overall_health_status="pass" if verification_passed else "fail",
+            failure_stage="" if verification_passed else "verify",
+            failure_summary="" if verification_passed else failure_summary,
+        ),
+    )
+
+
+def _apply_odoo_preview_verification_records(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    request: OdooPreviewVerificationRequest,
+) -> dict[str, object]:
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    preview = find_preview_record(
+        record_store=typed_record_store,
+        context_name=request.context,
+        anchor_repo=request.anchor_repo,
+        anchor_pr_number=request.anchor_pr_number,
+    )
+    if preview is None:
+        raise click.ClickException(
+            f"No Launchplane preview found for {request.context}/{request.anchor_repo}/pr-{request.anchor_pr_number}."
+        )
+    generation_id = preview.latest_generation_id or preview.active_generation_id
+    if not generation_id:
+        raise click.ClickException(
+            f"No Launchplane preview generation found for {preview.preview_id}."
+        )
+    generation = typed_record_store.read_preview_generation_record(generation_id)
+    verified_at = request.verified_at.strip()
+    verification_passed = request.verification_status == "pass"
+    failure_summary = request.failure_summary.strip() or "Odoo preview verification failed."
     return apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root_path,
         record_store=typed_record_store,
@@ -11403,6 +11518,43 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
                     request=verireel_preview_verification_request.verification,
+                )
+            elif path == _ODOO_PREVIEW_VERIFICATION_ROUTE.route_path:
+                odoo_preview_verification_request = (
+                    _ODOO_PREVIEW_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
+                )
+                _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=odoo_preview_verification_request.product,
+                )
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=odoo_preview_verification_request.product,
+                    context=odoo_preview_verification_request.verification.context,
+                    denial_message=_ODOO_PREVIEW_VERIFICATION_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = _apply_odoo_preview_verification_records(
+                    control_plane_root_path=resolved_root,
+                    record_store=record_store,
+                    request=odoo_preview_verification_request.verification,
                 )
             elif path == "/v1/product-profiles/context-cutover/apply":
                 context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
