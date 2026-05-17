@@ -1,3 +1,4 @@
+import hashlib
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from json import JSONDecodeError
@@ -39,6 +40,18 @@ def _operation_payload(operation_id: str = "operation-cm-testing") -> dict[str, 
         "created_at": "2026-05-17T00:00:00Z",
         "updated_at": "2026-05-17T00:00:00Z",
     }
+
+
+def _lane_reservation_path(
+    store: FilesystemRecordStore,
+    record: OdooStableTargetReplacementOperationRecord,
+) -> Path:
+    lane_key = "|".join((record.product, record.context, record.instance))
+    digest = hashlib.sha256(lane_key.encode()).hexdigest()[:16]
+    reservation_id = (
+        f"{record.product}-{record.context}-{record.instance}".replace("/", "-") + f"-{digest}"
+    )
+    return store._record_path("odoo_stable_target_replacement_lane_reservations", reservation_id)
 
 
 class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
@@ -227,6 +240,8 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
 
     def test_filesystem_store_waits_past_slow_reserved_operation_write(self) -> None:
         class SlowWriteFilesystemRecordStore(FilesystemRecordStore):
+            odoo_target_replacement_reservation_settle_timeout_seconds = 2.0
+
             def __init__(self, state_dir: Path) -> None:
                 super().__init__(state_dir)
                 self.first_write_started = Event()
@@ -246,13 +261,13 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
                 return super().write_odoo_stable_target_replacement_operation_record(record)
 
             def _wait_for_odoo_stable_target_replacement_reserved_operation(
-                self, operation_id: str
-            ) -> OdooStableTargetReplacementOperationRecord:
+                self, operation_id: str, deadline: float
+            ) -> OdooStableTargetReplacementOperationRecord | None:
                 if operation_id == "operation-cm-testing-first":
                     self.first_write_started.wait(timeout=2.0)
                     self.release_first_write.set()
                 return super()._wait_for_odoo_stable_target_replacement_reserved_operation(
-                    operation_id
+                    operation_id, deadline
                 )
 
         with TemporaryDirectory() as temporary_directory_name:
@@ -295,8 +310,84 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             self.assertFalse(second_created)
             self.assertEqual(len(active_records), 1)
 
+    def test_filesystem_store_recovers_empty_crashed_lane_reservation(self) -> None:
+        class FastRecoveryFilesystemRecordStore(FilesystemRecordStore):
+            odoo_target_replacement_reservation_settle_timeout_seconds = 0.01
+            odoo_target_replacement_reservation_poll_seconds = 0.001
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store: FilesystemRecordStore = FastRecoveryFilesystemRecordStore(
+                state_dir=Path(temporary_directory_name)
+            )
+            record = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-recovered")
+            )
+            reservation_path = _lane_reservation_path(store, record)
+            reservation_path.parent.mkdir(parents=True, exist_ok=True)
+            reservation_path.write_text("", encoding="utf-8")
+
+            created_record, created = (
+                store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                    record
+                )
+            )
+
+            active_records = store.list_odoo_stable_target_replacement_operation_records(
+                product="odoo-tenant-cm",
+                context_name="cm",
+                instance_name="testing",
+                statuses=("pending", "running"),
+            )
+
+            self.assertEqual(created_record.operation_id, record.operation_id)
+            self.assertTrue(created)
+            self.assertEqual(reservation_path.read_text(encoding="utf-8"), record.operation_id)
+            self.assertEqual(
+                tuple(active_record.operation_id for active_record in active_records),
+                (record.operation_id,),
+            )
+
+    def test_filesystem_store_recovers_missing_reserved_owner_record(self) -> None:
+        class FastRecoveryFilesystemRecordStore(FilesystemRecordStore):
+            odoo_target_replacement_reservation_settle_timeout_seconds = 0.01
+            odoo_target_replacement_reservation_poll_seconds = 0.001
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store: FilesystemRecordStore = FastRecoveryFilesystemRecordStore(
+                state_dir=Path(temporary_directory_name)
+            )
+            record = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-recovered")
+            )
+            reservation_path = _lane_reservation_path(store, record)
+            reservation_path.parent.mkdir(parents=True, exist_ok=True)
+            reservation_path.write_text("operation-cm-testing-missing", encoding="utf-8")
+
+            created_record, created = (
+                store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                    record
+                )
+            )
+
+            active_records = store.list_odoo_stable_target_replacement_operation_records(
+                product="odoo-tenant-cm",
+                context_name="cm",
+                instance_name="testing",
+                statuses=("pending", "running"),
+            )
+
+            self.assertEqual(created_record.operation_id, record.operation_id)
+            self.assertTrue(created)
+            self.assertEqual(reservation_path.read_text(encoding="utf-8"), record.operation_id)
+            self.assertEqual(
+                tuple(active_record.operation_id for active_record in active_records),
+                (record.operation_id,),
+            )
+
     def test_filesystem_store_waits_for_reserved_operation_json_to_settle(self) -> None:
         class SettlingReadFilesystemRecordStore(FilesystemRecordStore):
+            odoo_target_replacement_reservation_settle_timeout_seconds = 2.0
+
             def __init__(self, state_dir: Path) -> None:
                 super().__init__(state_dir)
                 self._operation_reads: dict[str, int] = {}
