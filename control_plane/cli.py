@@ -1292,6 +1292,74 @@ def _build_launchplane_preview_enablement_action_payload(
     )
 
 
+def _launchplane_promotion_check_status(
+    value: str,
+    *,
+    allow_skipped: bool = False,
+) -> str:
+    normalized_value = value.strip().lower()
+    if normalized_value == "pass":
+        return "pass"
+    if allow_skipped and normalized_value == "skipped":
+        return "pass"
+    if normalized_value in {"pending", ""}:
+        return "pending"
+    return "fail"
+
+
+def _launchplane_promotion_candidate_evidence_check(
+    *,
+    testing_artifact_id: str,
+    prod_artifact_id: str,
+) -> dict[str, str]:
+    candidate_status = "pending"
+    candidate_detail = "Launchplane is waiting for testing/prod inventory evidence before it can name a promotion candidate."
+    if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
+        candidate_status = "pass"
+        candidate_detail = f"Testing and prod are already aligned on {testing_artifact_id}."
+    elif testing_artifact_id:
+        candidate_status = "pass"
+        candidate_detail = f"Testing is carrying {testing_artifact_id or 'an artifact'} while prod is carrying {prod_artifact_id or 'nothing recorded yet'}."
+    elif prod_artifact_id:
+        candidate_status = "fail"
+        candidate_detail = (
+            "Prod has an artifact, but Launchplane has no current testing artifact to promote from."
+        )
+    return {
+        "label": "Promotion candidate",
+        "status": candidate_status,
+        "detail": candidate_detail,
+    }
+
+
+def _launchplane_promotion_backup_gate_evidence_check(
+    latest_backup_gate: BackupGateRecord | None,
+) -> dict[str, str]:
+    if latest_backup_gate is None:
+        return {
+            "label": "Prod backup gate",
+            "status": "pending",
+            "detail": "Launchplane has no prod backup-gate evidence yet. Promotion stays blocked until one is recorded.",
+        }
+    if latest_backup_gate.required and latest_backup_gate.status == "pass":
+        return {
+            "label": "Prod backup gate",
+            "status": "pass",
+            "detail": f"Latest prod backup gate {latest_backup_gate.record_id} passed and can authorize promotion.",
+        }
+    if latest_backup_gate.status == "fail":
+        return {
+            "label": "Prod backup gate",
+            "status": "fail",
+            "detail": f"Latest prod backup gate {latest_backup_gate.record_id} failed. Promotion is blocked until a passing gate is recorded.",
+        }
+    return {
+        "label": "Prod backup gate",
+        "status": "pending",
+        "detail": f"Latest prod backup gate {latest_backup_gate.record_id} is {latest_backup_gate.status} and does not yet authorize promotion.",
+    }
+
+
 def _build_launchplane_promotion_action_payload(
     *,
     record_store: FilesystemRecordStore,
@@ -1334,39 +1402,15 @@ def _build_launchplane_promotion_action_payload(
     )
     latest_backup_gate = recent_backup_gates[0] if recent_backup_gates else None
 
-    def check_status(value: str, *, allow_skipped: bool = False) -> str:
-        normalized_value = value.strip().lower()
-        if normalized_value == "pass":
-            return "pass"
-        if allow_skipped and normalized_value == "skipped":
-            return "pass"
-        if normalized_value in {"pending", ""}:
-            return "pending"
-        return "fail"
-
     evidence_checks: list[dict[str, str]] = []
-    candidate_status = "pending"
-    candidate_detail = "Launchplane is waiting for testing/prod inventory evidence before it can name a promotion candidate."
-    if testing_artifact_id and prod_artifact_id and testing_artifact_id == prod_artifact_id:
-        candidate_status = "pass"
-        candidate_detail = f"Testing and prod are already aligned on {testing_artifact_id}."
-    elif testing_artifact_id:
-        candidate_status = "pass"
-        candidate_detail = f"Testing is carrying {testing_artifact_id or 'an artifact'} while prod is carrying {prod_artifact_id or 'nothing recorded yet'}."
-    elif prod_artifact_id:
-        candidate_status = "fail"
-        candidate_detail = (
-            "Prod has an artifact, but Launchplane has no current testing artifact to promote from."
-        )
     evidence_checks.append(
-        {
-            "label": "Promotion candidate",
-            "status": candidate_status,
-            "detail": candidate_detail,
-        }
+        _launchplane_promotion_candidate_evidence_check(
+            testing_artifact_id=testing_artifact_id,
+            prod_artifact_id=prod_artifact_id,
+        )
     )
 
-    deploy_check_status = check_status(testing_deploy_status)
+    deploy_check_status = _launchplane_promotion_check_status(testing_deploy_status)
     evidence_checks.append(
         {
             "label": "Testing deploy",
@@ -1379,7 +1423,10 @@ def _build_launchplane_promotion_action_payload(
         }
     )
 
-    health_check_status = check_status(testing_health_status, allow_skipped=True)
+    health_check_status = _launchplane_promotion_check_status(
+        testing_health_status,
+        allow_skipped=True,
+    )
     evidence_checks.append(
         {
             "label": "Testing health",
@@ -1392,8 +1439,6 @@ def _build_launchplane_promotion_action_payload(
         }
     )
 
-    backup_check_status = "pending"
-    backup_detail = "Launchplane has no prod backup-gate evidence yet. Promotion stays blocked until one is recorded."
     backup_record_id = ""
     backup_gate_source = "prod-gate"
     backup_gate_evidence: dict[str, str] = {"snapshot": "s3://path/to/prod-backup"}
@@ -1401,22 +1446,9 @@ def _build_launchplane_promotion_action_payload(
         backup_record_id = latest_backup_gate.record_id
         backup_gate_source = latest_backup_gate.source
         backup_gate_evidence = dict(latest_backup_gate.evidence)
-        if latest_backup_gate.required and latest_backup_gate.status == "pass":
-            backup_check_status = "pass"
-            backup_detail = f"Latest prod backup gate {latest_backup_gate.record_id} passed and can authorize promotion."
-        elif latest_backup_gate.status == "fail":
-            backup_check_status = "fail"
-            backup_detail = f"Latest prod backup gate {latest_backup_gate.record_id} failed. Promotion is blocked until a passing gate is recorded."
-        else:
-            backup_check_status = "pending"
-            backup_detail = f"Latest prod backup gate {latest_backup_gate.record_id} is {latest_backup_gate.status} and does not yet authorize promotion."
-    evidence_checks.append(
-        {
-            "label": "Prod backup gate",
-            "status": backup_check_status,
-            "detail": backup_detail,
-        }
-    )
+    backup_gate_check = _launchplane_promotion_backup_gate_evidence_check(latest_backup_gate)
+    backup_check_status = backup_gate_check["status"]
+    evidence_checks.append(backup_gate_check)
 
     promotion_status = "unknown"
     headline = "Launchplane cannot plan the next promotion yet."

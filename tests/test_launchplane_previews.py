@@ -11,6 +11,7 @@ from unittest.mock import patch
 from click.testing import CliRunner
 
 from control_plane.cli import main
+from control_plane import cli as control_plane_cli
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane.contracts.backup_gate_record import BackupGateRecord
 from control_plane.contracts.environment_inventory import EnvironmentInventory
@@ -796,8 +797,12 @@ ODOO_DB_PASSWORD = "local-secret"
             )
             self.assertTrue(launchplane_anchor_repo_eligible(record_store=store, repo="tenant-opw"))
             self.assertTrue(launchplane_anchor_repo_eligible(record_store=store, repo="tenant-cm"))
-            self.assertFalse(launchplane_anchor_repo_eligible(record_store=store, repo="shared-addons"))
-            self.assertFalse(launchplane_anchor_repo_eligible(record_store=store, repo="control-plane"))
+            self.assertFalse(
+                launchplane_anchor_repo_eligible(record_store=store, repo="shared-addons")
+            )
+            self.assertFalse(
+                launchplane_anchor_repo_eligible(record_store=store, repo="control-plane")
+            )
 
     def test_classify_pull_request_event_for_launchplane_enables_preview_when_label_added(
         self,
@@ -1315,6 +1320,15 @@ ODOO_DB_PASSWORD = "local-secret"
             self.assertEqual(enablement_by_pr[126]["state"], "running")
             self.assertEqual(enablement_by_pr[126]["request_source"], "launchplane")
             self.assertEqual(enablement_by_pr[126]["action"]["status"], "existing_preview")
+
+    def test_launchplane_promotion_backup_gate_check_records_failed_gate(self) -> None:
+        evidence_check = control_plane_cli._launchplane_promotion_backup_gate_evidence_check(
+            _backup_gate_record(status="fail")
+        )
+
+        self.assertEqual(evidence_check["label"], "Prod backup gate")
+        self.assertEqual(evidence_check["status"], "fail")
+        self.assertIn("failed", evidence_check["detail"])
 
     def test_launchplane_previews_ingest_pr_event_persists_preview_enablement_record(self) -> None:
         runner = CliRunner()
