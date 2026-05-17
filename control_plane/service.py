@@ -1449,11 +1449,10 @@ class OdooPreviewVerificationRequest(BaseModel):
             return ()
         if isinstance(value, str):
             raw_values: tuple[object, ...] = (value,)
+        elif isinstance(value, (list, tuple)):
+            raw_values = tuple(value)
         else:
-            try:
-                raw_values = tuple(cast(Iterable[object], value))
-            except TypeError as exc:
-                raise ValueError("Odoo preview verification checked_urls must be a list.") from exc
+            raise ValueError("Odoo preview verification checked_urls must be a list.")
         if any(not isinstance(item, str) for item in raw_values):
             raise ValueError("Odoo preview verification checked_urls must be strings.")
         checked_urls = tuple(item.strip() for item in cast(tuple[str, ...], raw_values))
