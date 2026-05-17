@@ -37,6 +37,7 @@ from control_plane.contracts.deployment_record import DeploymentRecord
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_id_record import DokployTargetIdRecord
 from control_plane.contracts.dokploy_target_record import DokployTargetRecord
+from control_plane.contracts.driver_descriptor import DriverContextView
 from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.every_code_work_request import build_every_code_work_request_id
 from control_plane.contracts.github_pull_request_event import GitHubPullRequestEvent
@@ -11090,9 +11091,9 @@ def service_inspect_config_boundary(control_plane_root: Path | None) -> None:
     click.echo(json.dumps(payload, indent=2, sort_keys=True))
 
 
-def _first_driver_payload(view_payload: object, *, driver_id: str) -> dict[str, object] | None:
-    if not hasattr(view_payload, "drivers"):
-        return None
+def _first_driver_payload(
+    view_payload: DriverContextView, *, driver_id: str
+) -> dict[str, object] | None:
     for driver_view in view_payload.drivers:
         if getattr(driver_view, "driver_id", "") == driver_id:
             return _json_object(driver_view.model_dump(mode="json"))
