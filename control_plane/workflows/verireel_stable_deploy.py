@@ -11,6 +11,7 @@ from control_plane import runtime_environments as control_plane_runtime_environm
 from control_plane.contracts.deployment_record import ResolvedTargetEvidence
 from control_plane.contracts.dokploy_target_record import DokployTargetType
 from control_plane.contracts.promotion_record import HealthcheckEvidence, ReleaseStatus
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.ship_request import ShipRequest
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.dokploy_deploy import execute_dokploy_artifact_deploy
@@ -91,6 +92,26 @@ def _expected_build_revision(request: VeriReelStableDeployRequest) -> str:
 
 def _expected_build_tag(request: VeriReelStableDeployRequest) -> str:
     return request.expected_build_tag.strip() or _artifact_tag(request.artifact_id)
+
+
+def _build_runtime_identity(
+    *,
+    request: VeriReelStableDeployRequest,
+    ship_request: ShipRequest,
+    deployment_record_id: str,
+    deployed_at: str = "",
+) -> RuntimeIdentity:
+    return RuntimeIdentity(
+        product="verireel",
+        context=request.context,
+        instance=request.instance,
+        environment_kind="stable",
+        deployment_record_id=deployment_record_id,
+        artifact_id=ship_request.artifact_id,
+        source_git_ref=ship_request.source_git_ref,
+        image_reference=ship_request.artifact_id,
+        deployed_at=deployed_at,
+    )
 
 
 def _resolve_deploy_mode(*, configured_ship_mode: str, target_type: DokployTargetType) -> str:
@@ -187,6 +208,7 @@ def _execute_dokploy_deploy(
     ship_request: ShipRequest,
     resolved_target: ResolvedTargetEvidence,
     deploy_timeout_seconds: int,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> None:
     host, token = control_plane_dokploy.read_dokploy_config(control_plane_root=control_plane_root)
     execute_dokploy_artifact_deploy(
@@ -195,6 +217,7 @@ def _execute_dokploy_deploy(
         ship_request=ship_request,
         resolved_target=resolved_target,
         deploy_timeout_seconds=deploy_timeout_seconds,
+        runtime_identity=runtime_identity,
     )
 
 
@@ -268,12 +291,18 @@ def execute_verireel_stable_deploy(
         )
     )
 
+    runtime_identity = _build_runtime_identity(
+        request=request,
+        ship_request=ship_request,
+        deployment_record_id=record_id,
+    )
     try:
         _execute_dokploy_deploy(
             control_plane_root=control_plane_root,
             ship_request=ship_request,
             resolved_target=resolved_target,
             deploy_timeout_seconds=deploy_timeout_seconds,
+            runtime_identity=runtime_identity,
         )
     except click.ClickException as exc:
         finished_at = utc_now_timestamp()
@@ -321,6 +350,7 @@ def execute_verireel_stable_deploy(
                 started_at=started_at,
                 finished_at=finished_at,
                 resolved_target=resolved_target,
+                runtime_identity=runtime_identity,
                 destination_health=health_evidence_from_rollout(
                     result=failed_rollout_result,
                     timeout_seconds=request.rollout_timeout_seconds,
@@ -350,6 +380,12 @@ def execute_verireel_stable_deploy(
             started_at=started_at,
             finished_at=finished_at,
             resolved_target=resolved_target,
+            runtime_identity=_build_runtime_identity(
+                request=request,
+                ship_request=ship_request,
+                deployment_record_id=record_id,
+                deployed_at=finished_at,
+            ),
             destination_health=health_evidence_from_rollout(
                 result=rollout_result,
                 timeout_seconds=request.rollout_timeout_seconds,

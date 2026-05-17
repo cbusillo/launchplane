@@ -77,15 +77,19 @@ an ORM column/table or remains only in the evidence payload.
   evidence stay payload-only.
 - Deployment: modeled fields are `record_id`, `context`, `instance`,
   `artifact_id`, `source_git_ref`, deploy timestamps, and an optional structured
-  runtime identity. Resolved provider evidence, health detail, and post-deploy
-  product facts stay payload-only.
+  expected runtime identity. Destination health evidence may also record an
+  observed runtime identity and classify it as `match`, `mismatch`, `missing`,
+  `unverifiable`, or `unchecked`. Resolved provider evidence, health detail, and
+  post-deploy product facts stay payload-only.
 - Promotion: modeled fields are `record_id`, `context`, `from_instance`,
   `to_instance`, `artifact_id`, and deploy timestamps. Rollback annotations,
   backup evidence detail, and provider health envelopes stay payload-only.
 - Inventory: modeled fields are `context`, `instance`, `artifact_id`,
   `source_git_ref`, `updated_at`, linked deployment/promotion ids, and the
-  expected runtime identity copied from the current deployment record. Full
-  deploy evidence and product-specific live facts stay payload-only.
+  expected runtime identity copied from the current deployment record. Inventory
+  carries the destination health runtime-identity evidence from that deployment
+  so read models can show whether the live app reported the expected breadcrumb.
+  Full deploy evidence and product-specific live facts stay payload-only.
 - Preview: modeled fields are `preview_id`, `context`, `anchor_repo`,
   `anchor_pr_number`, `state`, and `updated_at`. Canonical URLs, lifecycle
   notes, and provider route evidence stay payload-only.

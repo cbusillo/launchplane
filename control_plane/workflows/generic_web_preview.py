@@ -20,6 +20,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
     ProductLaneProfile,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.runtime_key_safety_policy import (
     RuntimeKeySafetyPolicyRecord,
     RuntimeKeySafetyTarget,
@@ -31,7 +32,7 @@ from control_plane.runtime_key_safety import (
     latest_active_runtime_key_safety_policy,
 )
 from control_plane.workflows.preview_desired_state import discover_github_preview_desired_state
-from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 
 
 _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
@@ -311,6 +312,33 @@ def _anchor_repo(repository: str) -> str:
     if not separator or not owner.strip() or not repo.strip() or "/" in repo.strip():
         raise click.ClickException("GitHub repository must use owner/repo format.")
     return repo.strip()
+
+
+def _build_preview_runtime_identity(
+    *,
+    profile: "LaunchplaneProductProfileRecord",
+    preview_slug: str,
+    image_reference: str,
+    anchor_head_sha: str,
+    deployed_at: str = "",
+) -> RuntimeIdentity | None:
+    if not anchor_head_sha.strip():
+        return None
+    return RuntimeIdentity(
+        product=profile.product,
+        context=profile.preview.context,
+        instance=preview_slug,
+        environment_kind="preview",
+        deployment_record_id=generate_deployment_record_id(
+            context_name=profile.preview.context,
+            instance_name=preview_slug,
+        ),
+        artifact_id=image_reference,
+        source_git_ref=anchor_head_sha,
+        image_reference=image_reference,
+        preview_id=preview_slug,
+        deployed_at=deployed_at,
+    )
 
 
 def _preview_slug_prefix(slug_template: str) -> str:
@@ -904,6 +932,7 @@ def _render_preview_env_text(
     profile: LaunchplaneProductProfileRecord,
     template_application: JsonObject,
     preview_url: str,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> str:
     template_env = control_plane_dokploy.parse_dokploy_env_text(
         str(template_application.get("env") or "")
@@ -919,6 +948,8 @@ def _render_preview_env_text(
         updates[key] = preview_url
     for key in profile.preview.preview_domain_env_keys:
         updates[key] = preview_host
+    if runtime_identity is not None:
+        updates.update(runtime_identity_env(runtime_identity))
     return control_plane_dokploy.render_dokploy_env_text_with_overrides(
         "",
         updates=updates,
@@ -933,6 +964,7 @@ def _render_odoo_compose_stage_preview_env_text(
     template_payload: JsonObject,
     preview_url: str,
     image_reference: str,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> str:
     template_env = control_plane_dokploy.parse_dokploy_env_text(
         str(template_payload.get("env") or "")
@@ -952,6 +984,8 @@ def _render_odoo_compose_stage_preview_env_text(
         desired_env[key] = preview_url
     for key in profile.preview.preview_domain_env_keys:
         desired_env[key] = preview_host
+    if runtime_identity is not None:
+        desired_env.update(runtime_identity_env(runtime_identity))
     return control_plane_dokploy.serialize_dokploy_env_text(desired_env)
 
 
@@ -1527,6 +1561,12 @@ def execute_generic_web_preview_refresh(
                 target_definition=target_definition,
                 template_payload=template_application,
                 preview_url=preview_url,
+                runtime_identity=_build_preview_runtime_identity(
+                    profile=resolved_profile,
+                    preview_slug=request.preview_slug,
+                    image_reference=request.image_reference,
+                    anchor_head_sha=request.anchor_head_sha,
+                ),
             )
             finished_at = utc_now_timestamp()
             refresh_status: Literal["pass", "blocked", "fail"] = (
@@ -1553,10 +1593,17 @@ def execute_generic_web_preview_refresh(
             template_application=template_application,
             preview_slug=request.preview_slug,
         )
+        preview_runtime_identity = _build_preview_runtime_identity(
+            profile=resolved_profile,
+            preview_slug=request.preview_slug,
+            image_reference=request.image_reference,
+            anchor_head_sha=request.anchor_head_sha,
+        )
         env_text = _render_preview_env_text(
             profile=resolved_profile,
             template_application=template_application,
             preview_url=preview_url,
+            runtime_identity=preview_runtime_identity,
         )
         application, created_application = _ensure_application(
             host=host,
@@ -1667,6 +1714,7 @@ def _execute_odoo_compose_stage_preview_refresh(
     target_definition: control_plane_dokploy.DokployTargetDefinition,
     template_payload: JsonObject,
     preview_url: str,
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> tuple[str, GenericWebPreviewSmokeResult]:
     _enforce_preview_copied_runtime_key_safety(
         record_store=record_store,
@@ -1699,6 +1747,7 @@ def _execute_odoo_compose_stage_preview_refresh(
         template_payload=template_payload,
         preview_url=preview_url,
         image_reference=request.image_reference,
+        runtime_identity=runtime_identity,
     )
     control_plane_dokploy.update_dokploy_target_env(
         host=host,

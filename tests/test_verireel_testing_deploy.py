@@ -94,6 +94,16 @@ class VeriReelTestingDeployWorkflowTests(unittest.TestCase):
             self.assertEqual(deployment.deploy.started_at, "2026-04-20T18:20:00Z")
             self.assertEqual(deployment.deploy.finished_at, "2026-04-20T18:21:15Z")
             self.assertEqual(deployment.destination_health.status, "pass")
+            self.assertIsNotNone(deployment.runtime_identity)
+            assert deployment.runtime_identity is not None
+            self.assertEqual(deployment.runtime_identity.product, "verireel")
+            self.assertEqual(deployment.runtime_identity.context, "verireel")
+            self.assertEqual(deployment.runtime_identity.instance, "testing")
+            self.assertEqual(
+                deployment.runtime_identity.deployment_record_id,
+                "deployment-verireel-testing-run-12345-attempt-1",
+            )
+            self.assertEqual(deployment.runtime_identity.source_git_ref, request.source_git_ref)
             self.assertEqual(result.rollout_status, "pass")
 
     def test_execute_writes_failed_deployment_record(self) -> None:

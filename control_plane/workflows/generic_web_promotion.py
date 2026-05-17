@@ -3,9 +3,7 @@ from __future__ import annotations
 import time
 from pathlib import Path
 from typing import Literal, Protocol
-from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
 
 import click
 from pydantic import BaseModel, ConfigDict, Field, model_validator
@@ -26,6 +24,7 @@ from control_plane.contracts.promotion_record import (
     PromotionRecord,
     ReleaseStatus,
 )
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.workflows.generic_web_deploy import (
     GenericWebDeployStore,
     GenericWebDeployRequest,
@@ -37,6 +36,10 @@ from control_plane.workflows.inventory import build_environment_inventory
 from control_plane.workflows.launchplane import (
     github_api_request,
     resolve_launchplane_github_token,
+)
+from control_plane.workflows.runtime_identity_health import (
+    healthcheck_evidence_with_runtime_identity,
+    wait_for_healthcheck_with_retry,
 )
 from control_plane.workflows.promote import generate_promotion_record_id
 from control_plane.workflows.ship import utc_now_timestamp
@@ -273,7 +276,10 @@ def execute_generic_web_prod_promotion(
     )
     if deploy_result.deploy_status == "pass":
         try:
-            destination_health = _verify_health_evidence(destination_health)
+            destination_health = _verify_health_evidence_with_identity(
+                destination_health,
+                expected_runtime_identity=deployment_record.runtime_identity,
+            )
         except click.ClickException as error:
             destination_health = _mark_health_failed(destination_health)
             _write_deployment_health(
@@ -476,21 +482,12 @@ def _health_evidence_for_lane(
 
 
 def _wait_for_healthcheck(*, url: str, timeout_seconds: int) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    last_error = ""
-    while time.monotonic() < deadline:
-        try:
-            request = Request(url, method="GET")
-            with urlopen(request, timeout=min(5, timeout_seconds)) as response:
-                if 200 <= response.status < 300:
-                    return
-                last_error = f"http {response.status}"
-        except HTTPError as error:
-            last_error = f"http {error.code}"
-        except URLError as error:
-            last_error = str(error.reason)
-        time.sleep(1)
-    raise click.ClickException(f"Healthcheck failed for {url}: {last_error or 'timeout'}")
+    wait_for_healthcheck_with_retry(
+        url=url,
+        timeout_seconds=timeout_seconds,
+        sleep=time.sleep,
+        monotonic=time.monotonic,
+    )
 
 
 def _verify_health_evidence(evidence: HealthcheckEvidence) -> HealthcheckEvidence:
@@ -506,6 +503,45 @@ def _verify_health_evidence(evidence: HealthcheckEvidence) -> HealthcheckEvidenc
                 urls=evidence.urls,
                 timeout_seconds=timeout_seconds,
                 status="pass",
+            )
+        except click.ClickException as error:
+            healthcheck_errors.append(str(error))
+        except (TimeoutError, OSError) as error:
+            healthcheck_errors.append(str(error))
+    raise click.ClickException(
+        "Healthcheck verification failed for all generic web URLs:\n"
+        + "\n".join(healthcheck_errors)
+    )
+
+
+def _verify_health_evidence_with_identity(
+    evidence: HealthcheckEvidence,
+    *,
+    expected_runtime_identity: RuntimeIdentity | None,
+) -> HealthcheckEvidence:
+    if evidence.status == "skipped" or not evidence.urls:
+        return evidence
+    if expected_runtime_identity is None:
+        return _verify_health_evidence(evidence)
+    timeout_seconds = evidence.timeout_seconds or DEFAULT_GENERIC_WEB_HEALTH_TIMEOUT_SECONDS
+    healthcheck_errors: list[str] = []
+    for health_url in evidence.urls:
+        try:
+            healthcheck_pass = wait_for_healthcheck_with_retry(
+                url=health_url,
+                timeout_seconds=timeout_seconds,
+                sleep=time.sleep,
+                monotonic=time.monotonic,
+            )
+            return healthcheck_evidence_with_runtime_identity(
+                HealthcheckEvidence(
+                    verified=True,
+                    urls=evidence.urls,
+                    timeout_seconds=timeout_seconds,
+                    status="pass",
+                ),
+                expected_runtime_identity=expected_runtime_identity,
+                healthcheck_pass=healthcheck_pass,
             )
         except click.ClickException as error:
             healthcheck_errors.append(str(error))

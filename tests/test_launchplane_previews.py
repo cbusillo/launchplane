@@ -31,6 +31,7 @@ from control_plane.contracts.preview_request_metadata import (
     LaunchplanePreviewRequestParseStatus,
 )
 from control_plane.contracts.release_tuple_record import ReleaseTupleRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.promotion_record import (
     ArtifactIdentityReference,
     BackupGateEvidence,
@@ -625,6 +626,16 @@ ODOO_DB_PASSWORD = "local-secret"
                     )
 
     def test_build_preview_generation_record_links_anchor_and_sequence(self) -> None:
+        runtime_identity = RuntimeIdentity(
+            product="odoo-tenant-opw",
+            context="opw-preview",
+            instance="pr-123",
+            environment_kind="preview",
+            deployment_record_id="deployment-preview-123",
+            artifact_id="artifact-opw-124",
+            source_git_ref="aaaa1111",
+            preview_id="preview-opw-tenant-opw-pr-123",
+        )
         generation_record = build_preview_generation_record(
             preview_id="preview-opw-tenant-opw-pr-123",
             sequence=2,
@@ -642,6 +653,7 @@ ODOO_DB_PASSWORD = "local-secret"
             overall_health_status="fail",
             failure_stage="deploying",
             failure_summary="Replacement generation failed during deploy.",
+            runtime_identity=runtime_identity,
         )
 
         self.assertEqual(
@@ -651,6 +663,7 @@ ODOO_DB_PASSWORD = "local-secret"
         self.assertEqual(generation_record.anchor_summary.repo, "tenant-opw")
         self.assertEqual(generation_record.anchor_summary.pr_number, 123)
         self.assertEqual(generation_record.failure_stage, "deploying")
+        self.assertEqual(generation_record.runtime_identity, runtime_identity)
 
     def test_apply_generation_requested_transition_keeps_existing_serving_generation(self) -> None:
         preview = _preview_record(
