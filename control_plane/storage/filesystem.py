@@ -52,6 +52,9 @@ RecordModel = TypeVar("RecordModel", bound=BaseModel)
 
 
 class FilesystemRecordStore:
+    odoo_target_replacement_reservation_settle_timeout_seconds = 30.0
+    odoo_target_replacement_reservation_poll_seconds = 0.01
+
     def __init__(self, state_dir: Path) -> None:
         self.state_dir = state_dir
 
@@ -661,16 +664,22 @@ class FilesystemRecordStore:
                 reservation_file.flush()
                 os.fsync(reservation_file.fileno())
         except FileExistsError:
+            stale_reservation_deadline = (
+                time.monotonic() + self.odoo_target_replacement_reservation_settle_timeout_seconds
+            )
             reserved_operation_id = self._wait_for_odoo_stable_target_replacement_reservation_owner(
-                reservation_path
+                reservation_path, stale_reservation_deadline
             )
             if reserved_operation_id:
                 reserved_operation = (
                     self._wait_for_odoo_stable_target_replacement_reserved_operation(
-                        reserved_operation_id
+                        reserved_operation_id, stale_reservation_deadline
                     )
                 )
-                if reserved_operation.status in {"pending", "running"}:
+                if reserved_operation is not None and reserved_operation.status in {
+                    "pending",
+                    "running",
+                }:
                     return reserved_operation, False
             reservation_path.unlink(missing_ok=True)
             return self.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
@@ -679,9 +688,10 @@ class FilesystemRecordStore:
         self.write_odoo_stable_target_replacement_operation_record(record)
         return record, True
 
-    @staticmethod
     def _wait_for_odoo_stable_target_replacement_reservation_owner(
+        self,
         reservation_path: Path,
+        deadline: float,
     ) -> str:
         while True:
             try:
@@ -690,16 +700,20 @@ class FilesystemRecordStore:
                 return ""
             if reserved_operation_id:
                 return reserved_operation_id
-            time.sleep(0.01)
+            if time.monotonic() >= deadline:
+                return ""
+            time.sleep(self.odoo_target_replacement_reservation_poll_seconds)
 
     def _wait_for_odoo_stable_target_replacement_reserved_operation(
-        self, operation_id: str
-    ) -> OdooStableTargetReplacementOperationRecord:
+        self, operation_id: str, deadline: float
+    ) -> OdooStableTargetReplacementOperationRecord | None:
         while True:
             try:
                 return self.read_odoo_stable_target_replacement_operation_record(operation_id)
             except (FileNotFoundError, JSONDecodeError):
-                time.sleep(0.01)
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(self.odoo_target_replacement_reservation_poll_seconds)
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:
         return self._write_model("backup_gates", record.record_id, record)
