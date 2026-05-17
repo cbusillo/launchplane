@@ -1,0 +1,127 @@
+---
+name: Odoo Website Bootstrap Override
+
+"on":
+  workflow_dispatch:
+    inputs:
+      product:
+        description: Odoo product profile key.
+        required: true
+        default: odoo-tenant-cm
+        type: string
+      context:
+        description: Launchplane Odoo context.
+        required: true
+        default: cm
+        type: choice
+        options:
+          - cm
+      instance:
+        description: Stable Odoo instance to update.
+        required: true
+        default: testing
+        type: choice
+        options:
+          - testing
+      website_bootstrap_payload:
+        description: Website bootstrap JSON object rendered from the tenant bootstrap settings.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
+  cancel-in-progress: false
+
+jobs:
+  write:
+    runs-on:
+      - self-hosted
+      - ${{ vars.LAUNCHPLANE_RUNNER_LABEL }}
+    env:
+      PRODUCT: ${{ inputs.product }}
+      CONTEXT_NAME: ${{ inputs.context }}
+      INSTANCE: ${{ inputs.instance }}
+      WEBSITE_BOOTSTRAP_PAYLOAD: ${{ inputs.website_bootstrap_payload }}
+      LAUNCHPLANE_SERVICE_URL: ${{ vars.LAUNCHPLANE_PUBLIC_URL }}
+      LAUNCHPLANE_SERVICE_AUDIENCE: launchplane.shinycomputers.com
+    steps:
+      - name: Validate runtime inputs
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${PRODUCT:?Missing product input}"
+          : "${CONTEXT_NAME:?Missing context input}"
+          : "${INSTANCE:?Missing instance input}"
+          : "${WEBSITE_BOOTSTRAP_PAYLOAD:?Missing website bootstrap payload input}"
+          if [ "$CONTEXT_NAME" != "cm" ] || [ "$INSTANCE" != "testing" ]; then
+            echo 'This workflow currently writes only cm/testing Odoo website bootstrap overrides.' >&2
+            exit 1
+          fi
+          if [ -z "${LAUNCHPLANE_SERVICE_URL:-}" ] || [ -z "${LAUNCHPLANE_SERVICE_AUDIENCE:-}" ]; then
+            echo 'Missing Launchplane service URL or OIDC audience repository variable.' >&2
+            exit 1
+          fi
+          jq -e 'type == "object"' <<< "$WEBSITE_BOOTSTRAP_PAYLOAD" >/dev/null
+
+      - name: Write website bootstrap override
+        shell: bash
+        run: |
+          set -euo pipefail
+          oidc_token="$({
+            curl -fsSL \
+              -H "Authorization: bearer ${ACTIONS_ID_TOKEN_REQUEST_TOKEN}" \
+              "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=${LAUNCHPLANE_SERVICE_AUDIENCE}" \
+            | jq -r '.value'
+          })"
+          website_bootstrap="$({
+            jq -c . <<< "$WEBSITE_BOOTSTRAP_PAYLOAD"
+          })"
+          payload="$({
+            jq -n \
+              --arg product "$PRODUCT" \
+              --arg context "$CONTEXT_NAME" \
+              --arg instance "$INSTANCE" \
+              --argjson website_bootstrap "$website_bootstrap" \
+              '{
+                schema_version: 1,
+                product: $product,
+                override: {
+                  schema_version: 1,
+                  product: $product,
+                  context: $context,
+                  instance: $instance,
+                  website_bootstrap: $website_bootstrap,
+                  source_label: "github-actions:odoo-website-bootstrap-override"
+                }
+              }'
+          })"
+          status_code="$({
+            curl -sS \
+              -o odoo-website-bootstrap-override.json \
+              -w '%{http_code}' \
+              -X POST \
+              -H "Authorization: Bearer ${oidc_token}" \
+              -H 'Content-Type: application/json' \
+              -H "Idempotency-Key: odoo-website-bootstrap-override:${PRODUCT}:${CONTEXT_NAME}:${INSTANCE}:${GITHUB_RUN_ID}:${GITHUB_RUN_ATTEMPT}" \
+              --data "$payload" \
+              "${LAUNCHPLANE_SERVICE_URL}/v1/drivers/odoo/website-bootstrap-override"
+          })"
+          jq . odoo-website-bootstrap-override.json
+          if [ "$status_code" != "202" ]; then
+            echo "Launchplane Odoo website-bootstrap override failed with HTTP ${status_code}." >&2
+            exit 1
+          fi
+          if [ "$(jq -r '.status' odoo-website-bootstrap-override.json)" != "accepted" ]; then
+            echo 'Launchplane Odoo website-bootstrap override was not accepted.' >&2
+            exit 1
+          fi
+
+      - name: Upload override result
+        uses: actions/upload-artifact@v7
+        with:
+          name: odoo-website-bootstrap-override-${{ inputs.product }}-${{ inputs.context }}-${{ inputs.instance }}
+          path: odoo-website-bootstrap-override.json
