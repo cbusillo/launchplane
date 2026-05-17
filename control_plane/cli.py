@@ -8,7 +8,7 @@ import subprocess
 import time
 from json import JSONDecodeError
 from pathlib import Path
-from typing import Literal, cast, overload
+from typing import Literal, Protocol, cast, overload
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
@@ -367,13 +367,35 @@ def _normalize_dokploy_target_type(target_type: str) -> Literal["compose", "appl
     raise click.ClickException("Dokploy target type must be compose or application.")
 
 
-def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
+class _PolicyRecordSummaryFields(Protocol):
+    @property
+    def record_id(self) -> str: ...
+
+    @property
+    def status(self) -> str: ...
+
+    @property
+    def source(self) -> str: ...
+
+    @property
+    def updated_at(self) -> str: ...
+
+    @property
+    def policy_sha256(self) -> str: ...
+
+
+def _policy_record_summary_base(record: _PolicyRecordSummaryFields) -> dict[str, object]:
     return {
         "record_id": record.record_id,
         "status": record.status,
         "source": record.source,
         "updated_at": record.updated_at,
         "policy_sha256": record.policy_sha256,
+    }
+
+
+def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict[str, object]:
+    return _policy_record_summary_base(record) | {
         "github_actions_rule_count": len(record.policy.github_actions),
         "github_humans_rule_count": len(record.policy.github_humans),
     }
@@ -382,24 +404,14 @@ def _summarize_authz_policy_record(record: LaunchplaneAuthzPolicyRecord) -> dict
 def _summarize_runtime_key_safety_policy_record(
     record: RuntimeKeySafetyPolicyRecord,
 ) -> dict[str, object]:
-    return {
-        "record_id": record.record_id,
-        "status": record.status,
-        "source": record.source,
-        "updated_at": record.updated_at,
-        "policy_sha256": record.policy_sha256,
+    return _policy_record_summary_base(record) | {
         "rule_count": len(record.rules),
         "binding_keys": [rule.binding_key for rule in record.rules],
     }
 
 
 def _summarize_merge_train_policy_record(record: MergeTrainPolicyRecord) -> dict[str, object]:
-    return {
-        "record_id": record.record_id,
-        "status": record.status,
-        "source": record.source,
-        "updated_at": record.updated_at,
-        "policy_sha256": record.policy_sha256,
+    return _policy_record_summary_base(record) | {
         "repository_count": len(record.policy.policies),
         "policy_keys": [
             repository_policy.policy_key for repository_policy in record.policy.policies
