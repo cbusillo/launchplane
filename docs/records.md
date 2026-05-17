@@ -404,9 +404,9 @@ state/
   reusing it for a different request is rejected; an active `pending` or
   `running` operation blocks another apply for the same product/context/instance
   through a storage-owned lane reservation. Filesystem reservations wait briefly
-  for a concurrent owner and operation record to settle, then clear abandoned
-  empty or orphaned reservations so an interrupted writer cannot block the lane
-  forever.
+  for a concurrent owner id to settle, then give that owner record its own
+  bounded settle window before clearing abandoned empty or orphaned reservations
+  so an interrupted writer cannot block the lane forever.
 - Odoo prod rollback writes a normal deployment record for the rollback deploy,
   refreshes prod inventory, mints the prod release tuple from the selected
   artifact manifest, and annotates the current prod promotion record's

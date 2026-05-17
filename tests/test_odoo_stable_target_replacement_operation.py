@@ -5,6 +5,7 @@ from json import JSONDecodeError
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Event, Lock
+from unittest.mock import patch
 
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -308,6 +309,65 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             self.assertTrue(first_created)
             self.assertEqual(second_record.operation_id, first.operation_id)
             self.assertFalse(second_created)
+            self.assertEqual(len(active_records), 1)
+
+    def test_filesystem_store_restarts_settle_window_after_owner_id_appears(self) -> None:
+        class LateOwnerFilesystemRecordStore(FilesystemRecordStore):
+            odoo_target_replacement_reservation_settle_timeout_seconds = 0.08
+            odoo_target_replacement_reservation_poll_seconds = 0.001
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = LateOwnerFilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            owner = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-first")
+            )
+            requester = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-cm-testing-second"),
+                    "idempotency_key": "replacement-cm-testing-second",
+                    "idempotency_scope": "caller-second",
+                }
+            )
+            reservation_path = _lane_reservation_path(store, owner)
+            reservation_path.parent.mkdir(parents=True, exist_ok=True)
+            reservation_path.write_text("", encoding="utf-8")
+
+            monotonic_time = 0.0
+            owner_id_published = False
+            owner_record_published = False
+
+            def monotonic() -> float:
+                return monotonic_time
+
+            def sleep(seconds: float) -> None:
+                nonlocal monotonic_time, owner_id_published, owner_record_published
+                monotonic_time += seconds
+                if not owner_id_published and monotonic_time >= 0.06:
+                    reservation_path.write_text(owner.operation_id, encoding="utf-8")
+                    owner_id_published = True
+                if not owner_record_published and monotonic_time >= 0.10:
+                    store.write_odoo_stable_target_replacement_operation_record(owner)
+                    owner_record_published = True
+
+            with (
+                patch("control_plane.storage.filesystem.time.monotonic", monotonic),
+                patch("control_plane.storage.filesystem.time.sleep", sleep),
+            ):
+                requester_record, requester_created = (
+                    store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
+                        requester
+                    )
+                )
+
+            active_records = store.list_odoo_stable_target_replacement_operation_records(
+                product="odoo-tenant-cm",
+                context_name="cm",
+                instance_name="testing",
+                statuses=("pending", "running"),
+            )
+
+            self.assertEqual(requester_record.operation_id, owner.operation_id)
+            self.assertFalse(requester_created)
             self.assertEqual(len(active_records), 1)
 
     def test_filesystem_store_recovers_empty_crashed_lane_reservation(self) -> None:

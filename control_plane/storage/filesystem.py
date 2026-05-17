@@ -671,9 +671,13 @@ class FilesystemRecordStore:
                 reservation_path, stale_reservation_deadline
             )
             if reserved_operation_id:
+                owner_record_deadline = (
+                    time.monotonic()
+                    + self.odoo_target_replacement_reservation_settle_timeout_seconds
+                )
                 reserved_operation = (
                     self._wait_for_odoo_stable_target_replacement_reserved_operation(
-                        reserved_operation_id, stale_reservation_deadline
+                        reserved_operation_id, owner_record_deadline
                     )
                 )
                 if reserved_operation is not None and reserved_operation.status in {
