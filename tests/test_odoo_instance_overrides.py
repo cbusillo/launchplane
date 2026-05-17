@@ -248,6 +248,93 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         self.assertEqual(stored_record.website_bootstrap.name, "OPW")
         self.assertEqual(stored_record.website_bootstrap.routes[0].url, "/shop")
 
+    def test_cli_put_website_bootstrap_adds_deploy_and_promotion_apply_phases(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temp_dir = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temp_dir / "launchplane.sqlite3")
+            payload_file = temp_dir / "website-bootstrap.json"
+            payload_file.write_text(
+                json.dumps(
+                    {
+                        "tenant": "opw",
+                        "name": "OPW",
+                        "canonical_url": "https://opw-testing.example.com",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="testing",
+                    apply_on=("manual",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal", value="https://opw-testing.example.com"
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-17T00:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.close()
+            runner = CliRunner()
+            put_bootstrap_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-website-bootstrap",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--payload-file",
+                    str(payload_file),
+                ],
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="testing"
+            )
+            store.close()
+
+        self.assertEqual(put_bootstrap_result.exit_code, 0, msg=put_bootstrap_result.output)
+        self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
+
+    def test_cli_put_website_bootstrap_reports_schema_errors(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            temp_dir = Path(temporary_directory_name)
+            database_url = _sqlite_database_url(temp_dir / "launchplane.sqlite3")
+            payload_file = temp_dir / "website-bootstrap.json"
+            payload_file.write_text(json.dumps({"tenant": "opw"}), encoding="utf-8")
+            runner = CliRunner()
+            put_bootstrap_result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-website-bootstrap",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "testing",
+                    "--payload-file",
+                    str(payload_file),
+                ],
+            )
+
+        self.assertNotEqual(put_bootstrap_result.exit_code, 0)
+        self.assertIn("Invalid Odoo website bootstrap payload", put_bootstrap_result.output)
+        self.assertIn("name", put_bootstrap_result.output)
+
     def test_cli_mark_apply_updates_result_metadata(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
