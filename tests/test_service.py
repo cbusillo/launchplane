@@ -131,6 +131,7 @@ from control_plane.workflows.generic_web_preview import (
     GenericWebPreviewDestroyResult,
     GenericWebPreviewInventoryItem,
     GenericWebPreviewInventoryResult,
+    GenericWebPreviewRefreshRequest,
     GenericWebPreviewRefreshResult,
     GenericWebPreviewSmokeCheck,
     GenericWebPreviewSmokeResult,
@@ -12287,6 +12288,59 @@ class LaunchplaneServiceTests(unittest.TestCase):
                 _, kwargs = refresh.call_args
                 self.assertEqual(kwargs["profile"].product, "sellyouroutboard")
                 self.assertEqual(kwargs["request"].preview_url, "https://pr-42.example.test")
+
+    def test_generic_web_preview_refresh_mutation_builder_records_smoke_failure(
+        self,
+    ) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(_product_profile_payload())
+        driver_result = GenericWebPreviewRefreshResult.model_validate(
+            {
+                "refresh_status": "fail",
+                "refresh_started_at": "2026-05-03T15:00:00Z",
+                "refresh_finished_at": "2026-05-03T15:05:00Z",
+                "product": "sellyouroutboard",
+                "context": "sellyouroutboard-testing",
+                "preview_slug": "pr-42",
+                "application_name": "sellyouroutboard-pr-42",
+                "application_id": "app-preview",
+                "preview_url": "https://pr-42.example.test",
+                "smoke": {
+                    "smoke_status": "fail",
+                    "checked_at": "2026-05-03T15:04:55Z",
+                    "checks": [
+                        {
+                            "check_id": "health",
+                            "status": "fail",
+                            "message": "Health check failed.",
+                        }
+                    ],
+                    "failure_summary": "Smoke failed on /api/health.",
+                },
+            }
+        )
+        preview_request, generation_request = (
+            control_plane_service._generic_web_preview_refresh_mutation_requests(
+                request=GenericWebPreviewRefreshRequest.model_validate(
+                    {
+                        "schema_version": 1,
+                        "product": "sellyouroutboard",
+                        "preview_slug": "pr-42",
+                        "preview_url": "https://pr-42.request.example.test",
+                        "image_reference": "ghcr.io/cbusillo/sellyouroutboard:sha",
+                    }
+                ),
+                driver_result=driver_result,
+                profile=profile,
+            )
+        )
+
+        self.assertEqual(preview_request.state, "failed")
+        self.assertEqual(preview_request.canonical_url, "https://pr-42.example.test")
+        self.assertEqual(generation_request.state, "failed")
+        self.assertEqual(generation_request.deploy_status, "pass")
+        self.assertEqual(generation_request.verify_status, "fail")
+        self.assertEqual(generation_request.failure_stage, "verify")
+        self.assertEqual(generation_request.failure_summary, "Smoke failed on /api/health.")
 
     def test_generic_web_preview_refresh_route_accepts_omitted_preview_url(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

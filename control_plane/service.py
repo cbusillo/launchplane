@@ -6285,31 +6285,82 @@ def _generic_web_preview_anchor_head_sha(request: GenericWebPreviewRefreshReques
     return _image_reference_tail(request.image_reference) or request.image_reference.strip()
 
 
-def _apply_generic_web_preview_refresh_records(
-    *,
-    control_plane_root_path: Path,
-    record_store: object,
-    request: GenericWebPreviewRefreshRequest,
+def _generic_web_preview_refresh_timing(
     driver_result: GenericWebPreviewRefreshResult,
-    profile: LaunchplaneProductProfileRecord,
-) -> dict[str, object]:
-    if driver_result.refresh_status == "blocked":
-        return {}
-    anchor_pr_number = _generic_web_preview_anchor_pr_number(
-        request=request,
-        profile=profile,
-    )
+) -> tuple[str, str]:
     requested_at = (
         driver_result.refresh_started_at.strip() or driver_result.refresh_finished_at.strip()
     )
     finished_at = driver_result.refresh_finished_at.strip() or requested_at
+    return requested_at, finished_at
+
+
+def _generic_web_preview_refresh_failure_summary(
+    driver_result: GenericWebPreviewRefreshResult,
+) -> str:
+    smoke = driver_result.smoke
+    if smoke is not None and smoke.smoke_status == "fail" and smoke.failure_summary.strip():
+        return smoke.failure_summary.strip()
+    return driver_result.error_message.strip() or "Preview provisioning failed."
+
+
+@dataclass(frozen=True)
+class _GenericWebPreviewRefreshStates:
+    preview_state: Literal["pending", "active", "failed", "paused", "teardown_pending", "destroyed"]
+    generation_state: Literal[
+        "resolving", "building", "deploying", "verifying", "ready", "failed", "superseded"
+    ]
+    deploy_status: Literal["pending", "pass", "fail", "skipped"]
+    verify_status: Literal["pending", "pass", "fail", "skipped"]
+    overall_health_status: Literal["pending", "pass", "fail", "skipped"]
+    failure_stage: str
+
+
+def _generic_web_preview_refresh_states(
+    driver_result: GenericWebPreviewRefreshResult,
+) -> _GenericWebPreviewRefreshStates:
     refresh_passed = driver_result.refresh_status == "pass"
     smoke = driver_result.smoke
     smoke_passed = smoke is not None and smoke.smoke_status == "pass"
     smoke_failed = smoke is not None and smoke.smoke_status == "fail"
-    failure_summary = driver_result.error_message.strip() or "Preview provisioning failed."
-    if smoke is not None and smoke_failed and smoke.failure_summary.strip():
-        failure_summary = smoke.failure_summary.strip()
+    verify_status: Literal["pending", "pass", "fail", "skipped"] = "skipped"
+    if smoke_passed:
+        verify_status = "pass"
+    elif smoke_failed:
+        verify_status = "fail"
+    elif refresh_passed:
+        verify_status = "pending"
+    overall_health_status: Literal["pending", "pass", "fail", "skipped"] = "fail"
+    if smoke_passed:
+        overall_health_status = "pass"
+    elif smoke_failed:
+        overall_health_status = "fail"
+    elif refresh_passed:
+        overall_health_status = "pending"
+    return _GenericWebPreviewRefreshStates(
+        preview_state="active" if smoke_passed else "pending" if refresh_passed else "failed",
+        generation_state="ready" if smoke_passed else "verifying" if refresh_passed else "failed",
+        deploy_status="pass" if refresh_passed or smoke_failed else "fail",
+        verify_status=verify_status,
+        overall_health_status=overall_health_status,
+        failure_stage="" if refresh_passed else "verify" if smoke_failed else "provision",
+    )
+
+
+def _generic_web_preview_refresh_mutation_requests(
+    *,
+    request: GenericWebPreviewRefreshRequest,
+    driver_result: GenericWebPreviewRefreshResult,
+    profile: LaunchplaneProductProfileRecord,
+) -> tuple[PreviewMutationRequest, PreviewGenerationMutationRequest]:
+    anchor_pr_number = _generic_web_preview_anchor_pr_number(
+        request=request,
+        profile=profile,
+    )
+    requested_at, finished_at = _generic_web_preview_refresh_timing(driver_result)
+    states = _generic_web_preview_refresh_states(driver_result)
+    refresh_passed = driver_result.refresh_status == "pass"
+    failure_summary = _generic_web_preview_refresh_failure_summary(driver_result)
     preview_request = PreviewMutationRequest(
         context=profile.preview.context,
         anchor_repo=_generic_web_preview_anchor_repo(profile),
@@ -6320,7 +6371,7 @@ def _apply_generic_web_preview_refresh_records(
             anchor_pr_number=anchor_pr_number,
         ),
         canonical_url=driver_result.preview_url.strip() or request.preview_url.strip(),
-        state=("active" if smoke_passed else "pending" if refresh_passed else "failed"),
+        state=states.preview_state,
         created_at=requested_at,
         updated_at=finished_at,
         eligible_at=requested_at,
@@ -6331,36 +6382,38 @@ def _apply_generic_web_preview_refresh_records(
         anchor_pr_number=anchor_pr_number,
         anchor_pr_url=preview_request.anchor_pr_url,
         anchor_head_sha=_generic_web_preview_anchor_head_sha(request),
-        state=("ready" if smoke_passed else "verifying" if refresh_passed else "failed"),
+        state=states.generation_state,
         requested_reason="external_preview_refresh",
         requested_at=requested_at,
         started_at=requested_at,
-        ready_at=finished_at if smoke_passed else "",
-        finished_at=finished_at if smoke_passed or not refresh_passed else "",
+        ready_at=finished_at if states.generation_state == "ready" else "",
+        finished_at=finished_at if states.generation_state == "ready" or not refresh_passed else "",
         failed_at=finished_at if not refresh_passed else "",
         resolved_manifest_fingerprint=_generic_web_preview_manifest_fingerprint(request),
         artifact_id=request.image_reference,
-        deploy_status="pass" if refresh_passed or smoke_failed else "fail",
-        verify_status=(
-            "pass"
-            if smoke_passed
-            else "fail"
-            if smoke_failed
-            else "pending"
-            if refresh_passed
-            else "skipped"
-        ),
-        overall_health_status=(
-            "pass"
-            if smoke_passed
-            else "fail"
-            if smoke_failed
-            else "pending"
-            if refresh_passed
-            else "fail"
-        ),
-        failure_stage="" if refresh_passed else "verify" if smoke_failed else "provision",
+        deploy_status=states.deploy_status,
+        verify_status=states.verify_status,
+        overall_health_status=states.overall_health_status,
+        failure_stage=states.failure_stage,
         failure_summary="" if refresh_passed else failure_summary,
+    )
+    return preview_request, generation_request
+
+
+def _apply_generic_web_preview_refresh_records(
+    *,
+    control_plane_root_path: Path,
+    record_store: object,
+    request: GenericWebPreviewRefreshRequest,
+    driver_result: GenericWebPreviewRefreshResult,
+    profile: LaunchplaneProductProfileRecord,
+) -> dict[str, object]:
+    if driver_result.refresh_status == "blocked":
+        return {}
+    preview_request, generation_request = _generic_web_preview_refresh_mutation_requests(
+        request=request,
+        driver_result=driver_result,
+        profile=profile,
     )
     typed_record_store = cast(FilesystemRecordStore, record_store)
     return apply_launchplane_generation_evidence(
