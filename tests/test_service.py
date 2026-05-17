@@ -15,6 +15,7 @@ from typing import Any, Literal, cast
 from urllib.parse import parse_qs, urlparse
 from unittest.mock import patch
 
+from click import Command
 from click.testing import CliRunner
 
 from control_plane.cli import main
@@ -139,6 +140,7 @@ from control_plane.workflows.generic_web_preview import (
 
 StartResponse = Callable[[str, list[tuple[str, str]]], None]
 WsgiApp = Callable[[dict[str, object], StartResponse], Iterable[bytes]]
+CLI_MAIN = cast(Command, main)
 
 
 class _StubVerifier:
@@ -14450,7 +14452,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "service",
                     "inspect-data-freshness",
@@ -14491,7 +14493,7 @@ class LaunchplaneServiceTests(unittest.TestCase):
             )
 
             result = runner.invoke(
-                main,
+                CLI_MAIN,
                 [
                     "service",
                     "inspect-data-freshness",
