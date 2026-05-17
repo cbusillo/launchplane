@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping
-import json
 from pathlib import Path
 from typing import Literal, Protocol
 
