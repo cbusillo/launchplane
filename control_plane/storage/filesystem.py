@@ -660,7 +660,9 @@ class FilesystemRecordStore:
                 reservation_file.flush()
                 os.fsync(reservation_file.fileno())
         except FileExistsError:
-            reserved_operation_id = reservation_path.read_text(encoding="utf-8").strip()
+            reserved_operation_id = self._wait_for_odoo_stable_target_replacement_reservation_owner(
+                reservation_path
+            )
             if reserved_operation_id:
                 reserved_operation = (
                     self._wait_for_odoo_stable_target_replacement_reserved_operation(
@@ -680,6 +682,20 @@ class FilesystemRecordStore:
             )
         self.write_odoo_stable_target_replacement_operation_record(record)
         return record, True
+
+    @staticmethod
+    def _wait_for_odoo_stable_target_replacement_reservation_owner(
+        reservation_path: Path,
+    ) -> str:
+        deadline = time.monotonic() + 1.0
+        while True:
+            try:
+                reserved_operation_id = reservation_path.read_text(encoding="utf-8").strip()
+            except FileNotFoundError:
+                return ""
+            if reserved_operation_id or time.monotonic() >= deadline:
+                return reserved_operation_id
+            time.sleep(0.01)
 
     def _wait_for_odoo_stable_target_replacement_reserved_operation(
         self, operation_id: str
