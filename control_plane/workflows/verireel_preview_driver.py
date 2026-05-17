@@ -18,13 +18,14 @@ from control_plane import dokploy as control_plane_dokploy
 from control_plane import runtime_environments as control_plane_runtime_environments
 from control_plane import secrets as control_plane_secrets
 from control_plane.dokploy import JsonObject
+from control_plane.contracts.runtime_identity import RuntimeIdentity, runtime_identity_env
 from control_plane.contracts.runtime_key_safety_policy import RuntimeKeySafetyTarget
 from control_plane.runtime_key_safety import (
     RuntimeKeySafetyPolicyReadStore,
     evaluate_runtime_key_safety,
     latest_active_runtime_key_safety_policy,
 )
-from control_plane.workflows.ship import utc_now_timestamp
+from control_plane.workflows.ship import generate_deployment_record_id, utc_now_timestamp
 
 
 DEFAULT_PREVIEW_TIMEOUT_SECONDS = 300
@@ -36,6 +37,28 @@ _SECRET_SHAPED_RUNTIME_ENV_KEY_PARTS = {"PASSWORD", "TOKEN", "SECRET", "KEY"}
 
 def _expected_preview_slug(anchor_pr_number: int) -> str:
     return f"pr-{anchor_pr_number}"
+
+
+def _build_preview_runtime_identity(
+    *,
+    request: "VeriReelPreviewRefreshRequest",
+    deployed_at: str = "",
+) -> RuntimeIdentity:
+    return RuntimeIdentity(
+        product="verireel",
+        context=request.context,
+        instance=request.preview_slug,
+        environment_kind="preview",
+        deployment_record_id=generate_deployment_record_id(
+            context_name=request.context,
+            instance_name=request.preview_slug,
+        ),
+        artifact_id=request.image_reference,
+        source_git_ref=request.anchor_head_sha,
+        image_reference=request.image_reference,
+        preview_id=request.preview_slug,
+        deployed_at=deployed_at,
+    )
 
 
 class VeriReelPreviewRefreshRequest(BaseModel):
@@ -1159,6 +1182,9 @@ def execute_verireel_preview_refresh(
                     database_name=database_parts.database,
                     role_name=database_parts.username,
                     password=database_parts.password,
+                ),
+                **runtime_identity_env(
+                    _build_preview_runtime_identity(request=request)
                 ),
             },
         )

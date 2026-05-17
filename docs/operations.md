@@ -752,6 +752,16 @@ against the stored artifact manifest. Do not manually delete canonical stable
 targets as a replacement shortcut; add the missing Launchplane apply coverage
 first, then use the service-backed workflow.
 
+Runtime identity is a driver-owned breadcrumb, not tenant config. Launchplane
+injects `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`, `LAUNCHPLANE_DEPLOYMENT_RECORD_ID`,
+`LAUNCHPLANE_ARTIFACT_ID`, and `LAUNCHPLANE_SOURCE_GIT_REF` into supported
+Dokploy targets. Product health endpoints may echo the JSON payload as
+`runtime_identity`, `launchplane_runtime_identity`, `launchplaneRuntimeIdentity`,
+or `LAUNCHPLANE_RUNTIME_IDENTITY_JSON`; Launchplane records whether the observed
+payload matches, mismatches, is missing, or cannot be parsed. Missing observed
+identity is evidence for adoption work, not a reason to hardcode product-specific
+health or logo probe URLs.
+
 Target replacement only reconciles the provider target and runtime envelope. If
 an intentionally empty CM testing lane needs its Odoo database and filestore
 rebuilt, use the trusted `Odoo Stable Bootstrap` workflow instead of repairing

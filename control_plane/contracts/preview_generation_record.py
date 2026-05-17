@@ -3,6 +3,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from control_plane.contracts.promotion_record import ReleaseStatus
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 
 PreviewGenerationState = Literal[
     "resolving",
@@ -78,6 +79,7 @@ class PreviewGenerationRecord(BaseModel):
     overall_health_status: ReleaseStatus = "pending"
     failure_stage: str = ""
     failure_summary: str = ""
+    runtime_identity: RuntimeIdentity | None = None
 
     @model_validator(mode="after")
     def _validate_record(self) -> "PreviewGenerationRecord":

@@ -17,6 +17,7 @@ from control_plane.contracts.product_profile_record import (
     ProductSecretConfigRequirement,
 )
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.drivers.registry import (
     build_driver_context_view,
@@ -129,6 +130,10 @@ class ProductTargetSummary(BaseModel):
     target_type: str = ""
     target_name: str = ""
     target_id_recorded: bool = False
+    expected_runtime_identity: RuntimeIdentity | None = None
+    observed_runtime_identity: RuntimeIdentity | None = None
+    runtime_identity_status: RuntimeIdentityStatus = "unchecked"
+    runtime_identity_detail: str = ""
     trust_state: FreshnessStatus = "missing"
 
 
@@ -1469,12 +1474,44 @@ def _config_requirement_applies(
 
 
 def _target_summary(lane_summary: LaunchplaneLaneSummary | None) -> ProductTargetSummary:
-    if lane_summary is None or lane_summary.dokploy_target is None:
+    if lane_summary is None:
         return ProductTargetSummary()
+    expected_identity = None
+    destination_health = None
+    if lane_summary.inventory is not None:
+        expected_identity = lane_summary.inventory.runtime_identity
+        destination_health = lane_summary.inventory.destination_health
+    elif lane_summary.latest_deployment is not None:
+        expected_identity = lane_summary.latest_deployment.runtime_identity
+        destination_health = lane_summary.latest_deployment.destination_health
+    if lane_summary.dokploy_target is None:
+        return ProductTargetSummary(
+            expected_runtime_identity=expected_identity,
+            observed_runtime_identity=destination_health.observed_runtime_identity
+            if destination_health is not None
+            else None,
+            runtime_identity_status=destination_health.runtime_identity_status
+            if destination_health is not None
+            else "unchecked",
+            runtime_identity_detail=destination_health.runtime_identity_detail
+            if destination_health is not None
+            else "",
+            trust_state=lane_summary.provenance.freshness_status,
+        )
     return ProductTargetSummary(
         target_type=lane_summary.dokploy_target.target_type,
         target_name=lane_summary.dokploy_target.target_name,
         target_id_recorded=lane_summary.dokploy_target_id is not None,
+        expected_runtime_identity=expected_identity,
+        observed_runtime_identity=destination_health.observed_runtime_identity
+        if destination_health is not None
+        else None,
+        runtime_identity_status=destination_health.runtime_identity_status
+        if destination_health is not None
+        else "unchecked",
+        runtime_identity_detail=destination_health.runtime_identity_detail
+        if destination_health is not None
+        else "",
         trust_state="recorded",
     )
 

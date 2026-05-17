@@ -827,6 +827,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                     preview_slug="preview-42-site",
                     preview_url="https://preview-42.example.test",
                     image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                    anchor_head_sha="abc123",
                 ),
             )
 
@@ -1051,6 +1052,7 @@ class GenericWebPreviewTests(unittest.TestCase):
                     preview_slug="preview-42-site",
                     preview_url="https://preview-42.example.test",
                     image_reference="ghcr.io/cbusillo/sellyouroutboard:sha",
+                    anchor_head_sha="abc123",
                 ),
             )
 
@@ -1082,6 +1084,10 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertIn("SMTP_FROM=hello@example.com", env_text)
         self.assertIn("PUBLIC_URL=https://preview-42.example.test", env_text)
         self.assertIn("PUBLIC_DOMAIN=preview-42.example.test", env_text)
+        self.assertIn("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=", env_text)
+        self.assertIn("LAUNCHPLANE_DEPLOYMENT_RECORD_ID=", env_text)
+        self.assertIn("LAUNCHPLANE_ARTIFACT_ID=ghcr.io/cbusillo/sellyouroutboard:sha", env_text)
+        self.assertIn("LAUNCHPLANE_SOURCE_GIT_REF=", env_text)
         self.assertNotIn("SMTP_HOST=", env_text)
         trigger_deployment.assert_called_once()
         wait_health.assert_called_once()
@@ -1305,6 +1311,10 @@ class GenericWebPreviewTests(unittest.TestCase):
         self.assertIn("ODOO_INSTALL_MODULES=cm_custom,cm_website", env_updates[0])
         self.assertIn("WEB_BASE_URL=https://pr-28.cm-preview.shinycomputers.com", env_updates[0])
         self.assertIn("DOCKER_IMAGE_REFERENCE=ghcr.io/cbusillo/odoo-tenant-cm:sha", env_updates[0])
+        self.assertIn("LAUNCHPLANE_RUNTIME_IDENTITY_JSON=", env_updates[0])
+        self.assertIn("LAUNCHPLANE_DEPLOYMENT_RECORD_ID=", env_updates[0])
+        self.assertIn("LAUNCHPLANE_ARTIFACT_ID=ghcr.io/cbusillo/odoo-tenant-cm:sha", env_updates[0])
+        self.assertIn("LAUNCHPLANE_SOURCE_GIT_REF=abc123", env_updates[0])
         self.assertEqual(
             [request["path"] for request in domain_requests],
             ["/api/domain.byComposeId", "/api/domain.create"],

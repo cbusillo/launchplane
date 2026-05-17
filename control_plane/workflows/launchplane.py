@@ -43,6 +43,7 @@ from control_plane.contracts.product_profile_record import (
     LaunchplaneProductProfileRecord,
 )
 from control_plane.contracts.promotion_record import ReleaseStatus
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.storage.filesystem import FilesystemRecordStore
 from control_plane.workflows.ship import utc_now_timestamp
 
@@ -1474,6 +1475,7 @@ def build_preview_generation_record(
     overall_health_status: ReleaseStatus = "pending",
     failure_stage: str = "",
     failure_summary: str = "",
+    runtime_identity: RuntimeIdentity | None = None,
 ) -> PreviewGenerationRecord:
     resolved_generation_id = generation_id or generate_preview_generation_id(
         preview_id=preview_id,
@@ -1508,6 +1510,7 @@ def build_preview_generation_record(
         overall_health_status=overall_health_status,
         failure_stage=failure_stage,
         failure_summary=failure_summary,
+        runtime_identity=runtime_identity,
     )
 
 

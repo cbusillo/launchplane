@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from typing import cast
 import unittest
 
+from control_plane.contracts.environment_inventory import EnvironmentInventory
 from control_plane.contracts.preview_record import PreviewRecord
 from control_plane.contracts.product_environment_read_model import (
     ACTION_AUTHZ_BY_ROUTE,
@@ -15,7 +16,13 @@ from control_plane.contracts.product_environment_read_model import (
     build_product_site_overview,
 )
 from control_plane.contracts.product_profile_record import LaunchplaneProductProfileRecord
+from control_plane.contracts.promotion_record import (
+    ArtifactIdentityReference,
+    DeploymentEvidence,
+    HealthcheckEvidence,
+)
 from control_plane.contracts.runtime_environment_record import RuntimeEnvironmentRecord
+from control_plane.contracts.runtime_identity import RuntimeIdentity
 from control_plane.contracts.secret_record import SecretBinding
 from control_plane.storage.postgres import PostgresRecordStore
 
@@ -143,6 +150,23 @@ class _PreviewRecordStore:
     ) -> tuple[PreviewRecord, ...]:
         self.preview_record_calls.append((context_name, anchor_repo))
         return self._previews
+
+
+class _RuntimeIdentityReadModelStore(_PreviewRecordStore):
+    def __init__(
+        self,
+        profile: LaunchplaneProductProfileRecord,
+        inventory: EnvironmentInventory,
+    ) -> None:
+        super().__init__(profile, ())
+        self._inventory = inventory
+
+    def read_environment_inventory(
+        self, *, context_name: str, instance_name: str
+    ) -> EnvironmentInventory:
+        if context_name == self._inventory.context and instance_name == self._inventory.instance:
+            return self._inventory
+        raise FileNotFoundError(f"{context_name}/{instance_name}")
 
 
 class _ActivityRecordStore(_PreviewRecordStore):
@@ -705,6 +729,58 @@ class ProductEnvironmentReadModelTest(unittest.TestCase):
         self.assertTrue(detail.odoo_requires_backup_before_destroy)
         self.assertTrue(detail.odoo_requires_restore_proof)
         self.assertTrue(detail.odoo_requires_runtime_identity)
+
+    def test_product_environment_detail_exposes_runtime_identity_evidence(self) -> None:
+        profile = LaunchplaneProductProfileRecord.model_validate(
+            _site_profile_payload(preview_enabled=False)
+        )
+        expected = RuntimeIdentity(
+            product="example-site",
+            context="example-site-prod",
+            instance="prod",
+            deployment_record_id="deployment-prod-1",
+            artifact_id="ghcr.io/every/example-site@sha256:abc123",
+            source_git_ref="abc123",
+        )
+        inventory = EnvironmentInventory(
+            context="example-site-prod",
+            instance="prod",
+            artifact_identity=ArtifactIdentityReference(artifact_id=expected.artifact_id),
+            source_git_ref="abc123",
+            deploy=DeploymentEvidence(
+                target_name="example-site-prod",
+                target_type="application",
+                deploy_mode="dokploy-application-api",
+                deployment_id="control-plane-dokploy",
+                status="pass",
+                started_at="2026-05-02T10:00:00Z",
+                finished_at="2026-05-02T10:01:00Z",
+            ),
+            runtime_identity=expected,
+            destination_health=HealthcheckEvidence(
+                verified=True,
+                urls=("https://example-site.example/healthz",),
+                timeout_seconds=30,
+                status="pass",
+                runtime_identity_status="match",
+                runtime_identity_detail="Runtime identity matches the expected deployment record.",
+                observed_runtime_identity=expected,
+            ),
+            updated_at="2026-05-02T10:01:00Z",
+            deployment_record_id="deployment-prod-1",
+        )
+        store = _RuntimeIdentityReadModelStore(profile, inventory)
+
+        detail = build_product_environment_detail(
+            record_store=store,
+            product="example-site",
+            environment="prod",
+            action_allowed=lambda *_: False,
+        )
+
+        self.assertEqual(detail.target.expected_runtime_identity, expected)
+        self.assertEqual(detail.target.observed_runtime_identity, expected)
+        self.assertEqual(detail.target.runtime_identity_status, "match")
 
     def test_product_environment_config_status_reports_expected_key_states(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:

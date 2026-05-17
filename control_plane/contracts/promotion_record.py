@@ -2,6 +2,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from control_plane.contracts.runtime_identity import RuntimeIdentity, RuntimeIdentityStatus
+
 ReleaseStatus = Literal["pending", "pass", "fail", "skipped"]
 
 
@@ -19,6 +21,9 @@ class HealthcheckEvidence(BaseModel):
     urls: tuple[str, ...] = ()
     timeout_seconds: int | None = Field(default=None, ge=1)
     status: ReleaseStatus = "skipped"
+    runtime_identity_status: RuntimeIdentityStatus = "unchecked"
+    runtime_identity_detail: str = ""
+    observed_runtime_identity: RuntimeIdentity | None = None
 
     @model_validator(mode="after")
     def _validate_verified_healthcheck(self) -> "HealthcheckEvidence":

@@ -199,6 +199,9 @@ from control_plane.workflows.promote import (
     build_promotion_record,
     generate_promotion_record_id,
 )
+from control_plane.workflows.runtime_identity_health import (
+    wait_for_healthcheck_with_retry,
+)
 from control_plane.workflows.ship import (
     build_deployment_record,
     generate_deployment_record_id,
@@ -6362,21 +6365,12 @@ def _load_github_webhook_json_bytes(
 
 
 def _wait_for_ship_healthcheck(*, url: str, timeout_seconds: int) -> None:
-    deadline = time.monotonic() + timeout_seconds
-    last_error: str = ""
-    while time.monotonic() < deadline:
-        try:
-            request = Request(url, method="GET")
-            with urlopen(request, timeout=min(5, timeout_seconds)) as response:
-                if 200 <= response.status < 300:
-                    return
-                last_error = f"http {response.status}"
-        except HTTPError as error:
-            last_error = f"http {error.code}"
-        except URLError as error:
-            last_error = str(error.reason)
-        time.sleep(1)
-    raise click.ClickException(f"Healthcheck failed for {url}: {last_error or 'timeout'}")
+    wait_for_healthcheck_with_retry(
+        url=url,
+        timeout_seconds=timeout_seconds,
+        sleep=time.sleep,
+        monotonic=time.monotonic,
+    )
 
 
 def _verify_ship_healthchecks(*, request: ShipRequest) -> None:
