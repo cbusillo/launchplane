@@ -201,10 +201,70 @@ class OdooVerificationTests(unittest.TestCase):
             [
                 "https://cm-testing.example.com",
                 "https://cm-testing.example.com/web/image/website/1/logo",
+            ],
+        )
+
+    def test_verification_does_not_retry_permanent_canonical_failure(self) -> None:
+        calls: list[str] = []
+
+        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            calls.append(url)
+            return 200, "<html>not canonical yet</html>", "text/html"
+
+        with (
+            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification.time.sleep",
+                side_effect=lambda _seconds: None,
+            ) as sleep_mock,
+        ):
+            result = verify_odoo_stable_readiness(
+                base_url="https://cm-testing.example.com",
+                verify_health=False,
+                verify_logo=False,
+                timeout_seconds=30,
+                retry_interval_seconds=5,
+            )
+
+        self.assertEqual(result.canonical_status, "fail")
+        self.assertEqual(result.evidence.probes[-1].failure_class, "canonical_missing")
+        self.assertEqual(calls, ["https://cm-testing.example.com"])
+        sleep_mock.assert_not_called()
+
+    def test_verification_does_not_retry_permanent_logo_failure(self) -> None:
+        calls: list[str] = []
+
+        def fake_http_text(url: str, *, timeout_seconds: int) -> tuple[int, str, str]:
+            calls.append(url)
+            if url == "https://cm-testing.example.com":
+                return 200, '<link rel="canonical" href="https://cm-testing.example.com">', "text/html"
+            return 404, "missing", "text/plain"
+
+        with (
+            patch("control_plane.workflows.odoo_verification._http_text", side_effect=fake_http_text),
+            patch(
+                "control_plane.workflows.odoo_verification.time.sleep",
+                side_effect=lambda _seconds: None,
+            ) as sleep_mock,
+        ):
+            result = verify_odoo_stable_readiness(
+                base_url="https://cm-testing.example.com",
+                verify_health=False,
+                verify_canonical=False,
+                timeout_seconds=30,
+                retry_interval_seconds=5,
+            )
+
+        self.assertEqual(result.logo_status, "fail")
+        self.assertEqual(result.evidence.probes[-1].failure_class, "http")
+        self.assertEqual(
+            calls,
+            [
                 "https://cm-testing.example.com",
                 "https://cm-testing.example.com/web/image/website/1/logo",
             ],
         )
+        sleep_mock.assert_not_called()
 
     def test_extract_logo_urls_ignores_cross_origin_assets(self) -> None:
         urls = _extract_same_origin_logo_urls(

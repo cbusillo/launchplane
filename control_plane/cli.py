@@ -9168,10 +9168,12 @@ def _build_odoo_instance_override_record_with_config_parameter(
     config_parameters[normalized_key] = OdooConfigParameterOverride(
         key=normalized_key, value=override_value
     )
+    apply_on = target_record.apply_on if target_record is not None else ()
+    apply_phases = tuple(dict.fromkeys((*apply_on, "deploy", "promotion")))
     return OdooInstanceOverrideRecord(
         context=normalized_context,
         instance=normalized_instance,
-        apply_on=target_record.apply_on if target_record is not None else ("deploy", "promotion"),
+        apply_on=apply_phases,
         config_parameters=tuple(config_parameters[key] for key in sorted(config_parameters)),
         addon_settings=addon_settings,
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,
@@ -9215,9 +9217,12 @@ def _build_odoo_instance_override_record_with_addon_setting(
         setting=normalized_setting,
         value=override_value,
     )
+    apply_on = target_record.apply_on if target_record is not None else ()
+    apply_phases = tuple(dict.fromkeys((*apply_on, "deploy", "promotion")))
     return OdooInstanceOverrideRecord(
         context=normalized_context,
         instance=normalized_instance,
+        apply_on=apply_phases,
         config_parameters=config_parameters,
         addon_settings=tuple(addon_settings[key] for key in sorted(addon_settings)),
         website_bootstrap=target_record.website_bootstrap if target_record is not None else None,

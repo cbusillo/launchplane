@@ -112,6 +112,59 @@ class OdooInstanceOverrideTests(unittest.TestCase):
             stored_record.config_parameters[0].value.value, "https://opw-prod.example.com"
         )
 
+    def test_cli_put_config_param_adds_deploy_phases_to_existing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="prod",
+                    apply_on=("manual",),
+                    config_parameters=(
+                        OdooConfigParameterOverride(
+                            key="web.base.url",
+                            value=OdooOverrideValue(
+                                source="literal", value="https://old.example.com"
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-17T00:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.close()
+            runner = CliRunner()
+
+            result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-config-param",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--key",
+                    "web.base.url",
+                    "--value",
+                    "https://opw-prod.example.com",
+                ],
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
+
     def test_cli_put_addon_setting_requires_secret_binding_for_secret_shaped_setting(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
             database_url = _sqlite_database_url(
@@ -176,6 +229,63 @@ class OdooInstanceOverrideTests(unittest.TestCase):
         payload = json.loads(list_result.output)
         self.assertEqual(payload["records"][0]["addon_settings"], ["shopify.api_token"])
         self.assertNotIn("secret-binding-shopify-token", list_result.output)
+
+    def test_cli_put_addon_setting_adds_deploy_phases_to_existing_record(self) -> None:
+        with TemporaryDirectory() as temporary_directory_name:
+            database_url = _sqlite_database_url(
+                Path(temporary_directory_name) / "launchplane.sqlite3"
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            store.ensure_schema()
+            store.write_odoo_instance_override_record(
+                OdooInstanceOverrideRecord(
+                    context="opw",
+                    instance="prod",
+                    apply_on=("manual",),
+                    addon_settings=(
+                        OdooAddonSettingOverride(
+                            addon="shopify",
+                            setting="api_token",
+                            value=OdooOverrideValue(
+                                source="secret_binding",
+                                secret_binding_id="secret-binding-old-shopify-token",
+                            ),
+                        ),
+                    ),
+                    updated_at="2026-05-17T00:00:00Z",
+                    source_label="test",
+                )
+            )
+            store.close()
+            runner = CliRunner()
+
+            result = runner.invoke(
+                main,
+                [
+                    "odoo-overrides",
+                    "put-addon-setting",
+                    "--database-url",
+                    database_url,
+                    "--context",
+                    "opw",
+                    "--instance",
+                    "prod",
+                    "--addon",
+                    "shopify",
+                    "--setting",
+                    "api_token",
+                    "--secret-binding-id",
+                    "secret-binding-shopify-token",
+                ],
+            )
+            store = PostgresRecordStore(database_url=database_url)
+            stored_record = store.read_odoo_instance_override_record(
+                context_name="opw", instance_name="prod"
+            )
+            store.close()
+
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(stored_record.apply_on, ("manual", "deploy", "promotion"))
 
     def test_cli_put_website_bootstrap_preserves_existing_overrides(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
