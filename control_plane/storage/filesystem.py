@@ -670,11 +670,6 @@ class FilesystemRecordStore:
                         reserved_operation_id
                     )
                 )
-                if reserved_operation is None:
-                    reservation_path.unlink(missing_ok=True)
-                    return self.create_odoo_stable_target_replacement_operation_record_if_no_active_lane(
-                        record
-                    )
                 if reserved_operation.status in {"pending", "running"}:
                     return reserved_operation, False
             reservation_path.unlink(missing_ok=True)
@@ -688,26 +683,22 @@ class FilesystemRecordStore:
     def _wait_for_odoo_stable_target_replacement_reservation_owner(
         reservation_path: Path,
     ) -> str:
-        deadline = time.monotonic() + 1.0
         while True:
             try:
                 reserved_operation_id = reservation_path.read_text(encoding="utf-8").strip()
             except FileNotFoundError:
                 return ""
-            if reserved_operation_id or time.monotonic() >= deadline:
+            if reserved_operation_id:
                 return reserved_operation_id
             time.sleep(0.01)
 
     def _wait_for_odoo_stable_target_replacement_reserved_operation(
         self, operation_id: str
-    ) -> OdooStableTargetReplacementOperationRecord | None:
-        deadline = time.monotonic() + 1.0
+    ) -> OdooStableTargetReplacementOperationRecord:
         while True:
             try:
                 return self.read_odoo_stable_target_replacement_operation_record(operation_id)
             except (FileNotFoundError, JSONDecodeError):
-                if time.monotonic() >= deadline:
-                    return None
                 time.sleep(0.01)
 
     def write_backup_gate_record(self, record: BackupGateRecord) -> Path:

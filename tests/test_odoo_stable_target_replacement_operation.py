@@ -225,6 +225,76 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             self.assertEqual(second_record.operation_id, first.operation_id)
             self.assertFalse(second_created)
 
+    def test_filesystem_store_waits_past_slow_reserved_operation_write(self) -> None:
+        class SlowWriteFilesystemRecordStore(FilesystemRecordStore):
+            def __init__(self, state_dir: Path) -> None:
+                super().__init__(state_dir)
+                self.first_write_started = Event()
+                self.release_first_write = Event()
+                self._write_lock = Lock()
+                self._write_count = 0
+
+            def write_odoo_stable_target_replacement_operation_record(
+                self, record: OdooStableTargetReplacementOperationRecord
+            ) -> Path:
+                with self._write_lock:
+                    is_first_write = self._write_count == 0
+                    self._write_count += 1
+                if is_first_write:
+                    self.first_write_started.set()
+                    self.release_first_write.wait(timeout=2.0)
+                return super().write_odoo_stable_target_replacement_operation_record(record)
+
+            def _wait_for_odoo_stable_target_replacement_reserved_operation(
+                self, operation_id: str
+            ) -> OdooStableTargetReplacementOperationRecord:
+                if operation_id == "operation-cm-testing-first":
+                    self.first_write_started.wait(timeout=2.0)
+                    self.release_first_write.set()
+                return super()._wait_for_odoo_stable_target_replacement_reserved_operation(
+                    operation_id
+                )
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = SlowWriteFilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            first = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-first")
+            )
+            second = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-cm-testing-second"),
+                    "idempotency_key": "replacement-cm-testing-second",
+                    "idempotency_scope": "caller-second",
+                }
+            )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first_future = executor.submit(
+                    store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane,
+                    first,
+                )
+                self.assertTrue(store.first_write_started.wait(timeout=2.0))
+                second_future = executor.submit(
+                    store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane,
+                    second,
+                )
+
+                first_record, first_created = first_future.result(timeout=2.0)
+                second_record, second_created = second_future.result(timeout=2.0)
+
+            active_records = store.list_odoo_stable_target_replacement_operation_records(
+                product="odoo-tenant-cm",
+                context_name="cm",
+                instance_name="testing",
+                statuses=("pending", "running"),
+            )
+
+            self.assertEqual(first_record.operation_id, first.operation_id)
+            self.assertTrue(first_created)
+            self.assertEqual(second_record.operation_id, first.operation_id)
+            self.assertFalse(second_created)
+            self.assertEqual(len(active_records), 1)
+
     def test_filesystem_store_waits_for_reserved_operation_json_to_settle(self) -> None:
         class SettlingReadFilesystemRecordStore(FilesystemRecordStore):
             def __init__(self, state_dir: Path) -> None:
