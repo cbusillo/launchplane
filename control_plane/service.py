@@ -1433,12 +1433,33 @@ class OdooPreviewVerificationRequest(BaseModel):
     anchor_pr_number: int = Field(ge=1)
     verification_status: ReleaseStatus
     verified_at: str
+    checked_urls: tuple[str, ...] = ()
+    timeout_seconds: int | None = Field(default=None, ge=1)
     failure_summary: str = ""
 
     @field_validator("verification_status", mode="before")
     @classmethod
     def _normalize_status(cls, value: object) -> ReleaseStatus:
         return _normalize_release_status(value, label="Odoo preview verification status")
+
+    @field_validator("checked_urls", mode="before")
+    @classmethod
+    def _normalize_checked_urls(cls, value: object) -> tuple[str, ...]:
+        if value in (None, ""):
+            return ()
+        if isinstance(value, str):
+            raw_values: tuple[object, ...] = (value,)
+        else:
+            try:
+                raw_values = tuple(cast(Iterable[object], value))
+            except TypeError as exc:
+                raise ValueError("Odoo preview verification checked_urls must be a list.") from exc
+        if any(not isinstance(item, str) for item in raw_values):
+            raise ValueError("Odoo preview verification checked_urls must be strings.")
+        checked_urls = tuple(item.strip() for item in cast(tuple[str, ...], raw_values))
+        if any(not item for item in checked_urls):
+            raise ValueError("Odoo preview verification checked_urls cannot contain blanks.")
+        return checked_urls
 
     @model_validator(mode="after")
     def _validate_request(self) -> "OdooPreviewVerificationRequest":
@@ -1450,7 +1471,23 @@ class OdooPreviewVerificationRequest(BaseModel):
             raise ValueError("Odoo preview verification status must be pass or fail.")
         if not self.verified_at.strip():
             raise ValueError("Odoo preview verification requires verified_at.")
+        if self.checked_urls and self.timeout_seconds is None:
+            raise ValueError("Odoo preview verification checked_urls require timeout_seconds.")
         return self
+
+
+class OdooPreviewVerificationResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    preview_id: str
+    preview_generation_id: str
+    preview_state: str
+    generation_state: str
+    verification_status: ReleaseStatus
+    verified_at: str
+    checked_urls: tuple[str, ...] = ()
+    timeout_seconds: int | None = None
+    failure_summary: str = ""
 
 
 class OdooPreviewVerificationEnvelope(_ProductRouteEnvelope):
@@ -4219,51 +4256,60 @@ def _accepted_payload(
         serialized_driver_result = driver_result.model_dump(mode="json")
     elif isinstance(driver_result, dict):
         serialized_driver_result = dict(driver_result)
+    record_keys = {
+        "deployment_record_id",
+        "backup_gate_record_id",
+        "backup_record_id",
+        "release_tuple_id",
+        "inventory_record_id",
+        "preview_id",
+        "preview_desired_state_id",
+        "preview_inventory_scan_id",
+        "preview_pr_feedback_id",
+        "preview_lifecycle_cleanup_id",
+        "preview_lifecycle_plan_id",
+        "authz_policy_record_id",
+        "runtime_key_safety_policy_record_id",
+        "product_profile",
+        "dokploy_target_count",
+        "dokploy_target_id_count",
+        "runtime_environment_record_count",
+        "secret_binding_count",
+        "generation_id",
+        "promotion_record_id",
+        "target_id",
+        "target_type",
+        "image_reference",
+        "artifact_id",
+        "transition",
+        "preview_state",
+        "preview_generation_id",
+        "verification_status",
+        "verified_at",
+        "odoo_preview_verification",
+        "request_id",
+        "feedback_id",
+        "state",
+        "agent_write_intent_record_id",
+        "merge_train_batch_candidate_record_id",
+        "merge_train_batch_landing_plan_record_id",
+        "merge_train_stack_collapse_plan_record_id",
+        "merge_train_run_id",
+        "odoo_stable_bootstrap_operation_id",
+        "odoo_stable_target_replacement_operation_id",
+    }
+    records: dict[str, object] = {}
+    for key, value in result.items():
+        if key not in record_keys:
+            continue
+        if key == "odoo_preview_verification" and isinstance(value, dict):
+            records[key] = value
+            continue
+        records[key] = str(value)
     payload: dict[str, object] = {
         "status": "accepted",
         "trace_id": trace_id,
-        "records": {
-            key: str(value)
-            for key, value in result.items()
-            if key
-            in {
-                "deployment_record_id",
-                "backup_gate_record_id",
-                "backup_record_id",
-                "release_tuple_id",
-                "inventory_record_id",
-                "preview_id",
-                "preview_desired_state_id",
-                "preview_inventory_scan_id",
-                "preview_pr_feedback_id",
-                "preview_lifecycle_cleanup_id",
-                "preview_lifecycle_plan_id",
-                "authz_policy_record_id",
-                "runtime_key_safety_policy_record_id",
-                "product_profile",
-                "dokploy_target_count",
-                "dokploy_target_id_count",
-                "runtime_environment_record_count",
-                "secret_binding_count",
-                "generation_id",
-                "promotion_record_id",
-                "target_id",
-                "target_type",
-                "image_reference",
-                "artifact_id",
-                "transition",
-                "request_id",
-                "feedback_id",
-                "state",
-                "agent_write_intent_record_id",
-                "merge_train_batch_candidate_record_id",
-                "merge_train_batch_landing_plan_record_id",
-                "merge_train_stack_collapse_plan_record_id",
-                "merge_train_run_id",
-                "odoo_stable_bootstrap_operation_id",
-                "odoo_stable_target_replacement_operation_id",
-            }
-        },
+        "records": records,
         **({"result": serialized_driver_result} if serialized_driver_result else {}),
     }
     if replayed:
@@ -6527,7 +6573,7 @@ def _apply_verireel_preview_verification_records(
     verified_at = request.verified_at.strip()
     verification_passed = request.verification_status.strip() == "pass"
     failure_summary = request.failure_summary.strip() or "Preview E2E verification failed."
-    return apply_launchplane_generation_evidence(
+    result = apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root_path,
         record_store=typed_record_store,
         preview_request=PreviewMutationRequest(
@@ -6568,6 +6614,7 @@ def _apply_verireel_preview_verification_records(
             failure_summary="" if verification_passed else failure_summary,
         ),
     )
+    return result
 
 
 def _apply_odoo_preview_verification_records(
@@ -6596,7 +6643,7 @@ def _apply_odoo_preview_verification_records(
     verified_at = request.verified_at.strip()
     verification_passed = request.verification_status == "pass"
     failure_summary = request.failure_summary.strip() or "Odoo preview verification failed."
-    return apply_launchplane_generation_evidence(
+    result = apply_launchplane_generation_evidence(
         control_plane_root_path=control_plane_root_path,
         record_store=typed_record_store,
         preview_request=PreviewMutationRequest(
@@ -6637,6 +6684,25 @@ def _apply_odoo_preview_verification_records(
             failure_summary="" if verification_passed else failure_summary,
         ),
     )
+    preview_state = "active" if verification_passed else "failed"
+    generation_state = "ready" if verification_passed else "failed"
+    verification_result = OdooPreviewVerificationResult(
+        preview_id=preview.preview_id,
+        preview_generation_id=generation.generation_id,
+        preview_state=preview_state,
+        generation_state=generation_state,
+        verification_status=request.verification_status,
+        verified_at=verified_at,
+        checked_urls=request.checked_urls,
+        timeout_seconds=request.timeout_seconds if request.checked_urls else None,
+        failure_summary="" if verification_passed else failure_summary,
+    )
+    result["preview_state"] = preview_state
+    result["preview_generation_id"] = generation.generation_id
+    result["verification_status"] = request.verification_status
+    result["verified_at"] = verified_at
+    result["odoo_preview_verification"] = verification_result.model_dump(mode="json")
+    return result
 
 
 def _stable_verification_health_evidence(
