@@ -1017,6 +1017,136 @@ def _build_launchplane_environment_action_payload(
     }
 
 
+def _launchplane_preview_enablement_actionable_payload(
+    *,
+    context_name: str,
+    anchor_repo: str,
+    anchor_pr_number: int,
+    anchor_pr_url: str,
+    anchor_head_sha: str,
+    state: str,
+    label_enabled: bool,
+    summary: str,
+    baseline_release_tuple_id: str,
+    resolved_manifest_fingerprint: str,
+    source_map: list[dict[str, object]] | None = None,
+    companion_summaries: list[dict[str, object]] | None = None,
+) -> dict[str, object]:
+    preview_request_payload = {
+        "schema_version": 1,
+        "context": context_name,
+        "anchor_repo": anchor_repo,
+        "anchor_pr_number": anchor_pr_number,
+        "anchor_pr_url": anchor_pr_url,
+        "state": "pending",
+        "created_at": "<utc-timestamp>",
+        "updated_at": "<utc-timestamp>",
+        "eligible_at": "<utc-timestamp>",
+    }
+    generation_request_payload = {
+        "schema_version": 1,
+        "context": context_name,
+        "anchor_repo": anchor_repo,
+        "anchor_pr_number": anchor_pr_number,
+        "anchor_pr_url": anchor_pr_url,
+        "anchor_head_sha": anchor_head_sha,
+        "state": "resolving",
+        "requested_reason": "operator_requested_enablement",
+        "requested_at": "<utc-timestamp>",
+        "resolved_manifest_fingerprint": resolved_manifest_fingerprint,
+        "baseline_release_tuple_id": baseline_release_tuple_id,
+        "source_map": source_map
+        if source_map is not None
+        else [
+            {
+                "repo": anchor_repo,
+                "git_sha": anchor_head_sha,
+                "selection": "anchor",
+            }
+        ],
+        "companion_summaries": companion_summaries or [],
+        "deploy_status": "pending",
+        "verify_status": "pending",
+        "overall_health_status": "pending",
+    }
+    action_slug = _launchplane_action_slug(f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}")
+    recipe = _build_launchplane_action_script(
+        command_name="request-generation",
+        file_payloads=(
+            (
+                "PREVIEW_FILE",
+                f"/tmp/launchplane-{action_slug}-preview.json",
+                preview_request_payload,
+            ),
+            (
+                "GENERATION_FILE",
+                f"/tmp/launchplane-{action_slug}-generation.json",
+                generation_request_payload,
+            ),
+        ),
+        command_args=(
+            "--preview-input-file",
+            '"$PREVIEW_FILE"',
+            "--generation-input-file",
+            '"$GENERATION_FILE"',
+        ),
+    )
+    if state == "requested":
+        headline = "Materialize requested Launchplane preview"
+    elif label_enabled:
+        headline = "Request Launchplane preview from saved label state"
+    else:
+        headline = "Request Launchplane preview"
+    return {
+        "status": "actionable",
+        "tone": "warn",
+        "headline": headline,
+        "summary": summary,
+        "recipe": recipe,
+        "recipe_id": f"enablement-{action_slug}-request-generation",
+    }
+
+
+def _launchplane_preview_companion_snapshot_source_map_payload(
+    *,
+    anchor_repo: str,
+    anchor_head_sha: str,
+    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
+) -> list[dict[str, object]]:
+    companion_rows: list[dict[str, object]] = [
+        {
+            "repo": summary.repo,
+            "git_sha": summary.head_sha,
+            "selection": "companion",
+        }
+        for summary in request_metadata_companion_summaries
+    ]
+    return [
+        {
+            "repo": anchor_repo,
+            "git_sha": anchor_head_sha,
+            "selection": "anchor",
+        },
+        *companion_rows,
+    ]
+
+
+def _launchplane_preview_companion_summaries_payload(
+    request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
+) -> list[dict[str, object]]:
+    return [summary.model_dump(mode="json") for summary in request_metadata_companion_summaries]
+
+
+def _launchplane_preview_unresolved_companion_payload(*, detail: str) -> dict[str, object]:
+    return {
+        "status": "blocked",
+        "tone": "bad",
+        "headline": "Companion PR snapshots are required before Launchplane can request this preview.",
+        "summary": detail,
+        "recipe": "",
+    }
+
+
 def _build_launchplane_preview_enablement_action_payload(
     *,
     control_plane_root: Path | None,
@@ -1033,120 +1163,6 @@ def _build_launchplane_preview_enablement_action_payload(
     request_metadata_companion_summaries: tuple[PreviewPullRequestSummary, ...],
     preview_row: dict[str, object] | None,
 ) -> dict[str, object]:
-    def actionable_payload(
-        *,
-        summary: str,
-        baseline_release_tuple_id: str,
-        resolved_manifest_fingerprint: str,
-        source_map: list[dict[str, object]] | None = None,
-        companion_summaries: list[dict[str, object]] | None = None,
-    ) -> dict[str, object]:
-        preview_request_payload = {
-            "schema_version": 1,
-            "context": context_name,
-            "anchor_repo": anchor_repo,
-            "anchor_pr_number": anchor_pr_number,
-            "anchor_pr_url": anchor_pr_url,
-            "state": "pending",
-            "created_at": "<utc-timestamp>",
-            "updated_at": "<utc-timestamp>",
-            "eligible_at": "<utc-timestamp>",
-        }
-        generation_request_payload = {
-            "schema_version": 1,
-            "context": context_name,
-            "anchor_repo": anchor_repo,
-            "anchor_pr_number": anchor_pr_number,
-            "anchor_pr_url": anchor_pr_url,
-            "anchor_head_sha": anchor_head_sha,
-            "state": "resolving",
-            "requested_reason": "operator_requested_enablement",
-            "requested_at": "<utc-timestamp>",
-            "resolved_manifest_fingerprint": resolved_manifest_fingerprint,
-            "baseline_release_tuple_id": baseline_release_tuple_id,
-            "source_map": source_map
-            if source_map is not None
-            else [
-                {
-                    "repo": anchor_repo,
-                    "git_sha": anchor_head_sha,
-                    "selection": "anchor",
-                }
-            ],
-            "companion_summaries": companion_summaries or [],
-            "deploy_status": "pending",
-            "verify_status": "pending",
-            "overall_health_status": "pending",
-        }
-        action_slug = _launchplane_action_slug(
-            f"{context_name}-{anchor_repo}-pr-{anchor_pr_number}"
-        )
-        recipe = _build_launchplane_action_script(
-            command_name="request-generation",
-            file_payloads=(
-                (
-                    "PREVIEW_FILE",
-                    f"/tmp/launchplane-{action_slug}-preview.json",
-                    preview_request_payload,
-                ),
-                (
-                    "GENERATION_FILE",
-                    f"/tmp/launchplane-{action_slug}-generation.json",
-                    generation_request_payload,
-                ),
-            ),
-            command_args=(
-                "--preview-input-file",
-                '"$PREVIEW_FILE"',
-                "--generation-input-file",
-                '"$GENERATION_FILE"',
-            ),
-        )
-        if state == "requested":
-            headline = "Materialize requested Launchplane preview"
-        elif label_enabled:
-            headline = "Request Launchplane preview from saved label state"
-        else:
-            headline = "Request Launchplane preview"
-        return {
-            "status": "actionable",
-            "tone": "warn",
-            "headline": headline,
-            "summary": summary,
-            "recipe": recipe,
-            "recipe_id": f"enablement-{action_slug}-request-generation",
-        }
-
-    def companion_snapshot_source_map_payload() -> list[dict[str, object]]:
-        companion_rows: list[dict[str, object]] = [
-            {
-                "repo": summary.repo,
-                "git_sha": summary.head_sha,
-                "selection": "companion",
-            }
-            for summary in request_metadata_companion_summaries
-        ]
-        return [
-            {
-                "repo": anchor_repo,
-                "git_sha": anchor_head_sha,
-                "selection": "anchor",
-            },
-            *companion_rows,
-        ]
-
-    def companion_summaries_payload() -> list[dict[str, object]]:
-        return [summary.model_dump(mode="json") for summary in request_metadata_companion_summaries]
-
-    def unresolved_companion_payload(*, detail: str) -> dict[str, object]:
-        return {
-            "status": "blocked",
-            "tone": "bad",
-            "headline": "Companion PR snapshots are required before Launchplane can request this preview.",
-            "summary": detail,
-            "recipe": "",
-        }
-
     if preview_row is not None:
         return {
             "status": "existing_preview",
@@ -1182,21 +1198,34 @@ def _build_launchplane_preview_enablement_action_payload(
         )
     if control_plane_root is None:
         if request_metadata_companions and not request_metadata_companion_summaries:
-            return unresolved_companion_payload(
+            return _launchplane_preview_unresolved_companion_payload(
                 detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
             )
-        return actionable_payload(
+        return _launchplane_preview_enablement_actionable_payload(
+            context_name=context_name,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+            anchor_pr_url=anchor_pr_url,
+            anchor_head_sha=anchor_head_sha,
+            state=state,
+            label_enabled=label_enabled,
             summary=(
                 "Launchplane cannot resolve the default baseline contract from this workspace snapshot, so this request recipe keeps explicit placeholders for the baseline tuple id and manifest fingerprint before execution."
             ),
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
             source_map=(
-                companion_snapshot_source_map_payload()
+                _launchplane_preview_companion_snapshot_source_map_payload(
+                    anchor_repo=anchor_repo,
+                    anchor_head_sha=anchor_head_sha,
+                    request_metadata_companion_summaries=request_metadata_companion_summaries,
+                )
                 if request_metadata_companion_summaries
                 else None
             ),
-            companion_summaries=companion_summaries_payload(),
+            companion_summaries=_launchplane_preview_companion_summaries_payload(
+                request_metadata_companion_summaries
+            ),
         )
     if not anchor_pr_url or not anchor_head_sha:
         return {
@@ -1207,7 +1236,7 @@ def _build_launchplane_preview_enablement_action_payload(
             "recipe": "",
         }
     if request_metadata_companions and not request_metadata_companion_summaries:
-        return unresolved_companion_payload(
+        return _launchplane_preview_unresolved_companion_payload(
             detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
         )
 
@@ -1235,13 +1264,20 @@ def _build_launchplane_preview_enablement_action_payload(
         )
     except click.ClickException as exc:
         if request_metadata_companions and not request_metadata_companion_summaries:
-            return unresolved_companion_payload(
+            return _launchplane_preview_unresolved_companion_payload(
                 detail=(
                     "The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane could not prove their exact head SHAs from stored evidence. "
                     f"Resolve the companion snapshots before running the request recipe: {exc}"
                 ),
             )
-        return actionable_payload(
+        return _launchplane_preview_enablement_actionable_payload(
+            context_name=context_name,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+            anchor_pr_url=anchor_pr_url,
+            anchor_head_sha=anchor_head_sha,
+            state=state,
+            label_enabled=label_enabled,
             summary=(
                 "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
                 f"Use the typed request recipe below after replacing the baseline placeholders: {exc}"
@@ -1249,18 +1285,31 @@ def _build_launchplane_preview_enablement_action_payload(
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
             source_map=(
-                companion_snapshot_source_map_payload()
+                _launchplane_preview_companion_snapshot_source_map_payload(
+                    anchor_repo=anchor_repo,
+                    anchor_head_sha=anchor_head_sha,
+                    request_metadata_companion_summaries=request_metadata_companion_summaries,
+                )
                 if request_metadata_companion_summaries
                 else None
             ),
-            companion_summaries=companion_summaries_payload(),
+            companion_summaries=_launchplane_preview_companion_summaries_payload(
+                request_metadata_companion_summaries
+            ),
         )
     if resolved_manifest is None:
         if request_metadata_companions and not request_metadata_companion_summaries:
-            return unresolved_companion_payload(
+            return _launchplane_preview_unresolved_companion_payload(
                 detail="The saved PR metadata asks Launchplane to include companion pull requests, but Launchplane has no exact companion head SHA snapshot for this enablement record."
             )
-        return actionable_payload(
+        return _launchplane_preview_enablement_actionable_payload(
+            context_name=context_name,
+            anchor_repo=anchor_repo,
+            anchor_pr_number=anchor_pr_number,
+            anchor_pr_url=anchor_pr_url,
+            anchor_head_sha=anchor_head_sha,
+            state=state,
+            label_enabled=label_enabled,
             summary=(
                 "Launchplane could not resolve the default preview manifest automatically for this PR yet. "
                 "Use the typed request recipe below after replacing the baseline tuple id and manifest fingerprint placeholders."
@@ -1268,14 +1317,27 @@ def _build_launchplane_preview_enablement_action_payload(
             baseline_release_tuple_id="<resolved-baseline-tuple-id>",
             resolved_manifest_fingerprint="<resolved-manifest-fingerprint>",
             source_map=(
-                companion_snapshot_source_map_payload()
+                _launchplane_preview_companion_snapshot_source_map_payload(
+                    anchor_repo=anchor_repo,
+                    anchor_head_sha=anchor_head_sha,
+                    request_metadata_companion_summaries=request_metadata_companion_summaries,
+                )
                 if request_metadata_companion_summaries
                 else None
             ),
-            companion_summaries=companion_summaries_payload(),
+            companion_summaries=_launchplane_preview_companion_summaries_payload(
+                request_metadata_companion_summaries
+            ),
         )
 
-    return actionable_payload(
+    return _launchplane_preview_enablement_actionable_payload(
+        context_name=context_name,
+        anchor_repo=anchor_repo,
+        anchor_pr_number=anchor_pr_number,
+        anchor_pr_url=anchor_pr_url,
+        anchor_head_sha=anchor_head_sha,
+        state=state,
+        label_enabled=label_enabled,
         summary=(
             "This tenant PR is preview-eligible but still inactive. Run Launchplane's typed request-generation flow to create the initial preview route from the default testing baseline."
             if state != "requested" and not label_enabled
