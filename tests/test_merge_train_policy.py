@@ -10,6 +10,8 @@ from pydantic import ValidationError
 
 from control_plane import cli as control_plane_cli
 from control_plane.cli import main
+from control_plane.contracts.driver_descriptor import DriverContextView, DriverDescriptor
+from control_plane.contracts.driver_descriptor import DriverView
 from control_plane.contracts.merge_train_policy import (
     MergeTrainPolicyRecord,
     build_merge_train_policy_record_id,
@@ -125,6 +127,53 @@ class MergeTrainPolicyTests(unittest.TestCase):
             with self.subTest(value=value):
                 with self.assertRaisesRegex(click.ClickException, expected_message):
                     normalizer(value)
+
+    def test_cli_first_driver_payload_uses_typed_driver_context_view(self) -> None:
+        view = DriverContextView(
+            context="demo",
+            drivers=(
+                DriverView(
+                    driver_id="generic-web",
+                    descriptor=DriverDescriptor(
+                        driver_id="generic-web",
+                        label="Generic Web",
+                        product="generic-web",
+                        description="Generic web driver",
+                        provider_boundary="launchplane",
+                    ),
+                ),
+                DriverView(
+                    driver_id="verireel",
+                    descriptor=DriverDescriptor(
+                        driver_id="verireel",
+                        label="Verireel",
+                        product="verireel",
+                        description="Verireel driver",
+                        provider_boundary="launchplane",
+                    ),
+                ),
+            ),
+        )
+
+        payload = control_plane_cli._first_driver_payload(view, driver_id="verireel")
+
+        self.assertIsNotNone(payload)
+        assert payload is not None
+        self.assertEqual(payload["driver_id"], "verireel")
+        descriptor = payload["descriptor"]
+        self.assertIsInstance(descriptor, dict)
+        assert isinstance(descriptor, dict)
+        self.assertEqual(descriptor["driver_id"], "verireel")
+        self.assertEqual(descriptor["label"], "Verireel")
+        self.assertEqual(descriptor["product"], "verireel")
+        self.assertEqual(descriptor["provider_boundary"], "launchplane")
+
+    def test_cli_first_driver_payload_returns_none_for_missing_driver(self) -> None:
+        view = DriverContextView(context="demo")
+
+        payload = control_plane_cli._first_driver_payload(view, driver_id="verireel")
+
+        self.assertIsNone(payload)
 
     def test_policy_record_digest_ignores_missing_optional_stack_child_label(
         self,
