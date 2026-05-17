@@ -361,6 +361,8 @@ def _run_probe_with_retry(
     while True:
         try:
             return verification()
+        except _ProbeFailure:
+            raise
         except click.ClickException as error:
             last_error = error
             remaining_seconds = deadline - time.monotonic()
@@ -382,6 +384,8 @@ def _run_logo_probe_with_retry(
     while True:
         try:
             return verification()
+        except _ProbeFailure:
+            raise
         except click.ClickException as error:
             last_error = error
             remaining_seconds = deadline - time.monotonic()
