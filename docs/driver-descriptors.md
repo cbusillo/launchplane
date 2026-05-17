@@ -167,6 +167,11 @@ The verification route is a Launchplane-owned evidence ingress for follow-up
 browser or product smoke checks: it marks the latest preview generation ready or
 failed through the same preview-generation records without mutating provider
 state.
+Stable smoke follow-ups use the same shape at
+`POST /v1/drivers/odoo/stable-verification`: product workflows submit the
+deployment record, optional promotion record, checked URLs, and pass/fail status;
+Launchplane updates deployment, promotion, and inventory evidence without
+mutating provider state.
 
 Odoo also exposes `POST /v1/drivers/odoo/stable-bootstrap` as a destructive
 instance-scoped action. It is enabled per product-profile lane through

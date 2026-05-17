@@ -96,6 +96,7 @@ VeriReel product paths:
   - `POST /v1/drivers/odoo/website-bootstrap-override`
   - `POST /v1/drivers/odoo/target-replacement-plan`
   - `POST /v1/drivers/odoo/target-replacement-apply`
+  - `POST /v1/drivers/odoo/stable-verification`
   - `POST /v1/drivers/odoo/prod-backup-gate`
   - `POST /v1/drivers/odoo/prod-promotion`
   - `POST /v1/drivers/odoo/prod-rollback`
@@ -1150,6 +1151,13 @@ accepts the product, context, anchor repo/PR, `verification_status`,
 `verified_at`, and an optional failure summary, then marks the latest preview
 generation ready or failed. The route is safe-write evidence ingestion only; it
 does not mutate provider state.
+
+For stable Odoo smoke follow-ups, `POST /v1/drivers/odoo/stable-verification`
+accepts the product, context, instance, deployment record, optional promotion
+record, checked URLs, `verification_status`, `verified_at`, and optional failure
+summary. Launchplane updates deployment health evidence and, when a promotion
+record is supplied, promotion/inventory evidence. The route is safe-write
+evidence ingestion only; it does not mutate provider state.
 
 `POST /v1/evidence/previews/generations`
 

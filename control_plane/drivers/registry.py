@@ -555,6 +555,17 @@ ODOO_DRIVER = DriverDescriptor(
             writes_records=("preview", "preview_generation"),
         ),
         _action(
+            "stable_verification",
+            "Record stable verification",
+            "Record Odoo product smoke verification for an existing stable deployment or promotion.",
+            safety="safe_write",
+            scope="instance",
+            route_path="/v1/drivers/odoo/stable-verification",
+            authz_action="deployment.write",
+            operator_visible=False,
+            writes_records=("deployment", "promotion", "inventory"),
+        ),
+        _action(
             "prod_backup_gate",
             "Capture prod backup gate",
             "Capture concrete backup evidence before a prod-changing action.",

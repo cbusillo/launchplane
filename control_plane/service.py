@@ -241,6 +241,7 @@ from control_plane.workflows.merge_train_worker import (
     run_merge_train_worker_step,
 )
 from control_plane.workflows.evidence_ingestion import (
+    EvidenceIngestionStore,
     apply_deployment_evidence,
     apply_promotion_evidence,
 )
@@ -1461,6 +1462,57 @@ _ODOO_PREVIEW_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
     route_path="/v1/drivers/odoo/preview-verification",
     envelope_model=OdooPreviewVerificationEnvelope,
     denial_message="Workflow cannot write Odoo preview verification for the requested product/context.",
+)
+
+
+class OdooStableVerificationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: int = Field(default=1, ge=1)
+    context: str
+    instance: Literal["testing", "prod"]
+    deployment_record_id: str
+    promotion_record_id: str = ""
+    verification_status: ReleaseStatus
+    verified_at: str
+    checked_urls: tuple[str, ...] = ()
+    timeout_seconds: int | None = Field(default=None, ge=1)
+    failure_summary: str = ""
+
+    @field_validator("verification_status", mode="before")
+    @classmethod
+    def _normalize_status(cls, value: object) -> ReleaseStatus:
+        return _normalize_release_status(value, label="Odoo stable verification status")
+
+    @model_validator(mode="after")
+    def _validate_request(self) -> "OdooStableVerificationRequest":
+        if not self.context.strip():
+            raise ValueError("Odoo stable verification requires context.")
+        if not self.deployment_record_id.strip():
+            raise ValueError("Odoo stable verification requires deployment_record_id.")
+        if self.verification_status not in {"pass", "fail"}:
+            raise ValueError("Odoo stable verification status must be pass or fail.")
+        if not self.verified_at.strip():
+            raise ValueError("Odoo stable verification requires verified_at.")
+        if self.checked_urls and self.timeout_seconds is None:
+            raise ValueError("Odoo stable verification checked_urls require timeout_seconds.")
+        return self
+
+
+class OdooStableVerificationEnvelope(_ProductRouteEnvelope):
+    schema_version: int = Field(default=1, ge=1)
+    verification: OdooStableVerificationRequest
+
+    @model_validator(mode="after")
+    def _validate_alignment(self) -> "OdooStableVerificationEnvelope":
+        _validate_driver_envelope_product(self.product, label="Odoo stable verification")
+        return self
+
+
+_ODOO_STABLE_VERIFICATION_ROUTE = _DriverRouteExecutionMetadata(
+    route_path="/v1/drivers/odoo/stable-verification",
+    envelope_model=OdooStableVerificationEnvelope,
+    denial_message="Workflow cannot write Odoo stable verification for the requested product/context.",
 )
 
 
@@ -6541,6 +6593,88 @@ def _apply_odoo_preview_verification_records(
     )
 
 
+def _stable_verification_health_evidence(
+    *, request: OdooStableVerificationRequest
+) -> HealthcheckEvidence:
+    return HealthcheckEvidence(
+        verified=bool(request.checked_urls),
+        urls=request.checked_urls,
+        timeout_seconds=request.timeout_seconds if request.checked_urls else None,
+        status=request.verification_status,
+    )
+
+
+def _apply_odoo_stable_verification_records(
+    *,
+    record_store: object,
+    request: OdooStableVerificationRequest,
+) -> dict[str, object]:
+    typed_record_store = cast(FilesystemRecordStore, record_store)
+    evidence_store = cast(EvidenceIngestionStore, typed_record_store)
+    try:
+        deployment_record = typed_record_store.read_deployment_record(request.deployment_record_id)
+    except FileNotFoundError as exc:
+        raise click.ClickException(
+            f"No Launchplane deployment record found for {request.deployment_record_id}."
+        ) from exc
+    if deployment_record.context != request.context:
+        raise click.ClickException(
+            "Odoo stable verification context does not match deployment record context."
+        )
+    if deployment_record.instance != request.instance:
+        raise click.ClickException(
+            "Odoo stable verification instance does not match deployment record instance."
+        )
+
+    health_evidence = _stable_verification_health_evidence(request=request)
+    updated_deployment = deployment_record.model_copy(
+        update={"destination_health": health_evidence}
+    )
+    result: dict[str, object] = dict(
+        apply_deployment_evidence(
+            record_store=evidence_store,
+            deployment_record=updated_deployment,
+        )
+    )
+    result["deployment_health_status"] = request.verification_status
+
+    promotion_record_id = request.promotion_record_id.strip()
+    if promotion_record_id:
+        try:
+            promotion_record = typed_record_store.read_promotion_record(promotion_record_id)
+        except FileNotFoundError as exc:
+            raise click.ClickException(
+                f"No Launchplane promotion record found for {promotion_record_id}."
+            ) from exc
+        if promotion_record.context != request.context:
+            raise click.ClickException(
+                "Odoo stable verification context does not match promotion record context."
+            )
+        if promotion_record.to_instance != request.instance:
+            raise click.ClickException(
+                "Odoo stable verification instance does not match promotion destination instance."
+            )
+        if promotion_record.deployment_record_id.strip() not in {
+            "",
+            request.deployment_record_id,
+        }:
+            raise click.ClickException(
+                "Odoo stable verification deployment_record_id does not match linked promotion record."
+            )
+        updated_promotion = promotion_record.model_copy(
+            update={"destination_health": health_evidence}
+        )
+        result.update(
+            apply_promotion_evidence(
+                record_store=evidence_store,
+                promotion_record=updated_promotion,
+            )
+        )
+        result["promotion_health_status"] = request.verification_status
+
+    return result
+
+
 def _testing_post_deploy_detail(status: ReleaseStatus) -> str:
     if status == "pass":
         return "Prisma migrations completed on testing."
@@ -6584,6 +6718,7 @@ def _apply_verireel_testing_verification_records(
     request: VeriReelTestingVerificationRequest,
 ) -> dict[str, str]:
     typed_record_store = cast(FilesystemRecordStore, record_store)
+    evidence_store = cast(EvidenceIngestionStore, typed_record_store)
     try:
         deployment_record = typed_record_store.read_deployment_record(request.deployment_record_id)
     except FileNotFoundError as exc:
@@ -6617,7 +6752,7 @@ def _apply_verireel_testing_verification_records(
         }
     )
     result = apply_deployment_evidence(
-        record_store=typed_record_store,
+        record_store=evidence_store,
         deployment_record=updated_record,
     )
     result["deployment_health_status"] = destination_health_status
@@ -11555,6 +11690,44 @@ def create_launchplane_service_app(
                     control_plane_root_path=resolved_root,
                     record_store=record_store,
                     request=odoo_preview_verification_request.verification,
+                )
+            elif path == _ODOO_STABLE_VERIFICATION_ROUTE.route_path:
+                odoo_stable_verification_request = (
+                    _ODOO_STABLE_VERIFICATION_ROUTE.envelope_model.model_validate(payload)
+                )
+                _resolve_descriptor_product_driver_context(
+                    record_store=record_store,
+                    route_path=path,
+                    product=odoo_stable_verification_request.product,
+                    context=odoo_stable_verification_request.verification.context,
+                    instance=odoo_stable_verification_request.verification.instance,
+                )
+                authorization_response = _driver_route_authorization_response(
+                    authz_policy=authz_policy,
+                    identity=identity,
+                    route_path=path,
+                    product=odoo_stable_verification_request.product,
+                    context=odoo_stable_verification_request.verification.context,
+                    denial_message=_ODOO_STABLE_VERIFICATION_ROUTE.denial_message,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if authorization_response is not None:
+                    return authorization_response
+                idempotent_response = _check_idempotent_request(
+                    record_store=record_store,
+                    scope=request_scope,
+                    route_path=path,
+                    idempotency_key=request_idempotency_key,
+                    request_fingerprint=request_fingerprint,
+                    start_response=start_response,
+                    trace_id=request_trace_id,
+                )
+                if idempotent_response is not None:
+                    return idempotent_response
+                result = _apply_odoo_stable_verification_records(
+                    record_store=record_store,
+                    request=odoo_stable_verification_request.verification,
                 )
             elif path == "/v1/product-profiles/context-cutover/apply":
                 context_cutover_request = control_plane_product_context_cutover.ProductContextCutoverRequest.model_validate(
