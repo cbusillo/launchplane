@@ -1745,6 +1745,95 @@ def _enablement_companion_summaries_snapshot(
     return tuple(summaries)
 
 
+def _launchplane_preview_enablement_item_tone(state: str) -> str:
+    if state == "running":
+        return "good"
+    if state in {"requested", "paused"}:
+        return "warn"
+    return "neutral"
+
+
+def _launchplane_preview_enablement_item_source(
+    *,
+    label_enabled: bool,
+    preview_row: dict[str, object] | None,
+    latest_requested_reason: str,
+) -> str:
+    if label_enabled:
+        return "github_label"
+    if latest_requested_reason.startswith("operator_requested"):
+        return "launchplane"
+    if preview_row is not None and not label_enabled:
+        return "history"
+    return "none"
+
+
+def _launchplane_preview_enablement_item_state(
+    *, preview_row: dict[str, object] | None, label_enabled: bool, pr_state: str
+) -> str:
+    preview_state = (
+        str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
+    )
+    serving_generation_id = (
+        str(preview_row.get("serving_generation_id", "")).strip() if preview_row is not None else ""
+    )
+    if preview_state == "destroyed":
+        return "retained"
+    if preview_state == "paused":
+        return "paused"
+    if preview_row is not None and serving_generation_id:
+        return "running"
+    if preview_row is not None or label_enabled:
+        return "requested"
+    if pr_state == "open":
+        return "candidate"
+    return ""
+
+
+def _launchplane_preview_enablement_item_request_summary(
+    *,
+    state: str,
+    source: str,
+    request_metadata_status: str,
+    request_metadata_error: str,
+    preview_row: dict[str, object] | None,
+) -> str:
+    if state == "candidate":
+        return "Eligible tenant PR. No preview request is active yet."
+    if state == "retained":
+        return "Launchplane is keeping this PR's preview history as retained evidence."
+    if source == "github_label":
+        if request_metadata_status == "invalid":
+            return (
+                "GitHub label launchplane-preview requested a preview, but Launchplane preview metadata is invalid: "
+                f"{request_metadata_error}"
+            )
+        if preview_row is None:
+            return "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet."
+        return "GitHub label launchplane-preview is the current preview request source."
+    if source == "launchplane":
+        return "Launchplane explicitly requested this preview without relying on the GitHub label."
+    if state == "paused":
+        return (
+            "Launchplane is intentionally holding this preview in place until operators resume it."
+        )
+    return "Launchplane still has preview evidence from an earlier request even though no current GitHub label is present."
+
+
+def _launchplane_preview_enablement_item_status_summary(
+    *, state: str, preview_row: dict[str, object] | None
+) -> str:
+    if preview_row is not None:
+        status_summary = str(preview_row.get("status_summary", "")).strip()
+        if status_summary:
+            return status_summary
+    if state == "candidate":
+        return "Ready for opt-in preview enablement."
+    if state == "requested":
+        return "Preview request recorded; Launchplane has not materialized a serving route yet."
+    return "No additional preview lifecycle evidence recorded yet."
+
+
 def _build_launchplane_preview_enablement_items(
     *,
     control_plane_root: Path | None,
@@ -1772,98 +1861,13 @@ def _build_launchplane_preview_enablement_items(
             continue
         preview_by_key.setdefault((row_anchor_repo, row_pr_number), row)
 
-    def item_tone(state: str) -> str:
-        if state == "running":
-            return "good"
-        if state in {"requested", "paused"}:
-            return "warn"
-        return "neutral"
-
-    def item_source(
-        *,
-        label_enabled: bool,
-        preview_row: dict[str, object] | None,
-        latest_requested_reason: str,
-    ) -> str:
-        if label_enabled:
-            return "github_label"
-        if latest_requested_reason.startswith("operator_requested"):
-            return "launchplane"
-        if preview_row is not None and not label_enabled:
-            return "history"
-        return "none"
-
-    def item_state(
-        *, preview_row: dict[str, object] | None, label_enabled: bool, pr_state: str
-    ) -> str:
-        preview_state = (
-            str(preview_row.get("state", "")).strip().lower() if preview_row is not None else ""
-        )
-        serving_generation_id = (
-            str(preview_row.get("serving_generation_id", "")).strip()
-            if preview_row is not None
-            else ""
-        )
-        if preview_state == "destroyed":
-            return "retained"
-        if preview_state == "paused":
-            return "paused"
-        if preview_row is not None and serving_generation_id:
-            return "running"
-        if preview_row is not None or label_enabled:
-            return "requested"
-        if pr_state == "open":
-            return "candidate"
-        return ""
-
-    def item_request_summary(
-        *,
-        state: str,
-        source: str,
-        label_enabled: bool,
-        request_metadata_status: str,
-        request_metadata_error: str,
-        preview_row: dict[str, object] | None,
-    ) -> str:
-        if state == "candidate":
-            return "Eligible tenant PR. No preview request is active yet."
-        if state == "retained":
-            return "Launchplane is keeping this PR's preview history as retained evidence."
-        if source == "github_label":
-            if request_metadata_status == "invalid":
-                return (
-                    "GitHub label launchplane-preview requested a preview, but Launchplane preview metadata is invalid: "
-                    f"{request_metadata_error}"
-                )
-            if preview_row is None:
-                return "GitHub label launchplane-preview requested a preview, but Launchplane has not created the preview record yet."
-            return "GitHub label launchplane-preview is the current preview request source."
-        if source == "launchplane":
-            return (
-                "Launchplane explicitly requested this preview without relying on the GitHub label."
-            )
-        if state == "paused":
-            return "Launchplane is intentionally holding this preview in place until operators resume it."
-        return "Launchplane still has preview evidence from an earlier request even though no current GitHub label is present."
-
-    def item_status_summary(*, state: str, preview_row: dict[str, object] | None) -> str:
-        if preview_row is not None:
-            status_summary = str(preview_row.get("status_summary", "")).strip()
-            if status_summary:
-                return status_summary
-        if state == "candidate":
-            return "Ready for opt-in preview enablement."
-        if state == "requested":
-            return "Preview request recorded; Launchplane has not materialized a serving route yet."
-        return "No additional preview lifecycle evidence recorded yet."
-
     keys = set(enablement_by_key) | set(preview_by_key)
     items: list[dict[str, object]] = []
     for item_anchor_repo, item_pr_number in keys:
         preview_row = preview_by_key.get((item_anchor_repo, item_pr_number))
         enablement_record = enablement_by_key.get((item_anchor_repo, item_pr_number))
         pr_state = enablement_record.pr_state if enablement_record is not None else "open"
-        state = item_state(
+        state = _launchplane_preview_enablement_item_state(
             preview_row=preview_row,
             label_enabled=enablement_record.label_enabled
             if enablement_record is not None
@@ -1885,7 +1889,7 @@ def _build_launchplane_preview_enablement_items(
                 latest_requested_reason = latest_generations[0].requested_reason
 
         label_enabled = enablement_record.label_enabled if enablement_record is not None else False
-        source = item_source(
+        source = _launchplane_preview_enablement_item_source(
             label_enabled=label_enabled,
             preview_row=preview_row,
             latest_requested_reason=latest_requested_reason,
@@ -1957,17 +1961,18 @@ def _build_launchplane_preview_enablement_items(
                 if preview_row is not None
                 else "",
                 "state": state,
-                "tone": item_tone(state),
+                "tone": _launchplane_preview_enablement_item_tone(state),
                 "request_source": source,
-                "request_summary": item_request_summary(
+                "request_summary": _launchplane_preview_enablement_item_request_summary(
                     state=state,
                     source=source,
-                    label_enabled=label_enabled,
                     request_metadata_status=request_metadata_status,
                     request_metadata_error=request_metadata_error,
                     preview_row=preview_row,
                 ),
-                "status_summary": item_status_summary(state=state, preview_row=preview_row),
+                "status_summary": _launchplane_preview_enablement_item_status_summary(
+                    state=state, preview_row=preview_row
+                ),
                 "updated_at": updated_at,
                 "label_enabled": label_enabled,
                 "request_metadata_status": request_metadata_status,

@@ -511,6 +511,119 @@ def _github_webhook_replay_envelope(
 
 
 class LaunchplanePreviewReadModelTests(unittest.TestCase):
+    def test_launchplane_preview_enablement_item_helpers_classify_states(
+        self,
+    ) -> None:
+        running_preview: dict[str, object] = {
+            "state": "active",
+            "serving_generation_id": "generation-1",
+        }
+        paused_preview: dict[str, object] = {
+            "state": "paused",
+            "serving_generation_id": "generation-1",
+        }
+        destroyed_preview: dict[str, object] = {
+            "state": "destroyed",
+            "serving_generation_id": "",
+        }
+
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_state(
+                preview_row=running_preview,
+                label_enabled=False,
+                pr_state="open",
+            ),
+            "running",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_state(
+                preview_row=paused_preview,
+                label_enabled=False,
+                pr_state="open",
+            ),
+            "paused",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_state(
+                preview_row=destroyed_preview,
+                label_enabled=False,
+                pr_state="closed",
+            ),
+            "retained",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_state(
+                preview_row=None,
+                label_enabled=True,
+                pr_state="open",
+            ),
+            "requested",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_state(
+                preview_row=None,
+                label_enabled=False,
+                pr_state="open",
+            ),
+            "candidate",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_tone("running"), "good"
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_tone("requested"),
+            "warn",
+        )
+
+    def test_launchplane_preview_enablement_item_helpers_summarize_sources(
+        self,
+    ) -> None:
+        preview_row: dict[str, object] = {
+            "state": "active",
+            "serving_generation_id": "generation-1",
+        }
+
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_source(
+                label_enabled=True,
+                preview_row=preview_row,
+                latest_requested_reason="",
+            ),
+            "github_label",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_source(
+                label_enabled=False,
+                preview_row=preview_row,
+                latest_requested_reason="operator_requested_enablement",
+            ),
+            "launchplane",
+        )
+        self.assertIn(
+            "metadata is invalid",
+            control_plane_cli._launchplane_preview_enablement_item_request_summary(
+                state="requested",
+                source="github_label",
+                request_metadata_status="invalid",
+                request_metadata_error="missing baseline_channel",
+                preview_row=None,
+            ),
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_status_summary(
+                state="candidate",
+                preview_row=None,
+            ),
+            "Ready for opt-in preview enablement.",
+        )
+        self.assertEqual(
+            control_plane_cli._launchplane_preview_enablement_item_status_summary(
+                state="running",
+                preview_row={"status_summary": "Preview is serving traffic."},
+            ),
+            "Preview is serving traffic.",
+        )
+
     def test_launchplane_preview_identity_helpers_are_deterministic(self) -> None:
         self.assertEqual(
             build_preview_label(
