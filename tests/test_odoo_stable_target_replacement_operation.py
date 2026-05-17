@@ -2,6 +2,7 @@ import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Event, Lock
 
 from control_plane.contracts.odoo_stable_target_replacement_operation import (
     OdooStableTargetReplacementOperationRecord,
@@ -169,6 +170,59 @@ class OdooStableTargetReplacementOperationRecordTests(unittest.TestCase):
             self.assertEqual(created_results.count(False), 1)
             self.assertEqual(len(returned_ids), 1)
             self.assertEqual(len(active_records), 1)
+
+    def test_filesystem_store_waits_for_empty_lane_reservation_owner(self) -> None:
+        class DelayedWriteFilesystemRecordStore(FilesystemRecordStore):
+            def __init__(self, state_dir: Path) -> None:
+                super().__init__(state_dir)
+                self.first_write_started = Event()
+                self.release_first_write = Event()
+                self._write_lock = Lock()
+                self._write_count = 0
+
+            def write_odoo_stable_target_replacement_operation_record(
+                self, record: OdooStableTargetReplacementOperationRecord
+            ) -> Path:
+                with self._write_lock:
+                    is_first_write = self._write_count == 0
+                    self._write_count += 1
+                if is_first_write:
+                    self.first_write_started.set()
+                    self.release_first_write.wait(timeout=2.0)
+                return super().write_odoo_stable_target_replacement_operation_record(record)
+
+        with TemporaryDirectory() as temporary_directory_name:
+            store = DelayedWriteFilesystemRecordStore(state_dir=Path(temporary_directory_name))
+            first = OdooStableTargetReplacementOperationRecord.model_validate(
+                _operation_payload("operation-cm-testing-first")
+            )
+            second = OdooStableTargetReplacementOperationRecord.model_validate(
+                {
+                    **_operation_payload("operation-cm-testing-second"),
+                    "idempotency_key": "replacement-cm-testing-second",
+                    "idempotency_scope": "caller-second",
+                }
+            )
+
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                first_future = executor.submit(
+                    store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane,
+                    first,
+                )
+                self.assertTrue(store.first_write_started.wait(timeout=2.0))
+                second_future = executor.submit(
+                    store.create_odoo_stable_target_replacement_operation_record_if_no_active_lane,
+                    second,
+                )
+                store.release_first_write.set()
+
+                first_record, first_created = first_future.result(timeout=2.0)
+                second_record, second_created = second_future.result(timeout=2.0)
+
+            self.assertEqual(first_record.operation_id, first.operation_id)
+            self.assertTrue(first_created)
+            self.assertEqual(second_record.operation_id, first.operation_id)
+            self.assertFalse(second_created)
 
     def test_postgres_store_round_trips_operation(self) -> None:
         with TemporaryDirectory() as temporary_directory_name:
